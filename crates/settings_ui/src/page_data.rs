@@ -8608,7 +8608,7 @@ fn ai_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Auto Compact Threshold",
-                description: "When auto compaction runs. A percentage string like \"90%\" is measured against the context window. A positive integer is the number of used tokens to compact after. A negative integer is the number of tokens remaining in the context window before compacting.",
+                description: "When auto compaction runs. A percentage string like \"70%\" is measured against the context window. A positive integer is the number of used tokens to compact after. A negative integer is the number of tokens remaining in the context window before compacting.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("agent.auto_compact.threshold"),
@@ -8631,7 +8631,7 @@ fn ai_page(cx: &App) -> SettingsPage {
                     },
                 }),
                 metadata: Some(Box::new(SettingsFieldMetadata {
-                    placeholder: Some("90%"),
+                    placeholder: Some("70%"),
                     ..Default::default()
                 })),
                 files: USER,

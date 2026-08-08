@@ -152,8 +152,13 @@ pub enum AutoCompactThreshold {
 
 impl AutoCompactThreshold {
     /// The threshold used when none is configured, or when the configured value
-    /// is invalid (90% of the context window).
-    pub const DEFAULT: Self = Self::Percentage(0.9);
+    /// is invalid (70% of the context window).
+    ///
+    /// Compaction has to finish before the model starts degrading, not after.
+    /// Weaker models begin repeating themselves once the context is around 75%
+    /// full, so a threshold above that lets a thread spend its final tokens in
+    /// a loop instead of compacting out of it.
+    pub const DEFAULT: Self = Self::Percentage(0.7);
 }
 
 impl fmt::Display for AutoCompactThreshold {
@@ -1003,7 +1008,7 @@ mod tests {
             parse_auto_compact_threshold("90%").unwrap(),
             Percentage(0.9)
         );
-        assert_eq!(AutoCompactThreshold::DEFAULT, Percentage(0.9));
+        assert_eq!(AutoCompactThreshold::DEFAULT, Percentage(0.7));
         assert_eq!(
             parse_auto_compact_threshold("  92.5% ").unwrap(),
             Percentage(0.925)

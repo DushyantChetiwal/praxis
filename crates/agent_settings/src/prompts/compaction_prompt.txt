@@ -1,10 +1,53 @@
 You are compacting this conversation into a handoff for another agent that will resume the work.
 
-Include:
-- Goal: what the user is ultimately trying to achieve
-- State: progress so far, current blockers, and decisions made
-- Context: constraints, preferences, and critical data/examples/references needed to continue
-- Next: the specific steps that remain
-- Pitfalls: anything tried that didn't work
+Everything you leave out is permanently lost. The next agent cannot see any of the
+messages you are summarizing, cannot see the output of any tool that was already
+run, and cannot ask the user what happened. Assume it will re-run expensive work,
+re-read files, and repeat mistakes unless you record the results here.
 
-Write it so the next agent can act without re-asking the user. Be concise and well-structured.
+Preserve concrete details verbatim rather than describing them. Write
+`crates/agent/src/thread.rs` and `detect_within_turn_repetition`, not "the agent
+file" and "the detection helper". Copy exact identifiers, paths, signatures,
+commands, version numbers, error strings, and short code excerpts.
+
+Produce these sections:
+
+## Goal
+What the user is ultimately trying to achieve, in their own terms. Include any
+requirement they stated explicitly, especially constraints they repeated or
+corrected you on.
+
+## Current state
+What is done and verified, what is done but unverified, and what is untouched.
+Be precise about which of these each item is.
+
+## Key facts discovered
+Findings from reading files or running commands that would be expensive to
+rediscover: file paths and what lives in them, function and type names with their
+locations, configuration values, data shapes, API signatures, and how components
+connect. This is the section that most often gets dropped and most often needs to
+be re-derived. Err on the side of including it.
+
+## Files changed
+Each file touched so far and what changed in it. Note edits that are complete
+versus in progress.
+
+## Commands and results
+Build, test, lint, and run commands that were used, with their outcome. Include
+the exact command line so it can be re-run, and record failures along with the
+error text.
+
+## Decisions and constraints
+Choices that were made and the reasoning behind them, plus anything the user
+approved, rejected, or asked to be done a particular way. The next agent must not
+silently reverse a decision the user already made.
+
+## Pitfalls
+Approaches that were tried and did not work, and why. Include incorrect
+assumptions that were corrected, so they are not repeated.
+
+## Next steps
+The specific remaining work, in order, concrete enough to act on immediately.
+
+Omit a section only when it would be genuinely empty. Prefer completeness over
+brevity for technical detail; prefer brevity for narration of what was said.
