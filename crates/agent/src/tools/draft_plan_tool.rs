@@ -24,6 +24,30 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolInput};
 /// - Put constraints in `rules`, not in the intent. Rules are what must remain
 ///   true regardless of how the step is carried out.
 ///
+/// ### What each step hands on: `capture`
+/// `capture` says what a step's summary must contain. It is the contract
+/// between a step and the steps that follow it: whatever you name there is what
+/// they will be told, and nothing else about the step reaches them — not its
+/// reasoning, not the files it read, not the commands it ran.
+/// - Name the specifics the later steps actually need, such as "the path of the
+///   file that failed and the exact assertion message", not "what happened".
+/// - A step that leads nowhere usually needs no `capture`, because there is
+///   nobody left to tell.
+/// - A condition on a connection out of a step can only be judged from that
+///   step's summary, so make sure the `capture` covers whatever the condition
+///   asks about.
+///
+/// ### Steps that contain plans: `steps`
+/// A step may carry a nested plan in `steps`, for work that is one step at this
+/// level but several once you look closely. The nested plan runs in place of
+/// the step, and the step is done when its plan is.
+/// - Reach for this when a step would otherwise need more than a handful of
+///   rules. That is the sign it is really several steps wearing one hat.
+/// - Nest only as far as the work genuinely divides. A plan nested more than 5
+///   deep is refused rather than run.
+/// - A nested plan is a plan like any other: its steps need intents, captures
+///   and connections of their own.
+///
 /// ### Connections
 /// - Leave out `condition` when a step simply follows another.
 /// - Use `deterministic` when the answer can be checked without judgement,
@@ -139,11 +163,20 @@ impl AgentTool for DraftPlanTool {
 
             let steps = graph.nodes.len();
             let connections = graph.edges.len();
-            let problems = graph
+            let mut problems: Vec<String> = graph
                 .problems()
                 .iter()
                 .map(|problem| problem.to_string())
                 .collect();
+            // Not a structural fault, so the plan is still drawn. But a step
+            // that leads somewhere while saying nothing about what it hands on
+            // leaves the steps after it with only their own goal to work from,
+            // which is almost always an oversight rather than a decision.
+            problems.extend(
+                graph.steps_without_capture().iter().map(|id| {
+                    format!("{id} leads to another step but does not say what it hands on")
+                }),
+            );
 
             self.thread
                 .update(cx, |thread, cx| {
@@ -176,6 +209,7 @@ mod tests {
                     "title": "Reproduce the failure",
                     "intent": "Get a failing test that shows the bug",
                     "rules": ["Do not change behaviour yet"],
+                    "capture": "The test file and the assertion that failed",
                 },
                 { "id": "fix", "title": "Fix it", "intent": "Make the test pass" },
             ],
@@ -210,6 +244,73 @@ mod tests {
     }
 
     #[test]
+    fn a_step_can_carry_a_plan_of_its_own() {
+        let input: DraftPlanToolInput = serde_json::from_value(json!({
+            "nodes": [
+                {
+                    "id": "handlers",
+                    "title": "Write handlers",
+                    "intent": "Endpoints behave per the schema",
+                    "capture": "Which endpoints you added and their status codes",
+                    "steps": {
+                        "nodes": [
+                            { "id": "parse", "title": "Parse the body" },
+                            { "id": "respond", "title": "Respond" },
+                        ],
+                        "edges": [{ "from": "parse", "to": "respond" }],
+                    },
+                },
+            ],
+        }))
+        .unwrap();
+
+        let graph = ProposedGraph {
+            nodes: input.nodes,
+            edges: input.edges,
+        }
+        .into_graph();
+
+        let handlers = graph.node(&"handlers".into()).unwrap();
+        assert_eq!(
+            handlers.capture,
+            "Which endpoints you added and their status codes"
+        );
+
+        let subplan = handlers.subplan().expect("the nested plan should survive");
+        assert_eq!(subplan.nodes.len(), 2);
+        assert_eq!(subplan.edges.len(), 1);
+        assert!(
+            subplan.nodes.iter().all(|node| node.position.is_some()),
+            "a nested plan should arrive laid out, like any other"
+        );
+    }
+
+    #[test]
+    fn a_step_that_leads_somewhere_without_a_capture_is_reported() {
+        let input: DraftPlanToolInput = serde_json::from_value(json!({
+            "nodes": [
+                { "id": "first", "title": "First" },
+                { "id": "second", "title": "Second" },
+            ],
+            "edges": [{ "from": "first", "to": "second" }],
+        }))
+        .unwrap();
+
+        let graph = ProposedGraph {
+            nodes: input.nodes,
+            edges: input.edges,
+        }
+        .into_graph();
+
+        let missing = graph.steps_without_capture();
+        assert!(missing.contains(&"first".into()));
+        assert!(
+            !missing.contains(&"second".into()),
+            "a step nothing leads out of has nobody to hand anything to"
+        );
+    }
+
+    #[test]
     fn a_connection_may_leave_out_its_condition() {
         let input: DraftPlanToolInput = serde_json::from_value(json!({
             "nodes": [{ "id": "only", "title": "Only step" }],
@@ -218,5 +319,107 @@ mod tests {
 
         assert!(input.edges.is_empty());
         assert!(input.nodes[0].rules.is_empty());
+    }
+
+    #[test]
+    fn a_step_that_contains_a_plan_arrives_with_that_plan_inside_it() {
+        let input: DraftPlanToolInput = serde_json::from_value(json!({
+            "nodes": [
+                {
+                    "id": "survey",
+                    "title": "Survey the callers",
+                    "capture": "Every call site of the old API",
+                },
+                {
+                    "id": "migrate",
+                    "title": "Migrate the callers",
+                    "steps": {
+                        "nodes": [
+                            { "id": "rewrite", "title": "Rewrite them", "capture": "Files touched" },
+                            { "id": "compile", "title": "Compile" },
+                        ],
+                        "edges": [{ "from": "rewrite", "to": "compile" }],
+                    },
+                },
+            ],
+            "edges": [{ "from": "survey", "to": "migrate" }],
+        }))
+        .unwrap();
+
+        let graph = ProposedGraph {
+            nodes: input.nodes,
+            edges: input.edges,
+        }
+        .into_graph();
+
+        let nested = graph
+            .node(&"migrate".into())
+            .and_then(|node| node.subplan())
+            .expect("the nested plan should have become a subplan");
+        assert_eq!(nested.nodes.len(), 2);
+        assert_eq!(nested.edges.len(), 1);
+        assert!(
+            graph
+                .node(&"survey".into())
+                .is_some_and(|node| !node.has_subplan()),
+            "a step without nested steps should not gain an empty plan"
+        );
+    }
+
+    #[test]
+    fn what_a_step_hands_on_survives_into_the_plan() {
+        let input: DraftPlanToolInput = serde_json::from_value(json!({
+            "nodes": [
+                {
+                    "id": "measure",
+                    "title": "Measure the regression",
+                    "capture": "The before and after timings, in milliseconds",
+                },
+                { "id": "report", "title": "Report" },
+            ],
+            "edges": [{ "from": "measure", "to": "report" }],
+        }))
+        .unwrap();
+
+        let graph = ProposedGraph {
+            nodes: input.nodes,
+            edges: input.edges,
+        }
+        .into_graph();
+
+        assert_eq!(
+            graph
+                .node(&"measure".into())
+                .map(|node| node.capture.as_str()),
+            Some("The before and after timings, in milliseconds")
+        );
+        assert!(
+            graph.steps_without_capture().is_empty(),
+            "only the last step lacks a capture, and it hands nothing on"
+        );
+    }
+
+    #[test]
+    fn a_step_that_leads_somewhere_without_saying_what_it_hands_on_is_reported() {
+        let input: DraftPlanToolInput = serde_json::from_value(json!({
+            "nodes": [
+                { "id": "build", "title": "Build" },
+                { "id": "ship", "title": "Ship" },
+            ],
+            "edges": [{ "from": "build", "to": "ship" }],
+        }))
+        .unwrap();
+
+        let graph = ProposedGraph {
+            nodes: input.nodes,
+            edges: input.edges,
+        }
+        .into_graph();
+
+        assert_eq!(
+            graph.steps_without_capture(),
+            vec!["build".into()],
+            "the step feeding another one should be flagged, not the last one"
+        );
     }
 }

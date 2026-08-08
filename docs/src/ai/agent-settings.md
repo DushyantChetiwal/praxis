@@ -84,6 +84,31 @@ The `threshold` value can be one of:
 
 You can compact a Zed Agent thread manually at any time by typing `/compact` in the Agent Panel message editor. For more on thread token usage and compaction behavior, see [Token Usage and Compaction](./agent-panel.md#token-usage).
 
+## Loop Guard {#loop-guard}
+
+A model that gets stuck can start repeating itself, and left alone it will keep generating until it has filled the context window. The loop guard watches for this and interrupts it.
+
+It catches two kinds of repetition:
+
+- **Within a response**, where a phrase starts repeating as the response streams in. The response is cut off part way through.
+- **Across turns**, where the agent takes the same turn several times in a row. Several identical tool calls in a single turn are a parallel batch and are not treated as repetition; issuing the same turn again after seeing its result is.
+
+When the guard fires, the model is told what it was repeating and asked to take a different approach. If it loops again, the turn ends rather than being steered a second time. The transcript records the point where this happened, so a response that stops part way through does not appear to do so for no reason.
+
+The loop guard is enabled by default. To turn it off:
+
+```json [settings]
+{
+  "agent": {
+    "loop_guard": {
+      "enabled": false
+    }
+  }
+}
+```
+
+This is separate from the limits that stop a looping [Architect](./architect.md#stopping-a-run) plan, which bound how many steps a run may take.
+
 ## Compaction Model {#compaction-model}
 
 By default, context compaction (both `/compact` and auto-compaction) uses the thread's currently selected model. Set `agent.compaction_model` to use a different model:

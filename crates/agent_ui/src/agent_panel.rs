@@ -57,7 +57,7 @@ use crate::{
     },
     ui::{AgentNotification, AgentNotificationEvent, EndTrialUpsell},
 };
-use agent_settings::{AgentSettings, builtin_profiles};
+use agent_settings::AgentSettings;
 use ai_onboarding::AgentPanelOnboarding;
 use anyhow::{Context as _, Result, anyhow};
 #[cfg(feature = "audio")]
@@ -5775,21 +5775,15 @@ impl AgentPanel {
         })
     }
 
-    /// The way into the Architect canvas. It appears only while the architect
-    /// profile is active, because that is the only profile that can author a
-    /// plan, and a button that does nothing is worse than no button.
+    /// The way into the Architect canvas. It appears only once the thread has a
+    /// plan, because a button that opens an empty canvas is worse than no
+    /// button.
     fn render_architect_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let thread = self
             .active_thread_view(cx)
             .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))?;
 
-        let thread_ref = thread.read(cx);
-        if thread_ref.profile().as_str() != builtin_profiles::ARCHITECT {
-            return None;
-        }
-        let step_count = thread_ref
-            .architect_graph()
-            .map_or(0, |graph| graph.nodes.len());
+        let step_count = thread.read(cx).architect_graph()?.nodes.len();
 
         let tooltip = match step_count {
             0 => "Open the Architect canvas. Describe the goal in the chat and the plan appears here.".to_string(),
@@ -10946,6 +10940,7 @@ mod tests {
             thinking_effort: None,
             draft_prompt: None,
             ui_scroll_position: None,
+            architect_graph: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Default::default(),
         };

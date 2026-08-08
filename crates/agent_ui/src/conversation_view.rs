@@ -2115,7 +2115,8 @@ impl ConversationView {
                 .as_connected()
                 .is_some_and(|connected| connected.threads.contains_key(&existing))
         {
-            self.as_connected_mut()?.navigate_to_thread(existing.clone());
+            self.as_connected_mut()?
+                .navigate_to_thread(existing.clone());
             cx.notify();
             return Some(existing);
         }

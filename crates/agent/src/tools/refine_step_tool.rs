@@ -20,6 +20,9 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolInput};
 ///   user has sharpened it, send the sharpened version.
 /// - `rules` are the constraints that must hold however the step is carried out.
 ///   Send the complete list every time; it replaces the previous one.
+/// - `capture` is what this step's summary must contain. The steps that follow
+///   it are shown that summary and nothing else about this step, so name the
+///   specifics they will need rather than saying "what happened".
 /// - `routing` states when this step leads to each of the steps that follow it.
 ///   Only send it once the user has settled the routing.
 ///
@@ -42,6 +45,10 @@ pub struct RefineStepToolInput {
     /// keep what is already there; send an empty list to clear them.
     #[serde(default)]
     pub rules: Option<Vec<String>>,
+    /// What this step's summary must contain, for the steps that follow it.
+    /// Leave out to keep what is already there.
+    #[serde(default)]
+    pub capture: Option<String>,
     /// When this step leads to each step that follows it. Leave out to keep the
     /// current routing.
     #[serde(default)]
@@ -209,6 +216,9 @@ impl AgentTool for RefineStepTool {
                             }
                             if let Some(rules) = input.rules {
                                 node.rules = rules;
+                            }
+                            if let Some(capture) = input.capture {
+                                node.capture = capture;
                             }
                             if input.lock {
                                 node.locked = true;

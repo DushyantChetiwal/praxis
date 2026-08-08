@@ -1192,6 +1192,11 @@
         "name": "Write",
         "enable_all_context_servers": true,
         "tools": {
+          // Drawing a plan and reporting a finished step both belong here: the
+          // agent decides for itself when a task is worth planning, rather than
+          // the user having to pick a separate profile first.
+          "draft_plan": true,
+          "complete_step": true,
           "copy_path": true,
           "create_directory": true,
           "create_thread": true,
@@ -1238,25 +1243,8 @@
           "search_web": true,
         },
       },
-      "architect": {
-        "name": "Architect",
-        // Architect draws the plan rather than carrying it out, so it can read
-        // the project freely but cannot change it. The plan is run from the
-        // canvas once every step is locked.
-        "tools": {
-          "draft_plan": true,
-          "diagnostics": true,
-          "fetch": true,
-          "list_directory": true,
-          "find_path": true,
-          "find_references": true,
-          "go_to_definition": true,
-          "read_file": true,
-          "grep": true,
-          "skill": true,
-          "search_web": true,
-        },
-      },
+      // Applied automatically to Architect step threads; it is not selectable
+      // or editable from the profile picker.
       "architect_step": {
         "name": "Architect Step",
         // The thread behind a single step of a plan. It settles what that one

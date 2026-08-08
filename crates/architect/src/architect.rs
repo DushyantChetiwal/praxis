@@ -9,9 +9,14 @@
 //! be stored alongside a thread and exercised in plain unit tests.
 
 mod layout;
+mod run;
 mod spec;
 
 pub use layout::{COLUMN_SPACING, Position, ROW_SPACING, layout_positions};
+pub use run::{
+    Branch, Decision, MAX_NODE_VISITS, MAX_PLAN_DEPTH, MAX_RUN_STEPS, PlanRun, RunOutcome,
+    RunRefusal, branch_prompt, parse_verdict, step_prompt,
+};
 pub use spec::compile_spec;
 
 use agent_client_protocol::schema::v1 as acp;
@@ -34,6 +39,12 @@ impl Display for NodeId {
 impl From<&str> for NodeId {
     fn from(value: &str) -> Self {
         Self(value.to_owned())
+    }
+}
+
+impl From<String> for NodeId {
+    fn from(value: String) -> Self {
+        Self(value)
     }
 }
 
@@ -73,6 +84,20 @@ impl EdgeCondition {
     }
 }
 
+/// What a step reported when it finished.
+///
+/// This is what travels along an edge to the steps that follow, and what the
+/// step itself is reminded of when a loop brings it round again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepResult {
+    /// The step's own account of what it did, answering its `capture`.
+    pub summary: String,
+    /// Which attempt produced this, counting from 1. A step reached twice by a
+    /// loop is on attempt 2.
+    #[serde(default)]
+    pub attempt: usize,
+}
+
 /// A single step in the plan.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArchitectNode {
@@ -84,6 +109,16 @@ pub struct ArchitectNode {
     /// Constraints this step must honour, refined in the node's own chat.
     #[serde(default)]
     pub rules: Vec<String>,
+    /// What the step's summary has to contain, in the author's words. This is
+    /// the contract between one step and the steps that follow it: whatever is
+    /// named here is what they will be told.
+    #[serde(default)]
+    pub capture: String,
+    /// Forces this step's summary into every later step, not just the ones it
+    /// leads to directly. For the decision early on that everything downstream
+    /// depends on.
+    #[serde(default)]
+    pub pinned: bool,
     /// Where the node sits on the canvas. `None` until it has been laid out.
     #[serde(default)]
     pub position: Option<Position>,
@@ -93,6 +128,13 @@ pub struct ArchitectNode {
     /// The thread used to deliberate this step, created on first use.
     #[serde(default)]
     pub chat: Option<acp::SessionId>,
+    /// A plan nested inside this step. Running the step runs this plan, and the
+    /// step is done when the plan is.
+    #[serde(default)]
+    pub subplan: Option<Box<ArchitectGraph>>,
+    /// What the step reported the last time it ran.
+    #[serde(default)]
+    pub result: Option<StepResult>,
 }
 
 impl ArchitectNode {
@@ -102,10 +144,23 @@ impl ArchitectNode {
             title: title.into(),
             intent: String::new(),
             rules: Vec::new(),
+            capture: String::new(),
+            pinned: false,
             position: None,
             locked: false,
             chat: None,
+            subplan: None,
+            result: None,
         }
+    }
+
+    /// The nested plan, if this step has one worth running.
+    pub fn subplan(&self) -> Option<&ArchitectGraph> {
+        self.subplan.as_deref().filter(|graph| !graph.is_empty())
+    }
+
+    pub fn has_subplan(&self) -> bool {
+        self.subplan().is_some()
     }
 }
 
@@ -165,6 +220,11 @@ pub enum GraphProblem {
     Unreachable(NodeId),
     /// A step still open for deliberation.
     Unlocked(NodeId),
+    /// Something wrong inside a step's nested plan.
+    InSubplan {
+        node: NodeId,
+        problem: Box<GraphProblem>,
+    },
 }
 
 impl Display for GraphProblem {
@@ -182,7 +242,52 @@ impl Display for GraphProblem {
                 write!(formatter, "nothing leads to {id}, so it would never run")
             }
             GraphProblem::Unlocked(id) => write!(formatter, "{id} is not locked yet"),
+            GraphProblem::InSubplan { node, problem } => {
+                write!(formatter, "inside {node}: {problem}")
+            }
         }
+    }
+}
+
+/// Where a step sits, as the ids walked from the top-level plan down to it.
+///
+/// A bare `NodeId` stops meaning anything once plans nest, because the same id
+/// may exist in several sub-plans.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct NodePath(pub Vec<NodeId>);
+
+impl NodePath {
+    pub fn root(id: NodeId) -> Self {
+        Self(vec![id])
+    }
+
+    pub fn child(&self, id: NodeId) -> Self {
+        let mut path = self.0.clone();
+        path.push(id);
+        Self(path)
+    }
+
+    pub fn parent(&self) -> Option<NodePath> {
+        (self.0.len() > 1).then(|| NodePath(self.0[..self.0.len() - 1].to_vec()))
+    }
+
+    pub fn leaf(&self) -> Option<&NodeId> {
+        self.0.last()
+    }
+
+    pub fn depth(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Display for NodePath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let joined: Vec<&str> = self.0.iter().map(|id| id.0.as_str()).collect();
+        write!(formatter, "{}", joined.join(" / "))
     }
 }
 
@@ -320,6 +425,100 @@ impl ArchitectGraph {
         }
     }
 
+    /// The step a path addresses, walking down through nested plans.
+    pub fn node_at(&self, path: &NodePath) -> Option<&ArchitectNode> {
+        let (last, parents) = path.0.split_last()?;
+        let mut graph = self;
+        for id in parents {
+            graph = graph.node(id)?.subplan()?;
+        }
+        graph.node(last)
+    }
+
+    pub fn node_at_mut(&mut self, path: &NodePath) -> Option<&mut ArchitectNode> {
+        let (last, parents) = path.0.split_last()?;
+        let mut graph = self;
+        for id in parents {
+            graph = graph.node_mut(id)?.subplan.as_deref_mut()?;
+        }
+        graph.node_mut(last)
+    }
+
+    /// The plan a path addresses: the nested plan inside the addressed step, or
+    /// this graph itself for an empty path.
+    pub fn graph_at(&self, path: &NodePath) -> Option<&ArchitectGraph> {
+        let mut graph = self;
+        for id in &path.0 {
+            graph = graph.node(id)?.subplan()?;
+        }
+        Some(graph)
+    }
+
+    /// Whether a step may be locked. A step that contains a plan cannot be
+    /// settled while any part of that plan is still being argued about.
+    pub fn can_lock(&self, id: &NodeId) -> bool {
+        self.node(id)
+            .and_then(|node| node.subplan())
+            .is_none_or(|subplan| subplan.is_fully_locked_deeply())
+    }
+
+    /// Whether every step here and in every nested plan is locked.
+    pub fn is_fully_locked_deeply(&self) -> bool {
+        !self.nodes.is_empty()
+            && self.nodes.iter().all(|node| {
+                node.locked
+                    && node
+                        .subplan()
+                        .is_none_or(ArchitectGraph::is_fully_locked_deeply)
+            })
+    }
+
+    /// Steps whose summary every later step is told about, in graph order.
+    pub fn pinned_nodes(&self) -> impl Iterator<Item = &ArchitectNode> {
+        self.nodes.iter().filter(|node| node.pinned)
+    }
+
+    /// Steps that lead somewhere but never say what they hand on. Not an error:
+    /// plenty of steps have nothing worth passing forward. Worth pointing at,
+    /// though, because it is usually an oversight.
+    pub fn steps_without_capture(&self) -> Vec<NodeId> {
+        self.nodes
+            .iter()
+            .filter(|node| {
+                node.capture.trim().is_empty() && self.edges_from(&node.id).next().is_some()
+            })
+            .map(|node| node.id.clone())
+            .collect()
+    }
+
+    /// Everything that has to be fixed before a plan can be run.
+    ///
+    /// This is the structural problems plus the steps still open for
+    /// deliberation: running a half-argued plan is how a plan stops being worth
+    /// making. Compiling a spec and driving a run both gate on this, so the two
+    /// can never disagree about what "ready" means.
+    pub fn blocking_problems(&self) -> Vec<GraphProblem> {
+        let mut problems = self.problems();
+        problems.extend(
+            self.nodes
+                .iter()
+                .filter(|node| !node.locked)
+                .map(|node| GraphProblem::Unlocked(node.id.clone())),
+        );
+        for node in &self.nodes {
+            let Some(subplan) = node.subplan() else {
+                continue;
+            };
+            problems.extend(subplan.blocking_problems().into_iter().map(|problem| {
+                GraphProblem::InSubplan {
+                    node: node.id.clone(),
+                    problem: Box::new(problem),
+                }
+            }));
+        }
+        problems
+    }
+
     /// Every problem worth surfacing, in a stable order.
     pub fn problems(&self) -> Vec<GraphProblem> {
         let mut problems = Vec::new();
@@ -434,6 +633,14 @@ pub struct ProposedNode {
     /// Constraints this step must honour.
     #[serde(default)]
     pub rules: Vec<String>,
+    /// What this step's summary must contain, so the steps that follow it know
+    /// what they will be told. Leave out for a step that hands nothing on.
+    #[serde(default)]
+    pub capture: String,
+    /// A plan nested inside this step, for work that is one step at this level
+    /// but several once you look closely.
+    #[serde(default)]
+    pub steps: Option<Box<ProposedGraph>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -466,9 +673,16 @@ impl ProposedGraph {
                 title: node.title,
                 intent: node.intent,
                 rules: node.rules,
+                capture: node.capture,
+                pinned: false,
                 position: None,
                 locked: false,
                 chat: None,
+                subplan: node
+                    .steps
+                    .map(|steps| Box::new(steps.into_graph()))
+                    .filter(|graph| !graph.is_empty()),
+                result: None,
             });
         }
         for (ix, edge) in self.edges.into_iter().enumerate() {

@@ -354,6 +354,7 @@ impl ProfilePickerDelegate {
     fn candidates_from(profiles: AvailableProfiles) -> Vec<ProfileCandidate> {
         profiles
             .into_iter()
+            .filter(|(id, _)| builtin_profiles::is_selectable(id))
             .map(|(id, name)| ProfileCandidate {
                 is_builtin: builtin_profiles::is_builtin(&id),
                 id,
@@ -875,6 +876,32 @@ mod tests {
             entry,
             ProfilePickerEntry::Header(label) if label.as_ref() == "Custom Profiles"
         )));
+    }
+
+    #[gpui::test]
+    fn candidates_exclude_internal_profiles(_cx: &mut TestAppContext) {
+        let mut profiles = AvailableProfiles::default();
+        profiles.insert(
+            AgentProfileId(builtin_profiles::WRITE.into()),
+            SharedString::from("Write"),
+        );
+        profiles.insert(
+            AgentProfileId(builtin_profiles::ARCHITECT_STEP.into()),
+            SharedString::from("Architect Step"),
+        );
+
+        let candidates = ProfilePickerDelegate::candidates_from(profiles);
+
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.id.as_str() == builtin_profiles::WRITE)
+        );
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.id.as_str() == builtin_profiles::ARCHITECT_STEP)
+        );
     }
 
     #[gpui::test]

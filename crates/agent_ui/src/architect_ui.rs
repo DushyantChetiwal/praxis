@@ -9,17 +9,20 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use acp_thread::{AcpThread, AgentThreadEntry, AssistantMessageChunk};
 use agent::Thread;
 use agent_client_protocol::schema::v1 as acp;
+use anyhow::Result;
 use architect::{
-    ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, GraphProblem, NodeId, Position,
+    ArchitectGraph, ArchitectNode, Decision, EdgeCondition, EdgeId, GraphProblem, NodeId, NodePath,
+    PlanRun, Position, RunOutcome, RunRefusal,
 };
 use editor::{Editor, EditorEvent};
 use gpui::{
-    App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels,
-    Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, WeakEntity, Window,
-    canvas, div, point, px,
+    App, AsyncApp, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable,
+    Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder,
+    Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, Task,
+    WeakEntity, Window, canvas, div, point, px,
 };
 use ui::{TintColor, Tooltip, prelude::*};
 use workspace::{
@@ -58,12 +61,20 @@ enum Selection {
 enum Interaction {
     None,
     /// Dragging the canvas itself.
-    Panning { last: Point<Pixels> },
+    Panning {
+        last: Point<Pixels>,
+    },
     /// Dragging a node. The grab offset keeps the node from jumping so its
     /// centre snaps to the cursor.
-    DraggingNode { id: NodeId, grab: Point<f32> },
+    DraggingNode {
+        id: NodeId,
+        grab: Point<f32>,
+    },
     /// Dragging a new connection out of a node's handle.
-    Connecting { from: NodeId, at: Point<Pixels> },
+    Connecting {
+        from: NodeId,
+        at: Point<Pixels>,
+    },
 }
 
 impl Interaction {
@@ -72,6 +83,33 @@ impl Interaction {
     }
 }
 
+/// A run of the plan in progress.
+///
+/// The state machine itself lives in the task driving the run; what is kept here
+/// is only what the canvas draws. Holding the position in two places would let
+/// them disagree, and the canvas is the copy that can be stale without harm.
+struct RunState {
+    /// The step being carried out, or `None` once the run has ended. A path,
+    /// because a step inside a nested plan is not identified by its id alone.
+    current: Option<NodePath>,
+    /// Which step of the run this is, counting repeats, so a loop reads as
+    /// progress rather than as the same step over and over.
+    step_number: usize,
+    outcome: Option<RunOutcome>,
+    /// Dropping this stops the run at the next await point.
+    _task: Task<()>,
+}
+
+impl RunState {
+    fn is_running(&self) -> bool {
+        self.outcome.is_none()
+    }
+}
+
+/// Identifies the canvas's notifications so a new one replaces the last rather
+/// than stacking up behind it.
+struct ArchitectNotice;
+
 /// The editors backing the inspector for the selected step. They are rebuilt
 /// whenever the selection changes, which is also what keeps their contents from
 /// drifting away from the graph.
@@ -79,6 +117,7 @@ struct NodeInspector {
     node: NodeId,
     title: Entity<Editor>,
     goal: Entity<Editor>,
+    capture: Entity<Editor>,
     new_rule: Entity<Editor>,
     _subscriptions: Vec<Subscription>,
 }
@@ -96,6 +135,7 @@ pub struct ArchitectPane {
     inspector: Option<NodeInspector>,
     interaction: Interaction,
     hovered_node: Option<NodeId>,
+    run: Option<RunState>,
     _thread_subscription: Subscription,
 }
 
@@ -117,6 +157,7 @@ impl ArchitectPane {
             inspector: None,
             interaction: Interaction::None,
             hovered_node: None,
+            run: None,
             _thread_subscription: subscription,
         }
     }
@@ -197,6 +238,17 @@ impl ArchitectPane {
             editor.set_read_only(node.locked);
             editor
         });
+        let capture = cx.new(|cx| {
+            let mut editor = Editor::auto_height(2, 6, window, cx);
+            editor.set_placeholder_text(
+                "What must this step's summary contain, for the steps after it?",
+                window,
+                cx,
+            );
+            editor.set_text(node.capture.clone(), window, cx);
+            editor.set_read_only(node.locked);
+            editor
+        });
         let new_rule = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
             editor.set_placeholder_text("Add a rule and press enter", window, cx);
@@ -205,6 +257,7 @@ impl ArchitectPane {
 
         let id_for_title = node.id.clone();
         let id_for_goal = node.id.clone();
+        let id_for_capture = node.id.clone();
         let subscriptions = vec![
             cx.subscribe(&title, move |this, editor, event, cx| {
                 if matches!(event, EditorEvent::BufferEdited) {
@@ -234,12 +287,27 @@ impl ArchitectPane {
                     );
                 }
             }),
+            cx.subscribe(&capture, move |this, editor, event, cx| {
+                if matches!(event, EditorEvent::BufferEdited) {
+                    let text = editor.read(cx).text(cx);
+                    let id = id_for_capture.clone();
+                    this.edit_graph(
+                        move |graph| {
+                            if let Some(node) = graph.node_mut(&id) {
+                                node.capture = text;
+                            }
+                        },
+                        cx,
+                    );
+                }
+            }),
         ];
 
         NodeInspector {
             node: node.id,
             title,
             goal,
+            capture,
             new_rule,
             _subscriptions: subscriptions,
         }
@@ -310,11 +378,7 @@ impl ArchitectPane {
 
             let curve = EdgeCurve::between(from, to);
             let distance = curve.distance_to(canvas);
-            if distance <= tolerance
-                && closest
-                    .as_ref()
-                    .is_none_or(|(best, _)| distance < *best)
-            {
+            if distance <= tolerance && closest.as_ref().is_none_or(|(best, _)| distance < *best) {
                 closest = Some((distance, edge.id.clone()));
             }
         }
@@ -352,7 +416,11 @@ impl ArchitectPane {
             return;
         };
 
-        let positions: Vec<Position> = graph.nodes.iter().filter_map(|node| node.position).collect();
+        let positions: Vec<Position> = graph
+            .nodes
+            .iter()
+            .filter_map(|node| node.position)
+            .collect();
         if positions.is_empty() {
             return;
         }
@@ -441,50 +509,6 @@ impl ArchitectPane {
             },
             cx,
         );
-    }
-
-    /// Hands a prompt to the conversation that owns this plan, and shows it.
-    fn send_to_plan_chat(&self, prompt: String, submit: bool, window: &mut Window, cx: &mut App) {
-        let Some(workspace) = self.workspace.upgrade() else {
-            return;
-        };
-
-        workspace.update(cx, |workspace, cx| {
-            let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
-                return;
-            };
-            let Some(conversation_view) = panel.read(cx).active_conversation_view().cloned() else {
-                return;
-            };
-
-            // The plan is the main thread's to run, so make sure a step's
-            // conversation is not what receives this.
-            conversation_view.update(cx, |conversation_view, cx| {
-                conversation_view.return_to_root_thread(cx);
-            });
-            let Some(thread_view) = conversation_view.read(cx).root_thread_view() else {
-                return;
-            };
-
-            workspace.focus_panel::<AgentPanel>(window, cx);
-            thread_view.update(cx, |thread_view, cx| {
-                thread_view.message_editor.update(cx, |editor, cx| {
-                    editor.set_message(
-                        vec![acp::ContentBlock::Text(acp::TextContent::new(prompt))],
-                        window,
-                        cx,
-                    );
-                });
-                if submit {
-                    thread_view.send(window, cx);
-                } else {
-                    thread_view
-                        .message_editor
-                        .focus_handle(cx)
-                        .focus(window, cx);
-                }
-            });
-        });
     }
 
     /// Opens the step's own conversation in the agent panel.
@@ -624,31 +648,302 @@ impl ArchitectPane {
         });
     }
 
-    /// Compiles the locked plan into an ordered spec and hands it to the chat.
+    /// The conversation the run drives, which is the one that owns the plan.
+    fn plan_acp_thread(&self, cx: &App) -> Option<Entity<AcpThread>> {
+        let workspace = self.workspace.upgrade()?;
+        let panel = workspace.read(cx).panel::<AgentPanel>(cx)?;
+        let conversation_view = panel.read(cx).active_conversation_view()?.clone();
+        let thread_view = conversation_view.read(cx).root_thread_view()?;
+        Some(thread_view.read(cx).thread.clone())
+    }
+
+    /// Drives the plan step by step, deciding at every branch which way to go.
     ///
-    /// This is the seam a real executor would replace: today the agent is told
-    /// the plan in the order the graph implies, with every condition and loop
-    /// spelled out, rather than being driven through the graph node by node.
+    /// The alternative, compiling the whole plan into one spec (see
+    /// `architect::compile_spec`), leaves the control flow to the model: it is
+    /// shown the loops and conditions and trusted to honour them. A model that
+    /// decides it has done enough will quietly leave a retry loop early, and
+    /// nothing catches that. Here the position in the graph is held outside the
+    /// model. It is told about one step at a time, and every condition is put to
+    /// it as a question on its own whose answer is read back and acted on here.
+    ///
+    /// The graph is copied when the run starts, so a run carries out the plan as
+    /// it was when the user pressed Run. A step's own chat can still rewrite
+    /// routing while the run is in flight, and having the ground shift underneath
+    /// a half-finished run would make it impossible to say afterwards what was
+    /// actually carried out.
     fn run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(graph) = self.graph(cx) else {
+        if self.run.as_ref().is_some_and(RunState::is_running) {
+            return;
+        }
+        let Some(mut graph) = self.graph(cx).cloned() else {
             return;
         };
-        let spec = match architect::compile_spec(graph) {
-            Ok(spec) => spec,
-            Err(problems) => {
-                log::warn!(
-                    "Architect: refusing to run a plan that is not ready: {}",
-                    problems
-                        .iter()
-                        .map(|problem| problem.to_string())
-                        .collect::<Vec<_>>()
-                        .join("; ")
+
+        let mut plan_run = match PlanRun::start(&graph) {
+            Ok(plan_run) => plan_run,
+            Err(refusal) => {
+                self.report(
+                    match &refusal {
+                        RunRefusal::NothingToRun => "There is no plan to run yet.".to_string(),
+                        RunRefusal::NotReady(_) => {
+                            format!("This plan is not ready to run: {refusal}")
+                        }
+                    },
+                    cx,
                 );
                 return;
             }
         };
 
-        self.send_to_plan_chat(spec, true, window, cx);
+        let Some(acp_thread) = self.plan_acp_thread(cx) else {
+            self.report(
+                "Architect needs the conversation that owns this plan to be open in the agent \
+                 panel."
+                    .to_string(),
+                cx,
+            );
+            return;
+        };
+
+        // Everything the run says belongs in the conversation that owns the
+        // plan, not in whichever step's chat happens to be on screen.
+        self.show_plan_chat(window, cx);
+
+        let first_step = plan_run.current();
+        let task = cx.spawn({
+            let first_step = first_step.clone();
+            async move |this, cx| {
+                let mut decision = Decision::Run(first_step);
+                let outcome = loop {
+                    match decision {
+                        Decision::Run(node) => {
+                            let step_number = plan_run.steps_taken();
+                            let attempt = node
+                                .leaf()
+                                .map(|id| plan_run.attempt(id))
+                                .unwrap_or(1);
+                            // Telling the thread which step is running is what lets
+                            // `complete_step` write its summary onto the right one.
+                            this.update(cx, |this, cx| {
+                                this.note_run_position(Some(node.clone()), step_number, cx);
+                                this.set_running_step(Some(node.clone()), cx);
+                            })
+                            .ok();
+
+                            let prompt =
+                                architect::step_prompt(&graph, &node, step_number, attempt);
+                            let sent = send_and_wait(&acp_thread, prompt, cx).await;
+                            this.update(cx, |this, cx| this.set_running_step(None, cx)).ok();
+                            if let Err(error) = sent {
+                                log::error!("Architect: step \"{node}\" could not run: {error}");
+                                break RunOutcome::Cancelled;
+                            }
+
+                            // What the step reported is all the steps after it will
+                            // be told, so it is recorded before the run moves on. A
+                            // summary written by `complete_step` is preferred: it
+                            // was authored as a handover. Falling back to the last
+                            // thing said keeps a run going when the model forgets to
+                            // call the tool, at the cost of a vaguer handover.
+                            let reported = this
+                                .update(cx, |this, cx| this.reported_summary(&node, cx))
+                                .ok()
+                                .flatten();
+                            let summary = match reported {
+                                Some(summary) => summary,
+                                None => {
+                                    log::warn!(
+                                        "Architect: {node} ended without calling complete_step; \
+                                         using its closing message as the summary"
+                                    );
+                                    let scraped = acp_thread
+                                        .read_with(cx, |thread, cx| last_assistant_text(thread, cx));
+                                    this.update(cx, |this, cx| {
+                                        this.record_step_result(&node, &scraped, attempt, cx);
+                                    })
+                                    .ok();
+                                    scraped.trim().to_string()
+                                }
+                            };
+                            if let Some(step) = graph.node_at_mut(&node) {
+                                step.result = Some(architect::StepResult { summary, attempt });
+                            }
+
+                            decision = plan_run.finish_step(&graph);
+                        }
+                        Decision::Ask(branch) => {
+                            let prompt = architect::branch_prompt(&graph, &branch);
+                            if let Err(error) = send_and_wait(&acp_thread, prompt, cx).await {
+                                log::error!("Architect: a branch could not be decided: {error}");
+                                break RunOutcome::Cancelled;
+                            }
+
+                            let reply = acp_thread
+                                .read_with(cx, |thread, cx| last_assistant_text(thread, cx));
+
+                            // An unreadable answer is treated as "no". Taking the
+                            // branch anyway is how a retry loop becomes endless, and
+                            // not taking it fails towards a run that stops early
+                            // and visibly rather than one that never stops.
+                            let taken = architect::parse_verdict(&reply).unwrap_or_else(|| {
+                            log::warn!(
+                                "Architect: no YES or NO in the reply deciding {}; treating it as \
+                                 no",
+                                branch.edge.0
+                            );
+                            false
+                        });
+                            decision = plan_run.answer(&graph, taken);
+                        }
+                        Decision::Done(outcome) => break outcome,
+                    }
+                };
+
+                // A run that ended badly did so because of something the model kept
+                // doing, so it is told; a run that simply finished has nothing to
+                // add that another turn would be worth paying for.
+                if !outcome.is_success()
+                    && outcome != RunOutcome::Cancelled
+                    && let Err(error) =
+                        send_and_wait(&acp_thread, outcome.describe(&graph), cx).await
+                {
+                    log::error!("Architect: could not report how the run ended: {error}");
+                }
+
+                this.update(cx, |this, cx| this.finish_run(outcome, cx))
+                    .ok();
+            }
+        });
+
+        self.run = Some(RunState {
+            current: Some(first_step),
+            step_number: 1,
+            outcome: None,
+            _task: task,
+        });
+        cx.notify();
+    }
+
+    /// Records where the run has got to so the canvas can show it.
+    fn note_run_position(
+        &mut self,
+        node: Option<NodePath>,
+        step_number: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(run) = self.run.as_mut() {
+            run.current = node;
+            run.step_number = step_number;
+        }
+        cx.notify();
+    }
+
+    /// Points the thread at the step being carried out, so `complete_step` has
+    /// somewhere to write.
+    fn set_running_step(&mut self, step: Option<NodePath>, cx: &mut Context<Self>) {
+        self.thread
+            .update(cx, |thread, _cx| thread.set_architect_running_step(step));
+    }
+
+    /// The summary `complete_step` recorded for a step, if it called it.
+    fn reported_summary(&self, path: &NodePath, cx: &Context<Self>) -> Option<String> {
+        let summary = self
+            .thread
+            .read(cx)
+            .architect_graph()?
+            .node_at(path)?
+            .result
+            .as_ref()?
+            .summary
+            .trim()
+            .to_string();
+        (!summary.is_empty()).then_some(summary)
+    }
+
+    /// Writes a step's summary back onto the live plan, so it survives the run
+    /// and is there to show in the inspector afterwards.
+    fn record_step_result(
+        &mut self,
+        path: &NodePath,
+        summary: &str,
+        attempt: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let summary = summary.trim().to_string();
+        let path = path.clone();
+        self.edit_graph(
+            move |graph| {
+                if let Some(node) = graph.node_at_mut(&path) {
+                    node.result = Some(architect::StepResult { summary, attempt });
+                }
+            },
+            cx,
+        );
+    }
+
+    fn finish_run(&mut self, outcome: RunOutcome, cx: &mut Context<Self>) {
+        if let Some(run) = self.run.as_mut() {
+            run.current = None;
+            run.outcome = Some(outcome);
+        }
+        cx.notify();
+    }
+
+    /// Stops a run between steps, and stops the turn it is waiting on.
+    fn stop_run(&mut self, cx: &mut Context<Self>) {
+        // Dropping the task ends the run at its next await point, but the turn
+        // already in flight belongs to the thread and has to be told separately.
+        if let Some(acp_thread) = self.plan_acp_thread(cx) {
+            acp_thread
+                .update(cx, |thread, cx| thread.cancel(cx))
+                .detach();
+        }
+        self.run = None;
+        cx.notify();
+    }
+
+    /// The step the run is carrying out, if one is. Only the leaf matters for
+    /// highlighting, since the canvas shows one level at a time.
+    fn running_node(&self) -> Option<&NodeId> {
+        self.run.as_ref()?.current.as_ref()?.leaf()
+    }
+
+    /// Tells the user something the canvas cannot show in place.
+    fn report(&self, message: String, cx: &mut Context<Self>) {
+        log::warn!("Architect: {message}");
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            workspace.show_toast(
+                workspace::Toast::new(
+                    workspace::notifications::NotificationId::unique::<ArchitectNotice>(),
+                    message,
+                ),
+                cx,
+            );
+        });
+    }
+
+    /// Brings the conversation that owns the plan back on screen, so a run is
+    /// not carried out somewhere the user cannot see it.
+    fn show_plan_chat(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
+                return;
+            };
+            let Some(conversation_view) = panel.read(cx).active_conversation_view().cloned() else {
+                return;
+            };
+            conversation_view.update(cx, |conversation_view, cx| {
+                conversation_view.return_to_root_thread(cx);
+            });
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
     }
 
     fn toggle_lock(&mut self, id: NodeId, window: &mut Window, cx: &mut Context<Self>) {
@@ -656,30 +951,50 @@ impl ArchitectPane {
         // a drag that no mouse-up is going to end.
         self.interaction = Interaction::None;
 
-        let locked = self
-            .graph(cx)
-            .and_then(|graph| graph.node(&id))
-            .is_some_and(|node| node.locked);
+        let Some(graph) = self.graph(cx) else {
+            return;
+        };
+        let locked = graph.node(&id).is_some_and(|node| node.locked);
+
+        // Settling a step that contains a plan would settle that plan too,
+        // which is not the user's to do from out here.
+        if !locked && !graph.can_lock(&id) {
+            self.report(
+                "This step contains a plan that is still being argued about. Lock every step \
+                 inside it first."
+                    .to_string(),
+                cx,
+            );
+            return;
+        }
+
         self.edit_graph(|graph| graph.set_locked(&id, !locked), cx);
         self.refresh_inspector(window, cx);
     }
 
+    /// Locks or unlocks everything, descending into nested plans so that a
+    /// parent is never left locked over steps that are not.
     fn set_all_locked(&mut self, locked: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.edit_graph(
-            |graph| {
-                for node in &mut graph.nodes {
-                    node.locked = locked;
+        fn apply(graph: &mut ArchitectGraph, locked: bool) {
+            for node in &mut graph.nodes {
+                node.locked = locked;
+                if let Some(subplan) = node.subplan.as_deref_mut() {
+                    apply(subplan, locked);
                 }
-            },
-            cx,
-        );
+            }
+        }
+        self.edit_graph(move |graph| apply(graph, locked), cx);
         self.refresh_inspector(window, cx);
     }
 
     /// Rebuilds the inspector so its fields match the step again, which is what
     /// makes them go read-only the moment a step is locked.
     fn refresh_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.inspector.as_ref().map(|inspector| inspector.node.clone()) else {
+        let Some(id) = self
+            .inspector
+            .as_ref()
+            .map(|inspector| inspector.node.clone())
+        else {
             return;
         };
         let Some(node) = self.graph(cx).and_then(|graph| graph.node(&id)).cloned() else {
@@ -758,7 +1073,12 @@ impl ArchitectPane {
         cx.notify();
     }
 
-    fn handle_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn handle_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match &mut self.interaction {
             Interaction::None => {
                 let hovered = self.node_at(event.position, cx);
@@ -840,7 +1160,7 @@ impl ArchitectPane {
         let all_locked = step_count > 0 && locked_count == step_count;
         let ready_to_run = all_locked && problems.is_empty();
         let run_tooltip = if ready_to_run {
-            "Hand the plan to the chat and start work"
+            "Run the plan, one step at a time"
         } else if step_count == 0 {
             "There is no plan yet"
         } else if !problems.is_empty() {
@@ -848,6 +1168,21 @@ impl ArchitectPane {
         } else {
             "Lock every step first"
         };
+
+        let running = self.run.as_ref().is_some_and(RunState::is_running);
+        let run_status: Option<SharedString> =
+            self.run.as_ref().and_then(|run| match &run.outcome {
+                Some(outcome) => graph.map(|graph| outcome.describe(graph).into()),
+                None => {
+                    let title = run
+                        .current
+                        .as_ref()
+                        .and_then(|path| graph.and_then(|graph| graph.node_at(path)))
+                        .map(|node| node.title.clone())
+                        .unwrap_or_else(|| "Deciding what comes next".into());
+                    Some(format!("Step {}: {title}", run.step_number).into())
+                }
+            });
 
         h_flex()
             .w_full()
@@ -877,6 +1212,33 @@ impl ArchitectPane {
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                     )
+                    .when_some(run_status, |this, status| {
+                        this.child(
+                            h_flex()
+                                .id("architect-run-status")
+                                .gap_1()
+                                .child(
+                                    Icon::new(if running {
+                                        IconName::PlayFilled
+                                    } else {
+                                        IconName::Check
+                                    })
+                                    .size(IconSize::XSmall)
+                                    .color(if running {
+                                        Color::Accent
+                                    } else {
+                                        Color::Muted
+                                    }),
+                                )
+                                .child(
+                                    Label::new(status.clone())
+                                        .size(LabelSize::Small)
+                                        .color(if running { Color::Accent } else { Color::Muted })
+                                        .truncate(),
+                                )
+                                .tooltip(Tooltip::text(status)),
+                        )
+                    })
                     .when(!problems.is_empty(), |this| {
                         let summary: SharedString = problems
                             .iter()
@@ -933,20 +1295,27 @@ impl ArchitectPane {
                         )
                         .label_size(LabelSize::Small)
                         .start_icon(Icon::new(IconName::Lock).size(IconSize::XSmall))
-                        .disabled(step_count == 0)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.set_all_locked(!all_locked, window, cx)
-                        })),
+                        .disabled(step_count == 0 || running)
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| this.set_all_locked(!all_locked, window, cx),
+                        )),
                     )
-                    .child(
+                    .child(if running {
+                        Button::new("architect-stop", "Stop")
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Tinted(TintColor::Warning))
+                            .start_icon(Icon::new(IconName::Stop).size(IconSize::XSmall))
+                            .tooltip(Tooltip::text("Stop the run and the turn it is waiting on"))
+                            .on_click(cx.listener(|this, _, _, cx| this.stop_run(cx)))
+                    } else {
                         Button::new("architect-run", "Run")
                             .label_size(LabelSize::Small)
                             .style(ButtonStyle::Tinted(TintColor::Accent))
                             .start_icon(Icon::new(IconName::PlayFilled).size(IconSize::XSmall))
                             .disabled(!ready_to_run)
                             .tooltip(Tooltip::text(run_tooltip))
-                            .on_click(cx.listener(|this, _, window, cx| this.run(window, cx))),
-                    ),
+                            .on_click(cx.listener(|this, _, window, cx| this.run(window, cx)))
+                    }),
             )
             .into_any()
     }
@@ -959,12 +1328,20 @@ impl ArchitectPane {
 
         let title_editor = inspector.title.clone();
         let goal_editor = inspector.goal.clone();
+        let capture_editor = inspector.capture.clone();
         let rule_editor = inspector.new_rule.clone();
         let id = node.id.clone();
         let lock_id = node.id.clone();
         let discuss_id = node.id.clone();
+        let pin_id = node.id.clone();
         let locked = node.locked;
         let has_chat = node.chat.is_some();
+        // A step nothing leads out of has nobody to hand anything to, so an
+        // empty capture there is a decision rather than an oversight.
+        let hands_on = self
+            .graph(cx)
+            .is_some_and(|graph| graph.edges_from(&node.id).next().is_some());
+        let wants_capture = hands_on && node.capture.trim().is_empty();
 
         let field = |label: &'static str| {
             Label::new(label)
@@ -994,12 +1371,17 @@ impl ArchitectPane {
                                 .color(Color::Muted),
                         )
                         .child(
-                            Button::new("architect-inspector-lock", if locked { "Unlock" } else { "Lock" })
-                                .label_size(LabelSize::Small)
-                                .start_icon(Icon::new(IconName::Lock).size(IconSize::XSmall))
-                                .on_click(cx.listener(move |this, _, window, cx| {
+                            Button::new(
+                                "architect-inspector-lock",
+                                if locked { "Unlock" } else { "Lock" },
+                            )
+                            .label_size(LabelSize::Small)
+                            .start_icon(Icon::new(IconName::Lock).size(IconSize::XSmall))
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
                                     this.toggle_lock(lock_id.clone(), window, cx);
-                                })),
+                                },
+                            )),
                         ),
                 )
                 .child(
@@ -1010,34 +1392,28 @@ impl ArchitectPane {
                         .p_3()
                         .gap_3()
                         .child(
-                            v_flex()
-                                .gap_1()
-                                .child(field("Name"))
-                                .child(
-                                    div()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(cx.theme().colors().border)
-                                        .bg(cx.theme().colors().editor_background)
-                                        .child(title_editor),
-                                ),
+                            v_flex().gap_1().child(field("Name")).child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(cx.theme().colors().border)
+                                    .bg(cx.theme().colors().editor_background)
+                                    .child(title_editor),
+                            ),
                         )
                         .child(
-                            v_flex()
-                                .gap_1()
-                                .child(field("Goal"))
-                                .child(
-                                    div()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .border_1()
-                                        .border_color(cx.theme().colors().border)
-                                        .bg(cx.theme().colors().editor_background)
-                                        .child(goal_editor),
-                                ),
+                            v_flex().gap_1().child(field("Goal")).child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(cx.theme().colors().border)
+                                    .bg(cx.theme().colors().editor_background)
+                                    .child(goal_editor),
+                            ),
                         )
                         .child(
                             v_flex()
@@ -1061,9 +1437,9 @@ impl ArchitectPane {
                                                 )
                                                 .icon_size(IconSize::XSmall)
                                                 .tooltip(Tooltip::text("Remove this rule"))
-                                                .on_click(cx.listener(
-                                                    move |this, _, _, cx| this.remove_rule(ix, cx),
-                                                )),
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.remove_rule(ix, cx)
+                                                })),
                                             )
                                         })
                                 }))
@@ -1091,17 +1467,149 @@ impl ArchitectPane {
                                                     .child(rule_editor.clone()),
                                             )
                                             .child(
-                                                IconButton::new("architect-rule-add", IconName::Plus)
-                                                    .icon_size(IconSize::Small)
-                                                    .tooltip(Tooltip::text("Add this rule"))
-                                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                                IconButton::new(
+                                                    "architect-rule-add",
+                                                    IconName::Plus,
+                                                )
+                                                .icon_size(IconSize::Small)
+                                                .tooltip(Tooltip::text("Add this rule"))
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
                                                         let rule = rule_editor.read(cx).text(cx);
                                                         this.add_rule(rule, window, cx);
-                                                    })),
+                                                    },
+                                                )),
                                             ),
                                     )
                                 }),
                         )
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .justify_between()
+                                        .child(field("Capture In Summary"))
+                                        .child(
+                                            h_flex()
+                                                .gap_1()
+                                                .child(
+                                                    Label::new(if node.pinned {
+                                                        "told to every later step"
+                                                    } else if hands_on {
+                                                        "feeds the next step"
+                                                    } else {
+                                                        "nothing follows this step"
+                                                    })
+                                                    .size(LabelSize::XSmall)
+                                                    .color(if node.pinned {
+                                                        Color::Accent
+                                                    } else {
+                                                        Color::Muted
+                                                    }),
+                                                )
+                                                .child(
+                                                    IconButton::new(
+                                                        "architect-pin-step",
+                                                        if node.pinned {
+                                                            IconName::StarFilled
+                                                        } else {
+                                                            IconName::Star
+                                                        },
+                                                    )
+                                                    .icon_size(IconSize::XSmall)
+                                                    .icon_color(if node.pinned {
+                                                        Color::Accent
+                                                    } else {
+                                                        Color::Muted
+                                                    })
+                                                    .disabled(locked)
+                                                    .tooltip(Tooltip::text(if node.pinned {
+                                                        "Every later step is told this summary. \
+                                                         Click to tell only the next ones."
+                                                    } else {
+                                                        "Only the steps this one leads to are told \
+                                                         its summary. Click to tell every later \
+                                                         step."
+                                                    }))
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            let id = pin_id.clone();
+                                                            this.edit_graph(
+                                                                move |graph| {
+                                                                    if let Some(node) =
+                                                                        graph.node_mut(&id)
+                                                                    {
+                                                                        node.pinned = !node.pinned;
+                                                                    }
+                                                                },
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                                ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(if wants_capture {
+                                            cx.theme().status().warning_border
+                                        } else {
+                                            cx.theme().colors().border
+                                        })
+                                        .bg(cx.theme().colors().editor_background)
+                                        .child(capture_editor),
+                                )
+                                .when(wants_capture, |this| {
+                                    this.child(
+                                        Label::new(
+                                            "This step leads somewhere but says nothing about \
+                                             what it hands on. The steps after it see only this \
+                                             summary.",
+                                        )
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Warning),
+                                    )
+                                })
+                        )
+                        .when_some(node.result.clone(), |this, result| {
+                            this.child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        h_flex()
+                                            .w_full()
+                                            .justify_between()
+                                            .child(field("Last Result"))
+                                            .child(
+                                                Label::new(format!(
+                                                    "attempt {}",
+                                                    result.attempt.max(1)
+                                                ))
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(cx.theme().status().success_border)
+                                            .child(
+                                                Label::new(result.summary)
+                                                    .size(LabelSize::Small)
+                                                    .color(Color::Muted),
+                                            ),
+                                    ),
+                            )
+                        })
                         .child(
                             v_flex()
                                 .gap_1()
@@ -1118,9 +1626,11 @@ impl ArchitectPane {
                                     .full_width()
                                     .label_size(LabelSize::Small)
                                     .start_icon(Icon::new(IconName::Sparkle).size(IconSize::XSmall))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.discuss_node(discuss_id.clone(), window, cx);
-                                    })),
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.discuss_node(discuss_id.clone(), window, cx);
+                                        },
+                                    )),
                                 )
                                 .child(
                                     Label::new(if has_chat {
@@ -1325,11 +1835,7 @@ impl ArchitectPane {
                                 .border_1()
                                 .border_color(cx.theme().colors().border)
                                 .bg(cx.theme().colors().elevated_surface_background)
-                                .child(
-                                    Label::new(badge)
-                                        .size(LabelSize::XSmall)
-                                        .color(badge_color),
-                                )
+                                .child(Label::new(badge).size(LabelSize::XSmall).color(badge_color))
                                 .child(
                                     Label::new(truncate(label, 32))
                                         .size(LabelSize::XSmall)
@@ -1402,9 +1908,14 @@ impl ArchitectPane {
         let selected = self.selection == Some(Selection::Node(node.id.clone()));
         let hovered = self.hovered_node.as_ref() == Some(&node.id);
         let detailed = self.zoom >= DETAIL_ZOOM_THRESHOLD;
+        let running = self.running_node() == Some(&node.id);
 
+        // The step being carried out outranks selection, because during a run
+        // where the agent is now is the thing worth being able to find.
         let border_color = if invalid {
             error_border
+        } else if running {
+            cx.theme().status().info_border
         } else if selected {
             theme.border_focused
         } else if node.locked {
@@ -1470,13 +1981,25 @@ impl ArchitectPane {
                             .gap_1()
                             .justify_between()
                             .child(
-                                Label::new(node.title.clone())
-                                    .size(if detailed {
-                                        LabelSize::Default
-                                    } else {
-                                        LabelSize::Small
+                                h_flex()
+                                    .gap_1()
+                                    .overflow_hidden()
+                                    .when(running, |this| {
+                                        this.child(
+                                            Icon::new(IconName::PlayFilled)
+                                                .size(IconSize::XSmall)
+                                                .color(Color::Info),
+                                        )
                                     })
-                                    .truncate(),
+                                    .child(
+                                        Label::new(node.title.clone())
+                                            .size(if detailed {
+                                                LabelSize::Default
+                                            } else {
+                                                LabelSize::Small
+                                            })
+                                            .truncate(),
+                                    ),
                             )
                             .child(
                                 IconButton::new(
@@ -1498,9 +2021,11 @@ impl ArchitectPane {
                                 } else {
                                     "Draft. Click to lock"
                                 }))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.toggle_lock(lock_id.clone(), window, cx);
-                                })),
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.toggle_lock(lock_id.clone(), window, cx);
+                                    },
+                                )),
                             ),
                     )
                     .when(detailed, |this| {
@@ -1570,6 +2095,51 @@ impl ArchitectPane {
             )
             .into_any()
     }
+}
+
+/// Sends a prompt to a conversation and waits for the whole turn to finish.
+///
+/// This is the same path a typed message takes, so a run is subject to the tool
+/// permissions, cancellation and rendering that any other turn is.
+async fn send_and_wait(
+    thread: &Entity<AcpThread>,
+    prompt: String,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    let send = thread.update(cx, |thread, cx| {
+        thread.send(
+            vec![acp::ContentBlock::Text(acp::TextContent::new(prompt))],
+            cx,
+        )
+    });
+    send.await?;
+    Ok(())
+}
+
+/// The text of the most recent thing the agent said.
+///
+/// Reasoning is left out: a model thinking through both answers before settling
+/// on one would otherwise have its thinking read as the verdict.
+fn last_assistant_text(thread: &AcpThread, cx: &App) -> String {
+    thread
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            AgentThreadEntry::AssistantMessage(message) => Some(
+                message
+                    .chunks
+                    .iter()
+                    .filter_map(|chunk| match chunk {
+                        AssistantMessageChunk::Message { block, .. } => Some(block.to_markdown(cx)),
+                        AssistantMessageChunk::Thought { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 fn snap(value: f32) -> f32 {
@@ -1711,8 +2281,14 @@ fn paint_curve(
     let base = point(end.x - px(ux * size), end.y - px(uy * size));
     let mut head = PathBuilder::fill();
     head.move_to(end);
-    head.line_to(point(base.x - px(uy * size * 0.5), base.y + px(ux * size * 0.5)));
-    head.line_to(point(base.x + px(uy * size * 0.5), base.y - px(ux * size * 0.5)));
+    head.line_to(point(
+        base.x - px(uy * size * 0.5),
+        base.y + px(ux * size * 0.5),
+    ));
+    head.line_to(point(
+        base.x + px(uy * size * 0.5),
+        base.y - px(ux * size * 0.5),
+    ));
     head.close();
     if let Ok(path) = head.build() {
         window.paint_path(path, color);

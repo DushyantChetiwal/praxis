@@ -1,10 +1,10 @@
-//! Turning a finished graph into instructions the agent can follow.
+//! Rendering a finished graph as prose.
 //!
-//! The canvas is where a plan is argued about; this is where it stops being a
-//! diagram and becomes something the agent acts on. The order is the order the
-//! graph implies, and every condition is stated in full, including the ones
-//! that loop, so the agent never has to infer control flow from the shape of
-//! something it cannot see.
+//! This flattens a plan into an ordered list of steps with every condition
+//! stated in full, so that a graph can be read by anything that cannot see the
+//! canvas. Plans are not run this way: [`crate::PlanRun`] drives them a step at
+//! a time and keeps the control flow out of the model's hands. What this
+//! produces is a description of a plan, not an instruction to carry one out.
 
 use crate::{ArchitectGraph, EdgeCondition, GraphProblem, NodeId, layout};
 use std::fmt::Write;
@@ -15,14 +15,7 @@ use std::fmt::Write;
 /// deliberating, and running a half-argued plan is how a plan stops being worth
 /// making.
 pub fn compile_spec(graph: &ArchitectGraph) -> Result<String, Vec<GraphProblem>> {
-    let mut problems = graph.problems();
-    problems.extend(
-        graph
-            .nodes
-            .iter()
-            .filter(|node| !node.locked)
-            .map(|node| GraphProblem::Unlocked(node.id.clone())),
-    );
+    let problems = graph.blocking_problems();
     if !problems.is_empty() {
         return Err(problems);
     }

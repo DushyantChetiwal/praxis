@@ -1326,6 +1326,10 @@ pub struct Thread {
     /// The Architect plan drafted in this thread. The conversation governs the
     /// plan, so the two live and die together.
     architect_graph: Option<architect::ArchitectGraph>,
+    /// The step a run is currently carrying out, if one is. Deliberately not
+    /// persisted: a run does not survive a restart, and a stale pointer here
+    /// would let `complete_step` write its summary onto the wrong step.
+    architect_running_step: Option<architect::NodePath>,
     sandboxed_terminal_temp_dir: Option<PathBuf>,
     /// Sandbox permissions the user approved "for the rest of the thread".
     /// Shared with each tool call's event stream so repeated requests for
@@ -1500,6 +1504,7 @@ impl Thread {
             running_subagents: Vec::new(),
             inherits_parent_model_settings: true,
             architect_graph: None,
+            architect_running_step: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::default())),
         }
@@ -1890,6 +1895,7 @@ impl Thread {
             running_subagents: Vec::new(),
             inherits_parent_model_settings: true,
             architect_graph: db_thread.architect_graph,
+            architect_running_step: None,
             sandboxed_terminal_temp_dir: db_thread.sandboxed_terminal_temp_dir,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::from_db(
                 &db_thread.sandbox_grants,
@@ -2053,6 +2059,16 @@ impl Thread {
         self.architect_graph = graph;
         self.updated_at = Utc::now();
         cx.notify();
+    }
+
+    /// The step a run is carrying out, which is the step `complete_step` is
+    /// allowed to write a summary onto.
+    pub fn architect_running_step(&self) -> Option<&architect::NodePath> {
+        self.architect_running_step.as_ref()
+    }
+
+    pub fn set_architect_running_step(&mut self, step: Option<architect::NodePath>) {
+        self.architect_running_step = step;
     }
 
     /// Edits the plan in place, marking the thread changed so the edit is

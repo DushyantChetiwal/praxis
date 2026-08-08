@@ -18,7 +18,6 @@ pub mod builtin_profiles {
 
     pub const WRITE: &str = "write";
     pub const ASK: &str = "ask";
-    pub const ARCHITECT: &str = "architect";
     /// The profile a single Architect step's thread runs under. It can read and
     /// search to inform the argument, and can rewrite its own step, but it
     /// cannot build anything: the main thread owns that.
@@ -26,10 +25,14 @@ pub mod builtin_profiles {
     pub const MINIMAL: &str = "minimal";
 
     pub fn is_builtin(profile_id: &AgentProfileId) -> bool {
-        matches!(
-            profile_id.as_str(),
-            WRITE | ASK | ARCHITECT | ARCHITECT_STEP | MINIMAL
-        )
+        matches!(profile_id.as_str(), WRITE | ASK | ARCHITECT_STEP | MINIMAL)
+    }
+
+    /// Whether the user may pick this profile for a thread. `ARCHITECT_STEP`
+    /// is applied by step threads themselves and would do the wrong thing on
+    /// any other thread, so it is kept out of the picker.
+    pub fn is_selectable(profile_id: &AgentProfileId) -> bool {
+        profile_id.as_str() != ARCHITECT_STEP
     }
 }
 
