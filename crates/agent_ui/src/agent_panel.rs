@@ -5775,6 +5775,159 @@ impl AgentPanel {
         })
     }
 
+    /// What the plan is doing, shown in the panel rather than only on the
+    /// canvas.
+    ///
+    /// The canvas is a panel the user closes, and a run outlives it. Without
+    /// this there would be no way to see which step is running, or to stop it,
+    /// except by reopening the canvas.
+    fn render_architect_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let thread = self
+            .active_thread_view(cx)
+            .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))?;
+        let thread_ref = thread.read(cx);
+        let graph = thread_ref.architect_graph()?;
+        let run = thread_ref.architect_run();
+
+        let step_count = graph.nodes.len();
+        let locked_count = graph.nodes.iter().filter(|node| node.locked).count();
+        let nested_count = graph
+            .nodes
+            .iter()
+            .filter(|node| node.has_subplan())
+            .count();
+        let running = run.is_some_and(agent::ArchitectRun::is_running);
+
+        fn open_canvas(this: &mut AgentPanel, window: &mut Window, cx: &mut Context<AgentPanel>) {
+            let Some(thread) = this
+                .active_thread_view(cx)
+                .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))
+            else {
+                return;
+            };
+            this.workspace
+                .update(cx, |workspace, cx| {
+                    crate::architect_ui::ArchitectPane::open(thread, workspace, window, cx);
+                })
+                .ok();
+        }
+
+        let mut summary = match step_count {
+            1 => "1 step".to_string(),
+            count => format!("{count} steps"),
+        };
+        if nested_count > 0 {
+            summary.push_str(&format!(" · {nested_count} nested"));
+        }
+        if locked_count == step_count {
+            summary.push_str(" · all locked");
+        } else {
+            summary.push_str(&format!(" · {locked_count} of {step_count} locked"));
+        }
+
+        let card = v_flex()
+            .id("architect-status")
+            .w_full()
+            .gap_1()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(if running {
+                cx.theme().status().info_border
+            } else {
+                cx.theme().colors().border
+            })
+            .bg(cx.theme().colors().elevated_surface_background)
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_1p5()
+                    .justify_between()
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .child(
+                                Icon::new(if running {
+                                    IconName::PlayFilled
+                                } else {
+                                    IconName::GitBranch
+                                })
+                                .size(IconSize::XSmall)
+                                .color(if running { Color::Info } else { Color::Muted }),
+                            )
+                            .child(
+                                Label::new(match run {
+                                    Some(run) if running => {
+                                        format!("Step {} · {}", run.step_number, run.current_title)
+                                    }
+                                    _ => "Plan".to_string(),
+                                })
+                                .size(LabelSize::Small)
+                                .color(if running { Color::Info } else { Color::Default })
+                                .truncate(),
+                            ),
+                    )
+                    .child(if running {
+                        Button::new("architect-status-stop", "Stop")
+                            .label_size(LabelSize::XSmall)
+                            .style(ButtonStyle::Subtle)
+                            .color(Color::Warning)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let Some(thread) = this
+                                    .active_thread_view(cx)
+                                    .and_then(|view| view.read(cx).as_native_thread(cx))
+                                else {
+                                    return;
+                                };
+                                thread.update(cx, |thread, cx| thread.stop_architect_run(cx));
+                            }))
+                            .into_any_element()
+                    } else {
+                        Button::new("architect-status-open", "Open")
+                            .label_size(LabelSize::XSmall)
+                            .style(ButtonStyle::Subtle)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                open_canvas(this, window, cx)
+                            }))
+                            .into_any_element()
+                    }),
+            )
+            .child(
+                Label::new(match run.and_then(|run| run.outcome.as_ref()) {
+                    Some(outcome) => outcome.describe(graph),
+                    None => summary,
+                })
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
+            )
+            .when(step_count > 0, |this| {
+                // How far through locking the plan is, which is the thing the
+                // user is working towards before a run can start.
+                let fraction = locked_count as f32 / step_count as f32;
+                this.child(
+                    div()
+                        .w_full()
+                        .h(px(3.0))
+                        .rounded_sm()
+                        .bg(cx.theme().colors().element_background)
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(fraction.clamp(0.0, 1.0)))
+                                .rounded_sm()
+                                .bg(if locked_count == step_count {
+                                    cx.theme().status().success
+                                } else {
+                                    cx.theme().colors().text_accent
+                                }),
+                        ),
+                )
+            })
+            .on_click(cx.listener(|this, _, window, cx| open_canvas(this, window, cx)));
+
+        Some(div().w_full().px_2().pb_1p5().child(card).into_any_element())
+    }
+
     /// The way into the Architect canvas. It appears only once the thread has a
     /// plan, because a button that opens an empty canvas is worse than no
     /// button.
@@ -6521,6 +6674,7 @@ impl Render for AgentPanel {
                 }
             }))
             .child(self.render_toolbar(window, cx))
+            .children(self.render_architect_status(cx))
             .children(self.render_new_user_onboarding(window, cx))
             .map(|parent| match self.visible_surface() {
                 VisibleSurface::Uninitialized if !self.has_open_project(cx) => {

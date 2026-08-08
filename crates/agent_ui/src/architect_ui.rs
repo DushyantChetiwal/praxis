@@ -22,7 +22,7 @@ use gpui::{
     App, AsyncApp, Bounds, Context, CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle,
     Focusable, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     PathBuilder, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Subscription,
-    Task, WeakEntity, Window, canvas, div, point, px, relative,
+    WeakEntity, Window, canvas, div, point, px, relative,
 };
 use ui::{TintColor, Tooltip, prelude::*};
 use workspace::{
@@ -83,28 +83,6 @@ impl Interaction {
     }
 }
 
-/// A run of the plan in progress.
-///
-/// The state machine itself lives in the task driving the run; what is kept here
-/// is only what the canvas draws. Holding the position in two places would let
-/// them disagree, and the canvas is the copy that can be stale without harm.
-struct RunState {
-    /// The step being carried out, or `None` once the run has ended. A path,
-    /// because a step inside a nested plan is not identified by its id alone.
-    current: Option<NodePath>,
-    /// Which step of the run this is, counting repeats, so a loop reads as
-    /// progress rather than as the same step over and over.
-    step_number: usize,
-    outcome: Option<RunOutcome>,
-    /// Dropping this stops the run at the next await point.
-    _task: Task<()>,
-}
-
-impl RunState {
-    fn is_running(&self) -> bool {
-        self.outcome.is_none()
-    }
-}
 
 /// Identifies the canvas's notifications so a new one replaces the last rather
 /// than stacking up behind it.
@@ -149,7 +127,10 @@ pub struct ArchitectPane {
     focus: NodePath,
     /// Which half of the inspector is showing.
     inspector_tab: InspectorTab,
-    run: Option<RunState>,
+    /// Set while a run is being started, so the toolbar can show it before the
+    /// thread has been told. The run itself belongs to the thread.
+    run_starting: bool,
+
     _thread_subscription: Subscription,
 }
 
@@ -173,7 +154,7 @@ impl ArchitectPane {
             hovered_node: None,
             focus: NodePath::default(),
             inspector_tab: InspectorTab::Details,
-            run: None,
+            run_starting: false,
             _thread_subscription: subscription,
         }
     }
@@ -793,9 +774,10 @@ impl ArchitectPane {
     /// a half-finished run would make it impossible to say afterwards what was
     /// actually carried out.
     fn run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.run.as_ref().is_some_and(RunState::is_running) {
+        if self.is_running(cx) {
             return;
         }
+        self.run_starting = true;
         // A run always covers the whole plan, even when started from inside a
         // nested one: what is on screen is a viewpoint, not a scope.
         let Some(mut graph) = self.root_graph(cx).cloned() else {
@@ -944,27 +926,37 @@ impl ArchitectPane {
             }
         });
 
-        self.run = Some(RunState {
-            current: Some(first_step),
-            step_number: 1,
-            outcome: None,
-            _task: task,
+        let first_title = self.step_title(&first_step, cx);
+        self.thread.update(cx, |thread, cx| {
+            thread.start_architect_run(first_step, first_title, task, cx);
         });
+        self.run_starting = false;
         cx.notify();
     }
 
-    /// Records where the run has got to so the canvas can show it.
+    /// The title of a step, for showing progress without walking the plan.
+    fn step_title(&self, path: &NodePath, cx: &Context<Self>) -> SharedString {
+        self.root_graph(cx)
+            .and_then(|root| root.node_at(path))
+            .map(|node| SharedString::from(node.title.clone()))
+            .or_else(|| path.leaf().map(|id| SharedString::from(id.0.clone())))
+            .unwrap_or_else(|| SharedString::from("Step"))
+    }
+
+    /// Records where the run has got to so progress can be shown.
     fn note_run_position(
         &mut self,
         node: Option<NodePath>,
         step_number: usize,
         cx: &mut Context<Self>,
     ) {
-        if let Some(run) = self.run.as_mut() {
-            run.current = node;
-            run.step_number = step_number;
-        }
-        cx.notify();
+        let Some(node) = node else {
+            return;
+        };
+        let title = self.step_title(&node, cx);
+        self.thread.update(cx, |thread, cx| {
+            thread.note_architect_run_position(node, title, step_number, cx);
+        });
     }
 
     /// Points the thread at the step being carried out, so `complete_step` has
@@ -1011,11 +1003,8 @@ impl ArchitectPane {
     }
 
     fn finish_run(&mut self, outcome: RunOutcome, cx: &mut Context<Self>) {
-        if let Some(run) = self.run.as_mut() {
-            run.current = None;
-            run.outcome = Some(outcome);
-        }
-        cx.notify();
+        self.thread
+            .update(cx, |thread, cx| thread.finish_architect_run(outcome, cx));
     }
 
     /// Stops a run between steps, and stops the turn it is waiting on.
@@ -1027,14 +1016,30 @@ impl ArchitectPane {
                 .update(cx, |thread, cx| thread.cancel(cx))
                 .detach();
         }
-        self.run = None;
+        self.thread
+            .update(cx, |thread, cx| thread.stop_architect_run(cx));
+        self.run_starting = false;
         cx.notify();
+    }
+
+    fn is_running(&self, cx: &Context<Self>) -> bool {
+        self.run_starting
+            || self
+                .thread
+                .read(cx)
+                .architect_run()
+                .is_some_and(agent::ArchitectRun::is_running)
     }
 
     /// The step the run is carrying out, if one is. Only the leaf matters for
     /// highlighting, since the canvas shows one level at a time.
-    fn running_node(&self) -> Option<&NodeId> {
-        self.run.as_ref()?.current.as_ref()?.leaf()
+    fn running_node<'a>(&self, cx: &'a Context<Self>) -> Option<&'a NodeId> {
+        self.thread
+            .read(cx)
+            .architect_run()?
+            .current
+            .as_ref()?
+            .leaf()
     }
 
     /// Tells the user something the canvas cannot show in place.
@@ -1312,6 +1317,9 @@ impl ArchitectPane {
         let root = self.root_graph(cx)?;
 
         let mut crumbs: Vec<(usize, SharedString)> = vec![(0, "Plan".into())];
+        let home = Icon::new(IconName::GitBranch)
+            .size(IconSize::XSmall)
+            .color(Color::Muted);
         for (depth, id) in self.focus.0.iter().enumerate() {
             let title = root
                 .graph_at(&NodePath(self.focus.0[..depth].to_vec()))
@@ -1332,6 +1340,7 @@ impl ArchitectPane {
                 .border_b_1()
                 .border_color(cx.theme().colors().border)
                 .bg(cx.theme().colors().editor_background)
+                .child(home)
                 .children(crumbs.into_iter().enumerate().flat_map(
                     |(ix, (depth, title))| {
                         let is_last = ix == last;
@@ -1357,9 +1366,19 @@ impl ArchitectPane {
                         separator.into_iter().chain(std::iter::once(crumb))
                     },
                 ))
+                .child(
+                    chip(
+                        format!("level {}", self.focus.depth() + 1),
+                        None,
+                        Color::Muted,
+                        cx.theme().colors().border,
+                        cx.theme().colors().element_background,
+                    )
+                    .into_any_element(),
+                )
                 .child(div().flex_1())
                 .child(
-                    Label::new("Esc to go up")
+                    Label::new("Esc — up one level")
                         .size(LabelSize::XSmall)
                         .color(Color::Muted),
                 )
@@ -1390,20 +1409,17 @@ impl ArchitectPane {
             "Lock every step first"
         };
 
-        let running = self.run.as_ref().is_some_and(RunState::is_running);
+        let running = self.is_running(cx);
         let run_status: Option<SharedString> =
-            self.run.as_ref().and_then(|run| match &run.outcome {
-                Some(outcome) => graph.map(|graph| outcome.describe(graph).into()),
-                None => {
-                    let title = run
-                        .current
-                        .as_ref()
-                        .and_then(|path| graph.and_then(|graph| graph.node_at(path)))
-                        .map(|node| node.title.clone())
-                        .unwrap_or_else(|| "Deciding what comes next".into());
-                    Some(format!("Step {}: {title}", run.step_number).into())
-                }
-            });
+            self.thread
+                .read(cx)
+                .architect_run()
+                .and_then(|run| match &run.outcome {
+                    Some(outcome) => root.map(|root| outcome.describe(root).into()),
+                    None => {
+                        Some(format!("Step {} · {}", run.step_number, run.current_title).into())
+                    }
+                });
 
         h_flex()
             .w_full()
@@ -1590,8 +1606,10 @@ impl ArchitectPane {
             .is_some_and(|graph| graph.edges_from(&node.id).next().is_some());
         let wants_capture = hands_on && node.capture.trim().is_empty();
 
+        // Uppercase, so a field's name reads as a heading rather than as more
+        // of the prose it labels.
         let field = |label: &'static str| {
-            Label::new(label)
+            Label::new(label.to_uppercase())
                 .size(LabelSize::XSmall)
                 .color(Color::Muted)
         };
@@ -1642,11 +1660,9 @@ impl ArchitectPane {
                         .child(
                             Button::new("architect-tab-details", "Details")
                                 .label_size(LabelSize::Small)
-                                .style(if tab == InspectorTab::Details {
-                                    ButtonStyle::Tinted(TintColor::Accent)
-                                } else {
-                                    ButtonStyle::Subtle
-                                })
+                                .toggle_state(tab == InspectorTab::Details)
+                                .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                                .style(ButtonStyle::Subtle)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.inspector_tab = InspectorTab::Details;
                                     cx.notify();
@@ -1663,14 +1679,12 @@ impl ArchitectPane {
                                     })
                                     .size(IconSize::XSmall),
                                 )
-                            .style(if tab == InspectorTab::Chat {
-                                ButtonStyle::Tinted(TintColor::Accent)
-                            } else {
-                                ButtonStyle::Subtle
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.discuss_node(chat_tab_id.clone(), window, cx);
-                            })),
+                                .toggle_state(tab == InspectorTab::Chat)
+                                .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                                .style(ButtonStyle::Subtle)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.discuss_node(chat_tab_id.clone(), window, cx);
+                                })),
                         ),
                 )
                 .when(tab == InspectorTab::Chat, |this| {
@@ -2049,6 +2063,96 @@ impl ArchitectPane {
         )
     }
 
+    /// A scaled-down plan of the level on screen, so a graph too big to fit is
+    /// still navigable. Clicking jumps the view.
+    ///
+    /// Nodes are drawn as bare blocks: at this size their titles would be
+    /// unreadable, and the shape of the graph is what the minimap is for.
+    fn render_minimap(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        const WIDTH: f32 = 168.0;
+        const HEIGHT: f32 = 104.0;
+        const PADDING: f32 = 8.0;
+
+        let graph = self.graph(cx)?;
+        if graph.nodes.len() < 4 {
+            return None;
+        }
+
+        let positions: Vec<(NodeId, Position)> = graph
+            .nodes
+            .iter()
+            .filter_map(|node| node.position.map(|position| (node.id.clone(), position)))
+            .collect();
+        if positions.is_empty() {
+            return None;
+        }
+
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for (_, position) in &positions {
+            min_x = min_x.min(position.x);
+            min_y = min_y.min(position.y);
+            max_x = max_x.max(position.x);
+            max_y = max_y.max(position.y);
+        }
+        let span_x = (max_x - min_x).max(1.0);
+        let span_y = (max_y - min_y).max(1.0);
+        let scale = ((WIDTH - PADDING * 2.0) / span_x).min((HEIGHT - PADDING * 2.0) / span_y);
+
+        let running = self.running_node(cx).cloned();
+        let selected = match &self.selection {
+            Some(Selection::Node(id)) => Some(id.clone()),
+            _ => None,
+        };
+
+        let blocks = positions.into_iter().map(|(id, position)| {
+            let is_running = running.as_ref() == Some(&id);
+            let is_selected = selected.as_ref() == Some(&id);
+            div()
+                .absolute()
+                .left(px(PADDING + (position.x - min_x) * scale - 4.0))
+                .top(px(PADDING + (position.y - min_y) * scale - 2.5))
+                .w(px(9.0))
+                .h(px(5.0))
+                .rounded_sm()
+                .bg(if is_running {
+                    cx.theme().status().info
+                } else if is_selected {
+                    cx.theme().colors().text_accent
+                } else {
+                    cx.theme().colors().text_muted
+                })
+        });
+
+        Some(
+            div()
+                .absolute()
+                .right(px(16.0))
+                .bottom(px(16.0))
+                .w(px(WIDTH))
+                .h(px(HEIGHT))
+                .rounded_md()
+                .border_1()
+                .border_color(cx.theme().colors().border)
+                .bg(cx.theme().colors().editor_background.opacity(0.9))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(8.0))
+                        .top(px(4.0))
+                        .child(
+                            Label::new(match self.focus.depth() {
+                                0 => "plan".to_string(),
+                                depth => format!("level {}", depth + 1),
+                            })
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                        ),
+                )
+                .children(blocks)
+                .into_any(),
+        )
+    }
+
     fn render_empty_state(&self, cx: &Context<Self>) -> AnyElement {
         v_flex()
             .size_full()
@@ -2290,7 +2394,7 @@ impl ArchitectPane {
         let selected = self.selection == Some(Selection::Node(node.id.clone()));
         let hovered = self.hovered_node.as_ref() == Some(&node.id);
         let detailed = self.zoom >= DETAIL_ZOOM_THRESHOLD;
-        let running = self.running_node() == Some(&node.id);
+        let running = self.running_node(cx) == Some(&node.id);
         let subplan_steps = node.subplan().map_or(0, |subplan| subplan.nodes.len());
         // Naming the steps inside without opening it: enough to tell two
         // sub-plans apart at a glance, without the canvas drawing a graph
@@ -2313,6 +2417,16 @@ impl ArchitectPane {
             })
             .unwrap_or_else(|| SharedString::from("This step contains a plan. Open it."));
         let drill_id = node.id.clone();
+        let attempt = node.result.as_ref().map_or(1, |result| result.attempt);
+        let has_summary = node
+            .result
+            .as_ref()
+            .is_some_and(|result| !result.summary.trim().is_empty());
+        let summary_preview: SharedString = node
+            .result
+            .as_ref()
+            .map(|result| SharedString::from(result.summary.clone()))
+            .unwrap_or_default();
 
         // The step being carried out outranks selection, because during a run
         // where the agent is now is the thing worth being able to find.
@@ -2478,22 +2592,46 @@ impl ArchitectPane {
                                 })
                                 .when(subplan_steps > 0, |this| {
                                     this.child(
-                                        Button::new(
-                                            ("architect-node-open-subplan", ix),
-                                            match subplan_steps {
-                                                1 => "1 step".to_string(),
-                                                count => format!("{count} steps"),
-                                            },
-                                        )
-                                        .tooltip(Tooltip::text(subplan_preview.clone()))
-                                        .label_size(LabelSize::XSmall)
-                                        .style(ButtonStyle::Tinted(TintColor::Accent))
-                                        .start_icon(
-                                            Icon::new(IconName::ListTree).size(IconSize::XSmall),
-                                        )
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.drill_into(drill_id.clone(), window, cx);
-                                        })),
+                                        div()
+                                            .id(("architect-node-open-subplan", ix))
+                                            .cursor(CursorStyle::PointingHand)
+                                            .tooltip(Tooltip::text(subplan_preview.clone()))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.drill_into(drill_id.clone(), window, cx);
+                                            }))
+                                            .child(chip(
+                                                match subplan_steps {
+                                                    1 => "1 step".to_string(),
+                                                    count => format!("{count} steps"),
+                                                },
+                                                Some(IconName::ListTree),
+                                                Color::Accent,
+                                                cx.theme().status().info_border,
+                                                cx.theme().status().info_background,
+                                            )),
+                                    )
+                                })
+                                .when(attempt > 1, |this| {
+                                    this.child(chip(
+                                        format!("attempt {attempt}"),
+                                        None,
+                                        Color::Warning,
+                                        cx.theme().status().warning_border,
+                                        cx.theme().status().warning_background,
+                                    ))
+                                })
+                                .when(has_summary, |this| {
+                                    this.child(
+                                        div()
+                                            .id(("architect-node-summary", ix))
+                                            .tooltip(Tooltip::text(summary_preview.clone()))
+                                            .child(chip(
+                                                "summary",
+                                                Some(IconName::Check),
+                                                Color::Success,
+                                                cx.theme().status().success_border,
+                                                cx.theme().status().success_background,
+                                            )),
                                     )
                                 }),
                         )
@@ -2577,6 +2715,27 @@ fn last_assistant_text(thread: &AcpThread, cx: &App) -> String {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+/// A small tinted label. Nodes have room for about three words, so the canvas
+/// says things with these rather than with sentences.
+fn chip(
+    label: impl Into<SharedString>,
+    icon: Option<IconName>,
+    color: Color,
+    border: Hsla,
+    background: Hsla,
+) -> impl IntoElement {
+    h_flex()
+        .gap_1()
+        .px_1p5()
+        .py_0p5()
+        .rounded_sm()
+        .border_1()
+        .border_color(border)
+        .bg(background)
+        .children(icon.map(|icon| Icon::new(icon).size(IconSize::XSmall).color(color)))
+        .child(Label::new(label).size(LabelSize::XSmall).color(color))
 }
 
 fn snap(value: f32) -> f32 {
@@ -2741,6 +2900,7 @@ impl Render for ArchitectPane {
         let edges = self.render_edges(cx);
         let edge_labels = self.render_edge_labels(cx);
         let nodes = self.render_nodes(cx);
+        let minimap = self.render_minimap(cx);
         let inspector = self.render_inspector(cx);
 
         v_flex()
@@ -2783,6 +2943,7 @@ impl Render for ArchitectPane {
                             .child(edges)
                             .children(edge_labels)
                             .children(nodes)
+                            .children(minimap)
                             .into_any()
                     } else {
                         div()

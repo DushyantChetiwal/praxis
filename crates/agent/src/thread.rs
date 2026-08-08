@@ -190,6 +190,28 @@ fn tool_changes_the_project(tool_name: &str) -> bool {
     )
 }
 
+/// A plan being carried out, and enough of its position to show progress
+/// wherever the user happens to be looking.
+pub struct ArchitectRun {
+    /// The step in progress, or `None` once the run has ended.
+    pub current: Option<architect::NodePath>,
+    /// The title of that step, kept alongside the path so that progress can be
+    /// shown without walking the plan every frame.
+    pub current_title: SharedString,
+    /// Which step of the run this is, counting repeats.
+    pub step_number: usize,
+    pub outcome: Option<architect::RunOutcome>,
+    /// Dropping this stops the run at its next await point. Held here so that
+    /// closing the canvas cannot abandon a run.
+    _task: Task<()>,
+}
+
+impl ArchitectRun {
+    pub fn is_running(&self) -> bool {
+        self.outcome.is_none()
+    }
+}
+
 /// Returned when a turn is attempted but no language model has been selected.
 #[derive(Debug)]
 pub struct NoModelConfiguredError;
@@ -1388,6 +1410,10 @@ pub struct Thread {
     architect_running_step: Option<architect::NodePath>,
     /// Whether the thread is planning or building.
     session_mode: SessionMode,
+    /// A plan being carried out. It lives here rather than on the canvas
+    /// because the canvas is a panel the user closes, and closing a window
+    /// should not abandon work that is halfway through.
+    architect_run: Option<ArchitectRun>,
     sandboxed_terminal_temp_dir: Option<PathBuf>,
     /// Sandbox permissions the user approved "for the rest of the thread".
     /// Shared with each tool call's event stream so repeated requests for
@@ -1564,6 +1590,7 @@ impl Thread {
             architect_graph: None,
             architect_running_step: None,
             session_mode: SessionMode::default(),
+            architect_run: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::default())),
         }
@@ -1956,6 +1983,7 @@ impl Thread {
             architect_graph: db_thread.architect_graph,
             architect_running_step: None,
             session_mode: SessionMode::default(),
+            architect_run: None,
             sandboxed_terminal_temp_dir: db_thread.sandboxed_terminal_temp_dir,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::from_db(
                 &db_thread.sandbox_grants,
@@ -2118,6 +2146,63 @@ impl Thread {
     ) {
         self.architect_graph = graph;
         self.updated_at = Utc::now();
+        cx.notify();
+    }
+
+    pub fn architect_run(&self) -> Option<&ArchitectRun> {
+        self.architect_run.as_ref()
+    }
+
+    /// Takes ownership of a run, so that it outlives the canvas that started it.
+    pub fn start_architect_run(
+        &mut self,
+        current: architect::NodePath,
+        current_title: SharedString,
+        task: Task<()>,
+        cx: &mut Context<Self>,
+    ) {
+        self.architect_run = Some(ArchitectRun {
+            current: Some(current),
+            current_title,
+            step_number: 1,
+            outcome: None,
+            _task: task,
+        });
+        cx.notify();
+    }
+
+    pub fn note_architect_run_position(
+        &mut self,
+        current: architect::NodePath,
+        current_title: SharedString,
+        step_number: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(run) = self.architect_run.as_mut() {
+            run.current = Some(current);
+            run.current_title = current_title;
+            run.step_number = step_number;
+        }
+        cx.notify();
+    }
+
+    pub fn finish_architect_run(
+        &mut self,
+        outcome: architect::RunOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(run) = self.architect_run.as_mut() {
+            run.current = None;
+            run.outcome = Some(outcome);
+        }
+        self.architect_running_step = None;
+        cx.notify();
+    }
+
+    /// Ends a run by dropping the task driving it.
+    pub fn stop_architect_run(&mut self, cx: &mut Context<Self>) {
+        self.architect_run = None;
+        self.architect_running_step = None;
         cx.notify();
     }
 
