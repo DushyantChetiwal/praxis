@@ -57,7 +57,7 @@ use crate::{
     },
     ui::{AgentNotification, AgentNotificationEvent, EndTrialUpsell},
 };
-use agent_settings::AgentSettings;
+use agent_settings::{AgentSettings, builtin_profiles};
 use ai_onboarding::AgentPanelOnboarding;
 use anyhow::{Context as _, Result, anyhow};
 #[cfg(feature = "audio")]
@@ -5775,6 +5775,50 @@ impl AgentPanel {
         })
     }
 
+    /// The way into the Architect canvas. It appears only while the architect
+    /// profile is active, because that is the only profile that can author a
+    /// plan, and a button that does nothing is worse than no button.
+    fn render_architect_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let thread = self
+            .active_thread_view(cx)
+            .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))?;
+
+        let thread_ref = thread.read(cx);
+        if thread_ref.profile().as_str() != builtin_profiles::ARCHITECT {
+            return None;
+        }
+        let step_count = thread_ref
+            .architect_graph()
+            .map_or(0, |graph| graph.nodes.len());
+
+        let tooltip = match step_count {
+            0 => "Open the Architect canvas. Describe the goal in the chat and the plan appears here.".to_string(),
+            1 => "Open the Architect canvas (1 step)".to_string(),
+            count => format!("Open the Architect canvas ({count} steps)"),
+        };
+
+        Some(
+            IconButton::new("open-architect-canvas", IconName::GitBranch)
+                .icon_size(IconSize::Small)
+                .toggle_state(step_count > 0)
+                .tooltip(Tooltip::text(tooltip))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    let Some(thread) = this
+                        .active_thread_view(cx)
+                        .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))
+                    else {
+                        return;
+                    };
+                    this.workspace
+                        .update(cx, |workspace, cx| {
+                            crate::architect_ui::ArchitectPane::open(thread, workspace, window, cx);
+                        })
+                        .ok();
+                }))
+                .into_any_element(),
+        )
+    }
+
     fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let agent_server_store = self.project.read(cx).agent_server_store().clone();
 
@@ -6109,6 +6153,8 @@ impl AgentPanel {
                     thread_view.update(cx, |thread_view, cx| thread_view.render_sandbox_status(cx))
                 });
 
+            let architect_button = self.render_architect_button(cx);
+
             base_container
                 .child(
                     h_flex()
@@ -6132,6 +6178,7 @@ impl AgentPanel {
                         .flex_none()
                         .gap_1()
                         .children(sandbox_status)
+                        .children(architect_button)
                         .when(can_create_entries, |this| this.child(new_thread_menu))
                         .child(full_screen_button)
                         .child(self.render_panel_options_menu(window, cx)),

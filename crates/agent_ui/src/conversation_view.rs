@@ -1356,7 +1356,8 @@ impl ConversationView {
                             parent_session_id.clone(),
                             window,
                             cx,
-                        );
+                        )
+                        .detach_and_log_err(cx);
                     }
                 })
             })
@@ -1637,9 +1638,9 @@ impl ConversationView {
                     });
                 }
             }
-            AcpThreadEvent::SubagentSpawned(subagent_session_id) => {
-                self.load_subagent_session(subagent_session_id.clone(), session_id, window, cx)
-            }
+            AcpThreadEvent::SubagentSpawned(subagent_session_id) => self
+                .load_subagent_session(subagent_session_id.clone(), session_id, window, cx)
+                .detach_and_log_err(cx),
             AcpThreadEvent::ToolAuthorizationRequested(_) => {
                 self.notify_with_sound("Waiting for tool confirmation", IconName::Info, window, cx);
             }
@@ -2038,17 +2039,20 @@ impl ConversationView {
         parent_session_id: acp::SessionId,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Task<Result<()>> {
         let Some(connected) = self.as_connected() else {
-            return;
+            return Task::ready(Ok(()));
         };
-        if connected.threads.contains_key(&subagent_id)
-            || !connected.connection.supports_load_session()
-        {
-            return;
+        if connected.threads.contains_key(&subagent_id) {
+            return Task::ready(Ok(()));
+        }
+        if !connected.connection.supports_load_session() {
+            return Task::ready(Err(anyhow!(
+                "this agent cannot reopen a saved conversation"
+            )));
         }
         let Some(parent_thread) = connected.threads.get(&parent_session_id) else {
-            return;
+            return Task::ready(Err(anyhow!("the parent conversation is not open")));
         };
         let work_dirs = parent_thread
             .read(cx)
@@ -2087,7 +2091,94 @@ impl ConversationView {
                 connected.threads.insert(subagent_session_id, view);
             })
         })
-        .detach();
+    }
+
+    /// Shows the conversation for one Architect step, creating it the first time.
+    ///
+    /// Returns the session it settled on, which the canvas stores on the step so
+    /// that reopening it returns to the same conversation instead of starting a
+    /// new one. `existing` is the session the step already recorded, if any; it
+    /// may need loading from the database before it can be shown.
+    pub fn open_architect_step_thread(
+        &mut self,
+        node_id: architect::NodeId,
+        step_title: SharedString,
+        existing: Option<acp::SessionId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<acp::SessionId> {
+        let root_session_id = self.root_session_id.clone()?;
+
+        // Already open: just show it.
+        if let Some(existing) = existing.clone()
+            && self
+                .as_connected()
+                .is_some_and(|connected| connected.threads.contains_key(&existing))
+        {
+            self.as_connected_mut()?.navigate_to_thread(existing.clone());
+            cx.notify();
+            return Some(existing);
+        }
+
+        // Recorded on the step but not loaded yet, which is the case after a
+        // restart. Loading is asynchronous, so show it once it arrives.
+        if let Some(existing) = existing {
+            let load = self.load_subagent_session(existing.clone(), root_session_id, window, cx);
+            cx.spawn_in(window, {
+                let existing = existing.clone();
+                async move |this, cx| {
+                    load.await?;
+                    this.update(cx, |this, cx| {
+                        if let Some(connected) = this.as_connected_mut() {
+                            connected.navigate_to_thread(existing);
+                        }
+                        cx.notify();
+                    })
+                }
+            })
+            .detach_and_log_err(cx);
+            return Some(existing);
+        }
+
+        let connection = self.as_native_connection(cx)?;
+        let acp_thread = match connection.create_architect_step_thread(
+            &root_session_id,
+            node_id,
+            step_title,
+            cx,
+        ) {
+            Ok(thread) => thread,
+            Err(error) => {
+                log::error!("Architect: could not open a thread for this step: {error}");
+                return None;
+            }
+        };
+
+        let session_id = acp_thread.read(cx).session_id().clone();
+        let conversation = self
+            .as_connected()
+            .map(|connected| connected.conversation.clone())?;
+        conversation.update(cx, |conversation, cx| {
+            conversation.register_thread(acp_thread.clone(), cx);
+        });
+        let view = self.new_thread_view(acp_thread, conversation, false, None, window, cx);
+        let connected = self.as_connected_mut()?;
+        connected.threads.insert(session_id.clone(), view);
+        connected.navigate_to_thread(session_id.clone());
+        cx.notify();
+
+        Some(session_id)
+    }
+
+    /// Returns to the conversation that owns the plan.
+    pub fn return_to_root_thread(&mut self, cx: &mut Context<Self>) {
+        let Some(root_session_id) = self.root_session_id.clone() else {
+            return;
+        };
+        if let Some(connected) = self.as_connected_mut() {
+            connected.navigate_to_thread(root_session_id);
+        }
+        cx.notify();
     }
 
     fn spawn_external_agent_login(

@@ -8287,6 +8287,33 @@ fn ai_page(cx: &App) -> SettingsPage {
 
         items.extend([
             SettingsPageItem::SettingItem(SettingItem {
+                title: "Loop Guard",
+                description: "Interrupt the model when it starts repeating itself, instead of letting a stuck model fill the context window.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.loop_guard.enabled"),
+                    pick: |settings_content| {
+                        settings_content
+                            .agent
+                            .as_ref()?
+                            .loop_guard
+                            .as_ref()?
+                            .enabled
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent
+                            .get_or_insert_default()
+                            .loop_guard
+                            .get_or_insert_default()
+                            .enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
                 title: "Single File Review",
                 description: "When enabled, agent edits will also be displayed in single-file buffers for review.",
                 field: Box::new(SettingField {

@@ -3939,6 +3939,74 @@ impl ThreadView {
             .into_any()
     }
 
+    /// Renders the point where the loop guard stopped the model from repeating
+    /// itself. The correction sent to the model is deliberately not shown as a
+    /// message, so without this the transcript would show a response ending
+    /// part way through for no visible reason.
+    fn render_loop_guard_notice(
+        &self,
+        entry_ix: usize,
+        notice: &acp_thread::LoopGuardNotice,
+    ) -> AnyElement {
+        let repeated = notice.repeated.clone();
+
+        div()
+            .px_5()
+            .w_full()
+            .child(
+                v_flex()
+                    .pt_1p5()
+                    .mb_1p5()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .w_full()
+                            .child(Divider::horizontal())
+                            .child(
+                                h_flex()
+                                    .flex_none()
+                                    .gap_1()
+                                    .child(
+                                        Icon::new(IconName::Warning)
+                                            .size(IconSize::XSmall)
+                                            .color(Color::Warning),
+                                    )
+                                    .child(
+                                        Label::new(notice.headline())
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    ),
+                            )
+                            .child(Divider::horizontal()),
+                    )
+                    .child(
+                        v_flex()
+                            .px_2()
+                            .gap_0p5()
+                            .child(
+                                Label::new(notice.explanation())
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                h_flex()
+                                    .id(("loop-guard-repeated", entry_ix))
+                                    .w_full()
+                                    .overflow_hidden()
+                                    .child(
+                                        Label::new(format!("Repeated: {repeated}"))
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted)
+                                            .truncate(),
+                                    )
+                                    .tooltip(Tooltip::text(repeated)),
+                            ),
+                    ),
+            )
+            .into_any()
+    }
+
     fn render_context_compaction(
         &self,
         entry_ix: usize,
@@ -6439,6 +6507,9 @@ impl ThreadView {
             AgentThreadEntry::ContextCompaction(compaction) => {
                 self.render_context_compaction(entry_ix, compaction, window, cx)
             }
+            AgentThreadEntry::LoopGuardNotice(notice) => {
+                self.render_loop_guard_notice(entry_ix, notice)
+            }
         };
 
         let is_subagent_output = self.is_subagent()
@@ -7730,7 +7801,8 @@ impl ThreadView {
                 | AgentThreadEntry::Elicitation(_)
                 | AgentThreadEntry::AssistantMessage(_)
                 | AgentThreadEntry::CompletedPlan(_)
-                | AgentThreadEntry::ContextCompaction(_) => {}
+                | AgentThreadEntry::ContextCompaction(_)
+                | AgentThreadEntry::LoopGuardNotice(_) => {}
             }
         }
 

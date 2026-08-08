@@ -596,6 +596,7 @@ mod tests {
                 enabled: false,
                 threshold: agent_settings::AutoCompactThreshold::DEFAULT,
             },
+            loop_guard: agent_settings::LoopGuardSettings { enabled: true },
             enable_feedback: false,
             expand_edit_card: true,
             expand_terminal_card: true,

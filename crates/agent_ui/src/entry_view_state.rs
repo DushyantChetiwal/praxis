@@ -420,6 +420,11 @@ impl EntryViewState {
                     self.set_entry(index, Entry::ContextCompaction);
                 }
             }
+            AgentThreadEntry::LoopGuardNotice(_) => {
+                if !matches!(self.entries.get(index), Some(Entry::LoopGuardNotice)) {
+                    self.set_entry(index, Entry::LoopGuardNotice);
+                }
+            }
         };
     }
 
@@ -467,7 +472,8 @@ impl EntryViewState {
                 | Entry::AssistantMessage { .. }
                 | Entry::Elicitation { .. }
                 | Entry::CompletedPlan
-                | Entry::ContextCompaction => {}
+                | Entry::ContextCompaction
+                | Entry::LoopGuardNotice => {}
                 Entry::ToolCall(ToolCallEntry { content, .. }) => {
                     for view in content.values() {
                         if let Ok(diff_editor) = view.clone().downcast::<Editor>() {
@@ -538,6 +544,7 @@ pub enum Entry {
     Elicitation { focus_handle: FocusHandle },
     CompletedPlan,
     ContextCompaction,
+    LoopGuardNotice,
 }
 
 impl Entry {
@@ -547,7 +554,7 @@ impl Entry {
             Self::AssistantMessage(message) => Some(message.focus_handle.clone()),
             Self::ToolCall(tool_call) => Some(tool_call.focus_handle.clone()),
             Self::Elicitation { focus_handle } => Some(focus_handle.clone()),
-            Self::CompletedPlan | Self::ContextCompaction => None,
+            Self::CompletedPlan | Self::ContextCompaction | Self::LoopGuardNotice => None,
         }
     }
 
@@ -558,7 +565,8 @@ impl Entry {
             | Self::ToolCall(_)
             | Self::Elicitation { .. }
             | Self::CompletedPlan
-            | Self::ContextCompaction => None,
+            | Self::ContextCompaction
+            | Self::LoopGuardNotice => None,
         }
     }
 
@@ -589,7 +597,8 @@ impl Entry {
             | Self::ToolCall(_)
             | Self::Elicitation { .. }
             | Self::CompletedPlan
-            | Self::ContextCompaction => None,
+            | Self::ContextCompaction
+            | Self::LoopGuardNotice => None,
         }
     }
 
@@ -608,7 +617,8 @@ impl Entry {
             | Self::AssistantMessage(_)
             | Self::Elicitation { .. }
             | Self::CompletedPlan
-            | Self::ContextCompaction => false,
+            | Self::ContextCompaction
+            | Self::LoopGuardNotice => false,
         }
     }
 }
@@ -626,7 +636,9 @@ impl Focusable for Entry {
             Self::AssistantMessage(message) => message.focus_handle.clone(),
             Self::ToolCall(tool_call) => tool_call.focus_handle.clone(),
             Self::Elicitation { focus_handle } => focus_handle.clone(),
-            Self::CompletedPlan | Self::ContextCompaction => cx.focus_handle(),
+            Self::CompletedPlan | Self::ContextCompaction | Self::LoopGuardNotice => {
+                cx.focus_handle()
+            }
         }
     }
 }

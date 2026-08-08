@@ -79,6 +79,11 @@ pub struct DbThread {
     pub draft_prompt: Option<Vec<acp::ContentBlock>>,
     #[serde(default)]
     pub ui_scroll_position: Option<SerializedScrollPosition>,
+    /// The Architect plan drafted in this thread, if any. It lives on the
+    /// thread because the conversation is what governs it, which also means it
+    /// is deleted along with the thread.
+    #[serde(default)]
+    pub architect_graph: Option<architect::ArchitectGraph>,
     #[serde(default)]
     pub sandboxed_terminal_temp_dir: Option<PathBuf>,
     /// Sandbox escalations the user approved "for the rest of this thread".
@@ -167,6 +172,7 @@ impl SharedThread {
             thinking_effort: None,
             draft_prompt: None,
             ui_scroll_position: None,
+            architect_graph: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
         }
@@ -353,6 +359,7 @@ impl DbThread {
             thinking_effort: None,
             draft_prompt: None,
             ui_scroll_position: None,
+            architect_graph: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
         })
@@ -804,6 +811,7 @@ mod tests {
             thinking_effort: None,
             draft_prompt: None,
             ui_scroll_position: None,
+            architect_graph: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
         }
@@ -874,6 +882,61 @@ mod tests {
         assert!(
             entries[0].created_at.is_some(),
             "created_at should be populated"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_architect_graph_roundtrips_through_save_load(cx: &mut TestAppContext) {
+        let database = ThreadsDatabase::new(cx.executor()).unwrap();
+        let thread_id = session_id("architect-thread");
+
+        let mut graph = architect::ArchitectGraph::default();
+        let mut node = architect::ArchitectNode::new("edit", "Make the edit");
+        node.rules = vec!["Keep the public API stable".into()];
+        node.locked = true;
+        node.chat = Some(session_id("edit-node-chat"));
+        graph.add_node(node);
+        graph.add_node(architect::ArchitectNode::new("test", "Run the tests"));
+        graph.connect("edit", "test");
+        graph.place_unpositioned_nodes();
+
+        let mut thread = make_thread(
+            "Architect Thread",
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+        );
+        thread.architect_graph = Some(graph.clone());
+
+        database
+            .save_thread(thread_id.clone(), thread, PathList::default())
+            .await
+            .unwrap();
+
+        let loaded = database
+            .load_thread(thread_id)
+            .await
+            .unwrap()
+            .expect("thread should exist");
+
+        assert_eq!(
+            loaded.architect_graph,
+            Some(graph),
+            "the plan should survive exactly, including lock state and node chats"
+        );
+    }
+
+    #[test]
+    fn test_architect_graph_defaults_to_none() {
+        let json = r#"{
+            "title": "Old Thread",
+            "messages": [],
+            "updated_at": "2024-01-01T00:00:00Z"
+        }"#;
+
+        let db_thread: DbThread = serde_json::from_str(json).expect("Failed to deserialize");
+
+        assert!(
+            db_thread.architect_graph.is_none(),
+            "threads saved before Architect existed should still load"
         );
     }
 

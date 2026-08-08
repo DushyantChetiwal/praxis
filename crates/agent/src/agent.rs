@@ -2074,6 +2074,39 @@ impl NativeAgent {
 pub struct NativeAgentConnection(pub Entity<NativeAgent>);
 
 impl NativeAgentConnection {
+    /// Creates the thread behind one Architect step and registers it as a real
+    /// session, so it persists, reloads, and is deleted along with its parent
+    /// exactly like any other subagent thread.
+    pub fn create_architect_step_thread(
+        &self,
+        parent_session_id: &acp::SessionId,
+        node_id: architect::NodeId,
+        title: SharedString,
+        cx: &mut App,
+    ) -> Result<Entity<AcpThread>> {
+        let (parent_thread, project_id) = {
+            let agent = self.0.read(cx);
+            let session = agent
+                .sessions
+                .get(parent_session_id)
+                .context("the thread this plan belongs to is no longer open")?;
+            (session.thread.clone(), session.project_id)
+        };
+
+        let thread = cx.new(|cx| Thread::new_architect_step(&parent_thread, title, cx));
+        let acp_thread = self.0.update(cx, |agent, cx| {
+            agent.register_session(thread.clone(), project_id, 1, cx)
+        });
+
+        // Bound to this one step, so however the conversation is steered it can
+        // only ever rewrite the step it was opened for.
+        thread.update(cx, |thread, _cx| {
+            thread.add_tool(RefineStepTool::new(parent_thread.downgrade(), node_id));
+        });
+
+        Ok(acp_thread)
+    }
+
     pub fn thread(&self, session_id: &acp::SessionId, cx: &App) -> Option<Entity<Thread>> {
         self.0
             .read(cx)
@@ -2183,6 +2216,11 @@ impl NativeAgentConnection {
                                             cx,
                                         );
                                     }
+                                })?;
+                            }
+                            ThreadEvent::LoopGuardNotice(notice) => {
+                                acp_thread.update(cx, |thread, cx| {
+                                    thread.push_loop_guard_notice(notice, cx)
                                 })?;
                             }
                             ThreadEvent::AgentText(text) => {

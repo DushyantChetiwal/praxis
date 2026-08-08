@@ -1423,6 +1423,11 @@ mod tests {
             // tool calls inside the spawned thread, not the spawning itself.
             "create_thread",
             "spawn_agent",
+            // Architect tools only write to the plan on the canvas, which the
+            // user then reshapes, locks and runs deliberately. Nothing happens
+            // to the project until they do.
+            "draft_plan",
+            "refine_step",
         ];
 
         let tool_info_ids: Vec<&str> = TOOLS.iter().map(|t| t.id).collect();

@@ -1,11 +1,11 @@
 use crate::{
     ApplyCodeActionTool, CodeActionStore, ContextServerRegistry, CopyPathTool, CreateDirectoryTool,
-    CreateThreadTool, DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool,
-    FetchTool, FindPathTool, FindReferencesTool, GetCodeActionsTool, GoToDefinitionTool, GrepTool,
-    ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool, ProjectSnapshot, ReadFileTool,
-    RenameTool, SandboxedTerminalTool, SpawnAgentTool, SystemPromptTemplate, Template, Templates,
-    TerminalTool, ToolPermissionDecision, WebSearchTool, WriteFileTool,
-    decide_permission_from_settings,
+    CreateThreadTool, DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, DraftPlanTool,
+    EditFileTool, FetchTool, FindPathTool, FindReferencesTool, GetCodeActionsTool,
+    GoToDefinitionTool, GrepTool, ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool,
+    ProjectSnapshot, ReadFileTool, RenameTool, SandboxedTerminalTool, SpawnAgentTool,
+    SystemPromptTemplate, Template, Templates, TerminalTool, ToolPermissionDecision, WebSearchTool,
+    WriteFileTool, decide_permission_from_settings,
 };
 use acp_thread::{ClientUserMessageId, MentionUri};
 use action_log::ActionLog;
@@ -195,6 +195,20 @@ pub enum Message {
     Agent(AgentMessage),
     Resume,
     Compaction(CompactionInfo),
+    LoopGuard(LoopGuardInfo),
+}
+
+/// A correction sent after the loop guard stopped the model from repeating
+/// itself. It reaches the model as an ordinary user instruction, but is kept
+/// separate from `User` so the transcript can render it as a guard notice
+/// rather than as something the user typed.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct LoopGuardInfo {
+    pub kind: acp_thread::LoopGuardKind,
+    /// The phrase or turn the model was repeating.
+    pub repeated: SharedString,
+    /// The corrective instruction the model is given.
+    pub instruction: String,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -243,6 +257,12 @@ impl Message {
             }
             Message::Agent(message) => message.to_request(),
             Message::Compaction(info) => info.to_request(),
+            Message::LoopGuard(info) => vec![LanguageModelRequestMessage {
+                role: Role::User,
+                content: vec![info.instruction.clone().into()],
+                cache: false,
+                reasoning_details: None,
+            }],
             Message::Resume => vec![LanguageModelRequestMessage {
                 role: Role::User,
                 content: vec!["Continue where you left off".into()],
@@ -258,12 +278,15 @@ impl Message {
             Message::Agent(message) => message.to_markdown(),
             Message::Resume => "[resume]\n".into(),
             Message::Compaction(_) => "--- Context Compacted ---\n".into(),
+            Message::LoopGuard(info) => format!("--- Loop Guard: {} ---\n", info.repeated),
         }
     }
 
     pub fn role(&self) -> Role {
         match self {
-            Message::User(_) | Message::Resume | Message::Compaction(_) => Role::User,
+            Message::User(_) | Message::Resume | Message::Compaction(_) | Message::LoopGuard(_) => {
+                Role::User
+            }
             Message::Agent(_) => Role::Assistant,
         }
     }
@@ -892,6 +915,7 @@ pub enum ThreadEvent {
     Retry(acp_thread::RetryStatus),
     ContextCompaction(acp_thread::ContextCompaction),
     ContextCompactionUpdate(acp_thread::ContextCompactionUpdate),
+    LoopGuardNotice(acp_thread::LoopGuardNotice),
     Stop(acp::StopReason),
 }
 
@@ -1299,6 +1323,9 @@ pub struct Thread {
     /// Weak references to running subagent threads for cancellation propagation
     running_subagents: Vec<WeakEntity<Thread>>,
     inherits_parent_model_settings: bool,
+    /// The Architect plan drafted in this thread. The conversation governs the
+    /// plan, so the two live and die together.
+    architect_graph: Option<architect::ArchitectGraph>,
     sandboxed_terminal_temp_dir: Option<PathBuf>,
     /// Sandbox permissions the user approved "for the rest of the thread".
     /// Shared with each tool call's event stream so repeated requests for
@@ -1342,6 +1369,35 @@ impl Thread {
             thread.inherits_parent_model_settings = false;
             thread.apply_model_selection(&subagent_model, cx);
         }
+        thread
+    }
+
+    /// Creates the thread behind a single Architect step.
+    ///
+    /// It starts knowing everything the main thread knows, because a step's
+    /// requirements were inherited from that conversation and arguing them from
+    /// a blank slate would mean restating the whole goal. From here the two
+    /// histories diverge: nothing said in this thread reaches the main thread or
+    /// any sibling step, so settling one step cannot crowd out the context of
+    /// the next. That divergence is the whole reason the thread exists.
+    ///
+    /// It runs under the `architect_step` profile, which can read and search but
+    /// cannot build. Deciding what a step must do and doing it are separate
+    /// jobs, and the main thread owns the second one.
+    pub fn new_architect_step(
+        parent_thread: &Entity<Thread>,
+        title: SharedString,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut thread = Self::new_subagent(parent_thread, cx);
+        // Messages are shared by `Arc`, so inheriting the whole conversation
+        // costs a refcount rather than a copy.
+        thread.messages = parent_thread.read(cx).messages.clone();
+        thread.set_title(title, cx);
+        thread.set_profile(
+            AgentProfileId(builtin_profiles::ARCHITECT_STEP.into()),
+            cx,
+        );
         thread
     }
 
@@ -1443,6 +1499,7 @@ impl Thread {
             ui_scroll_position: None,
             running_subagents: Vec::new(),
             inherits_parent_model_settings: true,
+            architect_graph: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::default())),
         }
@@ -1548,6 +1605,9 @@ impl Thread {
                     }
                 }
                 Message::Resume => {}
+                Message::LoopGuard(info) => {
+                    stream.send_loop_guard_notice(info.kind, info.repeated.clone());
+                }
                 Message::Compaction(info) => {
                     let compaction_id = acp_thread::ContextCompactionId(
                         format!("replay-compaction-{message_ix}").into(),
@@ -1829,6 +1889,7 @@ impl Thread {
             }),
             running_subagents: Vec::new(),
             inherits_parent_model_settings: true,
+            architect_graph: db_thread.architect_graph,
             sandboxed_terminal_temp_dir: db_thread.sandboxed_terminal_temp_dir,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::from_db(
                 &db_thread.sandbox_grants,
@@ -1928,6 +1989,7 @@ impl Thread {
                     offset_in_item: lo.offset_in_item.as_f32(),
                 }
             }),
+            architect_graph: self.architect_graph.clone(),
             sandboxed_terminal_temp_dir: self.sandboxed_terminal_temp_dir.clone(),
             sandbox_grants: self.sandbox_grants.borrow().to_db(),
         };
@@ -1977,6 +2039,34 @@ impl Thread {
 
     pub fn set_draft_prompt(&mut self, prompt: Option<Vec<acp::ContentBlock>>) {
         self.draft_prompt = prompt;
+    }
+
+    pub fn architect_graph(&self) -> Option<&architect::ArchitectGraph> {
+        self.architect_graph.as_ref()
+    }
+
+    pub fn set_architect_graph(
+        &mut self,
+        graph: Option<architect::ArchitectGraph>,
+        cx: &mut Context<Self>,
+    ) {
+        self.architect_graph = graph;
+        self.updated_at = Utc::now();
+        cx.notify();
+    }
+
+    /// Edits the plan in place, marking the thread changed so the edit is
+    /// saved. Does nothing when the thread has no plan.
+    pub fn update_architect_graph<R>(
+        &mut self,
+        update: impl FnOnce(&mut architect::ArchitectGraph) -> R,
+        cx: &mut Context<Self>,
+    ) -> Option<R> {
+        let graph = self.architect_graph.as_mut()?;
+        let result = update(graph);
+        self.updated_at = Utc::now();
+        cx.notify();
+        Some(result)
     }
 
     pub fn ui_scroll_position(&self) -> Option<gpui::ListOffset> {
@@ -2179,6 +2269,7 @@ impl Thread {
         self.add_tool(WebSearchTool);
 
         self.add_tool(DiagnosticsTool::new(self.project.clone()));
+        self.add_tool(DraftPlanTool::new(cx.weak_entity()));
 
         let code_action_store: CodeActionStore = cx.new(|_cx| None);
         self.add_tool(FindReferencesTool::new(self.project.clone()));
@@ -2403,7 +2494,10 @@ impl Thread {
                 Message::User(message) => {
                     self.request_token_usage.remove(&message.id);
                 }
-                Message::Agent(_) | Message::Resume | Message::Compaction(_) => {}
+                Message::Agent(_)
+                | Message::Resume
+                | Message::Compaction(_)
+                | Message::LoopGuard(_) => {}
             }
         }
         self.clear_summary();
@@ -3080,7 +3174,9 @@ impl Thread {
                 repetition_steers += 1;
                 this.update(cx, |this, cx| {
                     this.inject_loop_guard_message(
-                        &format!(
+                        acp_thread::LoopGuardKind::WithinTurn,
+                        repeated.clone().into(),
+                        format!(
                             "Your previous response was cut off because it had started repeating \
                              the phrase \"{repeated}\" over and over. Do not continue that \
                              response and do not repeat it. Something about the current approach \
@@ -3146,6 +3242,10 @@ impl Thread {
         event_stream: &ThreadEventStream,
         cx: &mut Context<Self>,
     ) {
+        if !AgentSettings::get_global(cx).loop_guard.enabled {
+            return;
+        }
+
         let recent_turns: Vec<AgentTurnSignature> = self
             .messages
             .iter()
@@ -3185,7 +3285,9 @@ impl Thread {
              injecting corrective instruction"
         );
         self.inject_loop_guard_message(
-            &format!(
+            acp_thread::LoopGuardKind::RepeatedTurn,
+            description.clone().into(),
+            format!(
                 "Your last {LOOP_GUARD_TURN_THRESHOLD} turns have been identical: {description}. \
                  {instruction}"
             ),
@@ -3194,24 +3296,27 @@ impl Thread {
         );
     }
 
-    /// Appends a corrective user message to the message history.
+    /// Records a correction for the model and announces it to the UI.
     ///
-    /// The message is also emitted on the event stream. Pushing it onto
-    /// `messages` alone would only surface it once the thread is replayed from
-    /// the database, leaving the running UI to show a turn that stops for no
+    /// The notice is emitted on the event stream as well as stored. Storing it
+    /// alone would only surface it once the thread is replayed from the
+    /// database, leaving the running UI to show a turn that stops for no
     /// visible reason.
     fn inject_loop_guard_message(
         &mut self,
-        text: &str,
+        kind: acp_thread::LoopGuardKind,
+        repeated: SharedString,
+        instruction: String,
         event_stream: &ThreadEventStream,
         cx: &mut Context<Self>,
     ) {
-        let message = UserMessage {
-            id: ClientUserMessageId::new(),
-            content: Arc::from([UserMessageContent::Text(text.to_string())]),
-        };
-        event_stream.send_user_message(&message);
-        self.messages.push(Arc::new(Message::User(message)));
+        event_stream.send_loop_guard_notice(kind, repeated.clone());
+        self.messages
+            .push(Arc::new(Message::LoopGuard(LoopGuardInfo {
+                kind,
+                repeated,
+                instruction,
+            })));
         cx.notify();
     }
 
@@ -3491,7 +3596,7 @@ impl Thread {
                 self.flush_pending_message(cx);
                 self.pending_message = Some(AgentMessage::default());
             }
-            Text(new_text) => self.handle_text_event(new_text, event_stream),
+            Text(new_text) => self.handle_text_event(new_text, event_stream, cx),
             Thinking { text, signature } => {
                 self.handle_thinking_event(text, signature, event_stream)
             }
@@ -3557,7 +3662,12 @@ impl Thread {
         Ok(None)
     }
 
-    fn handle_text_event(&mut self, new_text: String, event_stream: &ThreadEventStream) {
+    fn handle_text_event(
+        &mut self,
+        new_text: String,
+        event_stream: &ThreadEventStream,
+        cx: &Context<Self>,
+    ) {
         event_stream.send_text(&new_text);
         let new_word_count = new_text.split_whitespace().count();
 
@@ -3594,6 +3704,12 @@ impl Thread {
             return;
         }
         self.last_repetition_scan_word_count = self.streamed_word_count;
+
+        // Read once per stride rather than once per chunk, so a long reply does
+        // not pay for a settings lookup on every fragment of text.
+        if !AgentSettings::get_global(cx).loop_guard.enabled {
+            return;
+        }
 
         // Two distinct failure modes are caught here, both while the message is
         // still streaming, so the turn stops before it spends the context window
@@ -4159,7 +4275,10 @@ impl Thread {
             .rev()
             .find_map(|message| match &**message {
                 Message::User(user_message) => Some(user_message),
-                Message::Agent(_) | Message::Resume | Message::Compaction(_) => None,
+                Message::Agent(_)
+                | Message::Resume
+                | Message::Compaction(_)
+                | Message::LoopGuard(_) => None,
             })
     }
 
@@ -5038,7 +5157,7 @@ pub(crate) fn messages_to_markdown(messages: &[Arc<Message>]) -> String {
         match &**message {
             Message::User(_) => markdown.push_str("## User\n\n"),
             Message::Agent(_) => markdown.push_str("## Assistant\n\n"),
-            Message::Resume | Message::Compaction(_) => {}
+            Message::Resume | Message::Compaction(_) | Message::LoopGuard(_) => {}
         }
         markdown.push_str(&message.to_markdown());
     }
@@ -5143,7 +5262,7 @@ fn retained_request_messages_before(
                     agent_budget_spent = true;
                 }
             }
-            Message::Resume | Message::Compaction(_) => {}
+            Message::Resume | Message::Compaction(_) | Message::LoopGuard(_) => {}
         }
     }
 
@@ -5575,6 +5694,14 @@ impl ThreadEventStream {
     fn send_user_message(&self, message: &UserMessage) {
         self.0
             .unbounded_send(Ok(ThreadEvent::UserMessage(message.clone())))
+            .ok();
+    }
+
+    fn send_loop_guard_notice(&self, kind: acp_thread::LoopGuardKind, repeated: SharedString) {
+        self.0
+            .unbounded_send(Ok(ThreadEvent::LoopGuardNotice(
+                acp_thread::LoopGuardNotice { kind, repeated },
+            )))
             .ok();
     }
 
@@ -8286,22 +8413,101 @@ mod tests {
             "the corrective prompt should name the repeated phrase, got: {prompt}"
         );
 
-        // The UI renders from this stream, so a message that is only pushed
+        // The UI renders from this stream, so a correction that is only pushed
         // onto `messages` stays invisible until the thread is reloaded.
-        let mut streamed_user_messages = Vec::new();
+        let mut notices = Vec::new();
         while let Some(Ok(event)) = events.next().now_or_never().flatten() {
-            if let ThreadEvent::UserMessage(message) = event {
-                streamed_user_messages.push(message);
+            if let ThreadEvent::LoopGuardNotice(notice) = event {
+                notices.push(notice);
             }
         }
+        let notice = notices
+            .pop()
+            .expect("the guard should announce itself to the UI while the turn is running");
+        assert_eq!(notice.kind, acp_thread::LoopGuardKind::WithinTurn);
         assert!(
-            streamed_user_messages.iter().any(|message| {
-                message.content.iter().any(|content| {
-                    matches!(content, UserMessageContent::Text(text) if text.contains("started repeating"))
+            notice
+                .repeated
+                .to_lowercase()
+                .contains("the build failed because of a missing module."),
+            "the notice should name the repeated phrase, got: {:?}",
+            notice.repeated
+        );
+
+        // The correction still has to reach the model, and it must not look
+        // like something the user typed.
+        let stored_kinds = thread.read_with(cx, |thread, _| {
+            thread
+                .messages
+                .iter()
+                .map(|message| match message.as_ref() {
+                    Message::User(_) => "user",
+                    Message::Agent(_) => "agent",
+                    Message::LoopGuard(_) => "loop-guard",
+                    Message::Resume => "resume",
+                    Message::Compaction(_) => "compaction",
                 })
-            }),
-            "the corrective message should reach the UI while the turn is running, \
-             got: {streamed_user_messages:?}"
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            stored_kinds.contains(&"loop-guard"),
+            "the correction should be stored as a loop guard message, got: {stored_kinds:?}"
+        );
+    }
+
+    /// Turning the guard off has to leave the model completely alone, including
+    /// on text that would otherwise trip it.
+    #[gpui::test]
+    async fn test_disabled_loop_guard_leaves_repetition_alone(cx: &mut TestAppContext) {
+        let (thread, _event_stream) = setup_thread_for_test(cx).await;
+        let model = Arc::new(FakeLanguageModel::default());
+
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.loop_guard = agent_settings::LoopGuardSettings { enabled: false };
+            AgentSettings::override_global(settings, cx);
+            thread.update(cx, |thread, cx| thread.set_model(model.clone(), cx));
+        });
+
+        let mut events = cx
+            .update(|cx| {
+                thread.update(cx, |thread, cx| {
+                    thread.send(ClientUserMessageId::new(), vec!["go"], cx)
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let request = model.pending_completions().pop().expect("initial request");
+        for _ in 0..8 {
+            model.send_completion_stream_text_chunk(
+                &request,
+                "The build failed because of a missing module. ",
+            );
+        }
+        cx.run_until_parked();
+
+        let notices = {
+            let mut notices = 0;
+            while let Some(Ok(event)) = events.next().now_or_never().flatten() {
+                if matches!(event, ThreadEvent::LoopGuardNotice(_)) {
+                    notices += 1;
+                }
+            }
+            notices
+        };
+        assert_eq!(notices, 0, "a disabled guard should announce nothing");
+
+        let stored_guards = thread.read_with(cx, |thread, _| {
+            thread
+                .messages
+                .iter()
+                .filter(|message| matches!(message.as_ref(), Message::LoopGuard(_)))
+                .count()
+        });
+        assert_eq!(
+            stored_guards, 0,
+            "a disabled guard should not correct the model"
         );
     }
 

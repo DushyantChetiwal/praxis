@@ -398,6 +398,7 @@ pub enum AgentThreadEntry {
     Elicitation(ElicitationEntryId),
     CompletedPlan(Vec<PlanEntry>),
     ContextCompaction(ContextCompaction),
+    LoopGuardNotice(LoopGuardNotice),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -785,6 +786,45 @@ pub struct ContextCompactionUpdate {
     pub status: Option<ContextCompactionStatus>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoopGuardKind {
+    /// A single response started repeating a phrase while streaming.
+    WithinTurn,
+    /// The agent took the same turn several times in a row.
+    RepeatedTurn,
+}
+
+/// A point in the thread where the loop guard stopped the model because it had
+/// begun repeating itself. Without this the turn would appear to stop for no
+/// reason, since the instruction sent to the model is not shown in the
+/// transcript.
+#[derive(Debug)]
+pub struct LoopGuardNotice {
+    pub kind: LoopGuardKind,
+    /// The phrase or turn the model was repeating.
+    pub repeated: SharedString,
+}
+
+impl LoopGuardNotice {
+    pub fn headline(&self) -> &'static str {
+        match self.kind {
+            LoopGuardKind::WithinTurn => "Stopped a Repeating Response",
+            LoopGuardKind::RepeatedTurn => "Stopped a Repeating Turn",
+        }
+    }
+
+    pub fn explanation(&self) -> &'static str {
+        match self.kind {
+            LoopGuardKind::WithinTurn => {
+                "The response began repeating itself, so it was cut off and the model was asked to take a different approach."
+            }
+            LoopGuardKind::RepeatedTurn => {
+                "The agent repeated the same turn, so it was asked to take a different approach."
+            }
+        }
+    }
+}
+
 impl AgentThreadEntry {
     pub fn is_indented(&self) -> bool {
         match self {
@@ -794,6 +834,7 @@ impl AgentThreadEntry {
             Self::Elicitation(_) => false,
             Self::CompletedPlan(_) => false,
             Self::ContextCompaction(_) => false,
+            Self::LoopGuardNotice(_) => false,
         }
     }
 
@@ -812,6 +853,13 @@ impl AgentThreadEntry {
                 md
             }
             Self::ContextCompaction(_) => "--- Context Compacted ---\n\n".to_string(),
+            Self::LoopGuardNotice(notice) => {
+                format!(
+                    "--- {} ---\n\n{}\n\n",
+                    notice.headline(),
+                    notice.explanation()
+                )
+            }
         }
     }
 
@@ -2473,7 +2521,8 @@ impl AcpThread {
                 | AgentThreadEntry::Elicitation(_)
                 | AgentThreadEntry::AssistantMessage(_)
                 | AgentThreadEntry::CompletedPlan(_)
-                | AgentThreadEntry::ContextCompaction(_) => {}
+                | AgentThreadEntry::ContextCompaction(_)
+                | AgentThreadEntry::LoopGuardNotice(_) => {}
             }
         }
         false
@@ -2503,7 +2552,8 @@ impl AcpThread {
                 | AgentThreadEntry::Elicitation(_)
                 | AgentThreadEntry::AssistantMessage(_)
                 | AgentThreadEntry::CompletedPlan(_)
-                | AgentThreadEntry::ContextCompaction(_) => {}
+                | AgentThreadEntry::ContextCompaction(_)
+                | AgentThreadEntry::LoopGuardNotice(_) => {}
             }
         }
 
@@ -2524,7 +2574,8 @@ impl AcpThread {
                 | AgentThreadEntry::Elicitation(_)
                 | AgentThreadEntry::AssistantMessage(_)
                 | AgentThreadEntry::CompletedPlan(_)
-                | AgentThreadEntry::ContextCompaction(_) => {}
+                | AgentThreadEntry::ContextCompaction(_)
+                | AgentThreadEntry::LoopGuardNotice(_) => {}
             }
         }
 
@@ -2538,6 +2589,7 @@ impl AcpThread {
                 AgentThreadEntry::AssistantMessage(..)
                 | AgentThreadEntry::CompletedPlan(..)
                 | AgentThreadEntry::ContextCompaction(_)
+                | AgentThreadEntry::LoopGuardNotice(_)
                 | AgentThreadEntry::Elicitation(_) => continue,
                 AgentThreadEntry::ToolCall(..) => return true,
             }
@@ -3023,6 +3075,10 @@ impl AcpThread {
         } else {
             self.push_entry(AgentThreadEntry::ContextCompaction(compaction), cx);
         }
+    }
+
+    pub fn push_loop_guard_notice(&mut self, notice: LoopGuardNotice, cx: &mut Context<Self>) {
+        self.push_entry(AgentThreadEntry::LoopGuardNotice(notice), cx);
     }
 
     pub fn update_context_compaction(

@@ -1177,6 +1177,13 @@
       // 0 is not a valid threshold.
       "threshold": "70%",
     },
+    "loop_guard": {
+      // Whether to interrupt a model that has started repeating itself, either
+      // within a single response or by taking the same turn over and over.
+      // A looping model would otherwise keep generating until it fills the
+      // context window.
+      "enabled": true,
+    },
     // When enabled, show voting thumbs for feedback on agent edits.
     "enable_feedback": true,
     "default_profile": "write",
@@ -1228,6 +1235,45 @@
           "grep": true,
           "skill": true,
           "spawn_agent": true,
+          "search_web": true,
+        },
+      },
+      "architect": {
+        "name": "Architect",
+        // Architect draws the plan rather than carrying it out, so it can read
+        // the project freely but cannot change it. The plan is run from the
+        // canvas once every step is locked.
+        "tools": {
+          "draft_plan": true,
+          "diagnostics": true,
+          "fetch": true,
+          "list_directory": true,
+          "find_path": true,
+          "find_references": true,
+          "go_to_definition": true,
+          "read_file": true,
+          "grep": true,
+          "skill": true,
+          "search_web": true,
+        },
+      },
+      "architect_step": {
+        "name": "Architect Step",
+        // The thread behind a single step of a plan. It settles what that one
+        // step must do, so it can read the project to inform the argument and
+        // rewrite its own step, but it cannot change the project or the rest of
+        // the plan. Building is the main thread's job.
+        "tools": {
+          "refine_step": true,
+          "diagnostics": true,
+          "fetch": true,
+          "list_directory": true,
+          "find_path": true,
+          "find_references": true,
+          "go_to_definition": true,
+          "read_file": true,
+          "grep": true,
+          "skill": true,
           "search_web": true,
         },
       },

@@ -4,6 +4,7 @@ mod agent_diff;
 mod agent_model_selector;
 mod agent_panel;
 mod agent_registry_ui;
+mod architect_ui;
 mod buffer_codegen;
 mod completion_provider;
 mod config_options;
@@ -326,6 +327,8 @@ actions!(
         ImportThreadsFromOtherChannels,
         /// Starts a new terminal thread.
         NewTerminalThread,
+        /// Opens the Architect canvas for the active thread's plan.
+        OpenArchitect,
     ]
 );
 
@@ -648,6 +651,35 @@ pub fn init(
                         cx,
                     );
                 }
+            },
+        );
+    })
+    .detach();
+    cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &OpenArchitect,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                let thread = workspace
+                    .panel::<AgentPanel>(cx)
+                    .and_then(|panel| panel.read(cx).active_thread_view(cx))
+                    .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx));
+
+                let Some(thread) = thread else {
+                    // Silently doing nothing here sends people hunting for a
+                    // bug that isn't one, so say which precondition is missing.
+                    workspace.show_toast(
+                        workspace::Toast::new(
+                            workspace::notifications::NotificationId::unique::<OpenArchitect>(),
+                            "Architect needs an open Zed Agent thread. Open the agent panel and \
+                             start a thread, then try again.",
+                        ),
+                        cx,
+                    );
+                    return;
+                };
+                crate::architect_ui::ArchitectPane::open(thread, workspace, window, cx);
             },
         );
     })

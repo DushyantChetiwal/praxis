@@ -5,6 +5,7 @@ mod create_directory_tool;
 mod create_thread_tool;
 mod delete_path_tool;
 mod diagnostics_tool;
+mod draft_plan_tool;
 mod edit_file_tool;
 mod edit_session;
 #[cfg(all(test, feature = "unit-eval"))]
@@ -19,6 +20,7 @@ mod list_agents_and_models_tool;
 mod list_directory_tool;
 mod move_path_tool;
 mod read_file_tool;
+mod refine_step_tool;
 mod rename_tool;
 mod skill_tool;
 mod spawn_agent_tool;
@@ -76,6 +78,7 @@ pub use create_directory_tool::*;
 pub use create_thread_tool::*;
 pub use delete_path_tool::*;
 pub use diagnostics_tool::*;
+pub use draft_plan_tool::*;
 pub use edit_file_tool::*;
 pub use fetch_tool::*;
 pub use find_path_tool::*;
@@ -87,6 +90,7 @@ pub use list_agents_and_models_tool::*;
 pub use list_directory_tool::*;
 pub use move_path_tool::*;
 pub use read_file_tool::*;
+pub use refine_step_tool::*;
 pub use rename_tool::*;
 pub use skill_tool::*;
 pub use spawn_agent_tool::*;
@@ -199,6 +203,7 @@ tools! {
     CreateThreadTool,
     DeletePathTool,
     DiagnosticsTool,
+    DraftPlanTool,
     EditFileTool,
     FetchTool,
     FindPathTool,
@@ -210,6 +215,7 @@ tools! {
     ListDirectoryTool,
     MovePathTool,
     ReadFileTool,
+    RefineStepTool,
     RenameTool,
     SkillTool,
     SpawnAgentTool,

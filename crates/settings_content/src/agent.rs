@@ -193,6 +193,20 @@ pub struct AutoCompactSettingsContent {
 
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
+pub struct LoopGuardSettingsContent {
+    /// Whether to interrupt a model that has started repeating itself, either
+    /// within a single response or by taking the same turn over and over.
+    ///
+    /// A model stuck in a loop will otherwise keep generating until it fills
+    /// the context window. When this fires, the response is cut off and the
+    /// model is told to take a different approach.
+    ///
+    /// Default: true
+    pub enabled: Option<bool>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, Default)]
 pub struct AgentSettingsContent {
     /// Whether the Agent is enabled.
     ///
@@ -299,6 +313,9 @@ pub struct AgentSettingsContent {
     /// earlier messages to free up room in the model's context window once the
     /// context grows too large.
     pub auto_compact: Option<AutoCompactSettingsContent>,
+    /// Settings for the loop guard, which stops a model that has begun
+    /// repeating itself instead of letting it consume the context window.
+    pub loop_guard: Option<LoopGuardSettingsContent>,
     /// Whether to show thumb buttons for feedback in the agent panel.
     ///
     /// Default: true

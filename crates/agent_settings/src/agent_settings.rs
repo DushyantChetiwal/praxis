@@ -177,6 +177,11 @@ pub struct AutoCompactSettings {
     pub threshold: AutoCompactThreshold,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LoopGuardSettings {
+    pub enabled: bool,
+}
+
 fn parse_auto_compact_threshold(raw: &str) -> anyhow::Result<AutoCompactThreshold> {
     let trimmed = raw.trim();
     if let Some(percent) = trimmed.strip_suffix('%') {
@@ -235,6 +240,7 @@ pub struct AgentSettings {
     pub single_file_review: bool,
     pub model_parameters: Vec<LanguageModelParameters>,
     pub auto_compact: AutoCompactSettings,
+    pub loop_guard: LoopGuardSettings,
     pub enable_feedback: bool,
     pub expand_edit_card: bool,
     pub expand_terminal_card: bool,
@@ -808,6 +814,9 @@ impl Settings for AgentSettings {
                     enabled: auto_compact.enabled.unwrap(),
                     threshold,
                 }
+            },
+            loop_guard: LoopGuardSettings {
+                enabled: agent.loop_guard.unwrap().enabled.unwrap(),
             },
             enable_feedback: agent.enable_feedback.unwrap(),
             expand_edit_card: agent.expand_edit_card.unwrap(),
