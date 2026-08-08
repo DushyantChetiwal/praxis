@@ -135,6 +135,9 @@ pub struct ArchitectPane {
     inspector: Option<NodeInspector>,
     interaction: Interaction,
     hovered_node: Option<NodeId>,
+    /// Which plan the canvas is showing. Empty is the top-level plan; each id
+    /// appended is a step whose own plan has been opened.
+    focus: NodePath,
     run: Option<RunState>,
     _thread_subscription: Subscription,
 }
@@ -157,6 +160,7 @@ impl ArchitectPane {
             inspector: None,
             interaction: Interaction::None,
             hovered_node: None,
+            focus: NodePath::default(),
             run: None,
             _thread_subscription: subscription,
         }
@@ -187,14 +191,115 @@ impl ArchitectPane {
         workspace.add_item_to_active_pane(Box::new(pane), None, true, window, cx);
     }
 
-    fn graph<'a>(&self, cx: &'a Context<Self>) -> Option<&'a ArchitectGraph> {
+    /// The whole plan, regardless of which level is being looked at. Validating
+    /// and running are properties of the plan, not of the current view.
+    fn root_graph<'a>(&self, cx: &'a Context<Self>) -> Option<&'a ArchitectGraph> {
         self.thread.read(cx).architect_graph()
     }
 
+    /// The plan the canvas is showing, which is the top-level one until a step
+    /// has been opened.
+    fn graph<'a>(&self, cx: &'a Context<Self>) -> Option<&'a ArchitectGraph> {
+        self.root_graph(cx)?.graph_at(&self.focus)
+    }
+
+    /// Edits the plan being shown. An edit made while inside a step's plan
+    /// belongs to that plan, not to the one containing it.
     fn edit_graph(&mut self, edit: impl FnOnce(&mut ArchitectGraph), cx: &mut Context<Self>) {
+        let focus = self.focus.clone();
         self.thread.update(cx, |thread, cx| {
-            thread.update_architect_graph(edit, cx);
+            thread.update_architect_graph(
+                |root| {
+                    if let Some(graph) = root.graph_at_mut(&focus) {
+                        edit(graph);
+                    }
+                },
+                cx,
+            );
         });
+        cx.notify();
+    }
+
+    /// Opens a step's own plan, giving it an empty one if it has none yet.
+    fn drill_into(&mut self, id: NodeId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus.depth() >= architect::MAX_PLAN_DEPTH {
+            self.report(
+                format!(
+                    "Plans cannot nest more than {} deep. Flatten this part of the plan instead.",
+                    architect::MAX_PLAN_DEPTH
+                ),
+                cx,
+            );
+            return;
+        }
+
+        let locked = self
+            .graph(cx)
+            .and_then(|graph| graph.node(&id))
+            .is_some_and(|node| node.locked);
+        let existing = self
+            .graph(cx)
+            .and_then(|graph| graph.node(&id))
+            .is_some_and(ArchitectNode::has_subplan);
+
+        // A locked step is settled, and giving it a plan would reopen it by the
+        // back door. Looking inside one it already has is fine.
+        if !existing && locked {
+            self.report(
+                "This step is locked. Unlock it before breaking it into steps.".to_string(),
+                cx,
+            );
+            return;
+        }
+
+        if !existing {
+            let id = id.clone();
+            self.edit_graph(
+                move |graph| {
+                    graph.subplan_mut(&id);
+                },
+                cx,
+            );
+        }
+
+        self.focus = self.focus.child(id);
+        self.selection = None;
+        self.inspector = None;
+        self.interaction = Interaction::None;
+        self.hovered_node = None;
+        self.zoom_to_fit(cx);
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Goes back out to the plan containing the one being shown. The step just
+    /// left is selected, so leaving does not lose your place.
+    fn drill_out(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(parent) = self.focus.parent() else {
+            return false;
+        };
+        let left = self.focus.leaf().cloned();
+        self.focus = parent;
+        self.interaction = Interaction::None;
+        self.hovered_node = None;
+        self.zoom_to_fit(cx);
+        self.set_selection(left.map(Selection::Node), window, cx);
+        cx.notify();
+        true
+    }
+
+    /// Jumps straight to a level from the breadcrumb.
+    fn focus_depth(&mut self, depth: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if depth >= self.focus.depth() {
+            return;
+        }
+        self.focus = NodePath(self.focus.0[..depth].to_vec());
+        self.selection = None;
+        self.inspector = None;
+        self.interaction = Interaction::None;
+        self.hovered_node = None;
+        self.zoom_to_fit(cx);
+        self.focus_handle.focus(window, cx);
         cx.notify();
     }
 
@@ -676,7 +781,9 @@ impl ArchitectPane {
         if self.run.as_ref().is_some_and(RunState::is_running) {
             return;
         }
-        let Some(mut graph) = self.graph(cx).cloned() else {
+        // A run always covers the whole plan, even when started from inside a
+        // nested one: what is on screen is a viewpoint, not a scope.
+        let Some(mut graph) = self.root_graph(cx).cloned() else {
             return;
         };
 
@@ -1130,6 +1237,21 @@ impl ArchitectPane {
         cx.notify();
     }
 
+    /// Selecting a step, then selecting it again, opens its plan. Double-click
+    /// is the gesture people already try on a box that looks like it contains
+    /// something.
+    fn handle_node_click(
+        &mut self,
+        id: NodeId,
+        click_count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if click_count >= 2 {
+            self.drill_into(id, window, cx);
+        }
+    }
+
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -1140,9 +1262,15 @@ impl ArchitectPane {
         // reaches the canvas is one meant for the canvas.
         match event.keystroke.key.as_str() {
             "delete" | "backspace" => self.delete_selection(window, cx),
+            // Escape works outwards: it drops whatever is selected first, and
+            // only once nothing is selected does it leave the plan being shown.
             "escape" => {
-                self.set_selection(None, window, cx);
                 self.interaction = Interaction::None;
+                if self.selection.is_some() {
+                    self.set_selection(None, window, cx);
+                } else {
+                    self.drill_out(window, cx);
+                }
             }
             _ => {}
         }
@@ -1150,15 +1278,84 @@ impl ArchitectPane {
 
     // -- Rendering ------------------------------------------------------------
 
+    /// The trail of steps opened to reach the plan on screen. It is the only
+    /// way out of a nested plan that does not depend on remembering how you got
+    /// in, so it is shown even at the top level, where it names the plan itself.
+    fn render_breadcrumb(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.focus.is_empty() {
+            return None;
+        }
+        let root = self.root_graph(cx)?;
+
+        let mut crumbs: Vec<(usize, SharedString)> = vec![(0, "Plan".into())];
+        for (depth, id) in self.focus.0.iter().enumerate() {
+            let title = root
+                .graph_at(&NodePath(self.focus.0[..depth].to_vec()))
+                .and_then(|graph| graph.node(id))
+                .map(|node| SharedString::from(node.title.clone()))
+                .unwrap_or_else(|| SharedString::from(id.0.clone()));
+            crumbs.push((depth + 1, title));
+        }
+        let last = crumbs.len().saturating_sub(1);
+
+        Some(
+            h_flex()
+                .w_full()
+                .flex_none()
+                .px_3()
+                .py_1p5()
+                .gap_1()
+                .border_b_1()
+                .border_color(cx.theme().colors().border)
+                .bg(cx.theme().colors().editor_background)
+                .children(crumbs.into_iter().enumerate().flat_map(
+                    |(ix, (depth, title))| {
+                        let is_last = ix == last;
+                        let separator = (ix > 0).then(|| {
+                            Icon::new(IconName::ChevronRight)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted)
+                                .into_any_element()
+                        });
+                        let crumb = if is_last {
+                            Label::new(title)
+                                .size(LabelSize::Small)
+                                .into_any_element()
+                        } else {
+                            Button::new(("architect-crumb", ix), title)
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Subtle)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.focus_depth(depth, window, cx)
+                                }))
+                                .into_any_element()
+                        };
+                        separator.into_iter().chain(std::iter::once(crumb))
+                    },
+                ))
+                .child(div().flex_1())
+                .child(
+                    Label::new("Esc to go up")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+                .into_any(),
+        )
+    }
+
     fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let graph = self.graph(cx);
         let step_count = graph.map_or(0, |graph| graph.nodes.len());
         let locked_count = graph.map_or(0, |graph| {
             graph.nodes.iter().filter(|node| node.locked).count()
         });
-        let problems: Vec<GraphProblem> = graph.map(|graph| graph.problems()).unwrap_or_default();
+        // Readiness is a property of the whole plan, not of the level on
+        // screen: a run started from inside a sub-plan still runs everything.
+        let root = self.root_graph(cx);
+        let problems: Vec<GraphProblem> = root.map(|root| root.problems()).unwrap_or_default();
         let all_locked = step_count > 0 && locked_count == step_count;
-        let ready_to_run = all_locked && problems.is_empty();
+        let ready_to_run = root.is_some_and(ArchitectGraph::is_fully_locked_deeply)
+            && root.is_some_and(|root| root.blocking_problems().is_empty());
         let run_tooltip = if ready_to_run {
             "Run the plan, one step at a time"
         } else if step_count == 0 {
@@ -1334,6 +1531,8 @@ impl ArchitectPane {
         let lock_id = node.id.clone();
         let discuss_id = node.id.clone();
         let pin_id = node.id.clone();
+        let subplan_id = node.id.clone();
+        let subplan_steps = node.subplan().map_or(0, |subplan| subplan.nodes.len());
         let locked = node.locked;
         let has_chat = node.chat.is_some();
         // A step nothing leads out of has nobody to hand anything to, so an
@@ -1610,6 +1809,41 @@ impl ArchitectPane {
                                     ),
                             )
                         })
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(field("Steps Inside"))
+                                .child(
+                                    Button::new(
+                                        "architect-open-subplan",
+                                        match subplan_steps {
+                                            0 => "Break Into Steps".to_string(),
+                                            1 => "Open Plan (1 step)".to_string(),
+                                            count => format!("Open Plan ({count} steps)"),
+                                        },
+                                    )
+                                    .full_width()
+                                    .label_size(LabelSize::Small)
+                                    .start_icon(
+                                        Icon::new(IconName::ListTree).size(IconSize::XSmall),
+                                    )
+                                    .disabled(locked && subplan_steps == 0)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.drill_into(subplan_id.clone(), window, cx);
+                                    })),
+                                )
+                                .child(
+                                    Label::new(if subplan_steps > 0 {
+                                        "This step is carried out by running the plan inside it. \
+                                         It cannot be locked until every step in there is."
+                                    } else {
+                                        "For work that is one step here but several up close. The \
+                                         plan inside runs in place of this step."
+                                    })
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                                ),
+                        )
                         .child(
                             v_flex()
                                 .gap_1()
@@ -1909,6 +2143,8 @@ impl ArchitectPane {
         let hovered = self.hovered_node.as_ref() == Some(&node.id);
         let detailed = self.zoom >= DETAIL_ZOOM_THRESHOLD;
         let running = self.running_node() == Some(&node.id);
+        let subplan_steps = node.subplan().map_or(0, |subplan| subplan.nodes.len());
+        let drill_id = node.id.clone();
 
         // The step being carried out outranks selection, because during a run
         // where the agent is now is the thing worth being able to find.
@@ -1955,6 +2191,12 @@ impl ArchitectPane {
                     this.focus_handle.focus(window, cx);
                     this.set_selection(Some(Selection::Node(id.clone())), window, cx);
 
+                    if event.click_count >= 2 {
+                        this.handle_node_click(id.clone(), event.click_count, window, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+
                     let canvas = this.to_canvas(event.position);
                     let centre = this
                         .graph(cx)
@@ -1989,6 +2231,13 @@ impl ArchitectPane {
                                             Icon::new(IconName::PlayFilled)
                                                 .size(IconSize::XSmall)
                                                 .color(Color::Info),
+                                        )
+                                    })
+                                    .when(subplan_steps > 0, |this| {
+                                        this.child(
+                                            Icon::new(IconName::ListTree)
+                                                .size(IconSize::XSmall)
+                                                .color(Color::Muted),
                                         )
                                     })
                                     .child(
@@ -2057,6 +2306,28 @@ impl ArchitectPane {
                                         Label::new("unreachable")
                                             .size(LabelSize::XSmall)
                                             .color(Color::Error),
+                                    )
+                                })
+                                .when(subplan_steps > 0, |this| {
+                                    this.child(
+                                        Button::new(
+                                            ("architect-node-open-subplan", ix),
+                                            match subplan_steps {
+                                                1 => "1 step".to_string(),
+                                                count => format!("{count} steps"),
+                                            },
+                                        )
+                                        .label_size(LabelSize::XSmall)
+                                        .style(ButtonStyle::Tinted(TintColor::Accent))
+                                        .start_icon(
+                                            Icon::new(IconName::ListTree).size(IconSize::XSmall),
+                                        )
+                                        .tooltip(Tooltip::text(
+                                            "This step contains a plan. Open it.",
+                                        ))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.drill_into(drill_id.clone(), window, cx);
+                                        })),
                                     )
                                 }),
                         )
@@ -2300,6 +2571,7 @@ impl Render for ArchitectPane {
         let has_plan = self.graph(cx).is_some_and(|graph| !graph.is_empty());
 
         let toolbar = self.render_toolbar(cx);
+        let breadcrumb = self.render_breadcrumb(cx);
         let edges = self.render_edges(cx);
         let edge_labels = self.render_edge_labels(cx);
         let nodes = self.render_nodes(cx);
@@ -2312,6 +2584,7 @@ impl Render for ArchitectPane {
             .bg(cx.theme().colors().editor_background)
             .on_key_down(cx.listener(Self::handle_key_down))
             .child(toolbar)
+            .children(breadcrumb)
             .child(
                 h_flex()
                     .flex_1()
