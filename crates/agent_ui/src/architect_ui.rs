@@ -19,14 +19,14 @@ use architect::{
 };
 use editor::{Editor, EditorEvent};
 use gpui::{
-    App, AsyncApp, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable,
-    Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder,
-    Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, Task,
-    WeakEntity, Window, canvas, div, point, px,
+    App, AsyncApp, Bounds, Context, CursorStyle, DismissEvent, Entity, EventEmitter, FocusHandle,
+    Focusable, Hsla, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    PathBuilder, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Subscription,
+    Task, WeakEntity, Window, canvas, div, point, px, relative,
 };
 use ui::{TintColor, Tooltip, prelude::*};
 use workspace::{
-    Workspace,
+    ModalView, Workspace,
     item::{Item, ItemEvent},
 };
 
@@ -110,6 +110,15 @@ impl RunState {
 /// than stacking up behind it.
 struct ArchitectNotice;
 
+/// The inspector shows one step, either as fields or as the conversation about
+/// it. The conversation lives here rather than in the agent panel so that the
+/// panel is never navigated away from the plan's own thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InspectorTab {
+    Details,
+    Chat,
+}
+
 /// The editors backing the inspector for the selected step. They are rebuilt
 /// whenever the selection changes, which is also what keeps their contents from
 /// drifting away from the graph.
@@ -138,6 +147,8 @@ pub struct ArchitectPane {
     /// Which plan the canvas is showing. Empty is the top-level plan; each id
     /// appended is a step whose own plan has been opened.
     focus: NodePath,
+    /// Which half of the inspector is showing.
+    inspector_tab: InspectorTab,
     run: Option<RunState>,
     _thread_subscription: Subscription,
 }
@@ -161,34 +172,24 @@ impl ArchitectPane {
             interaction: Interaction::None,
             hovered_node: None,
             focus: NodePath::default(),
+            inspector_tab: InspectorTab::Details,
             run: None,
             _thread_subscription: subscription,
         }
     }
 
-    /// Opens the canvas for a thread, reusing the tab if it is already showing
-    /// that thread's plan.
+    /// Opens the canvas over the workspace for a thread's plan, or closes it if
+    /// it is already showing.
     pub fn open(
         thread: Entity<Thread>,
         workspace: &mut Workspace,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        let existing = workspace
-            .active_pane()
-            .read(cx)
-            .items()
-            .filter_map(|item| item.downcast::<ArchitectPane>())
-            .find(|pane| pane.read(cx).thread == thread);
-
-        if let Some(existing) = existing {
-            workspace.activate_item(&existing, true, true, window, cx);
-            return;
-        }
-
         let handle = cx.weak_entity();
-        let pane = cx.new(|cx| ArchitectPane::new(thread, handle, cx));
-        workspace.add_item_to_active_pane(Box::new(pane), None, true, window, cx);
+        workspace.toggle_modal(window, cx, |_window, cx| {
+            ArchitectPane::new(thread, handle, cx)
+        });
     }
 
     /// The whole plan, regardless of which level is being looked at. Validating
@@ -616,12 +617,13 @@ impl ArchitectPane {
         );
     }
 
-    /// Opens the step's own conversation in the agent panel.
+    /// Opens the step's own conversation in the inspector, beside the step.
     ///
     /// Each step gets a thread of its own, inheriting the main conversation so
     /// it knows what the plan is for, then diverging. That divergence is the
     /// point: settling this step cannot crowd out the context the next step will
-    /// be settled in.
+    /// be settled in. The agent panel is deliberately left where it is, showing
+    /// the conversation that owns the plan.
     fn discuss_node(&mut self, id: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(node) = self.graph(cx).and_then(|graph| graph.node(&id)).cloned() else {
             return;
@@ -630,13 +632,13 @@ impl ArchitectPane {
             return;
         };
 
+        self.inspector_tab = InspectorTab::Chat;
         let is_first_visit = node.chat.is_none();
         let session_id = workspace.update(cx, |workspace, cx| {
             let panel = workspace.panel::<AgentPanel>(cx)?;
             let conversation_view = panel.read(cx).active_conversation_view()?.clone();
-            workspace.focus_panel::<AgentPanel>(window, cx);
             conversation_view.update(cx, |conversation_view, cx| {
-                conversation_view.open_architect_step_thread(
+                conversation_view.ensure_architect_step_thread(
                     node.id.clone(),
                     node.title.clone().into(),
                     node.chat.clone(),
@@ -760,6 +762,19 @@ impl ArchitectPane {
         let conversation_view = panel.read(cx).active_conversation_view()?.clone();
         let thread_view = conversation_view.read(cx).root_thread_view()?;
         Some(thread_view.read(cx).thread.clone())
+    }
+
+    /// The view for a step's own conversation, once it has been created and
+    /// loaded. Rendered inside the inspector rather than in the agent panel.
+    fn step_chat_view(
+        &self,
+        session_id: &acp::SessionId,
+        cx: &Context<Self>,
+    ) -> Option<Entity<crate::conversation_view::ThreadView>> {
+        let workspace = self.workspace.upgrade()?;
+        let panel = workspace.read(cx).panel::<AgentPanel>(cx)?;
+        let conversation_view = panel.read(cx).active_conversation_view()?;
+        conversation_view.read(cx).thread_view(session_id)
     }
 
     /// Drives the plan step by step, deciding at every branch which way to go.
@@ -1264,12 +1279,15 @@ impl ArchitectPane {
             "delete" | "backspace" => self.delete_selection(window, cx),
             // Escape works outwards: it drops whatever is selected first, and
             // only once nothing is selected does it leave the plan being shown.
+            // Escape works outwards: it drops whatever is selected, then leaves
+            // the plan being shown, and only closes the canvas once there is
+            // nothing left to back out of.
             "escape" => {
                 self.interaction = Interaction::None;
                 if self.selection.is_some() {
                     self.set_selection(None, window, cx);
-                } else {
-                    self.drill_out(window, cx);
+                } else if !self.drill_out(window, cx) {
+                    cx.emit(DismissEvent);
                 }
             }
             _ => {}
@@ -1512,7 +1530,13 @@ impl ArchitectPane {
                             .disabled(!ready_to_run)
                             .tooltip(Tooltip::text(run_tooltip))
                             .on_click(cx.listener(|this, _, window, cx| this.run(window, cx)))
-                    }),
+                    })
+                    .child(
+                        IconButton::new("architect-close", IconName::Close)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Close the canvas. The plan is kept."))
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
+                    ),
             )
             .into_any()
     }
@@ -1532,6 +1556,12 @@ impl ArchitectPane {
         let discuss_id = node.id.clone();
         let pin_id = node.id.clone();
         let subplan_id = node.id.clone();
+        let chat_tab_id = node.id.clone();
+        let tab = self.inspector_tab;
+        let step_chat = node
+            .chat
+            .as_ref()
+            .and_then(|session_id| self.step_chat_view(session_id, cx));
         let subplan_steps = node.subplan().map_or(0, |subplan| subplan.nodes.len());
         let locked = node.locked;
         let has_chat = node.chat.is_some();
@@ -1584,6 +1614,76 @@ impl ArchitectPane {
                         ),
                 )
                 .child(
+                    h_flex()
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .gap_1()
+                        .border_b_1()
+                        .border_color(cx.theme().colors().border)
+                        .child(
+                            Button::new("architect-tab-details", "Details")
+                                .label_size(LabelSize::Small)
+                                .style(if tab == InspectorTab::Details {
+                                    ButtonStyle::Tinted(TintColor::Accent)
+                                } else {
+                                    ButtonStyle::Subtle
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.inspector_tab = InspectorTab::Details;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("architect-tab-chat", "Chat")
+                                .label_size(LabelSize::Small)
+                                .start_icon(
+                                    Icon::new(if has_chat {
+                                        IconName::Sparkle
+                                    } else {
+                                        IconName::Plus
+                                    })
+                                    .size(IconSize::XSmall),
+                                )
+                            .style(if tab == InspectorTab::Chat {
+                                ButtonStyle::Tinted(TintColor::Accent)
+                            } else {
+                                ButtonStyle::Subtle
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.discuss_node(chat_tab_id.clone(), window, cx);
+                            })),
+                        ),
+                )
+                .when(tab == InspectorTab::Chat, |this| {
+                    this.child(match step_chat {
+                        Some(view) => div()
+                            .flex_1()
+                            .size_full()
+                            .overflow_hidden()
+                            .child(view)
+                            .into_any(),
+                        None => v_flex()
+                            .flex_1()
+                            .p_3()
+                            .gap_2()
+                            .child(
+                                Label::new("Opening this step's conversation…")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                Label::new(
+                                    "It starts knowing what the main conversation knows, then \
+                                     stays out of the other steps' way.",
+                                )
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                            )
+                            .into_any(),
+                    })
+                })
+                .when(tab == InspectorTab::Details, |this| this.child(
                     v_flex()
                         .id("architect-inspector-body")
                         .flex_1()
@@ -1896,7 +1996,7 @@ impl ArchitectPane {
                                     })),
                             )
                         }),
-                )
+                ))
                 .into_any(),
         )
     }
@@ -1916,9 +2016,9 @@ impl ArchitectPane {
             .child(
                 div().max_w(px(420.0)).child(
                     Label::new(
-                        "Describe what you want built in the chat, in the Architect profile. \
-                         The steps will appear here as a flowchart you can rearrange, \
-                         discuss one at a time, and lock when you are happy with them.",
+                        "Describe what you want built in the chat. The steps will appear here as \
+                         a flowchart you can rearrange, discuss one at a time, and lock when you \
+                         are happy with them.",
                     )
                     .size(LabelSize::Small)
                     .color(Color::Muted),
@@ -2580,7 +2680,15 @@ impl Render for ArchitectPane {
         v_flex()
             .key_context("ArchitectPane")
             .track_focus(&self.focus_handle)
-            .size_full()
+            // Nearly the whole window: a plan is read by its shape, and a
+            // centred dialog would leave no room for one.
+            .w(relative(0.94))
+            .h(relative(0.92))
+            .overflow_hidden()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .shadow_lg()
             .bg(cx.theme().colors().editor_background)
             .on_key_down(cx.listener(Self::handle_key_down))
             .child(toolbar)
@@ -2628,8 +2736,27 @@ impl Focusable for ArchitectPane {
     }
 }
 
+impl EventEmitter<DismissEvent> for ArchitectPane {}
+
+/// The canvas covers the workspace rather than taking a tab, because a plan
+/// belongs to a conversation rather than to the project. A tab would outlive the
+/// thread it was opened for and leave a plan stranded next to unrelated files.
+impl ModalView for ArchitectPane {
+    fn fade_out_background(&self) -> bool {
+        true
+    }
+
+    /// The canvas draws its own frame at close to the full size of the window,
+    /// so the usual centred modal chrome would only box it in.
+    fn render_bare(&self) -> bool {
+        true
+    }
+}
+
 impl EventEmitter<ItemEvent> for ArchitectPane {}
 
+#[allow(dead_code, reason = "kept so the canvas can be reopened in a tab if the \
+                             overlay turns out to be the wrong home for it")]
 impl Item for ArchitectPane {
     type Event = ItemEvent;
 

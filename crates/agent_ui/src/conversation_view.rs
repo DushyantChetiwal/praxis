@@ -2093,13 +2093,19 @@ impl ConversationView {
         })
     }
 
-    /// Shows the conversation for one Architect step, creating it the first time.
+    /// Makes sure the conversation for one Architect step exists and is loaded,
+    /// without showing it here.
+    ///
+    /// The panel deliberately stays on the conversation that owns the plan. A
+    /// step's chat is rendered by the canvas, beside the step it is about, so
+    /// that arguing about one step never costs you your place in the main
+    /// conversation.
     ///
     /// Returns the session it settled on, which the canvas stores on the step so
     /// that reopening it returns to the same conversation instead of starting a
     /// new one. `existing` is the session the step already recorded, if any; it
     /// may need loading from the database before it can be shown.
-    pub fn open_architect_step_thread(
+    pub fn ensure_architect_step_thread(
         &mut self,
         node_id: architect::NodeId,
         step_title: SharedString,
@@ -2109,35 +2115,22 @@ impl ConversationView {
     ) -> Option<acp::SessionId> {
         let root_session_id = self.root_session_id.clone()?;
 
-        // Already open: just show it.
+        // Already loaded, so the canvas can render it straight away.
         if let Some(existing) = existing.clone()
             && self
                 .as_connected()
                 .is_some_and(|connected| connected.threads.contains_key(&existing))
         {
-            self.as_connected_mut()?
-                .navigate_to_thread(existing.clone());
-            cx.notify();
             return Some(existing);
         }
 
         // Recorded on the step but not loaded yet, which is the case after a
-        // restart. Loading is asynchronous, so show it once it arrives.
+        // restart. Loading is asynchronous; the canvas picks the view up once it
+        // arrives, so there is nothing to do here but ask for it.
         if let Some(existing) = existing {
-            let load = self.load_subagent_session(existing.clone(), root_session_id, window, cx);
-            cx.spawn_in(window, {
-                let existing = existing.clone();
-                async move |this, cx| {
-                    load.await?;
-                    this.update(cx, |this, cx| {
-                        if let Some(connected) = this.as_connected_mut() {
-                            connected.navigate_to_thread(existing);
-                        }
-                        cx.notify();
-                    })
-                }
-            })
-            .detach_and_log_err(cx);
+            self.load_subagent_session(existing.clone(), root_session_id, window, cx)
+                .detach_and_log_err(cx);
+            cx.notify();
             return Some(existing);
         }
 
@@ -2165,7 +2158,6 @@ impl ConversationView {
         let view = self.new_thread_view(acp_thread, conversation, false, None, window, cx);
         let connected = self.as_connected_mut()?;
         connected.threads.insert(session_id.clone(), view);
-        connected.navigate_to_thread(session_id.clone());
         cx.notify();
 
         Some(session_id)
