@@ -134,6 +134,62 @@ const COMPACTION_RETAINED_USER_MESSAGES_BYTE_BUDGET: usize = 80_000;
 /// request. Using the same 4-bytes-per-token heuristic, 60K bytes is ~15k tokens.
 const COMPACTION_RETAINED_AGENT_MESSAGES_BYTE_BUDGET: usize = 60_000;
 
+/// Whether a thread is working out what to do, or doing it.
+///
+/// This replaces the old approach of a separate "architect" profile. A profile
+/// is a standing preference the user sets; planning is a phase of a task, and
+/// asking someone to change profile before they may plan meant that in practice
+/// nobody did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SessionMode {
+    /// Working out what to do. The project can be read but not changed.
+    Plan,
+    /// Carrying the work out.
+    #[default]
+    Build,
+}
+
+impl SessionMode {
+    pub const PLAN_ID: &'static str = "plan";
+    pub const BUILD_ID: &'static str = "build";
+
+    pub fn id(&self) -> &'static str {
+        match self {
+            SessionMode::Plan => Self::PLAN_ID,
+            SessionMode::Build => Self::BUILD_ID,
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            Self::PLAN_ID => Some(SessionMode::Plan),
+            Self::BUILD_ID => Some(SessionMode::Build),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a tool can alter the project or the world outside the conversation.
+///
+/// Named rather than derived from a trait method so that adding a tool is a
+/// deliberate decision about whether planning may use it, rather than something
+/// that silently defaults either way.
+fn tool_changes_the_project(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "edit_file"
+            | "write_file"
+            | "create_directory"
+            | "delete_path"
+            | "copy_path"
+            | "move_path"
+            | "rename_symbol"
+            | "apply_code_action"
+            | "terminal"
+            | "sandboxed_terminal"
+    )
+}
+
 /// Returned when a turn is attempted but no language model has been selected.
 #[derive(Debug)]
 pub struct NoModelConfiguredError;
@@ -1330,6 +1386,8 @@ pub struct Thread {
     /// persisted: a run does not survive a restart, and a stale pointer here
     /// would let `complete_step` write its summary onto the wrong step.
     architect_running_step: Option<architect::NodePath>,
+    /// Whether the thread is planning or building.
+    session_mode: SessionMode,
     sandboxed_terminal_temp_dir: Option<PathBuf>,
     /// Sandbox permissions the user approved "for the rest of the thread".
     /// Shared with each tool call's event stream so repeated requests for
@@ -1505,6 +1563,7 @@ impl Thread {
             inherits_parent_model_settings: true,
             architect_graph: None,
             architect_running_step: None,
+            session_mode: SessionMode::default(),
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::default())),
         }
@@ -1896,6 +1955,7 @@ impl Thread {
             inherits_parent_model_settings: true,
             architect_graph: db_thread.architect_graph,
             architect_running_step: None,
+            session_mode: SessionMode::default(),
             sandboxed_terminal_temp_dir: db_thread.sandboxed_terminal_temp_dir,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::from_db(
                 &db_thread.sandbox_grants,
@@ -2058,6 +2118,24 @@ impl Thread {
     ) {
         self.architect_graph = graph;
         self.updated_at = Utc::now();
+        cx.notify();
+    }
+
+    pub fn session_mode(&self) -> SessionMode {
+        self.session_mode
+    }
+
+    /// Switches between planning and building.
+    ///
+    /// The mode decides which tools the model is offered, so a thread that has
+    /// just been put into Plan cannot change the project even if it was midway
+    /// through trying to.
+    pub fn set_session_mode(&mut self, mode: SessionMode, cx: &mut Context<Self>) {
+        if self.session_mode == mode {
+            return;
+        }
+        self.session_mode = mode;
+        self.refresh_turn_tools(cx);
         cx.notify();
     }
 
@@ -4466,9 +4544,16 @@ impl Thread {
         let is_restricted =
             TrustedWorktrees::has_restricted_worktrees(&self.project.read(cx).worktree_store(), cx);
 
+        // Planning and building are different jobs. While planning, the tools
+        // that change the project are withheld rather than merely discouraged,
+        // because a model asked to plan will otherwise start building partway
+        // through drafting.
+        let planning = self.session_mode == SessionMode::Plan;
+
         let mut tools = self
             .tools
             .iter()
+            .filter(|(tool_name, _)| !planning || !tool_changes_the_project(tool_name))
             .filter(|(_, tool)| !is_restricted || tool.allow_in_restricted_mode())
             .filter_map(|(tool_name, tool)| {
                 let terminal_variant = matches!(
@@ -9614,6 +9699,66 @@ fn is_stopword(word: &str) -> bool {
             | "why"
             | "how"
     )
+}
+
+#[cfg(test)]
+mod session_mode_tests {
+    use super::{SessionMode, tool_changes_the_project};
+
+    #[test]
+    fn planning_withholds_the_tools_that_change_the_project() {
+        for tool in [
+            "edit_file",
+            "write_file",
+            "create_directory",
+            "delete_path",
+            "copy_path",
+            "move_path",
+            "rename_symbol",
+            "apply_code_action",
+            "terminal",
+            "sandboxed_terminal",
+        ] {
+            assert!(
+                tool_changes_the_project(tool),
+                "{tool} can change the project, so planning must not be offered it"
+            );
+        }
+    }
+
+    #[test]
+    fn planning_keeps_the_tools_that_only_look() {
+        for tool in [
+            "read_file",
+            "grep",
+            "find_path",
+            "list_directory",
+            "diagnostics",
+            "go_to_definition",
+            "find_references",
+            "fetch",
+            "draft_plan",
+            "complete_step",
+        ] {
+            assert!(
+                !tool_changes_the_project(tool),
+                "{tool} does not change the project, so planning should keep it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mode_survives_a_round_trip_through_its_id() {
+        for mode in [SessionMode::Plan, SessionMode::Build] {
+            assert_eq!(SessionMode::from_id(mode.id()), Some(mode));
+        }
+        assert_eq!(SessionMode::from_id("architect"), None);
+    }
+
+    #[test]
+    fn a_thread_builds_unless_it_is_told_otherwise() {
+        assert_eq!(SessionMode::default(), SessionMode::Build);
+    }
 }
 
 #[cfg(test)]

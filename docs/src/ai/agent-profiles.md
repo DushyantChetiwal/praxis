@@ -11,13 +11,13 @@ Profiles do not decide whether a tool call is allowed automatically. Use [Tool P
 
 ## Built-in Profiles {#built-in-profiles}
 
-Zed includes five built-in profiles:
+Zed includes three built-in profiles:
 
 - `Write`: enables tools for reading, editing, and running commands.
 - `Ask`: focuses on read-only codebase questions.
-- `Architect`: draws a plan as a flowchart instead of carrying it out. It can read and search the project but cannot change it. See [Architect](./architect.md).
-- `Architect Step`: settles what a single step of an Architect plan must do. It can read the project and rewrite its own step, but cannot change the project or any other step.
 - `Minimal`: uses no project tools.
+
+Planning is not a profile. A thread in the `Write` profile switches between [Plan and Build modes](./architect.md#plan-and-build-modes) as the task needs, and Plan mode withholds the tools that change your project.
 
 ## Configure Profiles {#configure-profiles}
 

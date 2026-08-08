@@ -832,6 +832,12 @@ impl ArchitectPane {
         // plan, not in whichever step's chat happens to be on screen.
         self.show_plan_chat(window, cx);
 
+        // Deliberation is over: the steps about to run have to be able to
+        // change the project.
+        self.thread.update(cx, |thread, cx| {
+            thread.set_session_mode(agent::SessionMode::Build, cx);
+        });
+
         let first_step = plan_run.current();
         let task = cx.spawn({
             let first_step = first_step.clone();
@@ -1563,6 +1569,18 @@ impl ArchitectPane {
             .as_ref()
             .and_then(|session_id| self.step_chat_view(session_id, cx));
         let subplan_steps = node.subplan().map_or(0, |subplan| subplan.nodes.len());
+        // The steps inside, listed here so a sub-plan can be read without
+        // leaving the step that contains it.
+        let subplan_titles: Vec<(SharedString, bool)> = node
+            .subplan()
+            .map(|subplan| {
+                subplan
+                    .nodes
+                    .iter()
+                    .map(|step| (SharedString::from(step.title.clone()), step.locked))
+                    .collect()
+            })
+            .unwrap_or_default();
         let locked = node.locked;
         let has_chat = node.chat.is_some();
         // A step nothing leads out of has nobody to hand anything to, so an
@@ -1932,6 +1950,36 @@ impl ArchitectPane {
                                         this.drill_into(subplan_id.clone(), window, cx);
                                     })),
                                 )
+                                .children(subplan_titles.iter().enumerate().map(
+                                    |(ix, (title, step_locked))| {
+                                        h_flex()
+                                            .w_full()
+                                            .gap_1p5()
+                                            .px_2()
+                                            .py_0p5()
+                                            .child(
+                                                Label::new(format!("{}", ix + 1))
+                                                    .size(LabelSize::XSmall)
+                                                    .color(Color::Muted),
+                                            )
+                                            .child(
+                                                Label::new(title.clone())
+                                                    .size(LabelSize::XSmall)
+                                                    .color(if *step_locked {
+                                                        Color::Default
+                                                    } else {
+                                                        Color::Muted
+                                                    }),
+                                            )
+                                            .when(!step_locked, |this| {
+                                                this.child(
+                                                    Icon::new(IconName::Pencil)
+                                                        .size(IconSize::XSmall)
+                                                        .color(Color::Muted),
+                                                )
+                                            })
+                                    },
+                                ))
                                 .child(
                                     Label::new(if subplan_steps > 0 {
                                         "This step is carried out by running the plan inside it. \
@@ -2244,6 +2292,26 @@ impl ArchitectPane {
         let detailed = self.zoom >= DETAIL_ZOOM_THRESHOLD;
         let running = self.running_node() == Some(&node.id);
         let subplan_steps = node.subplan().map_or(0, |subplan| subplan.nodes.len());
+        // Naming the steps inside without opening it: enough to tell two
+        // sub-plans apart at a glance, without the canvas drawing a graph
+        // inside a graph.
+        let subplan_preview: SharedString = node
+            .subplan()
+            .map(|subplan| {
+                let titles: Vec<&str> = subplan
+                    .nodes
+                    .iter()
+                    .take(6)
+                    .map(|node| node.title.as_str())
+                    .collect();
+                let more = subplan.nodes.len().saturating_sub(titles.len());
+                let mut preview = titles.join("  →  ");
+                if more > 0 {
+                    preview.push_str(&format!("  →  … and {more} more"));
+                }
+                format!("Opens the plan inside this step:\n{preview}").into()
+            })
+            .unwrap_or_else(|| SharedString::from("This step contains a plan. Open it."));
         let drill_id = node.id.clone();
 
         // The step being carried out outranks selection, because during a run
@@ -2417,14 +2485,12 @@ impl ArchitectPane {
                                                 count => format!("{count} steps"),
                                             },
                                         )
+                                        .tooltip(Tooltip::text(subplan_preview.clone()))
                                         .label_size(LabelSize::XSmall)
                                         .style(ButtonStyle::Tinted(TintColor::Accent))
                                         .start_icon(
                                             Icon::new(IconName::ListTree).size(IconSize::XSmall),
                                         )
-                                        .tooltip(Tooltip::text(
-                                            "This step contains a plan. Open it.",
-                                        ))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.drill_into(drill_id.clone(), window, cx);
                                         })),

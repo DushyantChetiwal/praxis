@@ -2426,6 +2426,48 @@ fn strip_slash_command_prefix(text: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Exposes the thread's Plan/Build mode to the UI, which renders it as the mode
+/// pill beside the composer.
+struct NativeAgentSessionModes {
+    session_id: acp::SessionId,
+    connection: NativeAgentConnection,
+    /// The mode when the selector was built. Reading through to the thread
+    /// needs an `App`, which `current_mode` is not given, so the value is
+    /// captured here and refreshed whenever the selector is rebuilt.
+    current: crate::SessionMode,
+}
+
+impl acp_thread::AgentSessionModes for NativeAgentSessionModes {
+    fn current_mode(&self) -> acp::SessionModeId {
+        acp::SessionModeId::new(self.current.id())
+    }
+
+    fn all_modes(&self) -> Vec<acp::SessionMode> {
+        vec![
+            acp::SessionMode::new(crate::SessionMode::BUILD_ID, "Build"),
+            acp::SessionMode::new(crate::SessionMode::PLAN_ID, "Plan"),
+        ]
+    }
+
+    fn set_mode(&self, mode: acp::SessionModeId, cx: &mut App) -> Task<Result<()>> {
+        let Some(mode) = crate::SessionMode::from_id(mode.0.as_ref()) else {
+            return Task::ready(Err(anyhow!("Unknown mode {}", mode.0)));
+        };
+        let Some(thread) = self
+            .connection
+            .0
+            .read(cx)
+            .sessions
+            .get(&self.session_id)
+            .map(|session| session.thread.clone())
+        else {
+            return Task::ready(Err(anyhow!("Session not found")));
+        };
+        thread.update(cx, |thread, cx| thread.set_session_mode(mode, cx));
+        Task::ready(Ok(()))
+    }
+}
+
 struct NativeAgentModelSelector {
     session_id: acp::SessionId,
     connection: NativeAgentConnection,
@@ -2661,6 +2703,26 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
 
     fn authenticate(&self, _method: acp::AuthMethodId, _cx: &mut App) -> Task<Result<()>> {
         Task::ready(Ok(()))
+    }
+
+    fn session_modes(
+        &self,
+        session_id: &acp::SessionId,
+        cx: &App,
+    ) -> Option<Rc<dyn acp_thread::AgentSessionModes>> {
+        let current = self
+            .0
+            .read(cx)
+            .sessions
+            .get(session_id)?
+            .thread
+            .read(cx)
+            .session_mode();
+        Some(Rc::new(NativeAgentSessionModes {
+            session_id: session_id.clone(),
+            connection: self.clone(),
+            current,
+        }) as Rc<dyn acp_thread::AgentSessionModes>)
     }
 
     fn model_selector(&self, session_id: &acp::SessionId) -> Option<Rc<dyn AgentModelSelector>> {
