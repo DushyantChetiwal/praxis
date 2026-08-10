@@ -1186,8 +1186,20 @@
     },
     // When enabled, show voting thumbs for feedback on agent edits.
     "enable_feedback": true,
-    "default_profile": "write",
+    // Build mode runs under "build". Which tools a thread may use is decided by
+    // its mode — Plan withholds the ones that change the project — so the
+    // profile behind it has no filtering left to do.
+    "default_profile": "build",
     "profiles": {
+      // Applied automatically by Build mode; it is not selectable from the
+      // profile picker.
+      "build": {
+        "name": "Build",
+        // Holds nothing back, and keeps holding nothing back as tools are added.
+        "enable_all_tools": true,
+        "enable_all_context_servers": true,
+        "tools": {},
+      },
       "write": {
         "name": "Write",
         "enable_all_context_servers": true,

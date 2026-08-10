@@ -545,6 +545,13 @@ pub struct AgentProfileContent {
     pub name: Arc<str>,
     #[serde(default)]
     pub tools: IndexMap<Arc<str>, bool>,
+    /// Whether every built-in tool is enabled, including ones added by later
+    /// versions of Zed.
+    ///
+    /// For a profile that is meant to hold nothing back, so that it does not
+    /// quietly fall behind as tools are added. Entries in `tools` are then only
+    /// useful for turning something off.
+    pub enable_all_tools: Option<bool>,
     /// Whether all context servers are enabled by default.
     pub enable_all_context_servers: Option<bool>,
     #[serde(default)]

@@ -56,7 +56,10 @@ use settings::{
     LanguageModelSelection, Settings, SettingsStore, ToolPermissionMode, update_settings_file,
 };
 use std::fmt::Write;
-use std::{cell::RefCell, ops::ControlFlow};
+use std::{
+    cell::{Cell, RefCell},
+    ops::ControlFlow,
+};
 use std::{
     collections::BTreeMap,
     marker::PhantomData,
@@ -1409,7 +1412,11 @@ pub struct Thread {
     /// would let `complete_step` write its summary onto the wrong step.
     architect_running_step: Option<architect::NodePath>,
     /// Whether the thread is planning or building.
-    session_mode: SessionMode,
+    ///
+    /// Shared, because the mode selector in the UI has to read it without an
+    /// `App` to hand. Handing that selector a copy instead would leave it
+    /// showing "Build" after a plan was drafted.
+    session_mode: Rc<Cell<SessionMode>>,
     /// A plan being carried out. It lives here rather than on the canvas
     /// because the canvas is a panel the user closes, and closing a window
     /// should not abandon work that is halfway through.
@@ -1482,10 +1489,7 @@ impl Thread {
         // costs a refcount rather than a copy.
         thread.messages = parent_thread.read(cx).messages.clone();
         thread.set_title(title, cx);
-        thread.set_profile(
-            AgentProfileId(builtin_profiles::ARCHITECT_STEP.into()),
-            cx,
-        );
+        thread.set_profile(AgentProfileId(builtin_profiles::ARCHITECT_STEP.into()), cx);
         thread
     }
 
@@ -1589,7 +1593,7 @@ impl Thread {
             inherits_parent_model_settings: true,
             architect_graph: None,
             architect_running_step: None,
-            session_mode: SessionMode::default(),
+            session_mode: Rc::new(Cell::new(SessionMode::default())),
             architect_run: None,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::default())),
@@ -1982,7 +1986,7 @@ impl Thread {
             inherits_parent_model_settings: true,
             architect_graph: db_thread.architect_graph,
             architect_running_step: None,
-            session_mode: SessionMode::default(),
+            session_mode: Rc::new(Cell::new(SessionMode::default())),
             architect_run: None,
             sandboxed_terminal_temp_dir: db_thread.sandboxed_terminal_temp_dir,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::from_db(
@@ -2186,11 +2190,7 @@ impl Thread {
         cx.notify();
     }
 
-    pub fn finish_architect_run(
-        &mut self,
-        outcome: architect::RunOutcome,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn finish_architect_run(&mut self, outcome: architect::RunOutcome, cx: &mut Context<Self>) {
         if let Some(run) = self.architect_run.as_mut() {
             run.current = None;
             run.outcome = Some(outcome);
@@ -2207,7 +2207,12 @@ impl Thread {
     }
 
     pub fn session_mode(&self) -> SessionMode {
-        self.session_mode
+        self.session_mode.get()
+    }
+
+    /// A handle the UI can read the mode through without an `App`.
+    pub fn session_mode_handle(&self) -> Rc<Cell<SessionMode>> {
+        self.session_mode.clone()
     }
 
     /// Switches between planning and building.
@@ -2216,10 +2221,10 @@ impl Thread {
     /// just been put into Plan cannot change the project even if it was midway
     /// through trying to.
     pub fn set_session_mode(&mut self, mode: SessionMode, cx: &mut Context<Self>) {
-        if self.session_mode == mode {
+        if self.session_mode.get() == mode {
             return;
         }
-        self.session_mode = mode;
+        self.session_mode.set(mode);
         self.refresh_turn_tools(cx);
         cx.notify();
     }
@@ -2513,10 +2518,14 @@ impl Thread {
         project: &Entity<Project>,
         cx: &App,
     ) -> (AgentProfileId, bool) {
-        let is_write_or_ask = profile_id.as_str() == builtin_profiles::WRITE
-            || profile_id.as_str() == builtin_profiles::ASK;
+        // `build` holds nothing back, so it is the most important one to
+        // downgrade, not an exception to it.
+        let is_downgradable = matches!(
+            profile_id.as_str(),
+            builtin_profiles::WRITE | builtin_profiles::ASK | builtin_profiles::BUILD
+        );
         let minimal = AgentProfileId(builtin_profiles::MINIMAL.into());
-        if is_write_or_ask
+        if is_downgradable
             && TrustedWorktrees::has_restricted_worktrees(&project.read(cx).worktree_store(), cx)
             && AgentProfileSettings::is_unmodified_default(&profile_id, cx)
             && AgentProfileSettings::is_unmodified_default(&minimal, cx)
@@ -4611,7 +4620,7 @@ impl Thread {
         Ok(request)
     }
 
-    fn enabled_tools(&self, cx: &App) -> BTreeMap<SharedString, Arc<dyn AnyAgentTool>> {
+    pub(crate) fn enabled_tools(&self, cx: &App) -> BTreeMap<SharedString, Arc<dyn AnyAgentTool>> {
         let Some(model) = self.model() else {
             return BTreeMap::new();
         };
@@ -4633,7 +4642,7 @@ impl Thread {
         // that change the project are withheld rather than merely discouraged,
         // because a model asked to plan will otherwise start building partway
         // through drafting.
-        let planning = self.session_mode == SessionMode::Plan;
+        let planning = self.session_mode.get() == SessionMode::Plan;
 
         let mut tools = self
             .tools

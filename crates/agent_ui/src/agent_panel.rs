@@ -5791,11 +5791,7 @@ impl AgentPanel {
 
         let step_count = graph.nodes.len();
         let locked_count = graph.nodes.iter().filter(|node| node.locked).count();
-        let nested_count = graph
-            .nodes
-            .iter()
-            .filter(|node| node.has_subplan())
-            .count();
+        let nested_count = graph.nodes.iter().filter(|node| node.has_subplan()).count();
         let running = run.is_some_and(agent::ArchitectRun::is_running);
 
         fn open_canvas(this: &mut AgentPanel, window: &mut Window, cx: &mut Context<AgentPanel>) {
@@ -5810,6 +5806,29 @@ impl AgentPanel {
                     crate::architect_ui::ArchitectPane::open(thread, workspace, window, cx);
                 })
                 .ok();
+        }
+
+        /// The names of the steps leading to the one running, so a step inside a
+        /// sub-plan says which step it is inside rather than appearing to be a
+        /// top-level step of a plan that does not list it.
+        fn step_trail(graph: &architect::ArchitectGraph, run: &agent::ArchitectRun) -> String {
+            let Some(path) = run.current.as_ref() else {
+                return run.current_title.to_string();
+            };
+            let mut names = Vec::new();
+            let mut level = Some(graph);
+            for id in &path.0 {
+                let Some(node) = level.and_then(|graph| graph.node(id)) else {
+                    break;
+                };
+                names.push(node.title.clone());
+                level = node.subplan();
+            }
+            if names.is_empty() {
+                run.current_title.to_string()
+            } else {
+                names.join(" › ")
+            }
         }
 
         let mut summary = match step_count {
@@ -5828,7 +5847,7 @@ impl AgentPanel {
         let card = v_flex()
             .id("architect-status")
             .w_full()
-            .gap_1()
+            .gap_1p5()
             .p_2()
             .rounded_md()
             .border_1()
@@ -5837,7 +5856,13 @@ impl AgentPanel {
             } else {
                 cx.theme().colors().border
             })
-            .bg(cx.theme().colors().elevated_surface_background)
+            // Tinted while running, so a glance at the panel says whether the
+            // plan is being carried out or merely drafted.
+            .bg(if running {
+                cx.theme().status().info_background
+            } else {
+                cx.theme().colors().elevated_surface_background
+            })
             .child(
                 h_flex()
                     .w_full()
@@ -5846,6 +5871,7 @@ impl AgentPanel {
                     .child(
                         h_flex()
                             .gap_1p5()
+                            .min_w_0()
                             .child(
                                 Icon::new(if running {
                                     IconName::PlayFilled
@@ -5853,14 +5879,18 @@ impl AgentPanel {
                                     IconName::GitBranch
                                 })
                                 .size(IconSize::XSmall)
-                                .color(if running { Color::Info } else { Color::Muted }),
+                                .color(if running {
+                                    Color::Info
+                                } else {
+                                    Color::Muted
+                                }),
                             )
                             .child(
                                 Label::new(match run {
                                     Some(run) if running => {
-                                        format!("Step {} · {}", run.step_number, run.current_title)
+                                        format!("Step {} of {}", run.step_number, step_count)
                                     }
-                                    _ => "Plan".to_string(),
+                                    _ => "Plan drafted".to_string(),
                                 })
                                 .size(LabelSize::Small)
                                 .color(if running { Color::Info } else { Color::Default })
@@ -5872,6 +5902,9 @@ impl AgentPanel {
                             .label_size(LabelSize::XSmall)
                             .style(ButtonStyle::Subtle)
                             .color(Color::Warning)
+                            .tooltip(Tooltip::text(
+                                "Stop the run. The plan and everything done so far are kept.",
+                            ))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let Some(thread) = this
                                     .active_thread_view(cx)
@@ -5886,37 +5919,48 @@ impl AgentPanel {
                         Button::new("architect-status-open", "Open")
                             .label_size(LabelSize::XSmall)
                             .style(ButtonStyle::Subtle)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                open_canvas(this, window, cx)
-                            }))
+                            .end_icon(Icon::new(IconName::ArrowUpRight).size(IconSize::XSmall))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| open_canvas(this, window, cx)),
+                            )
                             .into_any_element()
                     }),
             )
             .child(
                 Label::new(match run.and_then(|run| run.outcome.as_ref()) {
                     Some(outcome) => outcome.describe(graph),
+                    // While running, the step being carried out is more use than
+                    // a count of the plan, and the trail says how deep it is.
+                    None if running => run
+                        .map(|run| step_trail(graph, run))
+                        .unwrap_or_else(|| summary.clone()),
                     None => summary,
                 })
                 .size(LabelSize::XSmall)
-                .color(Color::Muted),
+                .color(if running { Color::Info } else { Color::Muted }),
             )
-            .when(step_count > 0, |this| {
-                // How far through locking the plan is, which is the thing the
-                // user is working towards before a run can start.
+            // How far through locking the plan is, which is what the user is
+            // working towards before a run can start.
+            //
+            // Only while drafting. Once a run has started every step is locked by
+            // definition, so the bar would sit permanently full: a bright rule
+            // welded to the bottom of the card, saying nothing.
+            .when(step_count > 0 && !running, |this| {
                 let fraction = locked_count as f32 / step_count as f32;
                 this.child(
                     div()
                         .w_full()
-                        .h(px(3.0))
-                        .rounded_sm()
+                        .mt_0p5()
+                        .h(px(2.0))
+                        .rounded_full()
                         .bg(cx.theme().colors().element_background)
                         .child(
                             div()
                                 .h_full()
                                 .w(relative(fraction.clamp(0.0, 1.0)))
-                                .rounded_sm()
+                                .rounded_full()
                                 .bg(if locked_count == step_count {
-                                    cx.theme().status().success
+                                    cx.theme().status().success.opacity(0.8)
                                 } else {
                                     cx.theme().colors().text_accent
                                 }),
@@ -5925,21 +5969,29 @@ impl AgentPanel {
             })
             .on_click(cx.listener(|this, _, window, cx| open_canvas(this, window, cx)));
 
-        Some(div().w_full().px_2().pb_1p5().child(card).into_any_element())
+        // Matched insets, so the card sits in the panel rather than being
+        // pushed against whatever follows it.
+        Some(div().w_full().px_2().pb_2().child(card).into_any_element())
     }
 
-    /// The way into the Architect canvas. It appears only once the thread has a
-    /// plan, because a button that opens an empty canvas is worse than no
-    /// button.
+    /// The way into the Architect canvas.
+    ///
+    /// Shown for every native thread, plan or no plan. Hiding it until a plan
+    /// existed was a deadlock: the canvas is where you learn that planning
+    /// exists, so gating it on a plan meant nobody could reach the feature that
+    /// produces one.
     fn render_architect_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let thread = self
             .active_thread_view(cx)
             .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))?;
 
-        let step_count = thread.read(cx).architect_graph()?.nodes.len();
+        let step_count = thread
+            .read(cx)
+            .architect_graph()
+            .map_or(0, |graph| graph.nodes.len());
 
         let tooltip = match step_count {
-            0 => "Open the Architect canvas. Describe the goal in the chat and the plan appears here.".to_string(),
+            0 => "Open the Architect canvas. Switch to Plan mode and describe the goal, and the plan appears here.".to_string(),
             1 => "Open the Architect canvas (1 step)".to_string(),
             count => format!("Open the Architect canvas ({count} steps)"),
         };

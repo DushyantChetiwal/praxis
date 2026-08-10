@@ -2431,15 +2431,14 @@ fn strip_slash_command_prefix(text: &str) -> String {
 struct NativeAgentSessionModes {
     session_id: acp::SessionId,
     connection: NativeAgentConnection,
-    /// The mode when the selector was built. Reading through to the thread
-    /// needs an `App`, which `current_mode` is not given, so the value is
-    /// captured here and refreshed whenever the selector is rebuilt.
-    current: crate::SessionMode,
+    /// Shared with the thread, so the pill reflects a mode the thread changed
+    /// by itself — drafting a plan, or a run starting.
+    mode: std::rc::Rc<std::cell::Cell<crate::SessionMode>>,
 }
 
 impl acp_thread::AgentSessionModes for NativeAgentSessionModes {
     fn current_mode(&self) -> acp::SessionModeId {
-        acp::SessionModeId::new(self.current.id())
+        acp::SessionModeId::new(self.mode.get().id())
     }
 
     fn all_modes(&self) -> Vec<acp::SessionMode> {
@@ -2710,18 +2709,17 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
         session_id: &acp::SessionId,
         cx: &App,
     ) -> Option<Rc<dyn acp_thread::AgentSessionModes>> {
-        let current = self
-            .0
-            .read(cx)
-            .sessions
-            .get(session_id)?
-            .thread
-            .read(cx)
-            .session_mode();
+        let Some(session) = self.0.read(cx).sessions.get(session_id) else {
+            // Worth saying out loud: without this the mode pill silently never
+            // appears, which looks like the feature was never built.
+            log::warn!("No session {session_id} yet, so it has no mode selector");
+            return None;
+        };
+        let mode = session.thread.read(cx).session_mode_handle();
         Some(Rc::new(NativeAgentSessionModes {
             session_id: session_id.clone(),
             connection: self.clone(),
-            current,
+            mode,
         }) as Rc<dyn acp_thread::AgentSessionModes>)
     }
 
@@ -6936,6 +6934,131 @@ mod internal_tests {
         });
 
         assert_eq!(*title_updated_count.borrow(), 2);
+    }
+
+    /// The mode pill is the only way to reach Plan mode, and it is rendered
+    /// only if the connection offers a mode selector. Without this, the pill can
+    /// silently vanish and the whole planning feature becomes unreachable.
+    #[gpui::test]
+    async fn test_a_new_session_offers_plan_and_build(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/", json!({ "a": {} })).await;
+        let project = Project::test(fs.clone(), [], cx).await;
+        let thread_store = cx.new(|cx| ThreadStore::new(cx));
+        let agent = cx
+            .update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
+        let connection = Rc::new(NativeAgentConnection(agent.clone()));
+
+        let acp_thread = cx
+            .update(|cx| {
+                connection
+                    .clone()
+                    .new_session(project.clone(), PathList::new(&[Path::new("")]), cx)
+            })
+            .await
+            .unwrap();
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+        let modes = cx
+            .update(|cx| {
+                acp_thread::AgentConnection::session_modes(connection.as_ref(), &session_id, cx)
+            })
+            .expect("a new native session must offer a mode selector");
+
+        assert_eq!(
+            modes
+                .all_modes()
+                .iter()
+                .map(|mode| mode.id.0.to_string())
+                .collect::<Vec<_>>(),
+            vec![
+                crate::SessionMode::BUILD_ID.to_string(),
+                crate::SessionMode::PLAN_ID.to_string(),
+            ],
+        );
+        assert_eq!(
+            modes.current_mode().0.as_ref(),
+            crate::SessionMode::BUILD_ID
+        );
+
+        // The pill reads the mode through a shared handle, so a mode the thread
+        // changed by itself has to show up without the selector being rebuilt.
+        let thread = agent.read_with(cx, |agent, _| {
+            agent.sessions.get(&session_id).unwrap().thread.clone()
+        });
+        thread.update(cx, |thread, cx| {
+            thread.set_session_mode(crate::SessionMode::Plan, cx)
+        });
+        assert_eq!(modes.current_mode().0.as_ref(), crate::SessionMode::PLAN_ID);
+    }
+
+    /// The step chat exists to rewrite one step, so `refine_step` has to reach
+    /// the model. It reported the tool as unavailable, which made the whole
+    /// conversation pointless: it could argue about the step but not record it.
+    #[gpui::test]
+    async fn test_a_step_thread_can_refine_its_step(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/", json!({ "a": {} })).await;
+        let project = Project::test(fs.clone(), [], cx).await;
+        let thread_store = cx.new(|cx| ThreadStore::new(cx));
+        let agent = cx
+            .update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
+        let connection = Rc::new(NativeAgentConnection(agent.clone()));
+
+        let acp_thread = cx
+            .update(|cx| {
+                connection
+                    .clone()
+                    .new_session(project.clone(), PathList::new(&[Path::new("")]), cx)
+            })
+            .await
+            .unwrap();
+        let parent_session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let parent = agent.read_with(cx, |agent, _| {
+            agent
+                .sessions
+                .get(&parent_session_id)
+                .unwrap()
+                .thread
+                .clone()
+        });
+        let model = Arc::new(FakeLanguageModel::default());
+        parent.update(cx, |thread, cx| thread.set_model(model.clone(), cx));
+
+        let step_thread = cx
+            .update(|cx| {
+                connection.create_architect_step_thread(
+                    &parent_session_id,
+                    architect::NodeId::from("step-1"),
+                    "Write handlers".into(),
+                    cx,
+                )
+            })
+            .unwrap();
+        let step_session_id = step_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let step = agent.read_with(cx, |agent, _| {
+            agent.sessions.get(&step_session_id).unwrap().thread.clone()
+        });
+        step.update(cx, |thread, cx| thread.set_model(model.clone(), cx));
+
+        step.read_with(cx, |thread, cx| {
+            assert!(
+                thread.has_registered_tool("refine_step"),
+                "the step's own tool was never registered",
+            );
+            let enabled = thread.enabled_tools(cx);
+            assert!(
+                enabled.contains_key("refine_step"),
+                "refine_step is registered but withheld from the model; it has {:?}",
+                enabled.keys().collect::<Vec<_>>(),
+            );
+            // Settling a step is not the place to redraw the whole plan, nor to
+            // build: those belong to the main conversation.
+            assert!(!enabled.contains_key("draft_plan"));
+            assert!(!enabled.contains_key("edit_file"));
+        });
     }
 
     fn thread_entries(

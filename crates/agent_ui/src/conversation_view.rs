@@ -240,10 +240,15 @@ impl ProfileProvider for Entity<agent::Thread> {
         });
     }
 
-    fn profiles_supported(&self, cx: &App) -> bool {
-        self.read(cx)
-            .model()
-            .is_some_and(|model| model.supports_tools())
+    /// Never, for Zed's own agent.
+    ///
+    /// Plan and Build say everything a profile said, at the moment it matters,
+    /// and they say it in one control instead of two. A profile picker beside
+    /// the mode switch invites the two to disagree — a thread in Plan mode
+    /// under a profile that can write, or Build mode under one that cannot —
+    /// and the mode is the one the user just chose.
+    fn profiles_supported(&self, _cx: &App) -> bool {
+        false
     }
 
     fn model_selected(&self, cx: &App) -> bool {
@@ -2128,8 +2133,19 @@ impl ConversationView {
         // restart. Loading is asynchronous; the canvas picks the view up once it
         // arrives, so there is nothing to do here but ask for it.
         if let Some(existing) = existing {
-            self.load_subagent_session(existing.clone(), root_session_id, window, cx)
-                .detach_and_log_err(cx);
+            let load = self.load_subagent_session(existing.clone(), root_session_id, window, cx);
+            let session_id = existing.clone();
+            cx.spawn(async move |this, cx| {
+                load.await?;
+                // The loader has no way to know this subagent is one the user
+                // talks to, so the composer has to be restored once it is here.
+                this.update(cx, |this, cx| {
+                    if let Some(view) = this.thread_view(&session_id) {
+                        view.update(cx, |view, _cx| view.user_driven = true);
+                    }
+                })
+            })
+            .detach_and_log_err(cx);
             cx.notify();
             return Some(existing);
         }
@@ -2156,6 +2172,9 @@ impl ConversationView {
             conversation.register_thread(acp_thread.clone(), cx);
         });
         let view = self.new_thread_view(acp_thread, conversation, false, None, window, cx);
+        // A subagent so that it inherits the plan's context, but the user is the
+        // one who talks to it, so it keeps its composer.
+        view.update(cx, |view, _cx| view.user_driven = true);
         let connected = self.as_connected_mut()?;
         connected.threads.insert(session_id.clone(), view);
         cx.notify();

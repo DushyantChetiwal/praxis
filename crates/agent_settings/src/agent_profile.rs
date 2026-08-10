@@ -18,6 +18,10 @@ pub mod builtin_profiles {
 
     pub const WRITE: &str = "write";
     pub const ASK: &str = "ask";
+    /// Holds nothing back. What Build mode runs under: which tools a thread may
+    /// use is decided by its mode, so the profile behind it has no filtering
+    /// left to do.
+    pub const BUILD: &str = "build";
     /// The profile a single Architect step's thread runs under. It can read and
     /// search to inform the argument, and can rewrite its own step, but it
     /// cannot build anything: the main thread owns that.
@@ -25,14 +29,17 @@ pub mod builtin_profiles {
     pub const MINIMAL: &str = "minimal";
 
     pub fn is_builtin(profile_id: &AgentProfileId) -> bool {
-        matches!(profile_id.as_str(), WRITE | ASK | ARCHITECT_STEP | MINIMAL)
+        matches!(
+            profile_id.as_str(),
+            WRITE | ASK | BUILD | ARCHITECT_STEP | MINIMAL
+        )
     }
 
     /// Whether the user may pick this profile for a thread. `ARCHITECT_STEP`
     /// is applied by step threads themselves and would do the wrong thing on
     /// any other thread, so it is kept out of the picker.
     pub fn is_selectable(profile_id: &AgentProfileId) -> bool {
-        profile_id.as_str() != ARCHITECT_STEP
+        !matches!(profile_id.as_str(), ARCHITECT_STEP | BUILD)
     }
 }
 
@@ -69,6 +76,10 @@ impl AgentProfile {
             .as_ref()
             .map(|profile| profile.tools.clone())
             .unwrap_or_default();
+        let enable_all_tools = base_profile
+            .as_ref()
+            .map(|profile| profile.enable_all_tools)
+            .unwrap_or_default();
         let enable_all_context_servers = base_profile
             .as_ref()
             .map(|profile| profile.enable_all_context_servers)
@@ -85,6 +96,7 @@ impl AgentProfile {
         let profile_settings = AgentProfileSettings {
             name: name.into(),
             tools,
+            enable_all_tools,
             enable_all_context_servers,
             context_servers,
             default_model,
@@ -116,6 +128,9 @@ pub struct AgentProfileSettings {
     /// The name of the profile.
     pub name: SharedString,
     pub tools: IndexMap<Arc<str>, bool>,
+    /// Every built-in tool is enabled, including ones this profile has never
+    /// heard of. `tools` can still switch an individual one off.
+    pub enable_all_tools: bool,
     pub enable_all_context_servers: bool,
     pub context_servers: IndexMap<Arc<str>, ContextServerPreset>,
     /// Default language model to apply when this profile becomes active.
@@ -124,7 +139,12 @@ pub struct AgentProfileSettings {
 
 impl AgentProfileSettings {
     pub fn is_tool_enabled(&self, tool_name: &str) -> bool {
-        self.tools.get(tool_name) == Some(&true)
+        match self.tools.get(tool_name) {
+            Some(enabled) => *enabled,
+            // An unlisted tool is off by default, unless the profile is the one
+            // that holds nothing back.
+            None => self.enable_all_tools,
+        }
     }
 
     /// Whether the built-in profile with the given id still matches the shipped
@@ -179,6 +199,7 @@ impl AgentProfileSettings {
             AgentProfileContent {
                 name: self.name.clone().into(),
                 tools: self.tools.clone(),
+                enable_all_tools: Some(self.enable_all_tools),
                 enable_all_context_servers: Some(self.enable_all_context_servers),
                 context_servers: self
                     .context_servers
@@ -206,6 +227,7 @@ impl From<AgentProfileContent> for AgentProfileSettings {
         let AgentProfileContent {
             name,
             tools,
+            enable_all_tools,
             enable_all_context_servers,
             context_servers,
             default_model,
@@ -214,6 +236,7 @@ impl From<AgentProfileContent> for AgentProfileSettings {
         Self {
             name: name.into(),
             tools,
+            enable_all_tools: enable_all_tools.unwrap_or_default(),
             enable_all_context_servers: enable_all_context_servers.unwrap_or_default(),
             context_servers: context_servers
                 .into_iter()
@@ -248,6 +271,7 @@ mod tests {
         AgentProfileSettings {
             name: "test".into(),
             tools: IndexMap::default(),
+            enable_all_tools: false,
             enable_all_context_servers,
             context_servers,
             default_model: None,

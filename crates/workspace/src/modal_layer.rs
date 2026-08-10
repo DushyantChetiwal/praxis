@@ -59,6 +59,10 @@ pub trait ModalView: ManagedView {
         false
     }
 
+    /// Renders the modal centered in the window without the usual dialog
+    /// chrome, so it can size itself. Use this for modals that fill most of the
+    /// window; the default column collapses its own height, which a modal asking
+    /// for a fraction of the window would resolve against nothing.
     fn render_bare(&self) -> bool {
         false
     }
@@ -287,20 +291,44 @@ impl Render for ModalLayer {
             return div().into_any_element();
         };
 
-        if active_modal.modal.render_bare(cx) {
-            return active_modal.modal.view().into_any_element();
-        }
-
-        div()
-            .absolute()
-            .size_full()
-            .inset_0()
-            .occlude()
-            .when(active_modal.modal.fade_out_background(cx), |this| {
+        // The overlay is absolute in both cases. The modal layer is a plain flex
+        // sibling of the workspace, so a modal left in the flow lays out beside
+        // the editor and squeezes it off screen rather than covering it.
+        let backdrop = div().absolute().size_full().inset_0().occlude().when(
+            active_modal.modal.fade_out_background(cx),
+            |this| {
                 let mut background = cx.theme().colors().elevated_surface_background;
                 background.fade_out(0.2);
                 this.bg(background)
-            })
+            },
+        );
+
+        if active_modal.modal.render_bare(cx) {
+            // A bare modal sizes itself, often as a fraction of the window, so
+            // its parent needs a definite size to be a fraction of. The dialog
+            // column below has no height of its own, which would resolve any
+            // relative height to nothing.
+            //
+            // Clicking away does not dismiss a bare modal: it fills nearly the
+            // whole window, so the sliver outside it is far more likely to be a
+            // misclick than an attempt to close. Escape still dismisses.
+            return backdrop
+                .child(
+                    v_flex()
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .occlude()
+                        .track_focus(&active_modal.focus_handle)
+                        .child(active_modal.modal.view())
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        }),
+                )
+                .into_any_element();
+        }
+
+        backdrop
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {

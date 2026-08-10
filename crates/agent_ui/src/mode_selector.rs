@@ -131,14 +131,50 @@ impl ModeSelector {
 
 impl Render for ModeSelector {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let all_modes = self.connection.all_modes();
         let current_mode_id = self.connection.current_mode();
-        let current_mode_name = self
-            .connection
-            .all_modes()
+        let current_mode_name = all_modes
             .iter()
             .find(|mode| mode.id == current_mode_id)
             .map(|mode| mode.name.clone())
             .unwrap_or_else(|| "Unknown".into());
+
+        // Two modes are a switch, and a switch should look like one. A dropdown
+        // showing only the mode you are already in hides the fact that there is
+        // another, which is the whole point of having modes.
+        if all_modes.len() == 2 {
+            let setting_mode = self.setting_mode;
+            return h_flex()
+                .id("mode-selector-switch")
+                .p_0p5()
+                .gap_0p5()
+                .rounded_md()
+                .border_1()
+                .border_color(cx.theme().colors().border)
+                .bg(cx.theme().colors().element_background)
+                .children(all_modes.into_iter().enumerate().map(|(ix, mode)| {
+                    let selected = mode.id == current_mode_id;
+                    let description = mode.description.clone();
+                    let mode_id = mode.id.clone();
+
+                    Button::new(("mode-selector-option", ix), mode.name)
+                        .label_size(LabelSize::Small)
+                        .style(ButtonStyle::Subtle)
+                        .toggle_state(selected)
+                        .selected_style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                        .disabled(setting_mode)
+                        .tooltip(move |_window, cx| match &description {
+                            Some(description) => Tooltip::simple(description.clone(), cx),
+                            None => Tooltip::simple("Switch mode", cx),
+                        })
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            if !selected {
+                                this.set_mode(mode_id.clone(), cx);
+                            }
+                        }))
+                }))
+                .into_any_element();
+        }
 
         let this = cx.weak_entity();
 
@@ -192,6 +228,7 @@ impl Render for ModeSelector {
                 this.update(cx, |this, cx| this.build_context_menu(window, cx))
                     .ok()
             })
+            .into_any_element()
     }
 }
 

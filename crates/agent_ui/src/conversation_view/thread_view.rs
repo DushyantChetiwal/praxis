@@ -594,6 +594,14 @@ pub struct ThreadView {
     pub expanded_tool_call_raw_inputs: HashSet<acp::ToolCallId>,
     collapsed_sandbox_authorization_details: HashSet<acp::ToolCallId>,
     collapsed_sandbox_network_details: HashSet<acp::ToolCallId>,
+    /// A subagent thread the user talks to directly, rather than one the agent
+    /// runs while being watched.
+    ///
+    /// Subagent threads normally hide the composer, because putting a message
+    /// into a thread the agent is driving would have nowhere to go. An Architect
+    /// step's thread is a subagent only so that it inherits what the main
+    /// conversation knows; the whole point of it is that the user types in it.
+    pub(crate) user_driven: bool,
     /// Sandbox escalation prompts whose "surprising Unicode" warning the user
     /// has explicitly acknowledged. Until a prompt's tool call is in this set,
     /// its allow buttons stay disabled. See [`Self::sandbox_confusable_findings`].
@@ -1012,6 +1020,7 @@ impl ThreadView {
             expanded_tool_call_raw_inputs: HashSet::default(),
             collapsed_sandbox_authorization_details: HashSet::default(),
             collapsed_sandbox_network_details: HashSet::default(),
+            user_driven: false,
             acknowledged_confusable_warnings: HashSet::default(),
             subagent_scroll_handles: RefCell::new(HashMap::default()),
             edits_expanded: false,
@@ -1232,6 +1241,12 @@ impl ThreadView {
 
     fn is_subagent(&self) -> bool {
         self.parent_session_id.is_some()
+    }
+
+    /// Whether this thread is one the agent drives and the user only watches.
+    /// That is what suppresses the composer, not being a subagent as such.
+    fn is_agent_driven_subagent(&self) -> bool {
+        self.is_subagent() && !self.user_driven
     }
 
     /// Returns the currently active editor, either for a message that is being
@@ -4303,6 +4318,12 @@ impl ThreadView {
         if self.parent_session_id.is_none() {
             return None;
         }
+        // A step's thread is shown inside the canvas, whose own header already
+        // names the step. This bar would repeat that, and its Minimize button
+        // navigates the agent panel, which is not where this thread is.
+        if self.user_driven {
+            return None;
+        }
         let parent_session_id = self.thread.read(cx).parent_session_id()?.clone();
 
         let server_view = self.server_view.clone();
@@ -4388,7 +4409,7 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if self.is_subagent() {
+        if self.is_agent_driven_subagent() {
             return div().into_any_element();
         }
 
