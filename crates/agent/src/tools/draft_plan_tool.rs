@@ -16,6 +16,21 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolInput};
 /// one step leads to another. Nothing is carried out by this tool: the plan is
 /// a proposal the user reshapes, and they run it when they are ready.
 ///
+/// ### Drawing over a plan that already exists
+/// This replaces the whole plan, so when one is already on the canvas you are
+/// editing rather than starting over. The current plan, with each step's id, is
+/// given to you above; reuse those ids for steps that are staying, so their
+/// history stays attached to them.
+///
+/// A step the user has **locked** is settled: its goal, rules, capture and
+/// routing were argued out, often in a chat of its own. Restate a locked step
+/// exactly as it is, connections included, or this tool will refuse the whole
+/// draft. If a locked step genuinely has to change, say so and let the user
+/// unlock it.
+///
+/// For an unlocked step you are keeping, anything you leave blank keeps what is
+/// already there, so you need only state what you are actually changing.
+///
 /// ### What makes a good plan
 /// - One step per meaningful unit of work. A step that says "do the task" is
 ///   useless, and twenty steps for a two-line change is noise.
@@ -87,6 +102,11 @@ pub enum DraftPlanToolOutput {
         /// step that does not exist. Worth fixing before the user sees it.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         problems: Vec<String>,
+        /// Steps that kept detail this draft did not carry, because it was
+        /// settled after the plan was first drawn. Said out loud so the model
+        /// does not assume the plan now reads exactly as it wrote it.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        kept_existing_detail: Vec<String>,
     },
     Error {
         error: String,
@@ -155,11 +175,49 @@ impl AgentTool for DraftPlanTool {
                 });
             }
 
-            let graph = ProposedGraph {
+            let draft = ProposedGraph {
                 nodes: input.nodes,
                 edges: input.edges,
             }
             .into_graph();
+
+            // Drawing over a plan that already exists is an edit, not a fresh
+            // start: everything settled since it was first drawn has to survive.
+            let merged = self
+                .thread
+                .read_with(cx, |thread, _cx| {
+                    thread
+                        .architect_graph()
+                        .map(|existing| existing.merge_draft(draft.clone()))
+                })
+                .map_err(|error| DraftPlanToolOutput::Error {
+                    error: format!("The thread this plan belongs to is gone: {error}"),
+                })?;
+
+            let merged = match merged {
+                Some(Ok(merged)) => merged,
+                Some(Err(refusal)) => {
+                    return Err(DraftPlanToolOutput::Error {
+                        error: format!(
+                            "This draft would have discarded steps the user has locked: {}. A \
+                             locked step is settled — its goal, rules, capture and where it leads \
+                             were argued out, often in its own chat. Draw the plan again, \
+                             restating those steps and their connections exactly as they are, and \
+                             change only what is not locked. If one of them really does have to \
+                             change, say so and let the user unlock it first.",
+                            refusal.steps.join(", "),
+                        ),
+                    });
+                }
+                None => architect::MergedDraft {
+                    graph: draft,
+                    preserved: Vec::new(),
+                },
+            };
+
+            let kept_existing_detail: Vec<String> =
+                merged.preserved.iter().map(|id| id.0.clone()).collect();
+            let graph = merged.graph;
 
             let steps = graph.nodes.len();
             let connections = graph.edges.len();
@@ -194,6 +252,7 @@ impl AgentTool for DraftPlanTool {
                 steps,
                 connections,
                 problems,
+                kept_existing_detail,
             })
         })
     }

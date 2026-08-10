@@ -58,6 +58,14 @@ pub struct SystemPromptTemplate<'a> {
     pub is_linux: bool,
     /// Whether sandboxed terminal commands run through WSL on Windows.
     pub is_windows: bool,
+    /// The plan on the Architect canvas, if this thread has one.
+    ///
+    /// Included because `draft_plan` replaces the plan wholesale. A model that
+    /// cannot see the current plan redraws it from scratch and silently discards
+    /// everything settled since it was drawn — goals argued out in each step's
+    /// own chat, rules, recorded results. It also cannot reuse a step's id
+    /// without knowing it, and ids are what keep a step's history attached to it.
+    pub plan: Option<String>,
 }
 
 impl Template for SystemPromptTemplate<'_> {
@@ -105,6 +113,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -112,6 +121,37 @@ mod tests {
         assert!(rendered.contains("Today's Date: 2026-01-01"));
         assert!(rendered.contains("## Fixing Diagnostics"));
         assert!(rendered.contains("test-model"));
+        assert!(
+            !rendered.contains("The plan on the canvas"),
+            "a thread with no plan should not be told about one"
+        );
+    }
+
+    /// Redrawing a plan replaces it, so a model that cannot see the current one
+    /// discards everything settled since it was drawn.
+    #[test]
+    fn test_system_prompt_shows_the_plan_when_there_is_one() {
+        let project = prompt_store::ProjectContext::default();
+        let template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec!["draft_plan".into()],
+            model_name: Some("test-model".to_string()),
+            date: "2026-01-01".to_string(),
+            user_agents_md: None,
+            sandboxing: false,
+            is_linux: false,
+            is_windows: false,
+            plan: Some("- schema — \"Define schema\" [locked: settled, do not rewrite]".into()),
+        };
+
+        let rendered = template.render(&Templates::new()).unwrap();
+
+        assert!(rendered.contains("## The plan on the canvas"));
+        assert!(rendered.contains("Define schema"));
+        assert!(
+            rendered.contains("Reuse a step's id"),
+            "ids are what keep a step's history attached to it"
+        );
     }
 
     #[test]
@@ -138,6 +178,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -167,6 +208,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -200,6 +242,7 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            plan: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -243,6 +286,7 @@ mod tests {
             sandboxing: true,
             is_linux: true,
             is_windows: false,
+            plan: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -276,6 +320,7 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: true,
+            plan: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -306,6 +351,7 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            plan: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -328,6 +374,7 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            plan: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -348,6 +395,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
@@ -366,6 +414,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan: None,
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();

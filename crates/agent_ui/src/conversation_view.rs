@@ -24,7 +24,7 @@ use editor::{
     Editor, EditorEvent, EditorMode, MultiBuffer, PathKey, SelectionEffects, SizingBehavior,
 };
 use file_icons::FileIcons;
-use fs::Fs;
+
 use futures::FutureExt as _;
 use gpui::{
     Action, Animation, AnimationExt, App, ClickEvent, ClipboardItem, CursorStyle, ElementId, Empty,
@@ -240,15 +240,10 @@ impl ProfileProvider for Entity<agent::Thread> {
         });
     }
 
-    /// Never, for Zed's own agent.
-    ///
-    /// Plan and Build say everything a profile said, at the moment it matters,
-    /// and they say it in one control instead of two. A profile picker beside
-    /// the mode switch invites the two to disagree — a thread in Plan mode
-    /// under a profile that can write, or Build mode under one that cannot —
-    /// and the mode is the one the user just chose.
-    fn profiles_supported(&self, _cx: &App) -> bool {
-        false
+    fn profiles_supported(&self, cx: &App) -> bool {
+        self.read(cx)
+            .model()
+            .is_some_and(|model| model.supports_tools())
     }
 
     fn model_selected(&self, cx: &App) -> bool {
@@ -1369,20 +1364,12 @@ impl ConversationView {
             .detach();
         }
 
-        let profile_selector: Option<Rc<agent::NativeAgentConnection>> =
-            connection.clone().downcast();
-        let profile_selector = profile_selector
-            .and_then(|native_connection| native_connection.thread(&session_id, cx))
-            .map(|native_thread| {
-                cx.new(|cx| {
-                    ProfileSelector::new(
-                        <dyn Fs>::global(cx),
-                        Arc::new(native_thread),
-                        self.focus_handle(cx),
-                        cx,
-                    )
-                })
-            });
+        // No profile picker. It only ever existed for Zed's own agent, and Plan
+        // and Build now say what a profile said, at the moment it matters,
+        // through one control instead of two. Left as `None` rather than removed
+        // so that `ToggleProfileSelector` and `CycleModeSelector` fall through to
+        // the mode switch, which is what they should now reach.
+        let profile_selector = None;
 
         let agent_display_name = self
             .agent_server_store
@@ -2126,6 +2113,11 @@ impl ConversationView {
                 .as_connected()
                 .is_some_and(|connected| connected.threads.contains_key(&existing))
         {
+            // It may have been loaded from disk earlier in this session, which
+            // does not give a step thread its own tool back.
+            if let Some(connection) = self.as_native_connection(cx) {
+                connection.ensure_architect_step_tool(&root_session_id, &existing, node_id, cx);
+            }
             return Some(existing);
         }
 
@@ -2133,15 +2125,25 @@ impl ConversationView {
         // restart. Loading is asynchronous; the canvas picks the view up once it
         // arrives, so there is nothing to do here but ask for it.
         if let Some(existing) = existing {
-            let load = self.load_subagent_session(existing.clone(), root_session_id, window, cx);
+            let load =
+                self.load_subagent_session(existing.clone(), root_session_id.clone(), window, cx);
             let session_id = existing.clone();
             cx.spawn(async move |this, cx| {
                 load.await?;
-                // The loader has no way to know this subagent is one the user
-                // talks to, so the composer has to be restored once it is here.
+                // The loader is generic, so neither of the two things that make
+                // this a step thread survives it: the composer, and the tool that
+                // writes the step back to the plan.
                 this.update(cx, |this, cx| {
                     if let Some(view) = this.thread_view(&session_id) {
                         view.update(cx, |view, _cx| view.user_driven = true);
+                    }
+                    if let Some(connection) = this.as_native_connection(cx) {
+                        connection.ensure_architect_step_tool(
+                            &root_session_id,
+                            &session_id,
+                            node_id,
+                            cx,
+                        );
                     }
                 })
             })
@@ -3776,7 +3778,7 @@ pub(crate) mod tests {
     use editor::MultiBufferOffset;
     use editor::actions::Paste;
     use feature_flags::{AcpBetaFeatureFlag, FeatureFlag as _, FeatureFlagAppExt as _};
-    use fs::FakeFs;
+    use fs::{FakeFs, Fs};
     use gpui::{ClipboardItem, EventEmitter, TestAppContext, VisualTestContext, point, size};
     use parking_lot::Mutex;
     use project::Project;

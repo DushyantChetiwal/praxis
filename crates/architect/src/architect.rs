@@ -23,6 +23,7 @@ use agent_client_protocol::schema::v1 as acp;
 use collections::{HashMap, HashSet};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::fmt::{self, Display};
 
 #[derive(
@@ -291,9 +292,192 @@ impl Display for NodePath {
     }
 }
 
+/// Locked steps a new draft would have discarded.
+///
+/// Locking is the user's declaration that a step is settled, so a draft that
+/// drops or rewrites one is throwing away work they explicitly finished. That is
+/// refused rather than merged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockedStepsWouldChange {
+    /// The steps, named as the user knows them.
+    pub steps: Vec<String>,
+}
+
+/// A draft, merged over the plan it replaces.
+#[derive(Clone, Debug)]
+pub struct MergedDraft {
+    pub graph: ArchitectGraph,
+    /// Steps that kept something the draft did not carry: settled detail, their
+    /// own conversation, what they reported when they ran, or a plan inside.
+    pub preserved: Vec<NodeId>,
+}
+
+/// Where a step leads, and on what terms, in a form two graphs can be compared
+/// by. Ordered, so the same routing written in a different order still matches.
+fn routes_from(graph: &ArchitectGraph, id: &NodeId) -> Vec<(String, EdgeCondition)> {
+    let mut routes: Vec<(String, EdgeCondition)> = graph
+        .edges_from(id)
+        .map(|edge| (edge.to.0.clone(), edge.condition.clone()))
+        .collect();
+    routes.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.label().unwrap_or("").cmp(b.1.label().unwrap_or("")))
+    });
+    routes
+}
+
 impl ArchitectGraph {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// Lays a fresh draft over this plan, keeping what a draft cannot know.
+    ///
+    /// Drafting a plan replaces it wholesale, which used to mean that redrawing a
+    /// plan silently destroyed everything settled since it was first drawn: every
+    /// goal argued out in a step's own chat, every rule, every recorded result,
+    /// the layout the user arranged, and the step conversations themselves.
+    ///
+    /// Structure is the draft's business — which steps exist and what leads where.
+    /// Everything that was decided about a step, rather than proposed, is this
+    /// plan's business and is carried across.
+    pub fn merge_draft(
+        &self,
+        mut draft: ArchitectGraph,
+    ) -> Result<MergedDraft, LockedStepsWouldChange> {
+        let mut refused = Vec::new();
+        for settled in self.nodes.iter().filter(|node| node.locked) {
+            let rewritten = match draft.node(&settled.id) {
+                None => true,
+                Some(drafted) => {
+                    drafted.title != settled.title
+                        || drafted.intent.trim() != settled.intent.trim()
+                        || drafted.rules != settled.rules
+                        || drafted.capture.trim() != settled.capture.trim()
+                        || routes_from(&draft, &settled.id) != routes_from(self, &settled.id)
+                }
+            };
+            if rewritten {
+                refused.push(settled.title.clone());
+            }
+        }
+        if !refused.is_empty() {
+            return Err(LockedStepsWouldChange { steps: refused });
+        }
+
+        let mut preserved = Vec::new();
+        for node in &mut draft.nodes {
+            let Some(existing) = self.node(&node.id) else {
+                continue;
+            };
+
+            // None of this can be re-derived from a draft: whether the user
+            // settled the step, where they put it, the conversation they settled
+            // it in, what it reported when it ran, and the plan inside it.
+            node.locked = existing.locked;
+            node.pinned = existing.pinned;
+            node.position = existing.position;
+            node.chat = existing.chat.clone();
+            node.result = existing.result.clone();
+            if node.subplan.is_none() {
+                node.subplan = existing.subplan.clone();
+            }
+
+            // Detail a draft leaves blank is detail it did not mean to remove.
+            // A redraw that only changes the shape of the plan should not empty
+            // out the steps it keeps.
+            let mut kept_detail = false;
+            if node.intent.trim().is_empty() && !existing.intent.trim().is_empty() {
+                node.intent = existing.intent.clone();
+                kept_detail = true;
+            }
+            if node.rules.is_empty() && !existing.rules.is_empty() {
+                node.rules = existing.rules.clone();
+                kept_detail = true;
+            }
+            if node.capture.trim().is_empty() && !existing.capture.trim().is_empty() {
+                node.capture = existing.capture.clone();
+                kept_detail = true;
+            }
+
+            if kept_detail || existing.chat.is_some() || existing.result.is_some() {
+                preserved.push(node.id.clone());
+            }
+        }
+
+        Ok(MergedDraft {
+            graph: draft,
+            preserved,
+        })
+    }
+
+    /// The plan as the model should read it before redrawing it.
+    ///
+    /// Without this the model drafts blind: it cannot preserve a goal it has
+    /// never seen, and it cannot match a step it does not know the id of. Ids and
+    /// lock state are the load-bearing parts, so a redraw is an edit rather than
+    /// an invention.
+    pub fn outline(&self) -> String {
+        let mut out = String::new();
+        self.write_outline(&mut out, 0);
+        out
+    }
+
+    fn write_outline(&self, out: &mut String, depth: usize) {
+        let pad = "  ".repeat(depth);
+        for node in &self.nodes {
+            let _ = writeln!(
+                out,
+                "{pad}- {} — \"{}\"{}",
+                node.id.0,
+                node.title,
+                if node.locked {
+                    " [locked: settled, do not rewrite]"
+                } else {
+                    ""
+                }
+            );
+            if !node.intent.trim().is_empty() {
+                let _ = writeln!(out, "{pad}  goal: {}", node.intent.trim());
+            }
+            for rule in &node.rules {
+                let _ = writeln!(out, "{pad}  rule: {rule}");
+            }
+            if !node.capture.trim().is_empty() {
+                let _ = writeln!(out, "{pad}  capture: {}", node.capture.trim());
+            }
+            if node.pinned {
+                let _ = writeln!(out, "{pad}  told to every later step");
+            }
+            for edge in self.edges_from(&node.id) {
+                let when = match &edge.condition {
+                    EdgeCondition::Always => "always".to_string(),
+                    EdgeCondition::Deterministic { expression } => format!("if {expression}"),
+                    EdgeCondition::LlmEvaluated { question } => {
+                        format!("model decides: {question}")
+                    }
+                };
+                let _ = writeln!(out, "{pad}  leads to {} ({when})", edge.to.0);
+            }
+            if let Some(result) = &node.result {
+                let _ = writeln!(
+                    out,
+                    "{pad}  reported on attempt {}: {}",
+                    result.attempt.max(1),
+                    result.summary.trim()
+                );
+            }
+            if node.chat.is_some() {
+                let _ = writeln!(
+                    out,
+                    "{pad}  has its own conversation, where this step was argued out"
+                );
+            }
+            if let Some(subplan) = node.subplan() {
+                let _ = writeln!(out, "{pad}  contains a plan:");
+                subplan.write_outline(out, depth + 2);
+            }
+        }
     }
 
     pub fn node(&self, id: &NodeId) -> Option<&ArchitectNode> {
@@ -841,6 +1025,216 @@ mod tests {
     fn an_empty_graph_is_never_ready_to_run() {
         let graph = ArchitectGraph::default();
         assert!(!graph.is_fully_locked());
+    }
+
+    /// A settled plan, as it would be after the user argued the steps out and
+    /// locked one of them.
+    fn settled_plan() -> ArchitectGraph {
+        let mut graph: ArchitectGraph = ArchitectGraph::default();
+        graph.add_node(ArchitectNode {
+            intent: "Every migration is reversible".into(),
+            rules: vec!["Do not change the token format".into()],
+            capture: "The migration number".into(),
+            locked: true,
+            chat: Some(acp::SessionId::new("chat-schema")),
+            result: Some(StepResult {
+                summary: "Added expires_at, migration 0007".into(),
+                attempt: 2,
+            }),
+            position: Some(Position { x: 40.0, y: 80.0 }),
+            pinned: true,
+            ..ArchitectNode::new("schema", "Define schema")
+        });
+        graph.add_node(ArchitectNode {
+            intent: "Endpoints behave per schema".into(),
+            capture: "Which endpoints changed".into(),
+            chat: Some(acp::SessionId::new("chat-handlers")),
+            ..ArchitectNode::new("handlers", "Write handlers")
+        });
+        graph
+            .edges
+            .push(ArchitectEdge::new("schema->handlers", "schema", "handlers"));
+        graph
+    }
+
+    fn draft(json: serde_json::Value) -> ArchitectGraph {
+        serde_json::from_value::<ProposedGraph>(json)
+            .unwrap()
+            .into_graph()
+    }
+
+    #[test]
+    fn a_redraw_that_drops_a_locked_step_is_refused() {
+        // The failure this guards against lost an afternoon of deliberation to a
+        // single "revise the plan", with nothing on screen to say it had gone.
+        let settled = settled_plan();
+        let refusal = settled
+            .merge_draft(draft(serde_json::json!({
+                "nodes": [{ "id": "handlers", "title": "Write handlers" }],
+            })))
+            .expect_err("dropping a locked step must be refused");
+
+        assert_eq!(refusal.steps, vec!["Define schema"]);
+    }
+
+    #[test]
+    fn a_redraw_that_rewrites_a_locked_step_is_refused() {
+        let settled = settled_plan();
+        let refusal = settled
+            .merge_draft(draft(serde_json::json!({
+                "nodes": [
+                    { "id": "schema", "title": "Define schema", "intent": "Something else" },
+                    { "id": "handlers", "title": "Write handlers" },
+                ],
+            })))
+            .expect_err("rewriting a locked step must be refused");
+
+        assert_eq!(refusal.steps, vec!["Define schema"]);
+    }
+
+    #[test]
+    fn a_redraw_that_reroutes_a_locked_step_is_refused() {
+        // Where a settled step leads was settled with it.
+        let settled = settled_plan();
+        let refusal = settled
+            .merge_draft(draft(serde_json::json!({
+                "nodes": [
+                    {
+                        "id": "schema",
+                        "title": "Define schema",
+                        "intent": "Every migration is reversible",
+                        "rules": ["Do not change the token format"],
+                        "capture": "The migration number",
+                    },
+                    { "id": "handlers", "title": "Write handlers" },
+                    { "id": "tests", "title": "Add tests" },
+                ],
+                "edges": [{ "from": "schema", "to": "tests" }],
+            })))
+            .expect_err("rerouting a locked step must be refused");
+
+        assert_eq!(refusal.steps, vec!["Define schema"]);
+    }
+
+    #[test]
+    fn a_redraw_may_reshape_the_plan_around_a_locked_step() {
+        // Restating the locked step exactly is allowed: that is what preserving
+        // it looks like. Everything else about the plan is the draft's business.
+        let settled = settled_plan();
+        let merged = settled
+            .merge_draft(draft(serde_json::json!({
+                "nodes": [
+                    {
+                        "id": "schema",
+                        "title": "Define schema",
+                        "intent": "Every migration is reversible",
+                        "rules": ["Do not change the token format"],
+                        "capture": "The migration number",
+                    },
+                    { "id": "handlers", "title": "Write handlers" },
+                    { "id": "ship", "title": "Ship it" },
+                ],
+                "edges": [
+                    { "from": "schema", "to": "handlers" },
+                    { "from": "handlers", "to": "ship" },
+                ],
+            })))
+            .expect("reshaping around a locked step is allowed");
+
+        assert_eq!(merged.graph.nodes.len(), 3);
+        assert!(merged.graph.node(&NodeId::from("ship")).is_some());
+    }
+
+    #[test]
+    fn a_redraw_keeps_what_a_draft_cannot_know() {
+        let settled = settled_plan();
+        let merged = settled
+            .merge_draft(draft(serde_json::json!({
+                "nodes": [
+                    {
+                        "id": "schema",
+                        "title": "Define schema",
+                        "intent": "Every migration is reversible",
+                        "rules": ["Do not change the token format"],
+                        "capture": "The migration number",
+                    },
+                    { "id": "handlers", "title": "Write handlers" },
+                ],
+                "edges": [{ "from": "schema", "to": "handlers" }],
+            })))
+            .unwrap();
+
+        let schema = merged.graph.node(&NodeId::from("schema")).unwrap();
+        assert!(schema.locked, "a settled step must come back settled");
+        assert!(schema.pinned);
+        assert_eq!(schema.position, Some(Position { x: 40.0, y: 80.0 }));
+        assert_eq!(schema.chat, Some(acp::SessionId::new("chat-schema")));
+        assert_eq!(
+            schema.result.as_ref().map(|result| result.attempt),
+            Some(2),
+            "what a step reported when it ran is not the draft's to discard"
+        );
+
+        // The draft said nothing about this step beyond its title, which is not
+        // the same as saying it has no goal.
+        let handlers = merged.graph.node(&NodeId::from("handlers")).unwrap();
+        assert_eq!(handlers.intent, "Endpoints behave per schema");
+        assert_eq!(handlers.capture, "Which endpoints changed");
+        assert_eq!(
+            handlers.chat,
+            Some(acp::SessionId::new("chat-handlers")),
+            "redrawing a plan must not orphan a step's conversation"
+        );
+
+        assert!(merged.preserved.contains(&NodeId::from("handlers")));
+    }
+
+    #[test]
+    fn a_redraw_may_still_replace_detail_it_states() {
+        // Preserving blanks must not become refusing to edit.
+        let settled = settled_plan();
+        let merged = settled
+            .merge_draft(draft(serde_json::json!({
+                "nodes": [
+                    {
+                        "id": "schema",
+                        "title": "Define schema",
+                        "intent": "Every migration is reversible",
+                        "rules": ["Do not change the token format"],
+                        "capture": "The migration number",
+                    },
+                    {
+                        "id": "handlers",
+                        "title": "Write handlers",
+                        "intent": "A better goal",
+                    },
+                ],
+                "edges": [{ "from": "schema", "to": "handlers" }],
+            })))
+            .unwrap();
+
+        assert_eq!(
+            merged.graph.node(&NodeId::from("handlers")).unwrap().intent,
+            "A better goal"
+        );
+    }
+
+    #[test]
+    fn the_outline_gives_the_model_ids_and_what_is_settled() {
+        let outline = settled_plan().outline();
+
+        assert!(
+            outline.contains("schema"),
+            "ids are how a redraw matches up"
+        );
+        assert!(outline.contains("[locked: settled, do not rewrite]"));
+        assert!(outline.contains("goal: Every migration is reversible"));
+        assert!(outline.contains("rule: Do not change the token format"));
+        assert!(outline.contains("leads to handlers (always)"));
+        assert!(
+            outline.contains("has its own conversation"),
+            "the model has to know a step was argued out elsewhere"
+        );
     }
 
     #[test]

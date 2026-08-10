@@ -4404,6 +4404,30 @@ impl ThreadView {
         )
     }
 
+    /// Says so when the chosen model cannot use tools at all.
+    ///
+    /// This used to ride on the profile selector, which is gone. Without it a
+    /// model like this simply fails at anything needing a tool — no reading
+    /// files, no running a plan — with nothing on screen to say why.
+    fn render_tools_unsupported_notice(&self, cx: &App) -> Option<AnyElement> {
+        let model = self.as_native_thread(cx)?.read(cx).model()?;
+        if model.supports_tools() {
+            return None;
+        }
+
+        Some(
+            Button::new("tools-unsupported", "Tools Unsupported")
+                .disabled(true)
+                .label_size(LabelSize::Small)
+                .color(Color::Muted)
+                .tooltip(Tooltip::text(
+                    "This model does not support tools, so the agent cannot read files, \
+                     run commands, or carry out a plan. Pick another model.",
+                ))
+                .into_any_element(),
+        )
+    }
+
     pub(crate) fn render_message_editor(
         &mut self,
         window: &mut Window,
@@ -4518,6 +4542,7 @@ impl ThreadView {
                                     .flex_wrap()
                                     .gap_1()
                                     .children(self.render_token_usage(cx))
+                                    .children(self.render_tools_unsupported_notice(cx))
                                     .children(self.profile_selector.clone())
                                     .map(|this| match self.config_options_view.clone() {
                                         Some(config_view) => this.child(config_view),

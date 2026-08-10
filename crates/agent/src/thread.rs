@@ -4738,7 +4738,8 @@ impl Thread {
             .is_some_and(|turn| turn.tools.contains_key(name))
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    /// Whether the tool exists on this thread at all, regardless of whether the
+    /// current profile or mode lets the model see it.
     pub fn has_registered_tool(&self, name: &str) -> bool {
         self.tools.contains_key(name)
     }
@@ -4826,6 +4827,13 @@ impl Thread {
             ),
             is_linux: cfg!(target_os = "linux"),
             is_windows: cfg!(target_os = "windows"),
+            // Rebuilt every request, so it is never a stale copy of a plan the
+            // user has since reshaped.
+            plan: self
+                .architect_graph
+                .as_ref()
+                .filter(|graph| !graph.is_empty())
+                .map(|graph| graph.outline()),
         }
         .render(&self.templates)
         .context("failed to build system prompt")

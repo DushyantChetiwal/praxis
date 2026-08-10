@@ -2098,13 +2098,43 @@ impl NativeAgentConnection {
             agent.register_session(thread.clone(), project_id, 1, cx)
         });
 
-        // Bound to this one step, so however the conversation is steered it can
-        // only ever rewrite the step it was opened for.
-        thread.update(cx, |thread, _cx| {
-            thread.add_tool(RefineStepTool::new(parent_thread.downgrade(), node_id));
-        });
+        let session_id = acp_thread.read(cx).session_id().clone();
+        self.ensure_architect_step_tool(parent_session_id, &session_id, node_id, cx);
 
         Ok(acp_thread)
+    }
+
+    /// Gives a step's thread the tool that writes back to its step, if it does
+    /// not have it already.
+    ///
+    /// Tools are registered in code rather than saved with the thread, so a step
+    /// thread reopened from disk comes back without this one. That was silent and
+    /// total: the conversation would discuss the step, try to record it, and be
+    /// told no such tool exists. Which step a thread belongs to is known only to
+    /// the plan, so the caller has to say.
+    pub fn ensure_architect_step_tool(
+        &self,
+        parent_session_id: &acp::SessionId,
+        step_session_id: &acp::SessionId,
+        node_id: architect::NodeId,
+        cx: &mut App,
+    ) {
+        let (Some(parent_thread), Some(step_thread)) = (
+            self.thread(parent_session_id, cx),
+            self.thread(step_session_id, cx),
+        ) else {
+            log::warn!("Architect: no thread to give refine_step to for {step_session_id}");
+            return;
+        };
+
+        // Bound to this one step, so however the conversation is steered it can
+        // only ever rewrite the step it was opened for.
+        step_thread.update(cx, |thread, _cx| {
+            if thread.has_registered_tool(RefineStepTool::NAME) {
+                return;
+            }
+            thread.add_tool(RefineStepTool::new(parent_thread.downgrade(), node_id));
+        });
     }
 
     pub fn thread(&self, session_id: &acp::SessionId, cx: &App) -> Option<Entity<Thread>> {
@@ -7058,6 +7088,82 @@ mod internal_tests {
             // build: those belong to the main conversation.
             assert!(!enabled.contains_key("draft_plan"));
             assert!(!enabled.contains_key("edit_file"));
+        });
+    }
+
+    /// Tools live in code, not in the saved thread, so a step thread reopened
+    /// from disk came back without the one tool it exists to use. The failure was
+    /// total and silent: the conversation would argue the step out, try to record
+    /// it, and be told "No tool named refine_step exists".
+    #[gpui::test]
+    async fn test_a_reopened_step_thread_gets_its_tool_back(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/", json!({ "a": {} })).await;
+        let project = Project::test(fs.clone(), [], cx).await;
+        let thread_store = cx.new(|cx| ThreadStore::new(cx));
+        let agent = cx
+            .update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
+        let connection = Rc::new(NativeAgentConnection(agent.clone()));
+
+        let acp_thread = cx
+            .update(|cx| {
+                connection
+                    .clone()
+                    .new_session(project.clone(), PathList::new(&[Path::new("")]), cx)
+            })
+            .await
+            .unwrap();
+        let parent_session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+        let step_thread = cx
+            .update(|cx| {
+                connection.create_architect_step_thread(
+                    &parent_session_id,
+                    architect::NodeId::from("step-1"),
+                    "Write handlers".into(),
+                    cx,
+                )
+            })
+            .unwrap();
+        let step_session_id = step_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let step = agent.read_with(cx, |agent, _| {
+            agent.sessions.get(&step_session_id).unwrap().thread.clone()
+        });
+
+        // Stand in for coming back from disk, which produces a thread with no
+        // tools of its own.
+        step.update(cx, |thread, _cx| {
+            assert!(thread.remove_tool("refine_step"));
+        });
+        step.read_with(cx, |thread, _| {
+            assert!(!thread.has_registered_tool("refine_step"));
+        });
+
+        cx.update(|cx| {
+            connection.ensure_architect_step_tool(
+                &parent_session_id,
+                &step_session_id,
+                architect::NodeId::from("step-1"),
+                cx,
+            );
+        });
+
+        step.read_with(cx, |thread, _| {
+            assert!(
+                thread.has_registered_tool("refine_step"),
+                "reopening a step left it unable to record anything",
+            );
+        });
+
+        // Asking twice must not trip the duplicate-tool assertion.
+        cx.update(|cx| {
+            connection.ensure_architect_step_tool(
+                &parent_session_id,
+                &step_session_id,
+                architect::NodeId::from("step-1"),
+                cx,
+            );
         });
     }
 
