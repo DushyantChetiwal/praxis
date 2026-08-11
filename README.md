@@ -1,7 +1,30 @@
-# Zed
+# Zed — Architect fork
 
-[![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
-[![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
+> **This is a modified fork of [Zed](https://github.com/zed-industries/zed), not
+> an official release.** It is not affiliated with or endorsed by Zed
+> Industries, and "Zed" is their trademark. If you want the real editor, get it
+> from [zed.dev](https://zed.dev).
+>
+> **What this fork adds: Architect.** Instead of asking an agent to carry out a
+> task in one turn, you draft the work as a flowchart of steps on a canvas. Each
+> step states its goal, its rules, and what its summary must hand on to the steps
+> that follow. Steps can be argued out one at a time in a conversation of their
+> own, locked once settled, nested into sub-plans, and connected by conditions
+> — including loops, so a plan can go back and try again. Once every step is
+> locked, the plan runs one step at a time.
+>
+> The agent panel gains a Plan/Build mode switch in place of tool profiles:
+> planning withholds the tools that change the project, so a model asked to plan
+> cannot start building halfway through.
+>
+> Modifications live mostly in `crates/architect` (the graph model, plan
+> compilation and the runner), `crates/agent_ui/src/architect_ui.rs` (the
+> canvas), and additions to `crates/agent` and `crates/agent_ui`. See the git
+> history for the full set.
+>
+> Building and installing this fork on Windows: `script/install-local-windows.ps1`.
+
+---
 
 Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
 
@@ -46,4 +69,3 @@ Zed is developed by **Zed Industries, Inc.**, a for-profit company.
 If you’d like to financially support the project, you can do so via GitHub Sponsors.
 Sponsorships go directly to Zed Industries and are used as general company revenue.
 There are no perks or entitlements associated with sponsorship.
-
