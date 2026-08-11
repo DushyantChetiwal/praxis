@@ -40,8 +40,29 @@ function Get-VSArch {
     }
 }
 
+# Which edition of Visual Studio is installed is not knowable in advance: CI
+# images ship Enterprise, most desktops have Community, and either may be
+# Professional. `vswhere` is installed alongside every Visual Studio since 2017
+# and is the supported way to ask, so this works wherever the C++ toolset is.
+function Get-VsDevShell {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path $vswhere) {
+        $installPath = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+        if ($installPath) {
+            $devShell = Join-Path $installPath 'Common7\Tools\Launch-VsDevShell.ps1'
+            if (Test-Path $devShell) {
+                return $devShell
+            }
+        }
+    }
+    throw "Could not find Launch-VsDevShell.ps1. Install Visual Studio with the " + `
+        "'Desktop development with C++' workload."
+}
+
 Push-Location
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+& (Get-VsDevShell) -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
 Pop-Location
 
 $target = "$Architecture-pc-windows-msvc"
