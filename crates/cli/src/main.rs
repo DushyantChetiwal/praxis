@@ -518,10 +518,16 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    // Set custom data directory before any path operations
+    // Set custom data directory before any path operations.
+    //
+    // The same rule as the app itself: a build that is not the released one keeps
+    // its own directories. This has to agree with the app, because the socket the
+    // CLI talks to it over lives in that directory.
     let user_data_dir = args.user_data_dir.clone();
     if let Some(dir) = &user_data_dir {
         paths::set_custom_data_dir(dir);
+    } else if *release_channel::RELEASE_CHANNEL != release_channel::ReleaseChannel::Stable {
+        paths::set_data_dir_for_app(release_channel::RELEASE_CHANNEL.display_name());
     }
 
     #[cfg(target_os = "linux")]

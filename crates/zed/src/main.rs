@@ -211,6 +211,19 @@ fn main() {
 
     let args = Args::parse();
 
+    // Decided before anything can read a path, because the directories are
+    // resolved once and then cached.
+    //
+    // A build that is not the released one keeps its own directories. Zed's are
+    // named after the app rather than the channel, so without this a dev or
+    // forked build shares settings, logs and the thread database with an
+    // installed stable Zed, and saving a thread here rewrites one there.
+    if let Some(dir) = &args.user_data_dir {
+        paths::set_custom_data_dir(dir);
+    } else if *release_channel::RELEASE_CHANNEL != release_channel::ReleaseChannel::Stable {
+        paths::set_data_dir_for_app(release_channel::RELEASE_CHANNEL.display_name());
+    }
+
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
     #[cfg(not(target_os = "windows"))]
     if let Some(socket) = &args.askpass {
@@ -266,11 +279,6 @@ fn main() {
     if args.dump_all_actions {
         dump_all_gpui_actions();
         return;
-    }
-
-    // Set custom data directory.
-    if let Some(dir) = &args.user_data_dir {
-        paths::set_custom_data_dir(dir);
     }
 
     #[cfg(target_os = "windows")]

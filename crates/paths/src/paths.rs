@@ -118,6 +118,39 @@ pub fn set_custom_data_dir(dir: &str) -> &'static PathBuf {
     })
 }
 
+/// The platform's default data directory for an app of the given name.
+///
+/// Computed fresh rather than read from the cache, so a caller can derive a
+/// directory beside the default one before the real directories are resolved.
+pub fn platform_data_dir_for(app_name: &str) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home_dir()
+            .join("Library/Application Support")
+            .join(app_name)
+    } else if cfg!(target_os = "windows") {
+        dirs::data_local_dir()
+            .expect("failed to determine LocalAppData directory")
+            .join(app_name)
+    } else {
+        dirs::data_local_dir()
+            .expect("failed to determine XDG_DATA_HOME directory")
+            .join(app_name.to_lowercase())
+    }
+}
+
+/// Keeps this build's settings, threads and database out of the way of another
+/// build of the same app.
+///
+/// Zed keeps one set of user directories per app name rather than per release
+/// channel, so a dev or forked build otherwise reads and writes the same
+/// settings and the same thread database as an installed stable Zed — including
+/// rewriting saved threads it does not fully understand. Must be called before
+/// any path is read, like [`set_custom_data_dir`].
+pub fn set_data_dir_for_app(app_name: &str) -> &'static PathBuf {
+    let dir = platform_data_dir_for(app_name);
+    set_custom_data_dir(&dir.to_string_lossy())
+}
+
 /// Returns the path to the configuration directory used by Zed.
 pub fn config_dir() -> &'static PathBuf {
     CONFIG_DIR.get_or_init(|| {
