@@ -12,6 +12,13 @@ default-run = "zed"
 workspace = true
 
 [features]
+# On by default, unlike upstream. A remote server binary is normally downloaded
+# for the build's release channel, but this fork builds on the `dev` channel,
+# which is never published — the download fails with `invalid channel: dev`.
+# Upstream only compiles the build-from-source path in under `debug_assertions`,
+# so an optimised build of a fork cannot reach WSL or SSH at all without this.
+default = ["build-remote-server-binary"]
+build-remote-server-binary = ["remote/build-remote-server-binary"]
 tracy = ["ztracing/tracy"]
 # LEAK_BACKTRACE=1 cargo run --features zed/track-project-leak --profile release-fast
 track-project-leak = ["gpui/leak-detection"]
