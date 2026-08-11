@@ -239,6 +239,30 @@ fn handle_rpc_messages_over_child_process_stdio(
 }
 
 #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
+/// Where the remote server is built.
+///
+/// Inside the checkout, unless the checkout's path contains a space.
+/// `cargo-zigbuild` links through a generated `.bat` wrapper that does not quote
+/// the arguments it passes on, so every path handed to the linker is cut at the
+/// first space: a checkout under something like `C:\...\My Projects\` fails with
+/// `unrecognized file extension` on a truncated path. Building somewhere without
+/// spaces keeps the linker's arguments intact.
+fn remote_server_target_dir() -> std::path::PathBuf {
+    let in_checkout = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        .join("target")
+        .join("remote_server");
+    if !in_checkout.to_string_lossy().contains(' ') {
+        return in_checkout;
+    }
+
+    let elsewhere = std::env::temp_dir().join("zed-remote-server-build");
+    log::info!(
+        "checkout path contains a space, building the remote server in {} instead",
+        elsewhere.display()
+    );
+    elsewhere
+}
+
 async fn build_remote_server_from_source(
     platform: &crate::RemotePlatform,
     delegate: &dyn crate::RemoteClientDelegate,
@@ -246,7 +270,6 @@ async fn build_remote_server_from_source(
     cx: &mut AsyncApp,
 ) -> Result<Option<std::path::PathBuf>> {
     use std::env::VarError;
-    use std::path::Path;
     use util::command::{Command, Stdio, new_command};
 
     if let Ok(path) = std::env::var("ZED_COPY_REMOTE_SERVER") {
@@ -335,11 +358,10 @@ async fn build_remote_server_from_source(
                     "remote_server",
                     "--features",
                     "debug-embed",
-                    "--target-dir",
-                    "target/remote_server",
-                    "--target",
-                    &triple,
                 ])
+                .arg("--target-dir")
+                .arg(remote_server_target_dir())
+                .args(["--target", &triple])
                 .env("RUSTFLAGS", &rust_flags),
         )
         .await?;
@@ -381,18 +403,15 @@ async fn build_remote_server_from_source(
                     "remote_server",
                     "--features",
                     "debug-embed",
-                    "--target-dir",
-                    "target/remote_server",
-                    "--target",
-                    &triple,
                 ])
+                .arg("--target-dir")
+                .arg(remote_server_target_dir())
+                .args(["--target", &triple])
                 .env("RUSTFLAGS", &rust_flags),
         )
         .await?;
     };
-    let bin_path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-        .join("target")
-        .join("remote_server")
+    let bin_path = remote_server_target_dir()
         .join(&triple)
         .join("debug")
         .join("remote_server")
