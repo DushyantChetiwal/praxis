@@ -850,27 +850,53 @@ impl ArchitectPane {
         });
 
         let first_step = plan_run.current();
+        // The run reports to the thread, not to this view. A run outlives the
+        // canvas — that is the point of it living on the thread — so anything it
+        // records through the canvas is silently lost the moment the canvas is
+        // closed. That left the step counter frozen, `complete_step` with nowhere
+        // to write, and the run never marked finished, so the panel offered to
+        // stop a run that had ended.
+        //
+        // Weak, because the thread owns the task: a strong handle here would be a
+        // cycle that keeps the thread alive forever.
+        let thread = self.thread.downgrade();
         let task = cx.spawn({
             let first_step = first_step.clone();
-            async move |this, cx| {
+            // The canvas is deliberately unused in here: see `thread` above.
+            async move |_this, cx| {
                 let mut decision = Decision::Run(first_step);
                 let outcome = loop {
                     match decision {
                         Decision::Run(node) => {
                             let step_number = plan_run.steps_taken();
                             let attempt = node.leaf().map(|id| plan_run.attempt(id)).unwrap_or(1);
+                            // Read from the run's own copy of the plan rather than
+                            // the live one, so progress is named as the run sees it.
+                            let title: SharedString = graph
+                                .node_at(&node)
+                                .map(|step| SharedString::from(step.title.clone()))
+                                .or_else(|| node.leaf().map(|id| SharedString::from(id.0.clone())))
+                                .unwrap_or_else(|| SharedString::from("Step"));
                             // Telling the thread which step is running is what lets
                             // `complete_step` write its summary onto the right one.
-                            this.update(cx, |this, cx| {
-                                this.note_run_position(Some(node.clone()), step_number, cx);
-                                this.set_running_step(Some(node.clone()), cx);
-                            })
-                            .ok();
+                            thread
+                                .update(cx, |thread, cx| {
+                                    thread.note_architect_run_position(
+                                        node.clone(),
+                                        title,
+                                        step_number,
+                                        attempt,
+                                        cx,
+                                    );
+                                    thread.set_architect_running_step(Some(node.clone()));
+                                })
+                                .ok();
 
                             let prompt =
                                 architect::step_prompt(&graph, &node, step_number, attempt);
                             let sent = send_and_wait(&acp_thread, prompt, cx).await;
-                            this.update(cx, |this, cx| this.set_running_step(None, cx))
+                            thread
+                                .update(cx, |thread, _cx| thread.set_architect_running_step(None))
                                 .ok();
                             if let Err(error) = sent {
                                 log::error!("Architect: step \"{node}\" could not run: {error}");
@@ -883,8 +909,15 @@ impl ArchitectPane {
                             // was authored as a handover. Falling back to the last
                             // thing said keeps a run going when the model forgets to
                             // call the tool, at the cost of a vaguer handover.
-                            let reported = this
-                                .update(cx, |this, cx| this.reported_summary(&node, cx))
+                            let reported = thread
+                                .read_with(cx, |thread, _cx| {
+                                    thread
+                                        .architect_graph()
+                                        .and_then(|graph| graph.node_at(&node))
+                                        .and_then(|step| step.result.as_ref())
+                                        .map(|result| result.summary.trim().to_string())
+                                        .filter(|summary| !summary.is_empty())
+                                })
                                 .ok()
                                 .flatten();
                             let summary = match reported {
@@ -897,13 +930,37 @@ impl ArchitectPane {
                                     let scraped = acp_thread.read_with(cx, |thread, cx| {
                                         last_assistant_text(thread, cx)
                                     });
-                                    this.update(cx, |this, cx| {
-                                        this.record_step_result(&node, &scraped, attempt, cx);
-                                    })
-                                    .ok();
-                                    scraped.trim().to_string()
+                                    let summary = scraped.trim().to_string();
+                                    let path = node.clone();
+                                    let recorded = summary.clone();
+                                    thread
+                                        .update(cx, |thread, cx| {
+                                            thread.update_architect_graph(
+                                                move |graph| {
+                                                    if let Some(step) = graph.node_at_mut(&path) {
+                                                        step.result = Some(architect::StepResult {
+                                                            summary: recorded,
+                                                            attempt,
+                                                        });
+                                                    }
+                                                },
+                                                cx,
+                                            );
+                                        })
+                                        .ok();
+                                    summary
                                 }
                             };
+                            // Closes the step off in the run's own record, so the
+                            // timeline stops it counting up and can show what it
+                            // handed on.
+                            let reported: SharedString = summary.clone().into();
+                            thread
+                                .update(cx, |thread, cx| {
+                                    thread.finish_architect_run_step(Some(reported), cx);
+                                })
+                                .ok();
+
                             if let Some(step) = graph.node_at_mut(&node) {
                                 step.result = Some(architect::StepResult { summary, attempt });
                             }
@@ -949,7 +1006,10 @@ impl ArchitectPane {
                     log::error!("Architect: could not report how the run ended: {error}");
                 }
 
-                this.update(cx, |this, cx| this.finish_run(outcome, cx))
+                thread
+                    .update(cx, |thread, cx| {
+                        thread.finish_architect_run(outcome, cx);
+                    })
                     .ok();
             }
         });
@@ -969,70 +1029,6 @@ impl ArchitectPane {
             .map(|node| SharedString::from(node.title.clone()))
             .or_else(|| path.leaf().map(|id| SharedString::from(id.0.clone())))
             .unwrap_or_else(|| SharedString::from("Step"))
-    }
-
-    /// Records where the run has got to so progress can be shown.
-    fn note_run_position(
-        &mut self,
-        node: Option<NodePath>,
-        step_number: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(node) = node else {
-            return;
-        };
-        let title = self.step_title(&node, cx);
-        self.thread.update(cx, |thread, cx| {
-            thread.note_architect_run_position(node, title, step_number, cx);
-        });
-    }
-
-    /// Points the thread at the step being carried out, so `complete_step` has
-    /// somewhere to write.
-    fn set_running_step(&mut self, step: Option<NodePath>, cx: &mut Context<Self>) {
-        self.thread
-            .update(cx, |thread, _cx| thread.set_architect_running_step(step));
-    }
-
-    /// The summary `complete_step` recorded for a step, if it called it.
-    fn reported_summary(&self, path: &NodePath, cx: &Context<Self>) -> Option<String> {
-        let summary = self
-            .thread
-            .read(cx)
-            .architect_graph()?
-            .node_at(path)?
-            .result
-            .as_ref()?
-            .summary
-            .trim()
-            .to_string();
-        (!summary.is_empty()).then_some(summary)
-    }
-
-    /// Writes a step's summary back onto the live plan, so it survives the run
-    /// and is there to show in the inspector afterwards.
-    fn record_step_result(
-        &mut self,
-        path: &NodePath,
-        summary: &str,
-        attempt: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let summary = summary.trim().to_string();
-        let path = path.clone();
-        self.edit_graph(
-            move |graph| {
-                if let Some(node) = graph.node_at_mut(&path) {
-                    node.result = Some(architect::StepResult { summary, attempt });
-                }
-            },
-            cx,
-        );
-    }
-
-    fn finish_run(&mut self, outcome: RunOutcome, cx: &mut Context<Self>) {
-        self.thread
-            .update(cx, |thread, cx| thread.finish_architect_run(outcome, cx));
     }
 
     /// Stops a run between steps, and stops the turn it is waiting on.
