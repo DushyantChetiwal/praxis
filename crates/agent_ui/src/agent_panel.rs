@@ -5969,9 +5969,115 @@ impl AgentPanel {
             })
             .on_click(cx.listener(|this, _, window, cx| open_canvas(this, window, cx)));
 
+        let timeline = run.map(|run| Self::render_run_timeline(run, cx));
+
         // Matched insets, so the card sits in the panel rather than being
         // pushed against whatever follows it.
-        Some(div().w_full().px_2().pb_2().child(card).into_any_element())
+        Some(
+            v_flex()
+                .w_full()
+                .px_2()
+                .pb_2()
+                .gap_1()
+                .child(card)
+                .children(timeline)
+                .into_any_element(),
+        )
+    }
+
+    /// What the run has actually done, in the order it did it.
+    ///
+    /// The plan says what is supposed to happen; only this says what happened —
+    /// which steps a loop came back to, what each one handed on, and where the
+    /// time went. It is the difference between a status label and being able to
+    /// follow along, and it stays after the run ends, because that is when what
+    /// a run did is most worth reading.
+    fn render_run_timeline(run: &agent::ArchitectRun, cx: &Context<Self>) -> AnyElement {
+        /// Enough of the tail to follow along without turning the panel into a
+        /// log. Earlier steps are counted rather than listed.
+        const SHOWN: usize = 6;
+
+        let history = run.history();
+        if history.is_empty() {
+            return div().into_any_element();
+        }
+        let hidden = history.len().saturating_sub(SHOWN);
+
+        // Coarse on purpose: the useful question is whether a step took seconds
+        // or minutes, not how many milliseconds.
+        fn describe(elapsed: std::time::Duration) -> String {
+            let seconds = elapsed.as_secs();
+            if seconds < 60 {
+                format!("{seconds}s")
+            } else {
+                format!("{}m {:02}s", seconds / 60, seconds % 60)
+            }
+        }
+
+        v_flex()
+            .w_full()
+            .gap_0p5()
+            .when(hidden > 0, |this| {
+                this.child(
+                    div().px_1().child(
+                        Label::new(match hidden {
+                            1 => "1 earlier step".to_string(),
+                            count => format!("{count} earlier steps"),
+                        })
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                    ),
+                )
+            })
+            .children(history.iter().enumerate().skip(hidden).map(|(ix, step)| {
+                let running = step.is_running();
+                h_flex()
+                    .id(("architect-run-step", ix))
+                    .w_full()
+                    .gap_1p5()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .when(running, |this| this.bg(cx.theme().status().info_background))
+                    .child(
+                        Icon::new(if running {
+                            IconName::PlayFilled
+                        } else {
+                            IconName::Check
+                        })
+                        .size(IconSize::XSmall)
+                        .color(if running {
+                            Color::Info
+                        } else {
+                            Color::Success
+                        }),
+                    )
+                    .child(
+                        Label::new(step.title.clone())
+                            .size(LabelSize::XSmall)
+                            .color(if running { Color::Info } else { Color::Default })
+                            .truncate(),
+                    )
+                    // A step reached twice is a loop doing its job, and the
+                    // thing most worth noticing in a run that is dragging.
+                    .when(step.attempt > 1, |this| {
+                        this.child(
+                            Label::new(format!("attempt {}", step.attempt))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Warning),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .child(
+                        Label::new(describe(step.elapsed()))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .when_some(step.summary.clone(), |this, summary| {
+                        this.tooltip(Tooltip::text(summary))
+                    })
+            }))
+            .into_any_element()
     }
 
     /// The way into the Architect canvas.

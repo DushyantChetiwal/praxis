@@ -193,6 +193,35 @@ fn tool_changes_the_project(tool_name: &str) -> bool {
     )
 }
 
+/// One step as a run took it.
+///
+/// A plan says what is meant to happen; this says what did. They differ in the
+/// ways that matter most to read afterwards: the order steps were actually
+/// reached, which ones a loop brought round more than once, and how long each
+/// took.
+pub struct RunStep {
+    pub path: architect::NodePath,
+    pub title: SharedString,
+    /// Counting from 1. A step a loop returns to is on attempt 2.
+    pub attempt: usize,
+    /// What the step reported. `None` while it is still running.
+    pub summary: Option<SharedString>,
+    started_at: Instant,
+    /// Set when the step ends, so a finished step stops counting up.
+    elapsed: Option<Duration>,
+}
+
+impl RunStep {
+    pub fn is_running(&self) -> bool {
+        self.elapsed.is_none()
+    }
+
+    /// How long the step took, or has been going so far.
+    pub fn elapsed(&self) -> Duration {
+        self.elapsed.unwrap_or_else(|| self.started_at.elapsed())
+    }
+}
+
 /// A plan being carried out, and enough of its position to show progress
 /// wherever the user happens to be looking.
 pub struct ArchitectRun {
@@ -204,6 +233,9 @@ pub struct ArchitectRun {
     /// Which step of the run this is, counting repeats.
     pub step_number: usize,
     pub outcome: Option<architect::RunOutcome>,
+    /// Every step taken, in the order taken, including repeats. Kept after the
+    /// run ends: what a run actually did is worth more once it is over.
+    history: Vec<RunStep>,
     /// Dropping this stops the run at its next await point. Held here so that
     /// closing the canvas cannot abandon a run.
     _task: Task<()>,
@@ -212,6 +244,10 @@ pub struct ArchitectRun {
 impl ArchitectRun {
     pub fn is_running(&self) -> bool {
         self.outcome.is_none()
+    }
+
+    pub fn history(&self) -> &[RunStep] {
+        &self.history
     }
 }
 
@@ -2170,22 +2206,53 @@ impl Thread {
             current_title,
             step_number: 1,
             outcome: None,
+            history: Vec::new(),
             _task: task,
         });
         cx.notify();
     }
 
+    /// Records that the run has entered a step.
     pub fn note_architect_run_position(
         &mut self,
         current: architect::NodePath,
         current_title: SharedString,
         step_number: usize,
+        attempt: usize,
         cx: &mut Context<Self>,
     ) {
         if let Some(run) = self.architect_run.as_mut() {
-            run.current = Some(current);
-            run.current_title = current_title;
+            run.current = Some(current.clone());
+            run.current_title = current_title.clone();
             run.step_number = step_number;
+            run.history.push(RunStep {
+                path: current,
+                title: current_title,
+                attempt,
+                summary: None,
+                started_at: Instant::now(),
+                elapsed: None,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Closes off the step the run is in, with whatever it reported.
+    ///
+    /// Kept separate from moving to the next step because a step can end without
+    /// another following it, and a run that ended should not leave its last step
+    /// counting up forever.
+    pub fn finish_architect_run_step(
+        &mut self,
+        summary: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(run) = self.architect_run.as_mut()
+            && let Some(step) = run.history.last_mut()
+            && step.is_running()
+        {
+            step.elapsed = Some(step.started_at.elapsed());
+            step.summary = summary;
         }
         cx.notify();
     }
@@ -2194,6 +2261,13 @@ impl Thread {
         if let Some(run) = self.architect_run.as_mut() {
             run.current = None;
             run.outcome = Some(outcome);
+            // A run cancelled mid-step leaves that step open, and a step that
+            // never ends reads as one still running.
+            if let Some(step) = run.history.last_mut()
+                && step.is_running()
+            {
+                step.elapsed = Some(step.started_at.elapsed());
+            }
         }
         self.architect_running_step = None;
         cx.notify();

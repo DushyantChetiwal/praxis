@@ -7167,6 +7167,93 @@ mod internal_tests {
         });
     }
 
+    /// A run keeps its own record of what it did, which is the only place the
+    /// order steps were actually taken and how long each took can be read. It
+    /// also has to close every step it opens: a step left open reads as one
+    /// still running, which is how the panel came to offer to stop a run that
+    /// had already ended.
+    #[gpui::test]
+    async fn test_a_run_records_the_steps_it_took(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/", json!({ "a": {} })).await;
+        let project = Project::test(fs.clone(), [], cx).await;
+        let thread_store = cx.new(|cx| ThreadStore::new(cx));
+        let agent = cx
+            .update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
+        let connection = Rc::new(NativeAgentConnection(agent.clone()));
+
+        let acp_thread = cx
+            .update(|cx| {
+                connection
+                    .clone()
+                    .new_session(project.clone(), PathList::new(&[Path::new("")]), cx)
+            })
+            .await
+            .unwrap();
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = agent.read_with(cx, |agent, _| {
+            agent.sessions.get(&session_id).unwrap().thread.clone()
+        });
+
+        let first = architect::NodePath(vec![architect::NodeId::from("first")]);
+        let second = architect::NodePath(vec![architect::NodeId::from("second")]);
+
+        thread.update(cx, |thread, cx| {
+            thread.start_architect_run(first.clone(), "First".into(), Task::ready(()), cx);
+            thread.note_architect_run_position(first.clone(), "First".into(), 1, 1, cx);
+        });
+
+        thread.read_with(cx, |thread, _| {
+            let history = thread.architect_run().unwrap().history();
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].title, "First");
+            assert!(history[0].is_running());
+        });
+
+        thread.update(cx, |thread, cx| {
+            thread.finish_architect_run_step(Some("wrote the migration".into()), cx);
+        });
+
+        thread.read_with(cx, |thread, _| {
+            let step = &thread.architect_run().unwrap().history()[0];
+            assert!(!step.is_running(), "a finished step must stop counting up");
+            assert_eq!(step.summary.as_deref(), Some("wrote the migration"));
+        });
+
+        // A loop bringing a step round again is a separate entry, not an edit of
+        // the first: what the earlier attempt reported is worth keeping.
+        thread.update(cx, |thread, cx| {
+            thread.note_architect_run_position(second.clone(), "Second".into(), 2, 2, cx);
+        });
+
+        thread.read_with(cx, |thread, _| {
+            let history = thread.architect_run().unwrap().history();
+            assert_eq!(history.len(), 2);
+            assert_eq!(history[1].attempt, 2);
+            assert!(history[1].is_running());
+        });
+
+        // Stopping mid-step must not leave that step running forever.
+        thread.update(cx, |thread, cx| {
+            thread.finish_architect_run(architect::RunOutcome::Cancelled, cx);
+        });
+
+        thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().unwrap();
+            assert!(!run.is_running());
+            assert!(
+                run.history().iter().all(|step| !step.is_running()),
+                "a run that has ended cannot still have a step in progress",
+            );
+            assert_eq!(
+                run.history().len(),
+                2,
+                "the record of what a run did outlives the run",
+            );
+        });
+    }
+
     fn thread_entries(
         thread_store: &Entity<ThreadStore>,
         cx: &mut TestAppContext,
