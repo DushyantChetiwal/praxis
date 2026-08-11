@@ -2,7 +2,13 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 
 $CARGO_ABOUT_VERSION="0.8.2"
-$outputFile=$args[0] ? $args[0] : "$(Get-Location)/assets/licenses.md"
+# Written long-hand rather than with `? :`, which is PowerShell 7 only. Windows
+# ships 5.1, so the ternary form made this script unrunnable on a stock machine.
+if ($args[0]) {
+    $outputFile = $args[0]
+} else {
+    $outputFile = "$(Get-Location)/assets/licenses.md"
+}
 $templateFile="script/licenses/template.md.hbs"
 
 New-Item -Path "$outputFile" -ItemType File -Value "" -Force
@@ -34,7 +40,11 @@ if ($needsInstall) {
 
 Write-Host "Generating cargo licenses"
 
-$failFlag = $env:ALLOW_MISSING_LICENSES ? "--fail" : ""
+if ($env:ALLOW_MISSING_LICENSES) {
+    $failFlag = "--fail"
+} else {
+    $failFlag = ""
+}
 $args = @('about', 'generate', $failFlag, '-c', 'script/licenses/zed-licenses.toml', $templateFile, '-o', $outputFile) | Where-Object { $_ }
 cargo @args
 
