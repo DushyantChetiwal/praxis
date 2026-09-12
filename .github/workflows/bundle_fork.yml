@@ -26,12 +26,17 @@ on:
         required: false
         default: true
         type: boolean
+      build_windows:
+        description: Build the Windows installer and Linux remote server
+        required: false
+        default: true
+        type: boolean
 
 jobs:
   macos:
     name: macOS (aarch64)
     if: inputs.build_macos
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 120
     env:
       # Nothing is reused between runs, so incremental artifacts are only cost.
@@ -84,6 +89,7 @@ jobs:
 
   linux_remote_server_x86_64:
     name: Linux remote server (x86_64 musl)
+    if: inputs.build_windows
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -122,6 +128,7 @@ jobs:
 
   windows:
     name: Windows (x86_64)
+    if: inputs.build_windows
     needs: linux_remote_server_x86_64
     # Pinned to 2022 on purpose: `bundle-windows.ps1` expects Inno Setup 6 at its
     # default location, which the 2022 image has and later images may not.
