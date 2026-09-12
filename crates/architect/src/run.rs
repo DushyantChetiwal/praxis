@@ -69,11 +69,11 @@ impl RunOutcome {
 
     /// A sentence describing the end of the run, for the transcript.
     pub fn describe(&self, graph: &ArchitectGraph) -> String {
-        let title = |id: &NodeId| {
-            find_title(graph, id).unwrap_or_else(|| id.0.clone())
-        };
+        let title = |id: &NodeId| find_title(graph, id).unwrap_or_else(|| id.0.clone());
         match self {
-            RunOutcome::Completed => "The plan is complete; every step has been carried out.".into(),
+            RunOutcome::Completed => {
+                "The plan is complete; every step has been carried out.".into()
+            }
             RunOutcome::StepLimit { steps } => format!(
                 "The run was stopped after {steps} steps, which means the plan is looping without \
                  ever reaching an end. Do not carry on; say which step kept repeating and what \
@@ -634,11 +634,13 @@ mod tests {
         graph.add_node(ArchitectNode::new("test", "Run the tests"));
         graph.connect("plan", "edit");
         graph.connect("edit", "test");
-        graph.edges.push(
-            ArchitectEdge::new("retry", "test", "edit").with_condition(EdgeCondition::LlmEvaluated {
-                question: "Did the tests fail?".into(),
-            }),
-        );
+        graph
+            .edges
+            .push(ArchitectEdge::new("retry", "test", "edit").with_condition(
+                EdgeCondition::LlmEvaluated {
+                    question: "Did the tests fail?".into(),
+                },
+            ));
         lock_deeply(&mut graph);
         graph
     }
@@ -692,13 +694,13 @@ mod tests {
         graph.add_node(ArchitectNode::new("check", "Check the build"));
         graph.add_node(ArchitectNode::new("fix", "Fix the build"));
         graph.add_node(ArchitectNode::new("ship", "Ship it"));
-        graph.edges.push(
-            ArchitectEdge::new("broken", "check", "fix").with_condition(
+        graph
+            .edges
+            .push(ArchitectEdge::new("broken", "check", "fix").with_condition(
                 EdgeCondition::Deterministic {
                     expression: "the build failed".into(),
                 },
-            ),
-        );
+            ));
         graph.connect("check", "ship");
         lock_deeply(&mut graph);
 
@@ -732,7 +734,10 @@ mod tests {
         let graph = nested_graph();
         let mut run = PlanRun::start(&graph).unwrap();
 
-        assert_eq!(run.finish_step(&graph), Decision::Run(path(&["handlers", "parse"])));
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Run(path(&["handlers", "parse"]))
+        );
         assert_eq!(run.depth(), 2, "the run should be inside the sub-plan");
     }
 
@@ -931,11 +936,13 @@ mod tests {
     fn a_loop_that_never_exits_is_stopped_rather_than_run_forever() {
         let mut graph = ArchitectGraph::default();
         graph.add_node(ArchitectNode::new("work", "Work"));
-        graph.edges.push(
-            ArchitectEdge::new("again", "work", "work").with_condition(EdgeCondition::LlmEvaluated {
-                question: "Again?".into(),
-            }),
-        );
+        graph
+            .edges
+            .push(ArchitectEdge::new("again", "work", "work").with_condition(
+                EdgeCondition::LlmEvaluated {
+                    question: "Again?".into(),
+                },
+            ));
         lock_deeply(&mut graph);
 
         let mut run = PlanRun::start(&graph).unwrap();

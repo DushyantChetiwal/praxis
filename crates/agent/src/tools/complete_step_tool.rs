@@ -38,13 +38,8 @@ pub struct CompleteStepToolInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CompleteStepToolOutput {
-    Success {
-        step: String,
-        attempt: usize,
-    },
-    Error {
-        error: String,
-    },
+    Success { step: String, attempt: usize },
+    Error { error: String },
 }
 
 impl From<CompleteStepToolOutput> for LanguageModelToolResultContent {
@@ -117,20 +112,21 @@ impl AgentTool for CompleteStepTool {
                     let Some(path) = thread.architect_running_step().cloned() else {
                         return None;
                     };
-                    thread.update_architect_graph(
-                        |graph| {
-                            let node = graph.node_at_mut(&path)?;
-                            let attempt =
-                                node.result.as_ref().map_or(1, |result| result.attempt + 1);
-                            node.result = Some(StepResult {
-                                summary: summary.clone(),
-                                attempt,
-                            });
-                            Some((node.title.clone(), attempt))
-                        },
-                        cx,
-                    )
-                    .flatten()
+                    thread
+                        .update_architect_graph(
+                            |graph| {
+                                let node = graph.node_at_mut(&path)?;
+                                let attempt =
+                                    node.result.as_ref().map_or(1, |result| result.attempt + 1);
+                                node.result = Some(StepResult {
+                                    summary: summary.clone(),
+                                    attempt,
+                                });
+                                Some((node.title.clone(), attempt))
+                            },
+                            cx,
+                        )
+                        .flatten()
                 })
                 .map_err(|error| CompleteStepToolOutput::Error {
                     error: format!("The plan this step belongs to is gone: {error}"),

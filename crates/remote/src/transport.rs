@@ -352,7 +352,10 @@ async fn build_remote_server_from_source(
         log::info!("building remote server binary from source");
         run_cmd(
             new_command("cargo")
-                .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+                .current_dir(
+                    util::dev_repo_root()
+                        .context("locating the zed checkout to build remote_server from source")?,
+                )
                 .args([
                     "build",
                     "--package",
@@ -397,7 +400,10 @@ async fn build_remote_server_from_source(
         log::info!("building remote binary from source for {triple} with Zig");
         run_cmd(
             new_command("cargo")
-                .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+                .current_dir(
+                    util::dev_repo_root()
+                        .context("locating the zed checkout to build remote_server from source")?,
+                )
                 .args([
                     "zigbuild",
                     "--package",

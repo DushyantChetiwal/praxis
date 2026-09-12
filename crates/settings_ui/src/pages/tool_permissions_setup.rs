@@ -1407,6 +1407,9 @@ mod tests {
             // Asking a question only pauses the conversation for user input; it
             // does not access the project or perform an external side effect.
             "ask_question",
+            // Interactive prompt: always asks the user via prompt_for_decision,
+            // so it has no settings-driven permission rules.
+            "ask_user",
             "diagnostics",
             "find_path",
             "find_references",

@@ -1,0 +1,95 @@
+name: sync_upstream
+
+on:
+  schedule:
+    # Keep the fork current without paying the cost of a full build every day.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      rebuild:
+        description: Rebuild Windows and macOS after a successful update
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge, validate, and rebuild
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out the Architect branch
+        uses: actions/checkout@v4
+        with:
+          ref: Enhanced_Agents
+          fetch-depth: 0
+
+      - name: Merge upstream Zed
+        id: sync
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/zed-industries/zed.git 2>/dev/null || \
+            git remote set-url upstream https://github.com/zed-industries/zed.git
+          git fetch --no-tags upstream main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Architect is already current with upstream." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if ! git merge --no-ff --no-edit upstream/main; then
+            conflicts="$(git diff --name-only --diff-filter=U)"
+            {
+              echo "## Upstream merge needs manual resolution"
+              echo
+              echo '```text'
+              echo "$conflicts"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort
+            exit 1
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "Merged upstream commit $(git rev-parse upstream/main)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cache Rust build artifacts
+        if: steps.sync.outputs.changed == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: sync-upstream-linux
+          cache-on-failure: true
+
+      - name: Validate the merged source
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          cargo metadata --locked --no-deps --format-version 1 > /dev/null
+          cargo check --locked --package architect --package agent --package agent_ui --package zed
+
+      - name: Push the update
+        if: steps.sync.outputs.changed == 'true'
+        run: git push origin HEAD:Enhanced_Agents
+
+      - name: Rebuild Windows and macOS
+        if: >-
+          steps.sync.outputs.changed == 'true' &&
+          (github.event_name == 'schedule' || inputs.rebuild)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh workflow run bundle_fork.yml
+          --repo "${{ github.repository }}"
+          --ref main
+          -f build_macos=true
+          -f build_windows=true

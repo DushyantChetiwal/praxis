@@ -276,7 +276,10 @@ mod tests {
         assert!(input.lock);
 
         let routing = input.routing.unwrap();
-        assert!(routing[0].condition.is_none(), "a plain connection needs no condition");
+        assert!(
+            routing[0].condition.is_none(),
+            "a plain connection needs no condition"
+        );
         assert!(matches!(
             routing[1].condition,
             Some(RouteCondition::LlmEvaluated { .. })
