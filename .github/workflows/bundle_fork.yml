@@ -1,0 +1,157 @@
+# Installers for this fork, each built on the OS it targets.
+#
+# Upstream's `run_bundling.yml` cannot be used here: it runs on Zed Industries'
+# private runners (`namespace-profile-mac-large`, `self-32vcpu-windows-2022`) and
+# expects their Sentry, Apple and signing secrets. This does the same two jobs on
+# GitHub-hosted runners with no secrets at all.
+#
+# A macOS installer can only be produced on macOS — `script/bundle-mac` needs
+# `hdiutil` to make the .dmg, plus `codesign` and the Apple SDK — which is why
+# this workflow exists rather than a local build script.
+#
+# Both artifacts are UNSIGNED. Expect:
+#   macOS   — Gatekeeper refuses the first open. Right-click → Open, or
+#             `xattr -d com.apple.quarantine /Applications/Zed\ Dev.app`.
+#   Windows — SmartScreen warns about an unknown publisher.
+#
+# Run it from the Actions tab; it is deliberately manual, because each job is a
+# full optimised build and takes upwards of an hour.
+name: bundle_fork
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    name: macOS (aarch64)
+    runs-on: macos-14
+    timeout-minutes: 120
+    env:
+      # Nothing is reused between runs, so incremental artifacts are only cost.
+      CARGO_INCREMENTAL: 0
+      # `bundle-mac` ad-hoc signs when the Apple secrets are absent, which is the
+      # case here. Left unset deliberately rather than defined empty.
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@v4
+        with:
+          ref: Enhanced_Agents
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bundle-macos-aarch64
+          cache-on-failure: true
+
+      - name: Set up Node
+        # `bundle-mac` installs `dmg-license` globally to attach the license
+        # agreement to the .dmg.
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Show the toolchain
+        # rustup honours rust-toolchain.toml, so the pinned version installs on
+        # first use. Printing it makes a toolchain surprise obvious in the log.
+        run: rustup show && cargo --version
+
+      - name: Bundle
+        run: ./script/bundle-mac aarch64-apple-darwin
+
+      - name: Upload the disk image
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-architect-macos-aarch64-dmg
+          path: target/aarch64-apple-darwin/release/Zed-aarch64.dmg
+          if-no-files-found: error
+
+      - name: Upload the remote server
+        # Needed to open a project over SSH from the bundled app, since this
+        # fork's channel is never published and so cannot download one.
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-architect-remote-server-macos-aarch64
+          path: target/zed-remote-server-macos-aarch64.gz
+          if-no-files-found: warn
+
+  linux_remote_server_x86_64:
+    name: Linux remote server (x86_64 musl)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@v4
+        with:
+          ref: Enhanced_Agents
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: remote-server-linux-x86_64
+          cache-on-failure: true
+
+      - name: Install musl and LLVM tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools llvm
+
+      - name: Build the remote server
+        run: bash ./script/build-linux-remote-server
+
+      - name: Upload the remote server
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-architect-remote-server-linux-x86_64
+          path: |
+            target/zed-remote-server-linux-x86_64.gz
+            target/zed-remote-server-linux-x86_64.gz.sha256
+            target/zed-remote-server-linux-x86_64.json
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows (x86_64)
+    needs: linux_remote_server_x86_64
+    # Pinned to 2022 on purpose: `bundle-windows.ps1` expects Inno Setup 6 at its
+    # default location, which the 2022 image has and later images may not.
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@v4
+        with:
+          ref: Enhanced_Agents
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bundle-windows-x86_64
+          cache-on-failure: true
+
+      - name: Download the Linux remote server
+        uses: actions/download-artifact@v4
+        with:
+          name: zed-architect-remote-server-linux-x86_64
+          path: target
+
+      - name: Show the toolchain
+        run: rustup show; cargo --version
+
+      - name: Bundle
+        run: ./script/bundle-windows.ps1
+        shell: pwsh
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          # Globbed because the file name carries the version from Cargo.toml.
+          name: zed-architect-windows-x86_64-installer
+          path: target/ZedEditorUserSetup-*.exe
+          if-no-files-found: error
