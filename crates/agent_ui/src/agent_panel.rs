@@ -91,7 +91,7 @@ use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
 use text::OffsetRangeExt;
 use theme_settings::ThemeSettings;
 use ui::{
-    ContextMenu, ContextMenuEntry, GradientFade, IconButton, KeyBinding, PopoverMenu,
+    ContextMenu, ContextMenuEntry, Disclosure, GradientFade, IconButton, KeyBinding, PopoverMenu,
     PopoverMenuHandle, ProjectEmptyState, Tab, Tooltip, prelude::*, utils::WithRemSize,
 };
 use util::ResultExt as _;
@@ -1184,6 +1184,7 @@ pub struct AgentPanel {
     _active_draft_reclaim_observation: Option<Subscription>,
     _thread_metadata_store_subscription: Subscription,
     last_context_source: Option<AgentContextSource>,
+    architect_timeline_expanded: bool,
 
     is_active: bool,
 }
@@ -1588,6 +1589,7 @@ impl AgentPanel {
             _active_draft_reclaim_observation: None,
             _thread_metadata_store_subscription,
             last_context_source: None,
+            architect_timeline_expanded: true,
             is_active: false,
         };
 
@@ -5847,8 +5849,9 @@ impl AgentPanel {
         let card = v_flex()
             .id("architect-status")
             .w_full()
-            .gap_1p5()
-            .p_2()
+            .gap_1()
+            .px_2()
+            .py_1p5()
             .rounded_md()
             .border_1()
             .border_color(if running {
@@ -5866,11 +5869,11 @@ impl AgentPanel {
             .child(
                 h_flex()
                     .w_full()
-                    .gap_1p5()
+                    .gap_1()
                     .justify_between()
                     .child(
                         h_flex()
-                            .gap_1p5()
+                            .gap_1()
                             .min_w_0()
                             .child(
                                 Icon::new(if running {
@@ -5906,6 +5909,7 @@ impl AgentPanel {
                                 "Stop the run. The plan and everything done so far are kept.",
                             ))
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
                                 let Some(thread) = this
                                     .active_thread_view(cx)
                                     .and_then(|view| view.read(cx).as_native_thread(cx))
@@ -5920,9 +5924,10 @@ impl AgentPanel {
                             .label_size(LabelSize::XSmall)
                             .style(ButtonStyle::Subtle)
                             .end_icon(Icon::new(IconName::ArrowUpRight).size(IconSize::XSmall))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| open_canvas(this, window, cx)),
-                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                cx.stop_propagation();
+                                open_canvas(this, window, cx);
+                            }))
                             .into_any_element()
                     }),
             )
@@ -5969,7 +5974,43 @@ impl AgentPanel {
             })
             .on_click(cx.listener(|this, _, window, cx| open_canvas(this, window, cx)));
 
-        let timeline = run.map(|run| Self::render_run_timeline(run, cx));
+        let timeline = run.and_then(|run| {
+            let history_len = run.history().len();
+            (history_len > 0).then(|| {
+                v_flex()
+                    .w_full()
+                    .gap_0p5()
+                    .child(
+                        h_flex()
+                            .id("architect-run-history-toggle")
+                            .w_full()
+                            .gap_1()
+                            .px_1()
+                            .py_0p5()
+                            .cursor_pointer()
+                            .child(Disclosure::new(
+                                "architect-run-history-disclosure",
+                                self.architect_timeline_expanded,
+                            ))
+                            .child(
+                                Label::new(format!(
+                                    "Run history · {history_len} {}",
+                                    if history_len == 1 { "step" } else { "steps" }
+                                ))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.architect_timeline_expanded =
+                                    !this.architect_timeline_expanded;
+                                cx.notify();
+                            })),
+                    )
+                    .when(self.architect_timeline_expanded, |this| {
+                        this.child(Self::render_run_timeline(run, cx))
+                    })
+            })
+        });
 
         // Matched insets, so the card sits in the panel rather than being
         // pushed against whatever follows it.
@@ -5977,8 +6018,8 @@ impl AgentPanel {
             v_flex()
                 .w_full()
                 .px_2()
-                .pb_2()
-                .gap_1()
+                .pb_1p5()
+                .gap_0p5()
                 .child(card)
                 .children(timeline)
                 .into_any_element(),
