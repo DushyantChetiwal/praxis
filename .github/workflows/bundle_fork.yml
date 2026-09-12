@@ -37,7 +37,7 @@ jobs:
     name: macOS (aarch64)
     if: inputs.build_macos
     runs-on: macos-15
-    timeout-minutes: 120
+    timeout-minutes: 240
     env:
       # Nothing is reused between runs, so incremental artifacts are only cost.
       CARGO_INCREMENTAL: 0
@@ -129,7 +129,7 @@ jobs:
     # Pinned to 2022 on purpose: `bundle-windows.ps1` expects Inno Setup 6 at its
     # default location, which the 2022 image has and later images may not.
     runs-on: windows-2022
-    timeout-minutes: 120
+    timeout-minutes: 240
     env:
       CARGO_INCREMENTAL: 0
       RUST_BACKTRACE: 1
