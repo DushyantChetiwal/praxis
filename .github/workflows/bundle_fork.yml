@@ -171,7 +171,7 @@ jobs:
       - name: Upload the installer
         uses: actions/upload-artifact@v4
         with:
-          # Globbed because the file name carries the version from Cargo.toml.
+          # `bundle-windows.ps1` names the installer after its target architecture.
           name: zed-architect-windows-x86_64-installer
-          path: target/ZedEditorUserSetup-*.exe
+          path: target/Zed-x86_64.exe
           if-no-files-found: error
