@@ -20,10 +20,17 @@ name: bundle_fork
 
 on:
   workflow_dispatch:
+    inputs:
+      build_macos:
+        description: Build the macOS disk image
+        required: false
+        default: true
+        type: boolean
 
 jobs:
   macos:
     name: macOS (aarch64)
+    if: inputs.build_macos
     runs-on: macos-14
     timeout-minutes: 120
     env:
@@ -128,6 +135,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: Enhanced_Agents
+
+      - name: Configure Windows long-path support
+        shell: pwsh
+        run: |
+          git config --system core.longpaths true
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
