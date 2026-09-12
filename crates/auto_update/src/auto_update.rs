@@ -12,6 +12,7 @@ use release_channel::{AppCommitSha, ReleaseChannel};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use settings::{RegisterSetting, Settings, SettingsStore};
+use sha2::{Digest, Sha256};
 use smol::fs::File;
 use smol::{
     fs,
@@ -33,6 +34,27 @@ use util::command::new_command;
 use workspace::Workspace;
 
 const SHOULD_SHOW_UPDATE_NOTIFICATION_KEY: &str = "auto-updater-should-show-updated-notification";
+const DEV_UPDATE_MANIFEST_BASE_URL: Option<&str> = option_env!("ZED_DEV_UPDATE_MANIFEST_BASE_URL");
+
+fn dev_update_manifest_base_url() -> Option<&'static str> {
+    DEV_UPDATE_MANIFEST_BASE_URL
+        .map(str::trim)
+        .map(|url| url.trim_end_matches('/'))
+        .filter(|url| !url.is_empty())
+}
+
+fn dev_updates_enabled(release_channel: ReleaseChannel) -> bool {
+    release_channel == ReleaseChannel::Dev && dev_update_manifest_base_url().is_some()
+}
+
+fn should_poll_for_updates(release_channel: ReleaseChannel) -> bool {
+    release_channel.poll_for_updates() || dev_updates_enabled(release_channel)
+}
+
+fn dev_update_manifest_url(os: &str, arch: &str) -> Option<String> {
+    dev_update_manifest_base_url()
+        .map(|base_url| format!("{base_url}/zed-dev-update-{os}-{arch}.json"))
+}
 
 #[derive(Debug)]
 struct MissingDependencyError(String);
@@ -188,6 +210,8 @@ pub struct AutoUpdater {
 pub struct ReleaseAsset {
     pub version: String,
     pub url: String,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 struct MacOsUnmounter<'a> {
@@ -274,7 +298,7 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
         let updater = AutoUpdater::new(version, client, cx);
 
         let poll_for_updates = ReleaseChannel::try_global(cx)
-            .map(|channel| channel.poll_for_updates())
+            .map(should_poll_for_updates)
             .unwrap_or(false);
 
         if option_env!("ZED_UPDATE_EXPLANATION").is_none()
@@ -318,7 +342,7 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     }
 
     if !ReleaseChannel::try_global(cx)
-        .map(|channel| channel.poll_for_updates())
+        .map(should_poll_for_updates)
         .unwrap_or(false)
     {
         return;
@@ -353,7 +377,10 @@ pub fn release_notes_url(cx: &mut App) -> Option<String> {
         ReleaseChannel::Nightly => {
             "https://github.com/zed-industries/zed/commits/nightly/".to_string()
         }
-        ReleaseChannel::Dev => "https://github.com/zed-industries/zed/commits/main/".to_string(),
+        ReleaseChannel::Dev => dev_update_manifest_base_url()
+            .and_then(|base_url| base_url.strip_suffix("/download"))
+            .unwrap_or("https://github.com/zed-industries/zed/commits/main/")
+            .to_string(),
     };
     Some(url)
 }
@@ -697,22 +724,32 @@ impl AutoUpdater {
         };
         let http_client = client.http_client();
 
-        let path = format!("/releases/{}/{}/asset", release_channel.dev_name(), version,);
-        let url = http_client.build_zed_cloud_url_with_query(
-            &path,
-            AssetQuery {
-                os,
-                arch,
-                asset,
-                metrics_id: metrics_id.as_deref(),
-                system_id: system_id.as_deref(),
-                is_staff,
-            },
-        )?;
+        let url = if release_channel == ReleaseChannel::Dev && asset == "zed" {
+            dev_update_manifest_url(os, arch)
+        } else {
+            None
+        };
+        let url = match url {
+            Some(url) => url,
+            None => {
+                let path = format!("/releases/{}/{}/asset", release_channel.dev_name(), version,);
+                http_client
+                    .build_zed_cloud_url_with_query(
+                        &path,
+                        AssetQuery {
+                            os,
+                            arch,
+                            asset,
+                            metrics_id: metrics_id.as_deref(),
+                            system_id: system_id.as_deref(),
+                            is_staff,
+                        },
+                    )?
+                    .to_string()
+            }
+        };
 
-        let mut response = http_client
-            .get(url.as_str(), Default::default(), true)
-            .await?;
+        let mut response = http_client.get(&url, Default::default(), true).await?;
         let mut body = Vec::new();
         response.body_mut().read_to_end(&mut body).await?;
 
@@ -864,7 +901,10 @@ impl AutoUpdater {
         let fetched_version = fetched_version.parse::<Version>()?;
 
         match release_channel {
-            ReleaseChannel::Nightly => {
+            ReleaseChannel::Nightly | ReleaseChannel::Dev
+                if release_channel == ReleaseChannel::Nightly
+                    || dev_updates_enabled(release_channel) =>
+            {
                 let should_download = if let AutoUpdateStatus::Updated { version } = status {
                     fetched_version != version
                 } else {
@@ -1069,6 +1109,12 @@ async fn download_release(
     mut on_progress: impl FnMut(Option<f32>),
 ) -> Result<()> {
     let mut target_file = File::create(&target_path).await?;
+    let expected_sha256 = release
+        .sha256
+        .as_deref()
+        .map(str::trim)
+        .filter(|sha256| !sha256.is_empty());
+    let mut hasher = expected_sha256.map(|_| Sha256::new());
 
     let mut response = client.get(&release.url, Default::default(), true).await?;
     anyhow::ensure!(
@@ -1094,6 +1140,9 @@ async fn download_release(
             break;
         }
         target_file.write_all(&buffer[..bytes_read]).await?;
+        if let Some(hasher) = &mut hasher {
+            hasher.update(&buffer[..bytes_read]);
+        }
         downloaded_bytes += bytes_read as u64;
 
         if let Some(total_bytes) = total_bytes {
@@ -1107,6 +1156,15 @@ async fn download_release(
         }
     }
     target_file.flush().await?;
+
+    if let (Some(expected_sha256), Some(hasher)) = (expected_sha256, hasher) {
+        let actual_sha256 = format!("{:x}", hasher.finalize());
+        anyhow::ensure!(
+            actual_sha256.eq_ignore_ascii_case(expected_sha256),
+            "downloaded update checksum mismatch: expected {expected_sha256}, got {actual_sha256}"
+        );
+    }
+
     if total_bytes.is_some() && last_reported_percent != Some(100) {
         on_progress(Some(1.0));
     }
@@ -1525,6 +1583,7 @@ mod tests {
         let release = ReleaseAsset {
             version: "1.0.0".to_string(),
             url: "https://test.example/download".to_string(),
+            sha256: None,
         };
 
         let reported = Rc::new(std::cell::RefCell::new(Vec::<f32>::new()));
@@ -1585,6 +1644,7 @@ mod tests {
         let release = ReleaseAsset {
             version: "1.0.0".to_string(),
             url: "https://test.example/download".to_string(),
+            sha256: None,
         };
 
         let reported = Rc::new(std::cell::RefCell::new(Vec::<Option<f32>>::new()));

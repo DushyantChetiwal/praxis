@@ -14,8 +14,8 @@
 #             `xattr -d com.apple.quarantine /Applications/Zed\ Dev.app`.
 #   Windows — SmartScreen warns about an unknown publisher.
 #
-# Run it from the Actions tab; it is deliberately manual, because each job is a
-# full optimised build and takes upwards of an hour.
+# It can be run from the Actions tab and is also dispatched after a successful
+# automated upstream sync.
 name: bundle_fork
 
 on:
@@ -32,21 +32,50 @@ on:
         default: true
         type: boolean
 
+permissions:
+  contents: write
+
+concurrency:
+  group: bundle-fork
+  cancel-in-progress: false
+
 jobs:
+  prepare:
+    name: Pin the source revision
+    runs-on: ubuntu-24.04
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - name: Check out the Architect branch
+        uses: actions/checkout@v4
+        with:
+          ref: Enhanced_Agents
+
+      - name: Record the source revision
+        id: source
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
   macos:
     name: macOS (aarch64)
     if: inputs.build_macos
+    needs: prepare
     runs-on: macos-15
     timeout-minutes: 240
     env:
       # Nothing is reused between runs, so incremental artifacts are only cost.
       CARGO_INCREMENTAL: 0
+      # Compile the fork's release feed into Zed Dev without redirecting any
+      # other Zed Cloud traffic.
+      ZED_DEV_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
       # `bundle-mac` ad-hoc signs when the Apple secrets are absent, which is the
       # case here. Left unset deliberately rather than defined empty.
       RUST_BACKTRACE: 1
     steps:
       - name: Check out the fork
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -88,6 +117,7 @@ jobs:
   linux_remote_server_x86_64:
     name: Linux remote server (x86_64 musl)
     if: inputs.build_windows
+    needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -96,6 +126,8 @@ jobs:
     steps:
       - name: Check out the fork
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -125,7 +157,9 @@ jobs:
   windows:
     name: Windows (x86_64)
     if: inputs.build_windows
-    needs: linux_remote_server_x86_64
+    needs:
+      - prepare
+      - linux_remote_server_x86_64
     # Pinned to 2022 on purpose: `bundle-windows.ps1` expects Inno Setup 6 at its
     # default location, which the 2022 image has and later images may not.
     runs-on: windows-2022
@@ -133,9 +167,12 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
       RUST_BACKTRACE: 1
+      ZED_DEV_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
     steps:
       - name: Check out the fork
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Configure Windows long-path support
         shell: pwsh
@@ -169,3 +206,89 @@ jobs:
           name: zed-architect-windows-x86_64-installer
           path: target/Zed-x86_64.exe
           if-no-files-found: error
+
+  publish:
+    name: Publish the self-update release
+    if: >-
+      always() &&
+      inputs.build_macos &&
+      inputs.build_windows &&
+      needs.macos.result == 'success' &&
+      needs.windows.result == 'success'
+    needs:
+      - prepare
+      - macos
+      - windows
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the built source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Download the Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: zed-architect-windows-x86_64-installer
+          path: release-assets
+
+      - name: Download the macOS disk image
+        uses: actions/download-artifact@v4
+        with:
+          name: zed-architect-macos-aarch64-dmg
+          path: release-assets
+
+      - name: Create update manifests
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="$(python -c 'import tomllib; print(tomllib.load(open("crates/zed/Cargo.toml", "rb"))["package"]["version"])')"
+          source_sha="$(git rev-parse HEAD)"
+          tag="zed-dev-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          release_version="${version}+dev.${GITHUB_RUN_NUMBER}.${source_sha}"
+          repository_url="https://github.com/${GITHUB_REPOSITORY}"
+          windows_sha256="$(sha256sum release-assets/Zed-x86_64.exe | cut -d ' ' -f 1)"
+          macos_sha256="$(sha256sum release-assets/Zed-aarch64.dmg | cut -d ' ' -f 1)"
+
+          jq -n \
+            --arg version "${release_version}" \
+            --arg url "${repository_url}/releases/download/${tag}/Zed-x86_64.exe" \
+            --arg sha256 "${windows_sha256}" \
+            '{version: $version, url: $url, sha256: $sha256}' \
+            > release-assets/zed-dev-update-windows-x86_64.json
+
+          jq -n \
+            --arg version "${release_version}" \
+            --arg url "${repository_url}/releases/download/${tag}/Zed-aarch64.dmg" \
+            --arg sha256 "${macos_sha256}" \
+            '{version: $version, url: $url, sha256: $sha256}' \
+            > release-assets/zed-dev-update-macos-aarch64.json
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${release_version}" >> "${GITHUB_OUTPUT}"
+          echo "source_sha=${source_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Publish the latest Zed Dev release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh release create "${{ steps.release.outputs.tag }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${{ steps.release.outputs.source_sha }}" \
+            --title "Zed Dev ${{ steps.release.outputs.version }}" \
+            --notes "Automated Architect build from ${{ steps.release.outputs.source_sha }}. The Windows and macOS installers are unsigned." \
+            --draft \
+            release-assets/Zed-x86_64.exe \
+            release-assets/Zed-aarch64.dmg \
+            release-assets/zed-dev-update-windows-x86_64.json \
+            release-assets/zed-dev-update-macos-aarch64.json
+
+          gh release edit "${{ steps.release.outputs.tag }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --draft=false \
+            --latest
