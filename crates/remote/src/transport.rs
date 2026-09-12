@@ -263,6 +263,7 @@ fn remote_server_target_dir() -> std::path::PathBuf {
     elsewhere
 }
 
+#[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
 async fn build_remote_server_from_source(
     platform: &crate::RemotePlatform,
     delegate: &dyn crate::RemoteClientDelegate,
