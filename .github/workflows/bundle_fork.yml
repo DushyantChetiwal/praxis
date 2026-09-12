@@ -20,11 +20,23 @@ name: bundle_fork
 
 on:
   workflow_dispatch:
+    inputs:
+      build_macos:
+        description: Build the macOS disk image
+        required: false
+        default: true
+        type: boolean
+      build_windows:
+        description: Build the Windows installer and Linux remote server
+        required: false
+        default: true
+        type: boolean
 
 jobs:
   macos:
     name: macOS (aarch64)
-    runs-on: macos-14
+    if: inputs.build_macos
+    runs-on: macos-15
     timeout-minutes: 120
     env:
       # Nothing is reused between runs, so incremental artifacts are only cost.
@@ -75,6 +87,7 @@ jobs:
 
   linux_remote_server_x86_64:
     name: Linux remote server (x86_64 musl)
+    if: inputs.build_windows
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -111,6 +124,7 @@ jobs:
 
   windows:
     name: Windows (x86_64)
+    if: inputs.build_windows
     needs: linux_remote_server_x86_64
     # Pinned to 2022 on purpose: `bundle-windows.ps1` expects Inno Setup 6 at its
     # default location, which the 2022 image has and later images may not.
@@ -122,6 +136,12 @@ jobs:
     steps:
       - name: Check out the fork
         uses: actions/checkout@v4
+
+      - name: Configure Windows long-path support
+        shell: pwsh
+        run: |
+          git config --system core.longpaths true
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
