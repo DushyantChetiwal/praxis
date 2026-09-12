@@ -1,4 +1,5 @@
 mod apply_code_action_tool;
+mod ask_question_tool;
 mod complete_step_tool;
 mod context_server_registry;
 mod copy_path_tool;
@@ -73,6 +74,7 @@ where
 }
 
 pub use apply_code_action_tool::*;
+pub use ask_question_tool::*;
 pub use complete_step_tool::*;
 pub use context_server_registry::*;
 pub use copy_path_tool::*;
@@ -183,8 +185,9 @@ macro_rules! tools {
     };
 }
 
-// Adding a tool here (and constructing it in `Thread::add_default_tools`) is
-// not enough to make the model actually receive it. Three further gates will
+// Adding a tool here (and constructing it in `Thread::add_default_tools` or
+// `NativeAgent::register_session`) is not enough to make the model actually
+// receive it. Three further gates will
 // silently drop the tool rather than fail to compile:
 //
 // 1. `assets/settings/default.json`: the `write` and `ask` agent profiles each
@@ -200,6 +203,7 @@ macro_rules! tools {
 //    it never offers a tool the agent can't actually use.
 tools! {
     ApplyCodeActionTool,
+    AskQuestionTool,
     CompleteStepTool,
     CopyPathTool,
     CreateDirectoryTool,

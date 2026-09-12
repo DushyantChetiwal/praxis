@@ -763,6 +763,8 @@ impl NativeAgent {
         let thread = thread_handle.read(cx);
         let session_id = thread.id().clone();
         let parent_session_id = thread.parent_thread_id();
+        let register_ask_question = parent_session_id.is_none()
+            || thread.profile().as_str() == agent_settings::builtin_profiles::ARCHITECT_STEP;
         let title = thread.title();
         let draft_prompt = thread.draft_prompt().map(Vec::from);
         let scroll_position = thread.ui_scroll_position();
@@ -803,6 +805,9 @@ impl NativeAgent {
                 }) as _,
                 cx,
             );
+            if register_ask_question {
+                thread.add_tool(AskQuestionTool::new(acp_thread.downgrade()));
+            }
             // The resolver closure reads `state.skills` at invocation
             // time, so skills added or removed by the SKILL.md watcher
             // after the thread is constructed are still visible to the
@@ -7023,6 +7028,131 @@ mod internal_tests {
         assert_eq!(modes.current_mode().0.as_ref(), crate::SessionMode::PLAN_ID);
     }
 
+    #[gpui::test]
+    async fn test_ask_question_is_available_to_root_threads_in_both_modes(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let model = Arc::new(FakeLanguageModel::default());
+        thread.update(cx, |thread, cx| thread.set_model(model, cx));
+
+        thread.read_with(cx, |thread, cx| {
+            assert_eq!(thread.session_mode(), crate::SessionMode::Build);
+            assert!(thread.has_registered_tool(AskQuestionTool::NAME));
+            assert!(thread.enabled_tools(cx).contains_key(AskQuestionTool::NAME));
+        });
+
+        thread.update(cx, |thread, cx| {
+            thread.set_session_mode(crate::SessionMode::Plan, cx)
+        });
+        thread.read_with(cx, |thread, cx| {
+            assert!(thread.enabled_tools(cx).contains_key(AskQuestionTool::NAME));
+        });
+
+        let project_id = agent.read_with(cx, |agent, _| {
+            agent.sessions.get(&session_id).unwrap().project_id
+        });
+        let background_thread = cx.new(|cx| Thread::new_subagent(&thread, cx));
+        let _background_acp_thread = agent.update(cx, |agent, cx| {
+            agent.register_session(background_thread.clone(), project_id, 1, cx)
+        });
+        background_thread.read_with(cx, |thread, _| {
+            assert!(
+                !thread.has_registered_tool(AskQuestionTool::NAME),
+                "a background subagent must not be able to pause for user input"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_ask_question_uses_the_owning_session_elicitation(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (_connection, _agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let (event_stream, mut events) = ToolCallEventStream::test();
+        let tool_call_id = event_stream.tool_call_id().clone();
+        let task = cx.update(|cx| {
+            Arc::new(AskQuestionTool::new(acp_thread.downgrade())).run(
+                ToolInput::resolved(AskQuestionToolInput {
+                    question: "Which database should the service use?".into(),
+                    options: vec![
+                        AskQuestionOption {
+                            value: "postgres".into(),
+                            label: "PostgreSQL".into(),
+                            description: Some("Use the existing relational stack".into()),
+                        },
+                        AskQuestionOption {
+                            value: "sqlite".into(),
+                            label: "SQLite".into(),
+                            description: None,
+                        },
+                    ],
+                    allow_multiple: false,
+                }),
+                event_stream,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        let (elicitation_id, request) = acp_thread.read_with(cx, |thread, _| {
+            let Some(acp_thread::AgentThreadEntry::Elicitation(elicitation_id)) =
+                thread.entries().last()
+            else {
+                panic!("ask_question did not create an elicitation entry")
+            };
+            let (_, elicitation) = thread
+                .elicitation(elicitation_id)
+                .expect("the elicitation entry must resolve to its request");
+            (elicitation_id.clone(), elicitation.request.clone())
+        });
+        assert_eq!(request.message, "Which database should the service use?");
+        let acp::ElicitationScope::Session(scope) = request.scope() else {
+            panic!("ask_question must use a session-scoped elicitation")
+        };
+        assert_eq!(scope.session_id, session_id);
+        assert_eq!(scope.tool_call_id.as_ref(), Some(&tool_call_id));
+
+        acp_thread.update(cx, |thread, cx| {
+            thread.respond_to_elicitation(
+                &elicitation_id,
+                acp::CreateElicitationResponse::new(acp::ElicitationAction::Accept(
+                    acp::ElicitationAcceptAction::new().content(std::collections::BTreeMap::from(
+                        [(
+                            "answer".to_string(),
+                            acp::ElicitationContentValue::from("postgres"),
+                        )],
+                    )),
+                )),
+                cx,
+            );
+        });
+
+        assert_eq!(
+            task.await.expect("the accepted question should succeed"),
+            AskQuestionToolOutput::Answered {
+                answer: AskQuestionAnswer::Text("postgres".into())
+            }
+        );
+
+        let update = events.expect_update_fields().await;
+        assert_eq!(update.title.as_deref(), Some("User answered the question"));
+        let content = update.content.expect("the answer card must retain content");
+        assert!(content.iter().any(|block| {
+            matches!(
+                block,
+                acp::ToolCallContent::Content(content)
+                    if matches!(
+                        &content.content,
+                        acp::ContentBlock::Text(text)
+                            if text.text.contains("PostgreSQL")
+                                && text.text.contains("Which database")
+                    )
+            )
+        }));
+    }
+
     /// The step chat exists to rewrite one step, so `refine_step` has to reach
     /// the model. It reported the tool as unavailable, which made the whole
     /// conversation pointless: it could argue about the step but not record it.
@@ -7078,11 +7208,19 @@ mod internal_tests {
                 thread.has_registered_tool("refine_step"),
                 "the step's own tool was never registered",
             );
+            assert!(
+                thread.has_registered_tool(AskQuestionTool::NAME),
+                "the step cannot ask the user to settle an unresolved choice",
+            );
             let enabled = thread.enabled_tools(cx);
             assert!(
                 enabled.contains_key("refine_step"),
                 "refine_step is registered but withheld from the model; it has {:?}",
                 enabled.keys().collect::<Vec<_>>(),
+            );
+            assert!(
+                enabled.contains_key(AskQuestionTool::NAME),
+                "ask_question is registered but withheld from the step model",
             );
             // Settling a step is not the place to redraw the whole plan, nor to
             // build: those belong to the main conversation.

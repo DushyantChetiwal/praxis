@@ -1404,6 +1404,9 @@ mod tests {
         const EXCLUDED_TOOLS: &[&str] = &[
             // Read-only / low-risk tools that don't call decide_permission_from_settings
             "apply_code_action",
+            // Asking a question only pauses the conversation for user input; it
+            // does not access the project or perform an external side effect.
+            "ask_question",
             "diagnostics",
             "find_path",
             "find_references",

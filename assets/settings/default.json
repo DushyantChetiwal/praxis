@@ -1209,6 +1209,7 @@
           // the user having to pick a separate profile first.
           "draft_plan": true,
           "complete_step": true,
+          "ask_question": true,
           "copy_path": true,
           "create_directory": true,
           "create_thread": true,
@@ -1239,6 +1240,7 @@
         // We don't know which of the context server tools are safe for the "Ask" profile, so we don't enable them by default.
         // "enable_all_context_servers": true,
         "tools": {
+          "ask_question": true,
           "create_thread": true,
           "diagnostics": true,
           "fetch": true,
@@ -1264,6 +1266,7 @@
         // rewrite its own step, but it cannot change the project or the rest of
         // the plan. Building is the main thread's job.
         "tools": {
+          "ask_question": true,
           "refine_step": true,
           "diagnostics": true,
           "fetch": true,
