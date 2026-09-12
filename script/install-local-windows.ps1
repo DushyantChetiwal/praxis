@@ -71,6 +71,21 @@ try {
         Write-Host ("  {0,-18} {1,7} MB" -f $file, $mb)
     }
 
+    $remoteServerName = 'zed-remote-server-linux-x86_64.gz'
+    $stagedRemoteServer = Join-Path $repoRoot "target/$remoteServerName"
+    $installedRemoteServer = Join-Path $dest $remoteServerName
+    if (Test-Path $stagedRemoteServer -PathType Leaf) {
+        Copy-Item $stagedRemoteServer $installedRemoteServer -Force
+        $mb = [math]::Round((Get-Item $stagedRemoteServer).Length / 1MB, 1)
+        Write-Host ("  {0,-42} {1,7} MB" -f $remoteServerName, $mb)
+    }
+    else {
+        if (Test-Path $installedRemoteServer -PathType Leaf) {
+            Remove-Item $installedRemoteServer -Force
+        }
+        Write-Host '  No staged Linux remote server; WSL will use the source-build fallback' -ForegroundColor Yellow
+    }
+
     Write-Host ''
     Write-Host "Installed to $dest" -ForegroundColor Green
     Write-Host "User data in $(Join-Path $env:LOCALAPPDATA $appName)"

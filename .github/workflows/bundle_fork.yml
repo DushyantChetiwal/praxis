@@ -36,6 +36,12 @@ jobs:
       - name: Check out the fork
         uses: actions/checkout@v4
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bundle-macos-aarch64
+          cache-on-failure: true
+
       - name: Set up Node
         # `bundle-mac` installs `dmg-license` globally to attach the license
         # agreement to the .dmg.
@@ -67,8 +73,45 @@ jobs:
           path: target/zed-remote-server-macos-aarch64.gz
           if-no-files-found: warn
 
+  linux_remote_server_x86_64:
+    name: Linux remote server (x86_64 musl)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@v4
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: remote-server-linux-x86_64
+          cache-on-failure: true
+
+      - name: Install musl and LLVM tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools llvm
+
+      - name: Build the remote server
+        run: bash ./script/build-linux-remote-server
+
+      - name: Upload the remote server
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-architect-remote-server-linux-x86_64
+          path: |
+            target/zed-remote-server-linux-x86_64.gz
+            target/zed-remote-server-linux-x86_64.gz.sha256
+            target/zed-remote-server-linux-x86_64.json
+          if-no-files-found: error
+          retention-days: 14
+
   windows:
     name: Windows (x86_64)
+    needs: linux_remote_server_x86_64
     # Pinned to 2022 on purpose: `bundle-windows.ps1` expects Inno Setup 6 at its
     # default location, which the 2022 image has and later images may not.
     runs-on: windows-2022
@@ -79,6 +122,18 @@ jobs:
     steps:
       - name: Check out the fork
         uses: actions/checkout@v4
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bundle-windows-x86_64
+          cache-on-failure: true
+
+      - name: Download the Linux remote server
+        uses: actions/download-artifact@v4
+        with:
+          name: zed-architect-remote-server-linux-x86_64
+          path: target
 
       - name: Show the toolchain
         run: rustup show; cargo --version

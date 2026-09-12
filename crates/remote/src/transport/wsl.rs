@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use collections::HashMap;
 use futures::channel::mpsc::{Sender, UnboundedReceiver, UnboundedSender};
 use gpui::{App, AppContext as _, AsyncApp, Task};
-use release_channel::{AppVersion, ReleaseChannel};
+use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
 use rpc::proto::Envelope;
 use semver::Version;
 use smol::fs;
@@ -27,6 +27,45 @@ use util::{
     shell::{Shell, ShellKind},
     shell_builder::ShellBuilder,
 };
+
+const BUNDLED_LINUX_X86_64_REMOTE_SERVER: &str = "zed-remote-server-linux-x86_64.gz";
+
+fn development_remote_server_version_matches(version: &str, expected_commit: &str) -> bool {
+    let version = version.trim();
+    if version == expected_commit {
+        return true;
+    }
+
+    version
+        .split_once('+')
+        .is_some_and(|(build_id, commit)| !build_id.is_empty() && commit == expected_commit)
+}
+
+fn remote_server_install_is_forced(
+    copy_override_present: bool,
+    build_override: Option<&str>,
+) -> bool {
+    copy_override_present
+        || build_override
+            .is_some_and(|value| !matches!(value, "never" | "false" | "no" | "off" | "0"))
+}
+
+fn bundled_remote_server_path(platform: &RemotePlatform) -> Option<PathBuf> {
+    if platform.os != RemoteOs::Linux || platform.arch != RemoteArch::X86_64 {
+        return None;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::env::current_exe()
+            .ok()?
+            .parent()
+            .map(|parent| parent.join(BUNDLED_LINUX_X86_64_REMOTE_SERVER))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    None
+}
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
@@ -68,8 +107,13 @@ impl WslRemoteConnection {
             connection_options.distro_name,
             connection_options.user
         );
-        let (release_channel, version) =
-            cx.update(|cx| (ReleaseChannel::global(cx), AppVersion::global(cx)));
+        let (release_channel, version, commit) = cx.update(|cx| {
+            (
+                ReleaseChannel::global(cx),
+                AppVersion::global(cx),
+                AppCommitSha::try_global(cx),
+            )
+        });
 
         let mut this = Self {
             connection_options,
@@ -108,7 +152,7 @@ impl WslRemoteConnection {
         this.os_version = this.detect_os_version().await;
         log::info!("Remote OS version discovered: {:?}", this.os_version);
         this.remote_binary_path = Some(
-            this.ensure_server_binary(&delegate, release_channel, version, cx)
+            this.ensure_server_binary(&delegate, release_channel, version, commit, cx)
                 .await
                 .context("failed ensuring server binary")?,
         );
@@ -184,11 +228,108 @@ impl WslRemoteConnection {
         .map(|_| ())
     }
 
+    async fn remote_server_binary_version(&self, path: &RelPath) -> Result<String> {
+        let binary = path.display(PathStyle::Unix).into_owned();
+        self.run_wsl_command_with_output(&binary, &["version"])
+            .await
+            .with_context(|| format!("failed to run `{binary} version`"))
+    }
+
+    async fn remote_server_binary_matches(
+        &self,
+        path: &RelPath,
+        release_channel: ReleaseChannel,
+        expected_commit: Option<&str>,
+    ) -> bool {
+        let Ok(installed_version) = self.remote_server_binary_version(path).await else {
+            return false;
+        };
+
+        match release_channel {
+            ReleaseChannel::Dev | ReleaseChannel::Nightly => {
+                expected_commit.is_some_and(|commit| {
+                    development_remote_server_version_matches(&installed_version, commit)
+                })
+            }
+            ReleaseChannel::Stable | ReleaseChannel::Preview => {
+                !installed_version.trim().is_empty()
+            }
+        }
+    }
+
+    async fn validate_remote_server_binary(
+        &self,
+        path: &RelPath,
+        release_channel: ReleaseChannel,
+        expected_commit: Option<&str>,
+    ) -> Result<()> {
+        let installed_version = self.remote_server_binary_version(path).await?;
+        if matches!(
+            release_channel,
+            ReleaseChannel::Dev | ReleaseChannel::Nightly
+        ) && let Some(expected_commit) = expected_commit
+            && !development_remote_server_version_matches(&installed_version, expected_commit)
+        {
+            bail!(
+                "installed WSL remote server reports version `{}`, but this application expects commit `{expected_commit}`",
+                installed_version.trim()
+            );
+        }
+        if installed_version.trim().is_empty() {
+            bail!("installed WSL remote server returned an empty version");
+        }
+
+        Ok(())
+    }
+
+    async fn install_local_server_binary(
+        &self,
+        local_path: &Path,
+        dst_path: &RelPath,
+        release_channel: ReleaseChannel,
+        expected_commit: Option<&str>,
+        delegate: &Arc<dyn RemoteClientDelegate>,
+        cx: &mut AsyncApp,
+    ) -> Result<()> {
+        if local_path
+            .extension()
+            .and_then(OsStr::to_str)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+        {
+            bail!(
+                "ZIP remote-server archives cannot be installed in WSL; use a raw binary, gzip archive, or ZED_BUILD_REMOTE_SERVER=nocompress"
+            );
+        }
+
+        let file_name = local_path.file_name().with_context(|| {
+            format!(
+                "remote server path has no file name: {}",
+                local_path.display()
+            )
+        })?;
+        let tmp_name = format!(
+            "download-{}-{}",
+            std::process::id(),
+            file_name.to_string_lossy()
+        );
+        let tmp_path = paths::remote_server_dir_relative().join(
+            RelPath::from_unix_str(&tmp_name).context("invalid temporary remote server path")?,
+        );
+
+        self.upload_file(local_path, &tmp_path, delegate, cx)
+            .await?;
+        self.extract_and_install(&tmp_path, dst_path, delegate, cx)
+            .await?;
+        self.validate_remote_server_binary(dst_path, release_channel, expected_commit)
+            .await
+    }
+
     async fn ensure_server_binary(
         &self,
         delegate: &Arc<dyn RemoteClientDelegate>,
         release_channel: ReleaseChannel,
         version: Version,
+        commit: Option<AppCommitSha>,
         cx: &mut AsyncApp,
     ) -> Result<Arc<RelPath>> {
         let version_str = match release_channel {
@@ -213,36 +354,71 @@ impl WslRemoteConnection {
                 .map_err(|e| e.context("Failed to create directory"))?;
         }
 
-        let binary_exists_on_server = self
-            .run_wsl_command(&dst_path.display(PathStyle::Unix), &["version"])
-            .await
-            .is_ok();
+        let expected_commit = commit.as_ref().map(AppCommitSha::full);
+        let cached_server_matches = self
+            .remote_server_binary_matches(&dst_path, release_channel, expected_commit.as_deref())
+            .await;
+        let build_override = std::env::var("ZED_BUILD_REMOTE_SERVER").ok();
+        let force_install = remote_server_install_is_forced(
+            std::env::var_os("ZED_COPY_REMOTE_SERVER").is_some(),
+            build_override.as_deref(),
+        );
+
+        if cached_server_matches && !force_install {
+            log::info!("reusing matching WSL remote server at {dst_path:?}");
+            return Ok(dst_path.into());
+        }
+
+        if !force_install
+            && matches!(
+                release_channel,
+                ReleaseChannel::Dev | ReleaseChannel::Nightly
+            )
+            && let Some(bundled_path) = bundled_remote_server_path(&self.platform)
+            && fs::metadata(&bundled_path).await.is_ok()
+        {
+            log::info!(
+                "installing bundled WSL remote server from {}",
+                bundled_path.display()
+            );
+            match self
+                .install_local_server_binary(
+                    &bundled_path,
+                    &dst_path,
+                    release_channel,
+                    expected_commit.as_deref(),
+                    delegate,
+                    cx,
+                )
+                .await
+            {
+                Ok(()) => return Ok(dst_path.into()),
+                Err(error) => {
+                    log::warn!(
+                        "failed to install the matching bundled WSL remote server; falling back to a source build: {error:#}"
+                    );
+                }
+            }
+        }
 
         #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
         if let Some(remote_server_path) = super::build_remote_server_from_source(
             &self.platform,
             delegate.as_ref(),
-            binary_exists_on_server,
+            cached_server_matches,
             cx,
         )
         .await?
         {
-            let tmp_path = paths::remote_server_dir_relative().join(
-                &RelPath::from_unix_str(&format!(
-                    "download-{}-{}",
-                    std::process::id(),
-                    remote_server_path.file_name().unwrap().to_string_lossy()
-                ))
-                .unwrap(),
-            );
-            self.upload_file(&remote_server_path, &tmp_path, delegate, cx)
-                .await?;
-            self.extract_and_install(&tmp_path, &dst_path, delegate, cx)
-                .await?;
-            return Ok(dst_path.into());
-        }
-
-        if binary_exists_on_server {
+            self.install_local_server_binary(
+                &remote_server_path,
+                &dst_path,
+                release_channel,
+                expected_commit.as_deref(),
+                delegate,
+                cx,
+            )
+            .await?;
             return Ok(dst_path.into());
         }
 
@@ -255,16 +431,15 @@ impl WslRemoteConnection {
             .download_server_binary_locally(self.platform, release_channel, wanted_version, cx)
             .await?;
 
-        let tmp_path = format!(
-            "{}.{}.gz",
-            dst_path.display(PathStyle::Unix),
-            std::process::id()
-        );
-        let tmp_path = RelPath::from_unix_str(&tmp_path).unwrap();
-
-        self.upload_file(&src_path, &tmp_path, delegate, cx).await?;
-        self.extract_and_install(&tmp_path, &dst_path, delegate, cx)
-            .await?;
+        self.install_local_server_binary(
+            &src_path,
+            &dst_path,
+            release_channel,
+            expected_commit.as_deref(),
+            delegate,
+            cx,
+        )
+        .await?;
 
         Ok(dst_path.into())
     }
@@ -682,4 +857,51 @@ fn wsl_command_impl(
 
     log::debug!("wsl {:?}", command);
     command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn development_server_version_requires_the_expected_commit() {
+        assert!(development_remote_server_version_matches(COMMIT, COMMIT));
+        assert!(development_remote_server_version_matches(
+            &format!("1234+{COMMIT}"),
+            COMMIT
+        ));
+        assert!(development_remote_server_version_matches(
+            &format!("\n{COMMIT}\n"),
+            COMMIT
+        ));
+
+        assert!(!development_remote_server_version_matches(
+            "fedcba9876543210fedcba9876543210fedcba98",
+            COMMIT
+        ));
+        assert!(!development_remote_server_version_matches(
+            &format!("+{COMMIT}"),
+            COMMIT
+        ));
+        assert!(!development_remote_server_version_matches(
+            &format!("1234+other+{COMMIT}"),
+            COMMIT
+        ));
+    }
+
+    #[test]
+    fn only_explicit_build_or_copy_requests_force_installation() {
+        assert!(!remote_server_install_is_forced(false, None));
+        assert!(remote_server_install_is_forced(true, None));
+
+        for value in ["never", "false", "no", "off", "0"] {
+            assert!(!remote_server_install_is_forced(false, Some(value)));
+        }
+
+        for value in ["", "true", "nocompress", "nomusl"] {
+            assert!(remote_server_install_is_forced(false, Some(value)));
+        }
+    }
 }

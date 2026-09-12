@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+target="x86_64-unknown-linux-musl"
+binary="target/$target/release/remote_server"
+archive="target/zed-remote-server-linux-x86_64.gz"
+checksum="${archive}.sha256"
+manifest="target/zed-remote-server-linux-x86_64.json"
+expected_commit="$(git rev-parse HEAD)"
+
+rustup target add "$target"
+command -v musl-gcc >/dev/null 2>&1 || {
+    echo "musl-gcc is required to build the Linux remote server" >&2
+    exit 1
+}
+command -v llvm-objcopy >/dev/null 2>&1 || {
+    echo "llvm-objcopy is required to strip the Linux remote server" >&2
+    exit 1
+}
+
+export CC_x86_64_unknown_linux_musl=musl-gcc
+export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static"
+
+cargo build \
+    --locked \
+    --release \
+    --target "$target" \
+    --package remote_server
+
+llvm-objcopy --strip-debug "$binary"
+
+actual_version="$("$binary" version)"
+if [[ "$actual_version" != "$expected_commit" && ! "$actual_version" =~ ^[^+]+\+${expected_commit}$ ]]; then
+    echo "remote server version '$actual_version' does not match commit '$expected_commit'" >&2
+    exit 1
+fi
+
+if readelf -d "$binary" 2>/dev/null | grep -q '(NEEDED)'; then
+    echo "remote server unexpectedly has dynamic library dependencies" >&2
+    readelf -d "$binary" >&2
+    exit 1
+fi
+
+gzip --best --no-name --stdout "$binary" > "$archive"
+gzip --test "$archive"
+
+archive_sha256="$(sha256sum "$archive" | awk '{print $1}')"
+archive_bytes="$(wc -c < "$archive" | tr -d '[:space:]')"
+printf '%s  %s\n' "$archive_sha256" "$(basename "$archive")" > "$checksum"
+cat > "$manifest" <<EOF
+{
+  "archive": "$(basename "$archive")",
+  "bytes": $archive_bytes,
+  "commit": "$expected_commit",
+  "server_version": "$actual_version",
+  "sha256": "$archive_sha256",
+  "target": "$target"
+}
+EOF
+
+printf 'Built %s (%s bytes, sha256 %s)\n' "$archive" "$archive_bytes" "$archive_sha256"

@@ -127,6 +127,16 @@ function PrepareForBundle {
     New-Item -Path "$innoDir\bin" -ItemType Directory -Force
     New-Item -Path "$innoDir\tools" -ItemType Directory -Force
 
+    $linuxRemoteServerName = "zed-remote-server-linux-x86_64.gz"
+    $stagedLinuxRemoteServer = Join-Path $env:ZED_WORKSPACE "target\$linuxRemoteServerName"
+    if (Test-Path $stagedLinuxRemoteServer -PathType Leaf) {
+        Copy-Item $stagedLinuxRemoteServer (Join-Path $innoDir $linuxRemoteServerName) -Force
+        Write-Output "Staged bundled Linux remote server"
+    }
+    else {
+        Write-Warning "No staged Linux remote server found at $stagedLinuxRemoteServer; WSL will use the source-build fallback"
+    }
+
     rustup target add $target
 }
 

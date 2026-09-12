@@ -66,6 +66,9 @@ Name: "{app}"; AfterInstall: DisableAppDirInheritance
 
 [Files]
 Source: "{#ResourcesDir}\Zed.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
+#ifexist ResourcesDir + "\zed-remote-server-linux-x86_64.gz"
+Source: "{#ResourcesDir}\zed-remote-server-linux-x86_64.gz"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
+#endif
 Source: "{#ResourcesDir}\bin\*"; DestDir: "{code:GetInstallDir}\bin"; Flags: ignoreversion
 Source: "{#ResourcesDir}\tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion
 Source: "{#ResourcesDir}\appx\*"; DestDir: "{app}\appx";  BeforeInstall: RemoveAppxPackage; AfterInstall: AddAppxPackage; Flags: ignoreversion; Check: IsWindows11OrLater
