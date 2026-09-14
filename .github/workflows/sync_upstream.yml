@@ -64,6 +64,10 @@ jobs:
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "Merged upstream commit $(git rev-parse upstream/main)." >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Install Linux build dependencies
+        if: steps.sync.outputs.changed == 'true'
+        run: bash script/linux
+
       - name: Cache Rust build artifacts
         if: steps.sync.outputs.changed == 'true'
         uses: Swatinem/rust-cache@v2
