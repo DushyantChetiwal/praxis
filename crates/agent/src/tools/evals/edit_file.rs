@@ -371,6 +371,7 @@ impl EditToolTest {
                 sandboxing: false,
                 is_linux: cfg!(target_os = "linux"),
                 is_windows: cfg!(target_os = "windows"),
+                plan: None,
             };
             let templates = Templates::new();
             template.render(&templates)?

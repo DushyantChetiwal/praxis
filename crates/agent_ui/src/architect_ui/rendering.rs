@@ -1,8 +1,10 @@
-use architect::{ArchitectNode, EdgeCondition, GraphProblem, NodeId, NodePath, Position};
+use architect::{
+    ArchitectGraph, ArchitectNode, EdgeCondition, GraphProblem, NodeId, NodePath, Position,
+};
 use gpui::{
     App, Bounds, Context, CursorStyle, DismissEvent, EventEmitter, FocusHandle, Focusable, Hsla,
-    MouseButton, MouseDownEvent, PathBuilder, Pixels, Point, Render, SharedString, Window, canvas,
-    div, point, px, relative,
+    MouseButton, MouseDownEvent, PathBuilder, Pixels, Render, SharedString, Window, canvas, div,
+    point, px, relative,
 };
 use ui::{TintColor, Tooltip, prelude::*};
 use workspace::{
@@ -10,7 +12,7 @@ use workspace::{
     item::{Item, ItemEvent},
 };
 
-use super::geometry::{EdgeCurve, NODE_HEIGHT, NODE_WIDTH, paint_curve};
+use super::geometry::{EdgeCurve, NODE_WIDTH, paint_curve};
 use super::{
     ArchitectPane, DETAIL_ZOOM_THRESHOLD, EXPANDED_CHILD_LIMIT, Interaction, MAX_ZOOM, MIN_ZOOM,
     Selection,

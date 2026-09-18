@@ -1,13 +1,13 @@
 use acp_thread::AcpThread;
 use agent_client_protocol::schema::v1 as acp;
-use architect::{ArchitectNode, EdgeCondition, NodeId};
+use architect::{ArchitectGraph, ArchitectNode, EdgeCondition, NodeId};
 use editor::{Editor, EditorEvent};
-use gpui::{App, Context, Entity, SharedString, Subscription, Window, div, px};
+use gpui::{App, Context, Entity, Focusable, SharedString, Subscription, Window, div, px};
 use ui::{TintColor, Tooltip, prelude::*};
 
 use crate::AgentPanel;
 
-use super::rendering::{chip, truncate};
+use super::rendering::truncate;
 use super::{ArchitectPane, Interaction, Selection};
 
 /// The inspector shows one step, either as fields or as the conversation about
