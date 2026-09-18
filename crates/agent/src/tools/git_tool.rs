@@ -2,7 +2,10 @@ use std::{fmt::Write as _, sync::Arc};
 
 use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 use agent_client_protocol::schema::v1 as acp;
-use git::{DiffType, FileStatus, StatusCode};
+use git::{
+    repository::DiffType,
+    status::{FileStatus, StatusCode, TrackedStatus},
+};
 use gpui::{App, Entity, SharedString, Task};
 use project::{Project, git_store::Repository};
 use schemars::JsonSchema;
@@ -591,7 +594,7 @@ mod tests {
     fn status_codes_match_porcelain_layout() {
         assert_eq!(status_code(FileStatus::Untracked), "??");
         assert_eq!(
-            status_code(FileStatus::Tracked(git::TrackedStatus {
+            status_code(FileStatus::Tracked(TrackedStatus {
                 index_status: StatusCode::Added,
                 worktree_status: StatusCode::Modified,
             })),

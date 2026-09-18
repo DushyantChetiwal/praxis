@@ -31,6 +31,7 @@ use util::{
     shell_builder::ShellBuilder,
 };
 
+#[cfg(target_os = "windows")]
 const BUNDLED_LINUX_X86_64_REMOTE_SERVER: &str = "zed-remote-server-linux-x86_64.gz";
 
 fn development_remote_server_version_matches(version: &str, expected_commit: &str) -> bool {

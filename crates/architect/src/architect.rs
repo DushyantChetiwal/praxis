@@ -1484,7 +1484,6 @@ mod tests {
             })
         );
 
-        graph.set_locked_at(&child, false).unwrap();
         graph
             .set_locked_at(&NodePath::from(NodeId::from("parent")), true)
             .unwrap();
