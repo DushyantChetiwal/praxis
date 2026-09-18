@@ -1496,6 +1496,7 @@ mod tests {
 
         cx.update(|cx| {
             settings::init(cx);
+            cx.set_global(db::AppDatabase::test_new());
 
             let current_version = semver::Version::new(0, 100, 0);
             release_channel::init_test(current_version, ReleaseChannel::Stable, cx);

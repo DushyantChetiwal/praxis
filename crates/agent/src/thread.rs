@@ -2423,7 +2423,7 @@ impl Thread {
         visit_id: ArchitectStepVisitId,
         summary: String,
         cx: &mut Context<Self>,
-    ) -> Result<(SharedString, usize), ArchitectStepCompletionError> {
+    ) -> Result<(String, usize), ArchitectStepCompletionError> {
         let visit = self
             .architect_active_visit
             .as_ref()
@@ -2441,7 +2441,7 @@ impl Thread {
             .node_at_mut(&path)
             .ok_or(ArchitectStepCompletionError::MissingStep)?;
         node.result = Some(architect::StepResult { summary, attempt });
-        let title = node.title.clone().into();
+        let title = node.title.clone();
         self.updated_at = Utc::now();
         cx.notify();
         Ok((title, attempt))
