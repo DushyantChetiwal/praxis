@@ -173,7 +173,7 @@ impl ArchitectPane {
         let Some(conversation_view) = self.plan_conversation_view(cx) else {
             return;
         };
-        let node_path = self.focus.child(id.clone());
+        let node_path = self.focus.child(id);
 
         self.inspector_tab = InspectorTab::Chat;
         let is_first_visit = node.chat.is_none();
