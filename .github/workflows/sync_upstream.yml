@@ -2,7 +2,6 @@ name: sync_upstream
 
 on:
   schedule:
-    # Keep the fork current without paying the cost of a full build every day.
     - cron: "17 3 * * 1"
   workflow_dispatch:
     inputs:
@@ -21,30 +20,38 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  sync:
-    name: Merge, validate, and rebuild
+  stage:
+    name: Merge upstream into a staging ref
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 30
+    outputs:
+      base_sha: ${{ steps.sync.outputs.base_sha }}
+      changed: ${{ steps.sync.outputs.changed }}
+      staging_ref: ${{ steps.sync.outputs.staging_ref }}
+      staging_sha: ${{ steps.sync.outputs.staging_sha }}
     steps:
       - name: Check out the Architect branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: Enhanced_Agents
           fetch-depth: 0
 
-      - name: Merge upstream Zed
+      - name: Merge upstream Zed and push staging ref
         id: sync
         shell: bash
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/zed-industries/zed.git 2>/dev/null || \
             git remote set-url upstream https://github.com/zed-industries/zed.git
           git fetch --no-tags upstream main
 
+          base_sha="$(git rev-parse HEAD)"
+          echo "base_sha=${base_sha}" >> "${GITHUB_OUTPUT}"
           if git merge-base --is-ancestor upstream/main HEAD; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "Architect is already current with upstream." >> "$GITHUB_STEP_SUMMARY"
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            echo "Architect is already current with upstream." >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
 
@@ -54,46 +61,89 @@ jobs:
               echo "## Upstream merge needs manual resolution"
               echo
               echo '```text'
-              echo "$conflicts"
+              echo "${conflicts}"
               echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
+            } >> "${GITHUB_STEP_SUMMARY}"
             git merge --abort
             exit 1
           fi
 
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-          echo "Merged upstream commit $(git rev-parse upstream/main)." >> "$GITHUB_STEP_SUMMARY"
+          staging_branch="architect-sync/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          staging_sha="$(git rev-parse HEAD)"
+          git push origin "HEAD:refs/heads/${staging_branch}"
+          echo "changed=true" >> "${GITHUB_OUTPUT}"
+          echo "staging_ref=${staging_branch}" >> "${GITHUB_OUTPUT}"
+          echo "staging_sha=${staging_sha}" >> "${GITHUB_OUTPUT}"
+          echo "Staged upstream commit $(git rev-parse upstream/main) as ${staging_sha}." \
+            >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Install Linux build dependencies
-        if: steps.sync.outputs.changed == 'true'
-        run: bash script/linux
+  quality:
+    name: Validate the staged merge
+    needs: stage
+    if: needs.stage.outputs.changed == 'true'
+    uses: ./.github/workflows/architect_quality.yml
+    with:
+      source_ref: ${{ needs.stage.outputs.staging_sha }}
 
-      - name: Cache Rust build artifacts
-        if: steps.sync.outputs.changed == 'true'
-        uses: Swatinem/rust-cache@v2
+  promote:
+    name: Promote the validated merge
+    needs:
+      - stage
+      - quality
+    if: needs.stage.outputs.changed == 'true' && needs.quality.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the Architect branch
+        uses: actions/checkout@v7
         with:
-          shared-key: sync-upstream-linux
-          cache-on-failure: true
+          ref: Enhanced_Agents
+          fetch-depth: 0
 
-      - name: Validate the merged source
-        if: steps.sync.outputs.changed == 'true'
+      - name: Fast-forward only the unchanged product branch
+        env:
+          BASE_SHA: ${{ needs.stage.outputs.base_sha }}
+          STAGING_REF: ${{ needs.stage.outputs.staging_ref }}
+          STAGING_SHA: ${{ needs.stage.outputs.staging_sha }}
+        shell: bash
         run: |
-          cargo metadata --locked --no-deps --format-version 1 > /dev/null
-          cargo check --locked --package architect --package agent --package agent_ui --package zed
-
-      - name: Push the update
-        if: steps.sync.outputs.changed == 'true'
-        run: git push origin HEAD:Enhanced_Agents
+          set -euo pipefail
+          git fetch --no-tags origin "refs/heads/${STAGING_REF}"
+          test "$(git rev-parse FETCH_HEAD)" = "${STAGING_SHA}"
+          git push origin \
+            "${STAGING_SHA}:refs/heads/Enhanced_Agents" \
+            "--force-with-lease=refs/heads/Enhanced_Agents:${BASE_SHA}"
+          echo "Promoted validated source ${STAGING_SHA}." >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Rebuild Windows and macOS
-        if: >-
-          steps.sync.outputs.changed == 'true' &&
-          (github.event_name == 'schedule' || inputs.rebuild)
+        if: github.event_name == 'schedule' || inputs.rebuild
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh workflow run bundle_fork.yml
-          --repo "${{ github.repository }}"
-          --ref main
-          -f build_macos=true
-          -f build_windows=true
+          STAGING_SHA: ${{ needs.stage.outputs.staging_sha }}
+        shell: bash
+        run: |
+          gh workflow run bundle_fork.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref main \
+            -f source_ref="${STAGING_SHA}" \
+            -f build_macos=true \
+            -f build_windows=true
+
+  cleanup:
+    name: Remove the staging ref
+    needs:
+      - stage
+      - quality
+      - promote
+    if: always() && needs.stage.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Delete the temporary branch
+        env:
+          STAGING_REF: ${{ needs.stage.outputs.staging_ref }}
+        shell: bash
+        run: git push origin --delete "${STAGING_REF}" || true

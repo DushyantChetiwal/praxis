@@ -1,7 +1,6 @@
-# Fork-owned validation for Architect. Keep the workflow definition on the
-# default main branch; product source remains on Enhanced_Agents. Event runs use
-# the event revision, while a manual run checks Enhanced_Agents unless another
-# source ref is supplied explicitly.
+# Fork-owned validation for Architect. Keep this workflow on the default main
+# branch; product source remains on Enhanced_Agents. Reusable callers pass an
+# exact staging SHA so automated syncs cannot publish unvalidated source.
 name: Architect quality
 
 on:
@@ -18,19 +17,25 @@ on:
         required: true
         default: Enhanced_Agents
         type: string
+  workflow_call:
+    inputs:
+      source_ref:
+        description: Branch, tag, or commit to validate
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: architect-quality-${{ github.event.pull_request.number || inputs.source_ref || github.ref }}
+  group: architect-quality-${{ inputs.source_ref || github.sha }}
   cancel-in-progress: true
 
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
-  SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.sha }}
+  SOURCE_REF: ${{ inputs.source_ref || github.sha }}
 
 jobs:
   formatting:
@@ -39,13 +44,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out the selected source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.SOURCE_REF }}
           persist-credentials: false
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: "9"
 
@@ -56,7 +61,12 @@ jobs:
         run: ./script/prettier
 
       - name: Check the fork workflow formatting
-        run: pnpm dlx prettier@3.5.0 .github/workflows/architect_quality.yml --check
+        run: >-
+          pnpm dlx prettier@3.5.0
+          .github/workflows/architect_quality.yml
+          .github/workflows/sync_upstream.yml
+          .github/workflows/bundle_fork.yml
+          --check
 
   architect-tests:
     name: Architect graph tests
@@ -64,7 +74,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Check out the selected source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.SOURCE_REF }}
           persist-credentials: false
@@ -84,7 +94,7 @@ jobs:
     timeout-minutes: 180
     steps:
       - name: Check out the selected source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.SOURCE_REF }}
           persist-credentials: false
@@ -109,15 +119,41 @@ jobs:
           cargo test --locked -p agent --lib tools::pull_request_tool::tests::
           cargo test --locked -p agent --lib tools::refine_step_tool::tests::
 
-      - name: Test native-agent mode integration
+      - name: Test native-agent mode and run integration
         run: |
           cargo test --locked -p agent --lib internal_tests::test_a_new_session_offers_plan_and_build -- --exact
           cargo test --locked -p agent --lib internal_tests::test_plan_mode_keeps_read_tools_and_denies_execution -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_plan_mode_and_filtered_tools_survive_reopening -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_architect_coordinator_owns_mode_and_cancellation -- --exact
           cargo test --locked -p agent --lib internal_tests::test_a_step_thread_can_refine_its_step -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_each_architect_step_gets_an_independent_chat -- --exact
           cargo test --locked -p agent --lib internal_tests::test_a_reopened_step_thread_gets_its_tool_back -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_a_run_records_the_steps_it_took -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_step_completion_is_idempotent_and_rejects_stale_visits -- --exact
+          cargo test --locked -p agent --lib db::tests::test_architect_graph_roundtrips_through_save_load -- --exact
 
       - name: Test Architect canvas support
         run: "cargo test --locked -p agent_ui --lib architect_ui::"
+
+  updater-tests:
+    name: Auto-update integrity tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out the selected source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: architect-updater-tests
+          cache-on-failure: true
+
+      - name: Test the updater
+        run: cargo test --locked -p auto_update --lib
 
   clippy:
     name: Clippy package checks
@@ -125,7 +161,7 @@ jobs:
     timeout-minutes: 180
     steps:
       - name: Check out the selected source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.SOURCE_REF }}
           persist-credentials: false
@@ -140,4 +176,4 @@ jobs:
           cache-on-failure: true
 
       - name: Check the Architect packages with Clippy
-        run: ./script/clippy --locked -p architect -p agent -p agent_ui
+        run: ./script/clippy --locked -p architect -p agent -p agent_ui -p auto_update
