@@ -813,7 +813,7 @@ mod tests {
             assert_eq!(pane.focus, NodePath::default());
         });
 
-        thread.update_in(cx, |thread, _window, cx| {
+        thread.update(cx, |thread, cx| {
             thread.start_architect_run(
                 NodePath::root(parent.clone()),
                 "Parent".into(),
@@ -834,7 +834,7 @@ mod tests {
             );
             assert_eq!(pane.running_node(cx), Some(&parent));
         });
-        reopened.update_in(cx, |pane, _window, cx| pane.stop_run(cx));
+        reopened.update(cx, |pane, cx| pane.stop_run(cx));
         reopened.read_with(cx, |pane, cx| {
             assert!(
                 !pane.is_running(cx),
