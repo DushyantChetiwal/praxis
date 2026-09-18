@@ -45,6 +45,87 @@ fn repository_name(repository: &Entity<Repository>, cx: &App) -> String {
         .to_string()
 }
 
+fn is_credential_query_key(key: &str) -> bool {
+    let encoded = format!("{key}=");
+    let decoded = url::form_urlencoded::parse(encoded.as_bytes())
+        .next()
+        .map_or_else(|| key.to_string(), |(key, _)| key.into_owned());
+    let normalized = decoded
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+
+    normalized.contains("token")
+        || normalized.contains("secret")
+        || normalized.contains("password")
+        || normalized.contains("passwd")
+        || normalized.contains("credential")
+        || normalized.contains("authorization")
+        || normalized.contains("signature")
+        || normalized == "auth"
+        || normalized == "sig"
+        || normalized == "key"
+        || normalized.ends_with("apikey")
+}
+
+fn redact_query_credentials(remote: &str) -> String {
+    let Some(query_start) = remote.find('?') else {
+        return remote.to_string();
+    };
+    let query_end = remote[query_start..]
+        .find('#')
+        .map_or(remote.len(), |offset| query_start + offset);
+    let mut output = String::with_capacity(remote.len());
+    output.push_str(&remote[..=query_start]);
+    for (index, pair) in remote[query_start + 1..query_end].split('&').enumerate() {
+        if index > 0 {
+            output.push('&');
+        }
+        let key = pair.split_once('=').map_or(pair, |(key, _)| key);
+        if is_credential_query_key(key) {
+            write!(output, "{key}=[redacted]").unwrap();
+        } else {
+            output.push_str(pair);
+        }
+    }
+    output.push_str(&remote[query_end..]);
+    output
+}
+
+fn redact_unparsed_userinfo(remote: &str) -> String {
+    let authority_start = remote.find("://").map_or(0, |index| index + 3);
+    let authority_end = remote[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(remote.len(), |offset| authority_start + offset);
+    let authority = &remote[authority_start..authority_end];
+    let Some(at) = authority.rfind('@') else {
+        return remote.to_string();
+    };
+
+    let userinfo_end = authority_start + at + 1;
+    let mut output = String::with_capacity(remote.len());
+    if authority_start == 0 {
+        output.push_str("[redacted]@");
+    } else {
+        output.push_str(&remote[..authority_start]);
+    }
+    output.push_str(&remote[userinfo_end..]);
+    output
+}
+
+fn redact_remote_url(remote: &str) -> String {
+    let without_userinfo = match url::Url::parse(remote) {
+        Ok(mut url) if url.has_host() => {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.to_string()
+        }
+        _ => redact_unparsed_userinfo(remote),
+    };
+    redact_query_credentials(&without_userinfo)
+}
+
 fn status_char(status: StatusCode) -> char {
     match status {
         StatusCode::Modified => 'M',
@@ -349,7 +430,7 @@ impl AgentTool for GitRemotesTool {
                     output.push_str("No remotes configured\n\n");
                 } else {
                     for (name, url) in remotes {
-                        writeln!(output, "{name}: {url}").unwrap();
+                        writeln!(output, "{name}: {}", redact_remote_url(&url)).unwrap();
                     }
                     output.push('\n');
                 }
@@ -627,5 +708,55 @@ mod tests {
         assert!(output.starts_with('a'));
         assert!(!output.starts_with("aé"));
         assert!(output.contains("Diff truncated"));
+    }
+
+    #[test]
+    fn remote_redaction_removes_url_userinfo() {
+        assert_eq!(
+            redact_remote_url("https://oauth2:top-secret@example.com/org/repo.git"),
+            "https://example.com/org/repo.git"
+        );
+        assert_eq!(
+            redact_remote_url("ssh://git:password@example.com/org/repo.git"),
+            "ssh://example.com/org/repo.git"
+        );
+    }
+
+    #[test]
+    fn remote_redaction_removes_scp_style_userinfo() {
+        assert_eq!(
+            redact_remote_url("git@example.com:org/repo.git"),
+            "[redacted]@example.com:org/repo.git"
+        );
+        assert_eq!(
+            redact_remote_url("oauth2:top-secret@example.com:org/repo.git"),
+            "[redacted]@example.com:org/repo.git"
+        );
+    }
+
+    #[test]
+    fn remote_redaction_hides_credential_query_parameters() {
+        assert_eq!(
+            redact_remote_url(
+                "https://example.com/org/repo.git?ref=main&access_token=secret&X-Amz-Signature=signed#fragment"
+            ),
+            "https://example.com/org/repo.git?ref=main&access_token=[redacted]&X-Amz-Signature=[redacted]#fragment"
+        );
+        assert_eq!(
+            redact_remote_url("https://example.com/repo?api%5Fkey=secret&monkey=visible"),
+            "https://example.com/repo?api%5Fkey=[redacted]&monkey=visible"
+        );
+    }
+
+    #[test]
+    fn malformed_remote_redaction_fails_closed() {
+        assert_eq!(
+            redact_remote_url("https://user:secret@/repo?token=secret"),
+            "https:///repo?token=[redacted]"
+        );
+        assert_eq!(
+            redact_remote_url("not a url?credential=secret&branch=main"),
+            "not a url?credential=[redacted]&branch=main"
+        );
     }
 }
