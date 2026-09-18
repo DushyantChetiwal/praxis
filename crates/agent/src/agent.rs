@@ -1,3 +1,4 @@
+mod architect_runner;
 mod db;
 mod legacy_thread;
 mod native_agent_server;
@@ -12,6 +13,7 @@ mod thread_store;
 mod tool_permissions;
 mod tools;
 
+pub use architect_runner::*;
 use context_server::ContextServerId;
 pub use db::*;
 use itertools::Itertools;
