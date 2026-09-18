@@ -681,6 +681,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         init_test(cx);
+        cx.update(|cx| language_model::LanguageModelRegistry::test(cx));
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree("/", json!({ "a": {} })).await;
         let project = Project::test(fs.clone(), [Path::new("/a")], cx).await;
