@@ -261,15 +261,13 @@ impl ArchitectPane {
     /// Goes back out to the plan containing the one being shown. The step just
     /// left is selected, so leaving does not lose your place.
     fn drill_out(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(parent) = self.focus.parent() else {
+        let Some(left) = self.focus.0.pop() else {
             return false;
         };
-        let left = self.focus.leaf().cloned();
-        self.focus = parent;
         self.interaction = Interaction::None;
         self.hovered_node = None;
         self.zoom_to_fit(cx);
-        self.set_selection(left.map(Selection::Node), window, cx);
+        self.set_selection(Some(Selection::Node(left)), window, cx);
         cx.notify();
         true
     }
