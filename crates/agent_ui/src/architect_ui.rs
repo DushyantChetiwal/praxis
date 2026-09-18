@@ -665,7 +665,9 @@ mod tests {
     use std::{path::Path, rc::Rc};
 
     use acp_thread::AgentConnection as _;
-    use gpui::{Modifiers, MouseMoveEvent, Task, TestAppContext, VisualTestContext};
+    use gpui::{
+        AppContext as _, Modifiers, MouseMoveEvent, Task, TestAppContext, VisualTestContext,
+    };
     use project::{FakeFs, Project};
     use serde_json::json;
     use util::path_list::PathList;
