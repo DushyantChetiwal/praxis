@@ -58,7 +58,9 @@ The built-in research surface includes file and symbol reads, diagnostics,
 fetch, web search, and shell-free Git tools for status, diffs, branches, remotes,
 and commit inspection. `pull_request` performs strict HTTPS GET-only inspection
 of GitHub pull requests and GitLab merge requests, including optional files,
-conversation, reviews, and checks. Terminal, sibling threads, and subagents are
+conversation, reviews, and checks. Hosted review reads use bounded pagination,
+a shared response budget, cancellable requests, and preserve the summary when an
+optional section fails. Terminal, sibling threads, and subagents are
 classified as `ArbitraryExecution` and are unavailable in Plan mode.
 
 MCP tools are admitted only when their annotation explicitly sets
