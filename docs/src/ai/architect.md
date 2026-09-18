@@ -15,7 +15,7 @@ The agent works in one of two modes, shown next to the message editor:
 
 You do not have to switch modes yourself. When the agent decides a task is worth planning, it draws a plan, and drawing a plan is what puts the thread into Plan mode. Pressing **Run** puts it back into Build.
 
-In Plan mode only tools reviewed as local or external reads are available. Project mutation, external mutation, terminal execution, subagents, sibling threads, and MCP tools without an explicit read-only annotation are withheld rather than merely discouraged. Shell-free Git and GitHub/GitLab pull-request tools remain available for research. You can switch modes by hand at any time from the mode selector.
+In Plan mode only tools reviewed as local reads, external reads, or conversation-owned plan updates are available. Plan tools may draft, refine, and report steps, but cannot change project files or external systems. Project mutation, external mutation, terminal execution, subagents, sibling threads, and MCP tools without an explicit read-only annotation are withheld rather than merely discouraged. Shell-free Git and GitHub/GitLab pull-request tools remain available for research. The selected mode is saved with the thread, so reopening a plan does not silently restore Build tools. You can switch modes by hand at any time from the mode selector.
 
 ## Drafting a plan
 

@@ -197,7 +197,7 @@ impl AgentTool for RefineStepTool {
     const NAME: &'static str = "refine_step";
 
     fn capability() -> ToolCapability {
-        ToolCapability::ReadOnly
+        ToolCapability::ConversationMutation
     }
 
     fn kind() -> acp::ToolKind {

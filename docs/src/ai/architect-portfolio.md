@@ -41,13 +41,15 @@ verdict and chooses the next connection.
 Every native tool declares one capability:
 
 - `ReadOnly` reads local project or conversation state.
+- `ConversationMutation` changes only conversation-owned planning state.
 - `ExternalRead` performs a non-mutating external lookup.
 - `ProjectMutation` changes project state.
 - `ExternalMutation` may change an external system.
 - `ArbitraryExecution` runs commands or delegates unrestricted execution.
 
-Plan mode permits only `ReadOnly` and `ExternalRead`. The default for a newly
-added tool is `ProjectMutation`, so an unreviewed tool fails closed. This is
+Plan mode permits `ReadOnly`, `ConversationMutation`, and `ExternalRead`. The
+default for a newly added tool is `ProjectMutation`, so an unreviewed tool fails
+closed. This is
 enforced when the enabled tool set is built, again when each completion request
 is serialized, and again at invocation time. A model cannot invoke a terminal
 from an earlier tool snapshot after the thread changes from Build to Plan.

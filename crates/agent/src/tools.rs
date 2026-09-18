@@ -322,6 +322,13 @@ mod tests {
     fn representative_tools_declare_their_plan_capabilities() {
         assert_eq!(ReadFileTool::capability(), crate::ToolCapability::ReadOnly);
         assert_eq!(GitDiffTool::capability(), crate::ToolCapability::ReadOnly);
+        for capability in [
+            DraftPlanTool::capability(),
+            RefineStepTool::capability(),
+            CompleteStepTool::capability(),
+        ] {
+            assert_eq!(capability, crate::ToolCapability::ConversationMutation);
+        }
         assert_eq!(
             PullRequestTool::capability(),
             crate::ToolCapability::ExternalRead

@@ -139,7 +139,7 @@ impl AgentTool for DraftPlanTool {
     const NAME: &'static str = "draft_plan";
 
     fn capability() -> ToolCapability {
-        ToolCapability::ReadOnly
+        ToolCapability::ConversationMutation
     }
 
     fn kind() -> acp::ToolKind {

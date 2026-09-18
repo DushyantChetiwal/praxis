@@ -144,10 +144,12 @@ const COMPACTION_RETAINED_AGENT_MESSAGES_BYTE_BUDGET: usize = 60_000;
 /// is a standing preference the user sets; planning is a phase of a task, and
 /// asking someone to change profile before they may plan meant that in practice
 /// nobody did.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionMode {
-    /// Working out what to do. Only tools classified as read-only research are
-    /// available; arbitrary execution and all mutations are mechanically denied.
+    /// Working out what to do. Read-only research and conversation-owned plan
+    /// updates are available; project/external mutation and arbitrary execution
+    /// are mechanically denied.
     Plan,
     /// Carrying the work out.
     #[default]
@@ -182,6 +184,9 @@ impl SessionMode {
 pub enum ToolCapability {
     /// Reads only local project or conversation state.
     ReadOnly,
+    /// Mutates conversation-owned planning state without changing the project or
+    /// an external service.
+    ConversationMutation,
     /// Mutates project files or other local project state.
     ProjectMutation,
     /// Reads from an external service without changing it.
@@ -194,7 +199,11 @@ pub enum ToolCapability {
 
 impl ToolCapability {
     pub fn is_allowed_in(self, mode: SessionMode) -> bool {
-        mode == SessionMode::Build || matches!(self, Self::ReadOnly | Self::ExternalRead)
+        mode == SessionMode::Build
+            || matches!(
+                self,
+                Self::ReadOnly | Self::ConversationMutation | Self::ExternalRead
+            )
     }
 }
 
@@ -2065,7 +2074,7 @@ impl Thread {
             inherits_parent_model_settings: true,
             architect_graph: db_thread.architect_graph,
             architect_running_step: None,
-            session_mode: Rc::new(Cell::new(SessionMode::default())),
+            session_mode: Rc::new(Cell::new(db_thread.session_mode)),
             architect_run: None,
             sandboxed_terminal_temp_dir: db_thread.sandboxed_terminal_temp_dir,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::from_db(
@@ -2167,6 +2176,7 @@ impl Thread {
                 }
             }),
             architect_graph: self.architect_graph.clone(),
+            session_mode: self.session_mode(),
             sandboxed_terminal_temp_dir: self.sandboxed_terminal_temp_dir.clone(),
             sandbox_grants: self.sandbox_grants.borrow().to_db(),
         };
@@ -2342,6 +2352,7 @@ impl Thread {
             return;
         }
         self.session_mode.set(mode);
+        self.updated_at = Utc::now();
         self.refresh_turn_tools(cx);
         cx.notify();
     }
@@ -10410,8 +10421,9 @@ mod session_mode_tests {
     use super::{SessionMode, ToolCapability};
 
     #[test]
-    fn planning_allows_only_read_capabilities() {
+    fn planning_allows_research_and_conversation_mutations() {
         assert!(ToolCapability::ReadOnly.is_allowed_in(SessionMode::Plan));
+        assert!(ToolCapability::ConversationMutation.is_allowed_in(SessionMode::Plan));
         assert!(ToolCapability::ExternalRead.is_allowed_in(SessionMode::Plan));
         assert!(!ToolCapability::ProjectMutation.is_allowed_in(SessionMode::Plan));
         assert!(!ToolCapability::ExternalMutation.is_allowed_in(SessionMode::Plan));
@@ -10422,6 +10434,7 @@ mod session_mode_tests {
     fn building_allows_every_capability() {
         for capability in [
             ToolCapability::ReadOnly,
+            ToolCapability::ConversationMutation,
             ToolCapability::ProjectMutation,
             ToolCapability::ExternalRead,
             ToolCapability::ExternalMutation,

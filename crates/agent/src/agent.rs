@@ -8041,6 +8041,54 @@ mod internal_tests {
     }
 
     #[gpui::test]
+    async fn test_plan_mode_and_filtered_tools_survive_reopening(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let model = Arc::new(FakeLanguageModel::default());
+        thread.update(cx, |thread, cx| {
+            thread.set_title("Persisted plan".into(), cx);
+            thread.set_model(model.clone(), cx);
+            thread.set_session_mode(crate::SessionMode::Plan, cx);
+        });
+
+        agent.update(cx, |agent, cx| agent.save_thread(thread.clone(), cx));
+        cx.run_until_parked();
+        drop(thread);
+        drop(acp_thread);
+        release_dropped_entities(cx);
+        agent.read_with(cx, |agent, _| {
+            assert!(!agent.sessions.contains_key(&session_id));
+        });
+
+        let restored_acp_thread = cx
+            .update(|cx| {
+                connection.clone().load_session(
+                    session_id.clone(),
+                    project,
+                    PathList::new(&[Path::new("/a")]),
+                    None,
+                    cx,
+                )
+            })
+            .await
+            .expect("the Plan-mode session should reload");
+        cx.run_until_parked();
+        let restored = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        restored.update(cx, |thread, cx| thread.set_model(model, cx));
+        restored.read_with(cx, |thread, cx| {
+            assert_eq!(thread.session_mode(), crate::SessionMode::Plan);
+            let tools = thread.enabled_tools(cx);
+            assert!(tools.contains_key(ReadFileTool::NAME));
+            assert!(tools.contains_key(DraftPlanTool::NAME));
+            assert!(!tools.contains_key(EditFileTool::NAME));
+            assert!(!tools.contains_key(TerminalTool::NAME));
+        });
+        drop(restored_acp_thread);
+    }
+
+    #[gpui::test]
     async fn test_ask_question_is_available_to_root_threads_in_both_modes(cx: &mut TestAppContext) {
         init_test(cx);
         let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;

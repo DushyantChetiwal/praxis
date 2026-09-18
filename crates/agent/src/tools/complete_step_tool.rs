@@ -72,7 +72,7 @@ impl AgentTool for CompleteStepTool {
     const NAME: &'static str = "complete_step";
 
     fn capability() -> ToolCapability {
-        ToolCapability::ReadOnly
+        ToolCapability::ConversationMutation
     }
 
     fn kind() -> acp::ToolKind {

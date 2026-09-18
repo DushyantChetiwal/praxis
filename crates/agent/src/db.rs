@@ -84,6 +84,10 @@ pub struct DbThread {
     /// is deleted along with the thread.
     #[serde(default)]
     pub architect_graph: Option<architect::ArchitectGraph>,
+    /// Whether the thread was last used for planning or building. Older saved
+    /// threads default to Build to preserve their previous behavior.
+    #[serde(default)]
+    pub session_mode: crate::SessionMode,
     #[serde(default)]
     pub sandboxed_terminal_temp_dir: Option<PathBuf>,
     /// Sandbox escalations the user approved "for the rest of this thread".
@@ -173,6 +177,7 @@ impl SharedThread {
             draft_prompt: None,
             ui_scroll_position: None,
             architect_graph: None,
+            session_mode: crate::SessionMode::default(),
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
         }
@@ -360,6 +365,7 @@ impl DbThread {
             draft_prompt: None,
             ui_scroll_position: None,
             architect_graph: None,
+            session_mode: crate::SessionMode::default(),
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
         })
@@ -832,6 +838,7 @@ mod tests {
             draft_prompt: None,
             ui_scroll_position: None,
             architect_graph: None,
+            session_mode: crate::SessionMode::default(),
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
         }
@@ -925,6 +932,7 @@ mod tests {
             Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
         );
         thread.architect_graph = Some(graph.clone());
+        thread.session_mode = crate::SessionMode::Plan;
 
         database
             .save_thread(thread_id.clone(), thread, PathList::default())
@@ -942,6 +950,11 @@ mod tests {
             Some(graph),
             "the plan should survive exactly, including lock state and node chats"
         );
+        assert_eq!(
+            loaded.session_mode,
+            crate::SessionMode::Plan,
+            "reopening a saved plan must not silently restore mutation tools"
+        );
     }
 
     #[test]
@@ -957,6 +970,11 @@ mod tests {
         assert!(
             db_thread.architect_graph.is_none(),
             "threads saved before Architect existed should still load"
+        );
+        assert_eq!(
+            db_thread.session_mode,
+            crate::SessionMode::Build,
+            "threads saved before session modes existed should preserve legacy behavior"
         );
     }
 
