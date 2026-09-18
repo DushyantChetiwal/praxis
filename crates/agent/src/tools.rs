@@ -327,6 +327,10 @@ mod tests {
             crate::ToolCapability::ExternalRead
         );
         assert_eq!(
+            WebSearchTool::capability(),
+            crate::ToolCapability::ExternalRead
+        );
+        assert_eq!(
             TerminalTool::capability(),
             crate::ToolCapability::ArbitraryExecution
         );

@@ -4,7 +4,7 @@ use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 use agent_client_protocol::schema::v1 as acp;
 use git::{
     repository::DiffType,
-    status::{FileStatus, StatusCode, TrackedStatus},
+    status::{FileStatus, StatusCode},
 };
 use gpui::{App, Entity, SharedString, Task};
 use project::{Project, git_store::Repository};
@@ -613,7 +613,7 @@ mod tests {
     fn status_codes_match_porcelain_layout() {
         assert_eq!(status_code(FileStatus::Untracked), "??");
         assert_eq!(
-            status_code(FileStatus::Tracked(TrackedStatus {
+            status_code(FileStatus::Tracked(git::status::TrackedStatus {
                 index_status: StatusCode::Added,
                 worktree_status: StatusCode::Modified,
             })),

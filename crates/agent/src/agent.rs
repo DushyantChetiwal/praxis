@@ -8028,7 +8028,6 @@ mod internal_tests {
                 GitStatusTool::NAME,
                 GitDiffTool::NAME,
                 PullRequestTool::NAME,
-                WebSearchTool::NAME,
             ] {
                 assert!(
                     tools.contains_key(tool_name),
