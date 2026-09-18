@@ -1,6 +1,5 @@
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
-use architect::StepResult;
 use gpui::{App, SharedString, Task, WeakEntity};
 use language_model::LanguageModelToolResultContent;
 use schemars::JsonSchema;
@@ -93,6 +92,23 @@ impl AgentTool for CompleteStepTool {
         _event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
+        let visit_id = match self
+            .thread
+            .read_with(cx, |thread, _cx| thread.architect_step_visit_id())
+        {
+            Ok(Some(visit_id)) => visit_id,
+            Ok(None) => {
+                return Task::ready(Err(CompleteStepToolOutput::Error {
+                    error: crate::ArchitectStepCompletionError::NoActiveVisit.to_string(),
+                }));
+            }
+            Err(error) => {
+                return Task::ready(Err(CompleteStepToolOutput::Error {
+                    error: format!("The plan this step belongs to is gone: {error}"),
+                }));
+            }
+        };
+
         cx.spawn(async move |cx| {
             let input = input
                 .recv()
@@ -113,38 +129,19 @@ impl AgentTool for CompleteStepTool {
             let recorded = self
                 .thread
                 .update(cx, |thread, cx| {
-                    let Some(path) = thread.architect_running_step().cloned() else {
-                        return None;
-                    };
-                    thread
-                        .update_architect_graph(
-                            |graph| {
-                                let node = graph.node_at_mut(&path)?;
-                                let attempt =
-                                    node.result.as_ref().map_or(1, |result| result.attempt + 1);
-                                node.result = Some(StepResult {
-                                    summary: summary.clone(),
-                                    attempt,
-                                });
-                                Some((node.title.clone(), attempt))
-                            },
-                            cx,
-                        )
-                        .flatten()
+                    thread.complete_architect_step_visit(visit_id, summary, cx)
                 })
                 .map_err(|error| CompleteStepToolOutput::Error {
                     error: format!("The plan this step belongs to is gone: {error}"),
+                })?
+                .map_err(|error| CompleteStepToolOutput::Error {
+                    error: error.to_string(),
                 })?;
 
-            let Some((step, attempt)) = recorded else {
-                return Err(CompleteStepToolOutput::Error {
-                    error: "There is no step running, so there is nothing to report on. This tool \
-                            is only for steps of a plan being run from the Architect canvas."
-                        .into(),
-                });
-            };
-
-            Ok(CompleteStepToolOutput::Success { step, attempt })
+            Ok(CompleteStepToolOutput::Success {
+                step: recorded.0,
+                attempt: recorded.1,
+            })
         })
     }
 }

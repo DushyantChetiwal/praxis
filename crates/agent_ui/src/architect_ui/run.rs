@@ -135,7 +135,6 @@ impl ArchitectPane {
                                         attempt,
                                         cx,
                                     );
-                                    thread.set_architect_running_step(Some(node.clone()));
                                 })
                                 .ok();
 
@@ -143,7 +142,7 @@ impl ArchitectPane {
                                 architect::step_prompt(&graph, &node, step_number, attempt);
                             let sent = send_and_wait(&acp_thread, prompt, cx).await;
                             thread
-                                .update(cx, |thread, _cx| thread.set_architect_running_step(None))
+                                .update(cx, |thread, _cx| thread.clear_architect_step_visit())
                                 .ok();
                             if let Err(error) = sent {
                                 log::error!("Architect: step \"{node}\" could not run: {error}");

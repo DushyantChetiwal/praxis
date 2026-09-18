@@ -265,6 +265,44 @@ impl ArchitectRun {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ArchitectStepVisitId(Uuid);
+
+#[derive(Clone, Debug)]
+struct ActiveArchitectStepVisit {
+    id: ArchitectStepVisitId,
+    path: architect::NodePath,
+    attempt: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArchitectStepCompletionError {
+    NoActiveVisit,
+    StaleVisit,
+    MissingStep,
+}
+
+impl std::fmt::Display for ArchitectStepCompletionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoActiveVisit => formatter.write_str(
+                "There is no step running, so there is nothing to report on. This tool is only \
+                 for steps of a plan being run from the Architect canvas.",
+            ),
+            Self::StaleVisit => formatter.write_str(
+                "That step visit has already ended. Its report was rejected instead of being \
+                 written onto the step that is running now.",
+            ),
+            Self::MissingStep => formatter.write_str(
+                "The running step is no longer present in the plan, so its report cannot be \
+                 recorded.",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ArchitectStepCompletionError {}
+
 /// Returned when a turn is attempted but no language model has been selected.
 #[derive(Debug)]
 pub struct NoModelConfiguredError;
@@ -1494,10 +1532,10 @@ pub struct Thread {
     /// The Architect plan drafted in this thread. The conversation governs the
     /// plan, so the two live and die together.
     architect_graph: Option<architect::ArchitectGraph>,
-    /// The step a run is currently carrying out, if one is. Deliberately not
-    /// persisted: a run does not survive a restart, and a stale pointer here
-    /// would let `complete_step` write its summary onto the wrong step.
-    architect_running_step: Option<architect::NodePath>,
+    /// The exact run visit `complete_step` may report on. Deliberately not
+    /// persisted: a run does not survive a restart. The unique visit id prevents
+    /// a late tool call from writing onto a later visit or a different step.
+    architect_active_visit: Option<ActiveArchitectStepVisit>,
     /// Whether the thread is planning or building.
     ///
     /// Shared, because the mode selector in the UI has to read it without an
@@ -1679,7 +1717,7 @@ impl Thread {
             running_subagents: Vec::new(),
             inherits_parent_model_settings: true,
             architect_graph: None,
-            architect_running_step: None,
+            architect_active_visit: None,
             session_mode: Rc::new(Cell::new(SessionMode::default())),
             architect_run: None,
             sandboxed_terminal_temp_dir: None,
@@ -2073,7 +2111,7 @@ impl Thread {
             running_subagents: Vec::new(),
             inherits_parent_model_settings: true,
             architect_graph: db_thread.architect_graph,
-            architect_running_step: None,
+            architect_active_visit: None,
             session_mode: Rc::new(Cell::new(db_thread.session_mode)),
             architect_run: None,
             sandboxed_terminal_temp_dir: db_thread.sandboxed_terminal_temp_dir,
@@ -2273,7 +2311,13 @@ impl Thread {
         step_number: usize,
         attempt: usize,
         cx: &mut Context<Self>,
-    ) {
+    ) -> ArchitectStepVisitId {
+        let visit_id = ArchitectStepVisitId(Uuid::new_v4());
+        self.architect_active_visit = Some(ActiveArchitectStepVisit {
+            id: visit_id,
+            path: current.clone(),
+            attempt,
+        });
         if let Some(run) = self.architect_run.as_mut() {
             run.current = Some(current.clone());
             run.current_title = current_title.clone();
@@ -2288,6 +2332,7 @@ impl Thread {
             });
         }
         cx.notify();
+        visit_id
     }
 
     /// Closes off the step the run is in, with whatever it reported.
@@ -2322,14 +2367,14 @@ impl Thread {
                 step.elapsed = Some(step.started_at.elapsed());
             }
         }
-        self.architect_running_step = None;
+        self.architect_active_visit = None;
         cx.notify();
     }
 
     /// Ends a run by dropping the task driving it.
     pub fn stop_architect_run(&mut self, cx: &mut Context<Self>) {
         self.architect_run = None;
-        self.architect_running_step = None;
+        self.architect_active_visit = None;
         cx.notify();
     }
 
@@ -2360,11 +2405,46 @@ impl Thread {
     /// The step a run is carrying out, which is the step `complete_step` is
     /// allowed to write a summary onto.
     pub fn architect_running_step(&self) -> Option<&architect::NodePath> {
-        self.architect_running_step.as_ref()
+        self.architect_active_visit
+            .as_ref()
+            .map(|visit| &visit.path)
     }
 
-    pub fn set_architect_running_step(&mut self, step: Option<architect::NodePath>) {
-        self.architect_running_step = step;
+    pub fn architect_step_visit_id(&self) -> Option<ArchitectStepVisitId> {
+        self.architect_active_visit.as_ref().map(|visit| visit.id)
+    }
+
+    pub fn clear_architect_step_visit(&mut self) {
+        self.architect_active_visit = None;
+    }
+
+    pub fn complete_architect_step_visit(
+        &mut self,
+        visit_id: ArchitectStepVisitId,
+        summary: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(SharedString, usize), ArchitectStepCompletionError> {
+        let visit = self
+            .architect_active_visit
+            .as_ref()
+            .ok_or(ArchitectStepCompletionError::NoActiveVisit)?;
+        if visit.id != visit_id {
+            return Err(ArchitectStepCompletionError::StaleVisit);
+        }
+        let path = visit.path.clone();
+        let attempt = visit.attempt;
+        let graph = self
+            .architect_graph
+            .as_mut()
+            .ok_or(ArchitectStepCompletionError::MissingStep)?;
+        let node = graph
+            .node_at_mut(&path)
+            .ok_or(ArchitectStepCompletionError::MissingStep)?;
+        node.result = Some(architect::StepResult { summary, attempt });
+        let title = node.title.clone().into();
+        self.updated_at = Utc::now();
+        cx.notify();
+        Ok((title, attempt))
     }
 
     /// Edits the plan in place, marking the thread changed so the edit is

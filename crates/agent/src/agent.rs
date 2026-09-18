@@ -8452,6 +8452,75 @@ mod internal_tests {
         });
     }
 
+    #[gpui::test]
+    async fn test_step_completion_is_idempotent_and_rejects_stale_visits(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let path = architect::NodePath::root(architect::NodeId::from("build"));
+        let mut graph = architect::ArchitectGraph::default();
+        graph.add_node(architect::ArchitectNode::new("build", "Build the feature"));
+
+        thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(graph), cx);
+            thread.start_architect_run(
+                path.clone(),
+                "Build the feature".into(),
+                Task::ready(()),
+                cx,
+            );
+            let first_visit = thread.note_architect_run_position(
+                path.clone(),
+                "Build the feature".into(),
+                1,
+                1,
+                cx,
+            );
+            assert_eq!(
+                thread.complete_architect_step_visit(first_visit, "first report".into(), cx),
+                Ok(("Build the feature".into(), 1))
+            );
+            assert_eq!(
+                thread.complete_architect_step_visit(first_visit, "revised report".into(), cx),
+                Ok(("Build the feature".into(), 1)),
+                "a duplicate report for one visit must not invent another attempt"
+            );
+
+            let second_visit = thread.note_architect_run_position(
+                path.clone(),
+                "Build the feature".into(),
+                2,
+                2,
+                cx,
+            );
+            assert_eq!(
+                thread.complete_architect_step_visit(first_visit, "late report".into(), cx),
+                Err(crate::ArchitectStepCompletionError::StaleVisit),
+                "a late completion must not write onto the current visit"
+            );
+            let result = thread
+                .architect_graph()
+                .and_then(|graph| graph.node_at(&path))
+                .and_then(|node| node.result.as_ref())
+                .expect("the first visit should still have its report");
+            assert_eq!(result.summary, "revised report");
+            assert_eq!(result.attempt, 1);
+
+            assert_eq!(
+                thread.complete_architect_step_visit(second_visit, "second visit".into(), cx),
+                Ok(("Build the feature".into(), 2))
+            );
+            let result = thread
+                .architect_graph()
+                .and_then(|graph| graph.node_at(&path))
+                .and_then(|node| node.result.as_ref())
+                .expect("the second visit should have its report");
+            assert_eq!(result.summary, "second visit");
+            assert_eq!(result.attempt, 2);
+        });
+    }
+
     fn thread_entries(
         thread_store: &Entity<ThreadStore>,
         cx: &mut TestAppContext,
