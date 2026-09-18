@@ -2,7 +2,7 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use super::symbol_locator::{LocationDisplay, SymbolLocator};
-use crate::{AgentTool, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 use agent_client_protocol::schema::v1 as acp;
 use gpui::{App, Entity, SharedString, Task};
 use project::Project;
@@ -35,6 +35,10 @@ impl AgentTool for FindReferencesTool {
     type Output = String;
 
     const NAME: &'static str = "find_references";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Search

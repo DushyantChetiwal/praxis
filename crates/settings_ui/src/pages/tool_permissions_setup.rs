@@ -69,6 +69,12 @@ const TOOLS: &[ToolInfo] = &[
         regex_explanation: "Patterns are matched against the URL being fetched.",
     },
     ToolInfo {
+        id: "pull_request",
+        name: "Pull Request",
+        description: "Read-only GitHub and GitLab pull request inspection",
+        regex_explanation: "Patterns are matched against the pull request or merge request URL.",
+    },
+    ToolInfo {
         id: "search_web",
         name: "Web Search",
         description: "Web search queries",
@@ -310,6 +316,7 @@ fn get_tool_render_fn(
         "move_path" => render_move_path_tool_config,
         "create_directory" => render_create_directory_tool_config,
         "fetch" => render_fetch_tool_config,
+        "pull_request" => render_pull_request_tool_config,
         "search_web" => render_web_search_tool_config,
         "skill" => render_skill_tool_config,
         _ => render_terminal_tool_config, // fallback
@@ -1388,6 +1395,7 @@ tool_config_page_fn!(render_copy_path_tool_config, "copy_path");
 tool_config_page_fn!(render_move_path_tool_config, "move_path");
 tool_config_page_fn!(render_create_directory_tool_config, "create_directory");
 tool_config_page_fn!(render_fetch_tool_config, "fetch");
+tool_config_page_fn!(render_pull_request_tool_config, "pull_request");
 tool_config_page_fn!(render_web_search_tool_config, "search_web");
 tool_config_page_fn!(render_skill_tool_config, "skill");
 
@@ -1414,6 +1422,12 @@ mod tests {
             "find_path",
             "find_references",
             "get_code_actions",
+            // Shell-free repository inspection through Zed's Git backend.
+            "git_branches",
+            "git_diff",
+            "git_remotes",
+            "git_show",
+            "git_status",
             "go_to_definition",
             "grep",
             "list_agents_and_models",

@@ -2,7 +2,7 @@ use super::tool_permissions::{
     ResolvedProjectPath, authorize_symlink_access, canonicalize_worktree_roots,
     resolve_global_skill_path, resolve_project_path,
 };
-use crate::{AgentTool, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::{Context as _, Result, anyhow};
 use fs::Fs;
@@ -183,6 +183,10 @@ impl AgentTool for ListDirectoryTool {
     type Output = String;
 
     const NAME: &'static str = "list_directory";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Read

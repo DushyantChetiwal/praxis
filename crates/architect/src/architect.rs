@@ -58,14 +58,33 @@ impl From<&str> for EdgeId {
     }
 }
 
+/// How Architect's built-in runner resolves an edge condition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConditionEvaluation {
+    /// No evaluation is needed.
+    Unconditional,
+    /// The condition is returned to the caller and, in the default prompt-based
+    /// integration, checked by the model.
+    ModelMediated,
+}
+
 /// When one step leads to another.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EdgeCondition {
     /// The step always follows.
     Always,
-    /// A condition that can be checked without asking a model, such as a
-    /// command's exit status or whether a file exists.
+    /// A legacy name for a free-form description of an externally observable
+    /// condition, retained for source and serialized-data compatibility.
+    ///
+    /// Architect does not interpret this string. Doing so would require an
+    /// expression language and a trusted evaluation environment, neither of
+    /// which this crate defines. [`crate::PlanRun`] therefore returns it through
+    /// [`crate::Decision::Ask`], just like [`EdgeCondition::LlmEvaluated`]. A
+    /// caller with a safe, typed evaluator may resolve it and pass the verdict to
+    /// [`crate::PlanRun::answer`]; the default prompt-based integration asks the
+    /// model to check it. New free-form model decisions should use
+    /// [`EdgeCondition::LlmEvaluated`] so their execution semantics are explicit.
     Deterministic { expression: String },
     /// A judgement the model has to make, phrased as a yes-or-no question.
     LlmEvaluated { question: String },
@@ -82,6 +101,17 @@ impl EdgeCondition {
 
     pub fn is_always(&self) -> bool {
         matches!(self, EdgeCondition::Always)
+    }
+
+    /// Describes what the built-in runner actually does, rather than what a
+    /// condition's legacy variant name might imply.
+    pub fn evaluation(&self) -> ConditionEvaluation {
+        match self {
+            EdgeCondition::Always => ConditionEvaluation::Unconditional,
+            EdgeCondition::Deterministic { .. } | EdgeCondition::LlmEvaluated { .. } => {
+                ConditionEvaluation::ModelMediated
+            }
+        }
     }
 }
 
@@ -162,6 +192,20 @@ impl ArchitectNode {
 
     pub fn has_subplan(&self) -> bool {
         self.subplan().is_some()
+    }
+
+    /// The result successors should receive from this step.
+    ///
+    /// Nested steps are not run directly, so older callers may not have stored a
+    /// result on the containing node. In that case the completed child results
+    /// are composed into a handoff instead of making the containing step appear
+    /// to have produced nothing.
+    pub fn handoff_result(&self) -> Option<StepResult> {
+        self.result
+            .as_ref()
+            .filter(|result| !result.summary.trim().is_empty())
+            .cloned()
+            .or_else(|| self.subplan()?.completion_result(1))
     }
 }
 
@@ -254,7 +298,10 @@ impl Display for GraphProblem {
 ///
 /// A bare `NodeId` stops meaning anything once plans nest, because the same id
 /// may exist in several sub-plans.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(transparent)]
 pub struct NodePath(pub Vec<NodeId>);
 
 impl NodePath {
@@ -283,12 +330,77 @@ impl NodePath {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    pub fn as_slice(&self) -> &[NodeId] {
+        &self.0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &NodeId> {
+        self.0.iter()
+    }
+}
+
+impl From<NodeId> for NodePath {
+    fn from(id: NodeId) -> Self {
+        Self::root(id)
+    }
+}
+
+impl From<Vec<NodeId>> for NodePath {
+    fn from(ids: Vec<NodeId>) -> Self {
+        Self(ids)
+    }
 }
 
 impl Display for NodePath {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let joined: Vec<&str> = self.0.iter().map(|id| id.0.as_str()).collect();
         write!(formatter, "{}", joined.join(" / "))
+    }
+}
+
+/// Why a checked graph mutation could not be applied.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphMutationError {
+    EmptyPath,
+    NodeNotFound { path: NodePath },
+    MissingSubplan { path: NodePath },
+    Locked { path: NodePath },
+    NestedPlanUnlocked { path: NodePath },
+    EdgeNotFound { graph: NodePath, edge: EdgeId },
+}
+
+impl std::error::Error for GraphMutationError {}
+
+impl Display for GraphMutationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GraphMutationError::EmptyPath => write!(formatter, "a node path cannot be empty"),
+            GraphMutationError::NodeNotFound { path } => {
+                write!(formatter, "the step at {path} does not exist")
+            }
+            GraphMutationError::MissingSubplan { path } => {
+                write!(formatter, "the step at {path} does not contain a plan")
+            }
+            GraphMutationError::Locked { path } => {
+                write!(formatter, "the step at {path} is locked")
+            }
+            GraphMutationError::NestedPlanUnlocked { path } => write!(
+                formatter,
+                "the step at {path} cannot be locked while its nested plan is unlocked"
+            ),
+            GraphMutationError::EdgeNotFound { graph, edge } => {
+                if graph.is_empty() {
+                    write!(formatter, "the connection {} does not exist", edge.0)
+                } else {
+                    write!(
+                        formatter,
+                        "the connection {} does not exist in the plan at {graph}",
+                        edge.0
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -329,6 +441,37 @@ fn routes_from(graph: &ArchitectGraph, id: &NodeId) -> Vec<(String, EdgeConditio
 impl ArchitectGraph {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// Clears results from this plan and every nested plan before a new run.
+    pub fn clear_results(&mut self) {
+        for node in &mut self.nodes {
+            node.result = None;
+            if let Some(subplan) = node.subplan.as_deref_mut() {
+                subplan.clear_results();
+            }
+        }
+    }
+
+    /// Composes the results produced by a completed plan into the handoff its
+    /// containing step gives to successors.
+    pub fn completion_result(&self, attempt: usize) -> Option<StepResult> {
+        let mut summary = String::new();
+        for node in &self.nodes {
+            let Some(result) = node.handoff_result() else {
+                continue;
+            };
+            let result_summary = result.summary.trim();
+            if result_summary.is_empty() {
+                continue;
+            }
+            let _ = writeln!(summary, "- {}: {result_summary}", node.title);
+        }
+
+        (!summary.is_empty()).then(|| StepResult {
+            summary: summary.trim_end().to_string(),
+            attempt: attempt.max(1),
+        })
     }
 
     /// Lays a fresh draft over this plan, keeping what a draft cannot know.
@@ -626,6 +769,205 @@ impl ArchitectGraph {
             graph = graph.node_mut(id)?.subplan.as_deref_mut()?;
         }
         graph.node_mut(last)
+    }
+
+    /// Mutates a nested plan only when every step containing it is unlocked.
+    /// An empty path addresses this top-level graph.
+    pub fn mutate_graph_at<R>(
+        &mut self,
+        path: &NodePath,
+        update: impl FnOnce(&mut ArchitectGraph) -> R,
+    ) -> Result<R, GraphMutationError> {
+        let mut graph = self;
+        let mut walked = Vec::with_capacity(path.depth());
+        for id in &path.0 {
+            walked.push(id.clone());
+            let parent_path = NodePath(walked.clone());
+            let parent = graph
+                .node_mut(id)
+                .ok_or_else(|| GraphMutationError::NodeNotFound {
+                    path: parent_path.clone(),
+                })?;
+            if parent.locked {
+                return Err(GraphMutationError::Locked { path: parent_path });
+            }
+            graph = parent.subplan.as_deref_mut().ok_or_else(|| {
+                GraphMutationError::MissingSubplan {
+                    path: NodePath(walked.clone()),
+                }
+            })?;
+        }
+        Ok(update(graph))
+    }
+
+    /// Mutates one unlocked step addressed by its complete path.
+    ///
+    /// Unlike [`ArchitectGraph::node_at_mut`], this enforces the lock boundary:
+    /// neither the target nor a containing step may be locked.
+    pub fn mutate_node_at<R>(
+        &mut self,
+        path: &NodePath,
+        update: impl FnOnce(&mut ArchitectNode) -> R,
+    ) -> Result<R, GraphMutationError> {
+        let (graph, id) = self.containing_graph_mut(path)?;
+        let node = graph
+            .node_mut(&id)
+            .ok_or_else(|| GraphMutationError::NodeNotFound { path: path.clone() })?;
+        if node.locked {
+            return Err(GraphMutationError::Locked { path: path.clone() });
+        }
+        Ok(update(node))
+    }
+
+    /// Replaces one unlocked step's outgoing routes, ignoring and returning
+    /// destinations that do not exist in that step's own plan.
+    pub fn replace_outgoing_at(
+        &mut self,
+        path: &NodePath,
+        routes: Vec<(NodeId, EdgeCondition)>,
+    ) -> Result<Vec<NodeId>, GraphMutationError> {
+        let (graph, id) = self.containing_graph_mut(path)?;
+        let node = graph
+            .node(&id)
+            .ok_or_else(|| GraphMutationError::NodeNotFound { path: path.clone() })?;
+        if node.locked {
+            return Err(GraphMutationError::Locked { path: path.clone() });
+        }
+
+        let mut accepted = Vec::new();
+        let mut unknown = Vec::new();
+        for (to, condition) in routes {
+            if graph.node(&to).is_some() {
+                accepted.push((to, condition));
+            } else {
+                unknown.push(to);
+            }
+        }
+
+        graph.edges.retain(|edge| edge.from != id);
+        for (to, condition) in accepted {
+            graph.connect_with(id.clone(), to, condition);
+        }
+        Ok(unknown)
+    }
+
+    /// Removes one unlocked step and every connection that touches it.
+    pub fn remove_node_at(&mut self, path: &NodePath) -> Result<(), GraphMutationError> {
+        let (graph, id) = self.containing_graph_mut(path)?;
+        let node = graph
+            .node(&id)
+            .ok_or_else(|| GraphMutationError::NodeNotFound { path: path.clone() })?;
+        if node.locked {
+            return Err(GraphMutationError::Locked { path: path.clone() });
+        }
+        graph.remove_node(&id);
+        Ok(())
+    }
+
+    /// Adds an outgoing connection from one unlocked step in its containing plan.
+    pub fn connect_from_at(
+        &mut self,
+        from: &NodePath,
+        to: NodeId,
+        condition: EdgeCondition,
+    ) -> Result<EdgeId, GraphMutationError> {
+        let (graph, from_id) = self.containing_graph_mut(from)?;
+        let source = graph
+            .node(&from_id)
+            .ok_or_else(|| GraphMutationError::NodeNotFound { path: from.clone() })?;
+        if source.locked {
+            return Err(GraphMutationError::Locked { path: from.clone() });
+        }
+        if graph.node(&to).is_none() {
+            let mut target = from.0[..from.0.len() - 1].to_vec();
+            target.push(to);
+            return Err(GraphMutationError::NodeNotFound {
+                path: NodePath(target),
+            });
+        }
+        Ok(graph.connect_with(from_id, to, condition))
+    }
+
+    /// Removes a connection unless its source step or a containing step is locked.
+    pub fn disconnect_at(
+        &mut self,
+        graph_path: &NodePath,
+        edge_id: &EdgeId,
+    ) -> Result<(), GraphMutationError> {
+        let edge = self
+            .graph_at(graph_path)
+            .and_then(|graph| graph.edges.iter().find(|edge| &edge.id == edge_id))
+            .cloned()
+            .ok_or_else(|| GraphMutationError::EdgeNotFound {
+                graph: graph_path.clone(),
+                edge: edge_id.clone(),
+            })?;
+        let source_path = graph_path.child(edge.from);
+        let (graph, source_id) = self.containing_graph_mut(&source_path)?;
+        let source = graph
+            .node(&source_id)
+            .ok_or_else(|| GraphMutationError::NodeNotFound {
+                path: source_path.clone(),
+            })?;
+        if source.locked {
+            return Err(GraphMutationError::Locked { path: source_path });
+        }
+        graph.disconnect(edge_id);
+        Ok(())
+    }
+
+    /// Changes a step's lock state while preserving nested-plan invariants.
+    ///
+    /// Unlocking the addressed step is allowed, but a child cannot be unlocked
+    /// through a locked containing step. Locking a step is refused until every
+    /// nested step is locked.
+    pub fn set_locked_at(
+        &mut self,
+        path: &NodePath,
+        locked: bool,
+    ) -> Result<(), GraphMutationError> {
+        let (graph, id) = self.containing_graph_mut(path)?;
+        let node = graph
+            .node_mut(&id)
+            .ok_or_else(|| GraphMutationError::NodeNotFound { path: path.clone() })?;
+        if locked
+            && node
+                .subplan()
+                .is_some_and(|subplan| !subplan.is_fully_locked_deeply())
+        {
+            return Err(GraphMutationError::NestedPlanUnlocked { path: path.clone() });
+        }
+        node.locked = locked;
+        Ok(())
+    }
+
+    /// Resolves the plan containing a node and rejects traversal through a
+    /// locked containing step.
+    fn containing_graph_mut(
+        &mut self,
+        path: &NodePath,
+    ) -> Result<(&mut ArchitectGraph, NodeId), GraphMutationError> {
+        let (last, parents) = path.0.split_last().ok_or(GraphMutationError::EmptyPath)?;
+        let mut graph = self;
+        let mut walked = Vec::with_capacity(path.depth());
+        for id in parents {
+            walked.push(id.clone());
+            let parent_path = NodePath(walked.clone());
+            let parent = graph
+                .node_mut(id)
+                .ok_or_else(|| GraphMutationError::NodeNotFound {
+                    path: parent_path.clone(),
+                })?;
+            if parent.locked {
+                return Err(GraphMutationError::Locked { path: parent_path });
+            }
+            graph = parent.subplan.as_deref_mut().ok_or_else(|| {
+                GraphMutationError::MissingSubplan {
+                    path: NodePath(walked.clone()),
+                }
+            })?;
+        }
+        Ok((graph, last.clone()))
     }
 
     /// The plan a path addresses: the nested plan inside the addressed step, or
@@ -1025,6 +1367,195 @@ mod tests {
     fn an_empty_graph_is_never_ready_to_run() {
         let graph = ArchitectGraph::default();
         assert!(!graph.is_fully_locked());
+    }
+
+    #[test]
+    fn a_completed_plan_composes_child_results_in_graph_order() {
+        let mut graph = ArchitectGraph::default();
+        let mut first = ArchitectNode::new("inspect", "Inspect");
+        first.result = Some(StepResult {
+            summary: "Found the failing boundary.".into(),
+            attempt: 1,
+        });
+        graph.add_node(first);
+        let mut second = ArchitectNode::new("fix", "Fix");
+        second.result = Some(StepResult {
+            summary: "Corrected the boundary check.".into(),
+            attempt: 1,
+        });
+        graph.add_node(second);
+
+        let result = graph.completion_result(2).unwrap();
+        assert_eq!(result.attempt, 2);
+        assert_eq!(
+            result.summary,
+            "- Inspect: Found the failing boundary.\n- Fix: Corrected the boundary check."
+        );
+    }
+
+    #[test]
+    fn clearing_results_descends_into_nested_plans() {
+        let mut nested = ArchitectGraph::default();
+        let mut child = ArchitectNode::new("child", "Child");
+        child.result = Some(StepResult {
+            summary: "old child result".into(),
+            attempt: 1,
+        });
+        nested.add_node(child);
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.result = Some(StepResult {
+            summary: "old parent result".into(),
+            attempt: 1,
+        });
+        parent.subplan = Some(Box::new(nested));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(parent);
+
+        graph.clear_results();
+
+        let parent = graph.node(&NodeId::from("parent")).unwrap();
+        assert!(parent.result.is_none());
+        assert!(
+            parent
+                .subplan()
+                .unwrap()
+                .node(&NodeId::from("child"))
+                .unwrap()
+                .result
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn checked_mutation_uses_the_full_nested_path() {
+        let mut first = ArchitectGraph::default();
+        first.add_node(ArchitectNode::new("same", "First same"));
+        let mut second = ArchitectGraph::default();
+        second.add_node(ArchitectNode::new("same", "Second same"));
+
+        let mut graph = ArchitectGraph::default();
+        let mut first_parent = ArchitectNode::new("first", "First");
+        first_parent.subplan = Some(Box::new(first));
+        graph.add_node(first_parent);
+        let mut second_parent = ArchitectNode::new("second", "Second");
+        second_parent.subplan = Some(Box::new(second));
+        graph.add_node(second_parent);
+
+        graph
+            .mutate_node_at(
+                &NodePath::from(vec!["second".into(), "same".into()]),
+                |node| {
+                    node.intent = "Only the second nested step".into();
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            graph
+                .node_at(&NodePath::from(vec!["first".into(), "same".into()]))
+                .unwrap()
+                .intent,
+            ""
+        );
+        assert_eq!(
+            graph
+                .node_at(&NodePath::from(vec!["second".into(), "same".into()]))
+                .unwrap()
+                .intent,
+            "Only the second nested step"
+        );
+    }
+
+    #[test]
+    fn checked_mutation_refuses_locked_targets_and_ancestors() {
+        let mut inner = ArchitectGraph::default();
+        inner.add_node(ArchitectNode::new("child", "Child"));
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.subplan = Some(Box::new(inner));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(parent);
+
+        let child = NodePath::from(vec!["parent".into(), "child".into()]);
+        graph.set_locked_at(&child, true).unwrap();
+        assert_eq!(
+            graph.mutate_node_at(&child, |_| ()),
+            Err(GraphMutationError::Locked {
+                path: child.clone()
+            })
+        );
+
+        graph.set_locked_at(&child, false).unwrap();
+        graph
+            .set_locked_at(&NodePath::from(NodeId::from("parent")), true)
+            .unwrap();
+        assert_eq!(
+            graph.mutate_node_at(&child, |_| ()),
+            Err(GraphMutationError::Locked {
+                path: NodePath::from(NodeId::from("parent"))
+            })
+        );
+    }
+
+    #[test]
+    fn checked_route_edits_refuse_locked_sources() {
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(ArchitectNode::new("from", "From"));
+        graph.add_node(ArchitectNode::new("to", "To"));
+        let edge = graph.connect("from", "to");
+        let from = NodePath::root("from".into());
+        graph.set_locked_at(&from, true).unwrap();
+
+        assert_eq!(
+            graph.disconnect_at(&NodePath::default(), &edge),
+            Err(GraphMutationError::Locked { path: from.clone() })
+        );
+        assert_eq!(
+            graph.connect_from_at(&from, "to".into(), EdgeCondition::Always),
+            Err(GraphMutationError::Locked { path: from })
+        );
+    }
+
+    #[test]
+    fn nested_graph_mutation_refuses_a_locked_container() {
+        let mut nested = ArchitectGraph::default();
+        nested.add_node(ArchitectNode::new("child", "Child"));
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.subplan = Some(Box::new(nested));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(parent);
+        let parent = NodePath::root("parent".into());
+        graph
+            .set_locked_at(&parent.child("child".into()), true)
+            .unwrap();
+        graph.set_locked_at(&parent, true).unwrap();
+
+        assert_eq!(
+            graph.mutate_graph_at(&parent, |nested| nested.nodes.clear()),
+            Err(GraphMutationError::Locked { path: parent })
+        );
+    }
+
+    #[test]
+    fn locking_a_parent_requires_its_nested_plan_to_be_settled() {
+        let mut inner = ArchitectGraph::default();
+        inner.add_node(ArchitectNode::new("child", "Child"));
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.subplan = Some(Box::new(inner));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(parent);
+        let parent = NodePath::from(NodeId::from("parent"));
+
+        assert_eq!(
+            graph.set_locked_at(&parent, true),
+            Err(GraphMutationError::NestedPlanUnlocked {
+                path: parent.clone()
+            })
+        );
+        graph
+            .set_locked_at(&NodePath::from(vec!["parent".into(), "child".into()]), true)
+            .unwrap();
+        graph.set_locked_at(&parent, true).unwrap();
+        assert!(graph.node(&NodeId::from("parent")).unwrap().locked);
     }
 
     /// A settled plan, as it would be after the user argued the steps out and

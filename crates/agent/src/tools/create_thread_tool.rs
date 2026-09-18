@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::{AgentTool, SiblingThreadRequest, ThreadEnvironment, ToolCallEventStream, ToolInput};
+use crate::{
+    AgentTool, SiblingThreadRequest, ThreadEnvironment, ToolCallEventStream, ToolCapability,
+    ToolInput,
+};
 
 /// Create a new agent thread that runs in parallel with this one.
 ///
@@ -139,6 +142,10 @@ impl AgentTool for CreateThreadTool {
     type Output = CreateThreadToolOutput;
 
     const NAME: &'static str = "create_thread";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ArbitraryExecution
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other

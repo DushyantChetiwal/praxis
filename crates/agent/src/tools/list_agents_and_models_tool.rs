@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::{AgentTool, AvailableAgents, ThreadEnvironment, ToolCallEventStream, ToolInput};
+use crate::{
+    AgentTool, AvailableAgents, ThreadEnvironment, ToolCallEventStream, ToolCapability, ToolInput,
+};
 
 /// List the agents and models available for use with the `create_thread` tool.
 ///
@@ -48,6 +50,10 @@ impl AgentTool for ListAgentsAndModelsTool {
     type Output = ListAgentsAndModelsToolOutput;
 
     const NAME: &'static str = "list_agents_and_models";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other

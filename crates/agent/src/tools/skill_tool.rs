@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use crate::{AgentTool, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 
 /// XML-escape a string so a malicious skill author cannot break out of the
 /// `<skill_content>` envelope (or the `<available_skills>` catalog) by
@@ -140,6 +140,10 @@ impl AgentTool for SkillTool {
     type Output = SkillToolOutput;
 
     const NAME: &'static str = "skill";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
 
     fn kind() -> acp::ToolKind {
         // The `Read` kind would map to a magnifying-glass icon in the UI,

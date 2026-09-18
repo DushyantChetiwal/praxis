@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::{AgentTool, ThreadEnvironment, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, ThreadEnvironment, ToolCallEventStream, ToolCapability, ToolInput};
 
 /// Spawn a sub-agent for a well-scoped task.
 ///
@@ -125,6 +125,10 @@ impl AgentTool for SpawnAgentTool {
     type Output = SpawnAgentToolOutput;
 
     const NAME: &'static str = "spawn_agent";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ArbitraryExecution
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other

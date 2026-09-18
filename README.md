@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
+
 # Zed — Architect fork
 
 > **This is a modified fork of [Zed](https://github.com/zed-industries/zed), not
@@ -13,16 +16,21 @@
 > — including loops, so a plan can go back and try again. Once every step is
 > locked, the plan runs one step at a time.
 >
-> The agent panel gains a Plan/Build mode switch in place of tool profiles:
-> planning withholds the tools that change the project, so a model asked to plan
-> cannot start building halfway through.
+> The agent panel gains a Plan/Build mode switch. Plan mode mechanically permits
+> only reviewed local and external read capabilities; terminal execution,
+> project mutation, external mutation, and unannotated MCP tools are withheld.
+> Shell-free Git and GitHub/GitLab pull-request inspection keep plans grounded.
 >
 > Modifications live mostly in `crates/architect` (the graph model, plan
-> compilation and the runner), `crates/agent_ui/src/architect_ui.rs` (the
-> canvas), and additions to `crates/agent` and `crates/agent_ui`. See the git
-> history for the full set.
+> compilation and runner), `crates/agent_ui/src/architect_ui/` (the canvas), and
+> additions to `crates/agent` and `crates/agent_ui`. See the git history for the
+> full set and [`docs/src/ai/architect-portfolio.md`](./docs/src/ai/architect-portfolio.md)
+> for the architecture and reproducible demo.
 >
-> Building and installing this fork on Windows: `script/install-local-windows.ps1`.
+> Install unsigned Windows and macOS builds from this repository's GitHub
+> releases. Installed Zed Dev builds poll the latest release manifest and update
+> through the normal in-app updater. A scheduled GitHub workflow merges upstream
+> Zed, validates the fork, and dispatches fresh installers when upstream changes.
 
 ---
 

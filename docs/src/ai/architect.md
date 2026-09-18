@@ -15,7 +15,7 @@ The agent works in one of two modes, shown next to the message editor:
 
 You do not have to switch modes yourself. When the agent decides a task is worth planning, it draws a plan, and drawing a plan is what puts the thread into Plan mode. Pressing **Run** puts it back into Build.
 
-In Plan mode the tools that change your project — `edit_file`, `write_file`, `terminal`, `delete_path` and the rest — are withheld rather than merely discouraged, so a model cannot start building halfway through drafting. You can switch modes by hand at any time from the mode selector.
+In Plan mode only tools reviewed as local or external reads are available. Project mutation, external mutation, terminal execution, subagents, sibling threads, and MCP tools without an explicit read-only annotation are withheld rather than merely discouraged. Shell-free Git and GitHub/GitLab pull-request tools remain available for research. You can switch modes by hand at any time from the mode selector.
 
 ## Drafting a plan
 
@@ -34,15 +34,15 @@ Each **step** is one meaningful unit of work and carries:
 
 Each **connection** says when one step leads to another:
 
-| Condition         | When to use it                                                                |
-| ----------------- | ----------------------------------------------------------------------------- |
-| _(none)_          | The step simply follows.                                                      |
-| **Deterministic** | The answer can be checked without judgement, such as a command's exit status. |
-| **LLM-evaluated** | The decision genuinely needs judgement, phrased as a yes-or-no question.      |
+| Condition         | When to use it                                                                                                                    |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| _(none)_          | The step simply follows.                                                                                                          |
+| **Deterministic** | An objective fact such as a command's exit status. The built-in runner still asks the model to evaluate it from the step summary. |
+| **LLM-evaluated** | The decision genuinely needs judgement, phrased as a yes-or-no question.                                                          |
 
 Pointing a connection back at an earlier step forms a loop, which is how you express "go back and fix it if the tests fail". Loops are expected; just make sure something can leave the loop.
 
-The Architect profile can read and search your project but cannot change it. Drawing a plan and carrying it out are separate jobs.
+Plan mode can read and search your project but cannot change it through native tools. Drawing a plan and carrying it out are separate jobs.
 
 ## Steps inside steps
 

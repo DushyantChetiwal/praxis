@@ -1,13 +1,13 @@
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
-use architect::{EdgeCondition, NodeId};
+use architect::{ArchitectGraph, EdgeCondition, GraphMutationError, NodeId, NodePath};
 use gpui::{App, SharedString, Task, WeakEntity};
 use language_model::LanguageModelToolResultContent;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::{AgentTool, Thread, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 
 /// Record what has been settled about the one step this conversation is about.
 ///
@@ -73,7 +73,8 @@ pub struct StepRoute {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RouteCondition {
-    /// Something checkable without judgement, such as a command's exit status.
+    /// An objective fact, such as a command's exit status. The current runner
+    /// still asks the model to evaluate it from the completed step summary.
     Deterministic { expression: String },
     /// A yes-or-no question that genuinely needs judgement.
     LlmEvaluated { question: String },
@@ -119,16 +120,76 @@ impl From<RefineStepToolOutput> for LanguageModelToolResultContent {
 pub struct RefineStepTool {
     /// The thread that owns the plan, which is the parent of this one.
     plan_thread: WeakEntity<Thread>,
-    node_id: NodeId,
+    node_path: NodePath,
 }
 
 impl RefineStepTool {
-    pub fn new(plan_thread: WeakEntity<Thread>, node_id: NodeId) -> Self {
+    pub fn new(plan_thread: WeakEntity<Thread>, node_path: NodePath) -> Self {
         Self {
             plan_thread,
-            node_id,
+            node_path,
         }
     }
+}
+
+fn apply_refinement(
+    graph: &mut ArchitectGraph,
+    node_path: &NodePath,
+    input: RefineStepToolInput,
+) -> Result<(String, bool, Vec<String>), GraphMutationError> {
+    let RefineStepToolInput {
+        goal,
+        rules,
+        capture,
+        routing,
+        lock,
+    } = input;
+
+    // Apply the whole refinement to a clone first. A lock invariant or bad path
+    // must not leave half the request written to the live plan.
+    let mut revised = graph.clone();
+    let unknown_steps = if let Some(routing) = routing {
+        let routes = routing
+            .into_iter()
+            .map(|route| {
+                (
+                    NodeId(route.to),
+                    route
+                        .condition
+                        .map(EdgeCondition::from)
+                        .unwrap_or(EdgeCondition::Always),
+                )
+            })
+            .collect();
+        revised
+            .replace_outgoing_at(node_path, routes)?
+            .into_iter()
+            .map(|id| id.0)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let title = revised.mutate_node_at(node_path, |node| {
+        if let Some(goal) = goal {
+            node.intent = goal;
+        }
+        if let Some(rules) = rules {
+            node.rules = rules;
+        }
+        if let Some(capture) = capture {
+            node.capture = capture;
+        }
+        node.title.clone()
+    })?;
+    if lock {
+        revised.set_locked_at(node_path, true)?;
+    }
+    let locked = revised
+        .node_at(node_path)
+        .is_some_and(|node| node.locked);
+    *graph = revised;
+    Ok((title, locked, unknown_steps))
 }
 
 impl AgentTool for RefineStepTool {
@@ -136,6 +197,10 @@ impl AgentTool for RefineStepTool {
     type Output = RefineStepToolOutput;
 
     const NAME: &'static str = "refine_step";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Think
@@ -166,85 +231,33 @@ impl AgentTool for RefineStepTool {
                     error: format!("Failed to receive tool input: {error}"),
                 })?;
 
-            let node_id = self.node_id.clone();
+            let node_path = self.node_path.clone();
             let outcome = self
                 .plan_thread
                 .update(cx, |thread, cx| {
-                    let mut title = None;
-                    let mut unknown_steps = Vec::new();
-
                     thread.update_architect_graph(
-                        |graph| {
-                            if graph.node(&node_id).is_none() {
-                                return;
-                            }
-
-                            let known: Vec<NodeId> =
-                                graph.nodes.iter().map(|node| node.id.clone()).collect();
-
-                            if let Some(routing) = input.routing {
-                                let mut wanted = Vec::new();
-                                for route in routing {
-                                    let to = NodeId(route.to.clone());
-                                    if known.contains(&to) {
-                                        wanted.push((
-                                            to,
-                                            route
-                                                .condition
-                                                .map(EdgeCondition::from)
-                                                .unwrap_or(EdgeCondition::Always),
-                                        ));
-                                    } else {
-                                        unknown_steps.push(route.to);
-                                    }
-                                }
-
-                                // Only this step's own outgoing connections are
-                                // replaced; every other connection in the plan
-                                // is left exactly as it was.
-                                graph.edges.retain(|edge| edge.from != node_id);
-                                for (to, condition) in wanted {
-                                    graph.connect_with(node_id.clone(), to, condition);
-                                }
-                            }
-
-                            let Some(node) = graph.node_mut(&node_id) else {
-                                return;
-                            };
-                            if let Some(goal) = input.goal {
-                                node.intent = goal;
-                            }
-                            if let Some(rules) = input.rules {
-                                node.rules = rules;
-                            }
-                            if let Some(capture) = input.capture {
-                                node.capture = capture;
-                            }
-                            if input.lock {
-                                node.locked = true;
-                            }
-                            title = Some(node.title.clone());
-                        },
+                        |graph| apply_refinement(graph, &node_path, input),
                         cx,
-                    );
-
-                    (title, unknown_steps)
+                    )
                 })
                 .map_err(|error| RefineStepToolOutput::Error {
                     error: format!("The plan this step belongs to is gone: {error}"),
                 })?;
 
-            let (title, unknown_steps) = outcome;
-            let Some(step) = title else {
+            let Some(outcome) = outcome else {
                 return Err(RefineStepToolOutput::Error {
-                    error: "This step is no longer part of the plan; it was probably deleted."
-                        .into(),
+                    error: "This step's plan is no longer available.".into(),
                 });
             };
+            let (step, locked, unknown_steps) = outcome.map_err(|error| {
+                RefineStepToolOutput::Error {
+                    error: format!("Could not refine this step: {error}"),
+                }
+            })?;
 
             Ok(RefineStepToolOutput::Success {
                 step,
-                locked: input.lock,
+                locked,
                 unknown_steps,
             })
         })
@@ -254,6 +267,7 @@ impl AgentTool for RefineStepTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use architect::ArchitectNode;
     use serde_json::json;
 
     #[test]
@@ -307,5 +321,77 @@ mod tests {
             Some(Vec::new()),
             "an empty list is a deliberate instruction to drop the rules"
         );
+    }
+
+    #[test]
+    fn refinement_uses_the_complete_nested_path() {
+        let nested = || {
+            let mut graph = ArchitectGraph::default();
+            graph.add_node(ArchitectNode::new("same", "Nested"));
+            graph
+        };
+        let mut first = ArchitectNode::new("first", "First");
+        first.subplan = Some(Box::new(nested()));
+        let mut second = ArchitectNode::new("second", "Second");
+        second.subplan = Some(Box::new(nested()));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(first);
+        graph.add_node(second);
+
+        let path = NodePath::from(vec!["second".into(), "same".into()]);
+        apply_refinement(
+            &mut graph,
+            &path,
+            RefineStepToolInput {
+                goal: Some("Only this nested step".into()),
+                rules: None,
+                capture: None,
+                routing: None,
+                lock: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            graph
+                .node_at(&NodePath::from(vec!["first".into(), "same".into()]))
+                .unwrap()
+                .intent,
+            ""
+        );
+        assert_eq!(graph.node_at(&path).unwrap().intent, "Only this nested step");
+    }
+
+    #[test]
+    fn failed_locking_is_atomic() {
+        let mut nested = ArchitectGraph::default();
+        nested.add_node(ArchitectNode::new("child", "Child"));
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.intent = "Original".into();
+        parent.subplan = Some(Box::new(nested));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(parent);
+        let path = NodePath::root("parent".into());
+
+        let error = apply_refinement(
+            &mut graph,
+            &path,
+            RefineStepToolInput {
+                goal: Some("Changed".into()),
+                rules: None,
+                capture: None,
+                routing: None,
+                lock: true,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            GraphMutationError::NestedPlanUnlocked { path: path.clone() }
+        );
+        let parent = graph.node_at(&path).unwrap();
+        assert_eq!(parent.intent, "Original");
+        assert!(!parent.locked);
     }
 }

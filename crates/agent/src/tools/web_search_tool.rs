@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{AgentTool, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
 use cloud_llm_client::WebSearchResponse;
@@ -49,6 +49,10 @@ impl AgentTool for WebSearchTool {
     type Output = WebSearchToolOutput;
 
     const NAME: &'static str = "search_web";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ExternalRead
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Fetch

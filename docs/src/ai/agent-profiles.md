@@ -17,7 +17,7 @@ Zed includes three built-in profiles:
 - `Ask`: focuses on read-only codebase questions.
 - `Minimal`: uses no project tools.
 
-Planning is not a profile. A thread in the `Write` profile switches between [Plan and Build modes](./architect.md#plan-and-build-modes) as the task needs, and Plan mode withholds the tools that change your project.
+Planning is not a profile. A native-agent thread switches between [Plan and Build modes](./architect.md#plan-and-build-modes) as the task needs. Plan mode permits only tools classified as local or external reads, regardless of whether the active profile also enables mutating or executable tools.
 
 ## Configure Profiles {#configure-profiles}
 

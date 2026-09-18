@@ -1,0 +1,143 @@
+# Fork-owned validation for Architect. Keep the workflow definition on the
+# default main branch; product source remains on Enhanced_Agents. Event runs use
+# the event revision, while a manual run checks Enhanced_Agents unless another
+# source ref is supplied explicitly.
+name: Architect quality
+
+on:
+  push:
+    branches:
+      - Enhanced_Agents
+  pull_request:
+    branches:
+      - Enhanced_Agents
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag, or commit to validate
+        required: true
+        default: Enhanced_Agents
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: architect-quality-${{ github.event.pull_request.number || inputs.source_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.sha }}
+
+jobs:
+  formatting:
+    name: Formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the selected source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "9"
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check repository documentation formatting
+        run: ./script/prettier
+
+      - name: Check the fork workflow formatting
+        run: pnpm dlx prettier@3.5.0 .github/workflows/architect_quality.yml --check
+
+  architect-tests:
+    name: Architect graph tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the selected source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: architect-tests
+          cache-on-failure: true
+
+      - name: Test the Architect graph and runner
+        run: cargo test --locked -p architect --lib
+
+  agent-tests:
+    name: Agent and canvas integration tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out the selected source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - name: Install Linux build dependencies
+        run: ./script/linux
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: architect-agent-tests
+          cache-on-failure: true
+
+      - name: Test Plan-mode capability filtering
+        run: cargo test --locked -p agent --lib session_mode_tests::
+
+      - name: Test capability and structured-read tools
+        run: |
+          cargo test --locked -p agent --lib tools::tests::
+          cargo test --locked -p agent --lib tools::context_server_registry::tests::
+          cargo test --locked -p agent --lib tools::git_tool::tests::
+          cargo test --locked -p agent --lib tools::pull_request_tool::tests::
+          cargo test --locked -p agent --lib tools::refine_step_tool::tests::
+
+      - name: Test native-agent mode integration
+        run: |
+          cargo test --locked -p agent --lib internal_tests::test_a_new_session_offers_plan_and_build -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_plan_mode_keeps_read_tools_and_denies_execution -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_a_step_thread_can_refine_its_step -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_a_reopened_step_thread_gets_its_tool_back -- --exact
+
+      - name: Test Architect canvas support
+        run: cargo test --locked -p agent_ui --lib architect_ui::
+
+  clippy:
+    name: Clippy package checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out the selected source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - name: Install Linux build dependencies
+        run: ./script/linux
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: architect-clippy
+          cache-on-failure: true
+
+      - name: Check the Architect packages with Clippy
+        run: ./script/clippy --locked -p architect -p agent -p agent_ui

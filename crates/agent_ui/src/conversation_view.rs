@@ -2128,7 +2128,7 @@ impl ConversationView {
     /// may need loading from the database before it can be shown.
     pub fn ensure_architect_step_thread(
         &mut self,
-        node_id: architect::NodeId,
+        node_path: architect::NodePath,
         step_title: SharedString,
         existing: Option<acp::SessionId>,
         window: &mut Window,
@@ -2145,7 +2145,7 @@ impl ConversationView {
             // It may have been loaded from disk earlier in this session, which
             // does not give a step thread its own tool back.
             if let Some(connection) = self.as_native_connection(cx) {
-                connection.ensure_architect_step_tool(&root_session_id, &existing, node_id, cx);
+                connection.ensure_architect_step_tool(&root_session_id, &existing, node_path, cx);
             }
             return Some(existing);
         }
@@ -2170,7 +2170,7 @@ impl ConversationView {
                         connection.ensure_architect_step_tool(
                             &root_session_id,
                             &session_id,
-                            node_id,
+                            node_path,
                             cx,
                         );
                     }
@@ -2184,7 +2184,7 @@ impl ConversationView {
         let connection = self.as_native_connection(cx)?;
         let acp_thread = match connection.create_architect_step_thread(
             &root_session_id,
-            node_id,
+            node_path,
             step_title,
             cx,
         ) {

@@ -2205,7 +2205,7 @@ impl NativeAgentConnection {
     pub fn create_architect_step_thread(
         &self,
         parent_session_id: &acp::SessionId,
-        node_id: architect::NodeId,
+        node_path: architect::NodePath,
         title: SharedString,
         cx: &mut App,
     ) -> Result<Entity<AcpThread>> {
@@ -2224,7 +2224,7 @@ impl NativeAgentConnection {
         });
 
         let session_id = acp_thread.read(cx).session_id().clone();
-        self.ensure_architect_step_tool(parent_session_id, &session_id, node_id, cx);
+        self.ensure_architect_step_tool(parent_session_id, &session_id, node_path, cx);
 
         Ok(acp_thread)
     }
@@ -2241,7 +2241,7 @@ impl NativeAgentConnection {
         &self,
         parent_session_id: &acp::SessionId,
         step_session_id: &acp::SessionId,
-        node_id: architect::NodeId,
+        node_path: architect::NodePath,
         cx: &mut App,
     ) {
         let (Some(parent_thread), Some(step_thread)) = (
@@ -2258,7 +2258,7 @@ impl NativeAgentConnection {
             if thread.has_registered_tool(RefineStepTool::NAME) {
                 return;
             }
-            thread.add_tool(RefineStepTool::new(parent_thread.downgrade(), node_id));
+            thread.add_tool(RefineStepTool::new(parent_thread.downgrade(), node_path));
         });
     }
 
@@ -8007,6 +8007,50 @@ mod internal_tests {
     }
 
     #[gpui::test]
+    async fn test_plan_mode_keeps_read_tools_and_denies_execution(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let model = Arc::new(FakeLanguageModel::default());
+        thread.update(cx, |thread, cx| {
+            thread.set_model(model, cx);
+            thread.set_session_mode(crate::SessionMode::Plan, cx);
+        });
+
+        thread.read_with(cx, |thread, cx| {
+            let tools = thread.enabled_tools(cx);
+            for tool_name in [
+                ReadFileTool::NAME,
+                GrepTool::NAME,
+                FindPathTool::NAME,
+                FetchTool::NAME,
+                GitStatusTool::NAME,
+                GitDiffTool::NAME,
+                PullRequestTool::NAME,
+                WebSearchTool::NAME,
+            ] {
+                assert!(
+                    tools.contains_key(tool_name),
+                    "Plan mode should keep read tool `{tool_name}` enabled"
+                );
+            }
+            for tool_name in [
+                EditFileTool::NAME,
+                WriteFileTool::NAME,
+                TerminalTool::NAME,
+                SpawnAgentTool::NAME,
+                CreateThreadTool::NAME,
+            ] {
+                assert!(
+                    !tools.contains_key(tool_name),
+                    "Plan mode must deny mutating or executable tool `{tool_name}`"
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
     async fn test_ask_question_is_available_to_root_threads_in_both_modes(cx: &mut TestAppContext) {
         init_test(cx);
         let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
@@ -8169,7 +8213,7 @@ mod internal_tests {
             .update(|cx| {
                 connection.create_architect_step_thread(
                     &parent_session_id,
-                    architect::NodeId::from("step-1"),
+                    architect::NodePath::root(architect::NodeId::from("step-1")),
                     "Write handlers".into(),
                     cx,
                 )
@@ -8236,7 +8280,7 @@ mod internal_tests {
             .update(|cx| {
                 connection.create_architect_step_thread(
                     &parent_session_id,
-                    architect::NodeId::from("step-1"),
+                    architect::NodePath::root(architect::NodeId::from("step-1")),
                     "Write handlers".into(),
                     cx,
                 )
@@ -8260,7 +8304,7 @@ mod internal_tests {
             connection.ensure_architect_step_tool(
                 &parent_session_id,
                 &step_session_id,
-                architect::NodeId::from("step-1"),
+                architect::NodePath::root(architect::NodeId::from("step-1")),
                 cx,
             );
         });
@@ -8277,7 +8321,7 @@ mod internal_tests {
             connection.ensure_architect_step_tool(
                 &parent_session_id,
                 &step_session_id,
-                architect::NodeId::from("step-1"),
+                architect::NodePath::root(architect::NodeId::from("step-1")),
                 cx,
             );
         });

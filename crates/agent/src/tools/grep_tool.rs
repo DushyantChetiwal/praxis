@@ -1,4 +1,4 @@
-use crate::{AgentTool, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 use acp_thread::MentionUri;
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
@@ -82,6 +82,10 @@ impl AgentTool for GrepTool {
     type Output = String;
 
     const NAME: &'static str = "grep";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Search

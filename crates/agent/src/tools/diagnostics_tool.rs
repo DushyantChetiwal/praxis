@@ -1,4 +1,4 @@
-use crate::{AgentTool, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 use agent_client_protocol::schema::v1 as acp;
 use futures::{Future, FutureExt as _};
 use gpui::{App, AsyncApp, Entity, Task};
@@ -137,6 +137,10 @@ impl AgentTool for DiagnosticsTool {
     type Output = String;
 
     const NAME: &'static str = "diagnostics";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Read

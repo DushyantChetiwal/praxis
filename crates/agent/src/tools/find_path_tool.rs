@@ -1,4 +1,4 @@
-use crate::{AgentTool, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 use acp_thread::MentionUri;
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::{Result, anyhow};
@@ -103,6 +103,10 @@ impl AgentTool for FindPathTool {
     type Output = FindPathToolOutput;
 
     const NAME: &'static str = "find_path";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Search

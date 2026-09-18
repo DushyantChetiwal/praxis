@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::{AgentTool, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
 use gpui::{App, SharedString, Task};
@@ -73,6 +73,10 @@ impl AgentTool for AskUserTool {
     type Output = AskUserToolOutput;
 
     const NAME: &'static str = "ask_user";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Other

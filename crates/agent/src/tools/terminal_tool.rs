@@ -19,7 +19,7 @@ use crate::sandboxing::{
     NetworkRequest, sandbox_git_dirs, sandbox_worktree_writable_paths,
     sandboxing_enabled_for_project,
 };
-use crate::{AgentTool, ThreadEnvironment, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, ThreadEnvironment, ToolCallEventStream, ToolCapability, ToolInput};
 
 const COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
 
@@ -296,6 +296,10 @@ impl AgentTool for TerminalTool {
 
     const NAME: &'static str = "terminal";
 
+    fn capability() -> ToolCapability {
+        ToolCapability::ArbitraryExecution
+    }
+
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Execute
     }
@@ -337,6 +341,10 @@ impl AgentTool for SandboxedTerminalTool {
     type Output = String;
 
     const NAME: &'static str = "sandboxed_terminal";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ArbitraryExecution
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Execute

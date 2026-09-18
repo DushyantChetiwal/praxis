@@ -1263,8 +1263,8 @@
     // When enabled, show voting thumbs for feedback on agent edits.
     "enable_feedback": true,
     // Build mode runs under "build". Which tools a thread may use is decided by
-    // its mode — Plan withholds the ones that change the project — so the
-    // profile behind it has no filtering left to do.
+    // its mode — Plan permits only reviewed read capabilities — so the profile
+    // behind it has no filtering left to do.
     "default_profile": "build",
     "profiles": {
       // Applied automatically by Build mode; it is not selectable from the
@@ -1299,10 +1299,16 @@
           "find_path": true,
           "find_references": true,
           "get_code_actions": true,
+          "git_branches": true,
+          "git_diff": true,
+          "git_remotes": true,
+          "git_show": true,
+          "git_status": true,
           "go_to_definition": true,
           "list_agents_and_models": true,
           "list_directory": true,
           "move_path": true,
+          "pull_request": true,
           "rename_symbol": true,
           "read_file": true,
           "grep": true,
@@ -1324,9 +1330,15 @@
           "fetch": true,
           "list_agents_and_models": true,
           "list_directory": true,
+          "pull_request": true,
           "find_path": true,
           "find_references": true,
           "get_code_actions": true,
+          "git_branches": true,
+          "git_diff": true,
+          "git_remotes": true,
+          "git_show": true,
+          "git_status": true,
           "go_to_definition": true,
           "read_file": true,
           "grep": true,
@@ -1349,8 +1361,14 @@
           "diagnostics": true,
           "fetch": true,
           "list_directory": true,
+          "pull_request": true,
           "find_path": true,
           "find_references": true,
+          "git_branches": true,
+          "git_diff": true,
+          "git_remotes": true,
+          "git_show": true,
+          "git_status": true,
           "go_to_definition": true,
           "read_file": true,
           "grep": true,

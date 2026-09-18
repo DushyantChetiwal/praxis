@@ -14,7 +14,7 @@ use ui::SharedString;
 use util::markdown::{MarkdownEscaped, MarkdownInlineCode};
 
 use crate::sandboxing::{NetworkRequest, SandboxRequest};
-use crate::{AgentTool, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 enum ContentType {
@@ -216,6 +216,10 @@ impl AgentTool for FetchTool {
     type Output = String;
 
     const NAME: &'static str = "fetch";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ExternalRead
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Fetch

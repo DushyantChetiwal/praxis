@@ -31,13 +31,17 @@ When no path is provided, shows a summary of error and warning counts for all fi
 
 Fetches a URL and returns the content as Markdown. Useful for providing docs as context.
 
-`fetch` is governed by tool permissions, agent profiles, and project trust. It is not run inside the terminal OS sandbox, so terminal sandbox network grants such as `allow_hosts` and `allow_all_hosts` do not apply to it.
+`fetch` is governed by tool permissions, agent profiles, and project trust. It is not run inside the terminal OS sandbox, but when sandboxing is enabled it uses the same per-host network grants as terminal commands and re-authorizes every redirect target.
 
 **Example:** Fetching a library's changelog page to check whether a breaking API change was introduced in a recent version before writing integration code.
 
 ### `find_path`
 
 Quickly finds files by matching glob patterns (like "\*_/_.js"), returning matching file paths alphabetically.
+
+### `git_status`, `git_diff`, `git_branches`, `git_remotes`, and `git_show`
+
+Inspect repository state through Zed's Git backend without invoking a shell. These tools cover working-tree status, staged/worktree/merge-base diffs, local and remote branches, remote URLs, and commit metadata with changed-file names. They are available in Plan mode because their API surface contains no Git mutation operation.
 
 ### `grep`
 
@@ -54,6 +58,10 @@ Lists files and directories in a given path, providing an overview of filesystem
 Reads the content of a specified file in the project, allowing access to file contents.
 
 ## Web Tools
+
+### `pull_request`
+
+Inspects a public `github.com` pull request or `gitlab.com` merge request using strict HTTPS GET requests. The summary is always returned; files, conversation, reviews or approvals, and checks or pipelines can be requested as additional sections. Private repositories require `GITHUB_TOKEN` or `GITLAB_TOKEN` in Zed's environment. Self-hosted forges are rejected rather than contacted through a guessed API endpoint.
 
 ### `search_web`
 

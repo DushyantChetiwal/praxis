@@ -145,7 +145,7 @@ use super::tool_permissions::{
     ResolvedProjectPath, authorize_symlink_access, canonicalize_worktree_roots,
     resolve_global_skill_path, resolve_project_path,
 };
-use crate::{AgentTool, ToolCallEventStream, ToolInput, outline};
+use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput, outline};
 
 /// Reads the content of the given file in the project.
 ///
@@ -210,6 +210,10 @@ impl AgentTool for ReadFileTool {
     type Output = LanguageModelToolResultContent;
 
     const NAME: &'static str = "read_file";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Read

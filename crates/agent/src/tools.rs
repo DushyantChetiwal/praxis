@@ -17,11 +17,13 @@ mod fetch_tool;
 mod find_path_tool;
 mod find_references_tool;
 mod get_code_actions_tool;
+mod git_tool;
 mod go_to_definition_tool;
 mod grep_tool;
 mod list_agents_and_models_tool;
 mod list_directory_tool;
 mod move_path_tool;
+mod pull_request_tool;
 mod read_file_tool;
 mod refine_step_tool;
 mod rename_tool;
@@ -90,11 +92,13 @@ pub use fetch_tool::*;
 pub use find_path_tool::*;
 pub use find_references_tool::*;
 pub use get_code_actions_tool::*;
+pub use git_tool::*;
 pub use go_to_definition_tool::*;
 pub use grep_tool::*;
 pub use list_agents_and_models_tool::*;
 pub use list_directory_tool::*;
 pub use move_path_tool::*;
+pub use pull_request_tool::*;
 pub use read_file_tool::*;
 pub use refine_step_tool::*;
 pub use rename_tool::*;
@@ -221,11 +225,17 @@ tools! {
     FindPathTool,
     FindReferencesTool,
     GetCodeActionsTool,
+    GitBranchesTool,
+    GitDiffTool,
+    GitRemotesTool,
+    GitShowTool,
+    GitStatusTool,
     GoToDefinitionTool,
     GrepTool,
     ListAgentsAndModelsTool,
     ListDirectoryTool,
     MovePathTool,
+    PullRequestTool,
     ReadFileTool,
     RefineStepTool,
     RenameTool,
@@ -289,13 +299,16 @@ mod tests {
     }
 
     #[test]
-    fn fetch_and_terminal_are_forbidden_in_restricted_mode() {
+    fn external_network_and_terminal_tools_are_forbidden_in_restricted_mode() {
         assert!(!tool_allowed_in_restricted_mode(FetchTool::NAME));
+        assert!(!tool_allowed_in_restricted_mode(PullRequestTool::NAME));
         assert!(!tool_allowed_in_restricted_mode(TerminalTool::NAME));
 
         // Every other built-in tool, and unknown (e.g. MCP) tools, are allowed.
         for name in ALL_TOOL_NAMES {
-            let expected = *name != FetchTool::NAME && *name != TerminalTool::NAME;
+            let expected = *name != FetchTool::NAME
+                && *name != PullRequestTool::NAME
+                && *name != TerminalTool::NAME;
             assert_eq!(
                 tool_allowed_in_restricted_mode(name),
                 expected,
@@ -303,5 +316,27 @@ mod tests {
             );
         }
         assert!(tool_allowed_in_restricted_mode("some_mcp_tool"));
+    }
+
+    #[test]
+    fn representative_tools_declare_their_plan_capabilities() {
+        assert_eq!(ReadFileTool::capability(), crate::ToolCapability::ReadOnly);
+        assert_eq!(GitDiffTool::capability(), crate::ToolCapability::ReadOnly);
+        assert_eq!(
+            PullRequestTool::capability(),
+            crate::ToolCapability::ExternalRead
+        );
+        assert_eq!(
+            TerminalTool::capability(),
+            crate::ToolCapability::ArbitraryExecution
+        );
+        assert_eq!(
+            SpawnAgentTool::capability(),
+            crate::ToolCapability::ArbitraryExecution
+        );
+        assert_eq!(
+            EditFileTool::capability(),
+            crate::ToolCapability::ProjectMutation
+        );
     }
 }

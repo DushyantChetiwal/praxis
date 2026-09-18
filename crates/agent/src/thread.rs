@@ -2,9 +2,11 @@ use crate::{
     ApplyCodeActionTool, AskUserTool, CodeActionStore, ContextServerRegistry, CopyPathTool,
     CreateDirectoryTool, CreateThreadTool, DbLanguageModel, DbThread, DeletePathTool,
     DiagnosticsTool, DraftPlanTool, EditFileTool, FetchTool, FindPathTool, FindReferencesTool,
-    GetCodeActionsTool, GoToDefinitionTool, GrepTool, ListAgentsAndModelsTool, ListDirectoryTool,
-    MovePathTool, ProjectSnapshot, ReadFileTool, RenameTool, SandboxedTerminalTool, SpawnAgentTool,
-    SystemPromptTemplate, Template, Templates, TerminalTool, ToolPermissionDecision, WebSearchTool,
+    GetCodeActionsTool, GitBranchesTool, GitDiffTool, GitRemotesTool, GitShowTool, GitStatusTool,
+    GoToDefinitionTool, GrepTool, ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool,
+    ProjectSnapshot, PullRequestTool, ReadFileTool, RenameTool, SandboxedTerminalTool,
+    SpawnAgentTool, SystemPromptTemplate, Template, Templates, TerminalTool, ToolPermissionDecision,
+    WebSearchTool,
     WriteFileTool, decide_permission_from_settings,
 };
 use acp_thread::{ClientUserMessageId, MentionUri};
@@ -145,7 +147,8 @@ const COMPACTION_RETAINED_AGENT_MESSAGES_BYTE_BUDGET: usize = 60_000;
 /// nobody did.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SessionMode {
-    /// Working out what to do. The project can be read but not changed.
+    /// Working out what to do. Only tools classified as read-only research are
+    /// available; arbitrary execution and all mutations are mechanically denied.
     Plan,
     /// Carrying the work out.
     #[default]
@@ -172,25 +175,28 @@ impl SessionMode {
     }
 }
 
-/// Whether a tool can alter the project or the world outside the conversation.
+/// The side-effect boundary enforced for an agent tool.
 ///
-/// Named rather than derived from a trait method so that adding a tool is a
-/// deliberate decision about whether planning may use it, rather than something
-/// that silently defaults either way.
-fn tool_changes_the_project(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "edit_file"
-            | "write_file"
-            | "create_directory"
-            | "delete_path"
-            | "copy_path"
-            | "move_path"
-            | "rename_symbol"
-            | "apply_code_action"
-            | "terminal"
-            | "sandboxed_terminal"
-    )
+/// Tools default to [`ToolCapability::ProjectMutation`] so newly-added tools fail
+/// closed in Plan mode until their behavior has been reviewed and classified.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolCapability {
+    /// Reads only local project or conversation state.
+    ReadOnly,
+    /// Mutates project files or other local project state.
+    ProjectMutation,
+    /// Reads from an external service without changing it.
+    ExternalRead,
+    /// Mutates an external service or has unverified external side effects.
+    ExternalMutation,
+    /// Runs arbitrary programs or delegates unrestricted execution.
+    ArbitraryExecution,
+}
+
+impl ToolCapability {
+    pub fn is_allowed_in(self, mode: SessionMode) -> bool {
+        mode == SessionMode::Build || matches!(self, Self::ReadOnly | Self::ExternalRead)
+    }
 }
 
 /// One step as a run took it.
@@ -2329,9 +2335,9 @@ impl Thread {
 
     /// Switches between planning and building.
     ///
-    /// The mode decides which tools the model is offered, so a thread that has
-    /// just been put into Plan cannot change the project even if it was midway
-    /// through trying to.
+    /// The mode decides which tools the model is offered, so switching to Plan
+    /// immediately withholds direct project-editing tools while retaining the
+    /// inspection tools needed to research a useful plan.
     pub fn set_session_mode(&mut self, mode: SessionMode, cx: &mut Context<Self>) {
         if self.session_mode.get() == mode {
             return;
@@ -2547,9 +2553,17 @@ impl Thread {
         ));
         self.add_tool(FetchTool::new(self.project.read(cx).client().http_client()));
         self.add_tool(FindPathTool::new(self.project.clone()));
+        self.add_tool(GitStatusTool::new(self.project.clone()));
+        self.add_tool(GitDiffTool::new(self.project.clone()));
+        self.add_tool(GitBranchesTool::new(self.project.clone()));
+        self.add_tool(GitRemotesTool::new(self.project.clone()));
+        self.add_tool(GitShowTool::new(self.project.clone()));
         self.add_tool(GrepTool::new(self.project.clone()));
         self.add_tool(ListDirectoryTool::new(self.project.clone()));
         self.add_tool(MovePathTool::new(self.project.clone()));
+        self.add_tool(PullRequestTool::new(
+            self.project.read(cx).client().http_client(),
+        ));
         self.add_tool(ReadFileTool::new(
             self.project.clone(),
             self.action_log.clone(),
@@ -4661,9 +4675,13 @@ impl Thread {
             .model()
             .ok_or_else(|| anyhow!(NoModelConfiguredError))?;
         let sandboxing_enabled = crate::sandboxing::sandboxing_enabled(cx);
+        let mode = self.session_mode.get();
         let tools = if let Some(turn) = self.running_turn.as_ref() {
             turn.tools
                 .iter()
+                // Defend against a mode change after this turn's tool snapshot
+                // was captured. Disallowed tools must never reach the provider.
+                .filter(|(_, tool)| tool.capability().is_allowed_in(mode))
                 .map(|(tool_name, tool)| {
                     log::trace!("Including tool: {}", tool_name);
                     let mut description = tool.description().to_string();
@@ -4715,7 +4733,13 @@ impl Thread {
         let available_tools: Vec<_> = self
             .running_turn
             .as_ref()
-            .map(|turn| turn.tools.keys().cloned().collect())
+            .map(|turn| {
+                turn.tools
+                    .iter()
+                    .filter(|(_, tool)| tool.capability().is_allowed_in(mode))
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
             .unwrap_or_default();
 
         log::debug!("Request includes {} tools", available_tools.len());
@@ -4762,16 +4786,14 @@ impl Thread {
         let is_restricted =
             TrustedWorktrees::has_restricted_worktrees(&self.project.read(cx).worktree_store(), cx);
 
-        // Planning and building are different jobs. While planning, the tools
-        // that change the project are withheld rather than merely discouraged,
-        // because a model asked to plan will otherwise start building partway
-        // through drafting.
-        let planning = self.session_mode.get() == SessionMode::Plan;
+        // Planning and building are different jobs. Plan mode permits only
+        // capabilities that are mechanically read-only.
+        let mode = self.session_mode.get();
 
         let mut tools = self
             .tools
             .iter()
-            .filter(|(tool_name, _)| !planning || !tool_changes_the_project(tool_name))
+            .filter(|(_, tool)| tool.capability().is_allowed_in(mode))
             .filter(|(_, tool)| !is_restricted || tool.allow_in_restricted_mode())
             .filter_map(|(tool_name, tool)| {
                 let terminal_variant = matches!(
@@ -4809,7 +4831,9 @@ impl Thread {
         let mut duplicate_tool_names = HashSet::default();
         for (server_id, server_tools) in self.context_server_registry.read(cx).servers() {
             for (tool_name, tool) in server_tools {
-                if profile.is_context_server_tool_enabled(&server_id.0, &tool_name) {
+                if profile.is_context_server_tool_enabled(&server_id.0, &tool_name)
+                    && tool.capability().is_allowed_in(mode)
+                {
                     let tool_name: SharedString =
                         provider_compatible_tool_name(tool_name.as_ref()).into();
                     if !seen_tools.insert(tool_name.clone()) {
@@ -4853,13 +4877,14 @@ impl Thread {
     }
 
     fn tool(&self, name: &str) -> Option<Arc<dyn AnyAgentTool>> {
-        self.running_turn.as_ref()?.tools.get(name).cloned()
+        let tool = self.running_turn.as_ref()?.tools.get(name)?;
+        tool.capability()
+            .is_allowed_in(self.session_mode.get())
+            .then(|| tool.clone())
     }
 
     pub fn has_tool(&self, name: &str) -> bool {
-        self.running_turn
-            .as_ref()
-            .is_some_and(|turn| turn.tools.contains_key(name))
+        self.tool(name).is_some()
     }
 
     /// Whether the tool exists on this thread at all, regardless of whether the
@@ -5735,6 +5760,12 @@ where
 
     const NAME: &'static str;
 
+    /// Declares the side-effect boundary this tool requires. The default is
+    /// deliberately mutating so unreviewed tools cannot enter Plan mode.
+    fn capability() -> ToolCapability {
+        ToolCapability::ProjectMutation
+    }
+
     fn description() -> SharedString {
         let schema = schemars::schema_for!(Self::Input);
         SharedString::new(
@@ -5833,6 +5864,7 @@ pub trait AnyAgentTool {
     fn name(&self) -> SharedString;
     fn description(&self) -> SharedString;
     fn kind(&self) -> acp::ToolKind;
+    fn capability(&self) -> ToolCapability;
     fn initial_title(&self, input: serde_json::Value, _cx: &mut App) -> SharedString;
     fn input_schema(&self) -> serde_json::Value;
     fn supports_input_streaming(&self) -> bool {
@@ -5874,6 +5906,10 @@ where
 
     fn kind(&self) -> acp::ToolKind {
         T::kind()
+    }
+
+    fn capability(&self) -> ToolCapability {
+        T::capability()
     }
 
     fn supports_input_streaming(&self) -> bool {
@@ -10113,47 +10149,27 @@ fn is_stopword(word: &str) -> bool {
 
 #[cfg(test)]
 mod session_mode_tests {
-    use super::{SessionMode, tool_changes_the_project};
+    use super::{SessionMode, ToolCapability};
 
     #[test]
-    fn planning_withholds_the_tools_that_change_the_project() {
-        for tool in [
-            "edit_file",
-            "write_file",
-            "create_directory",
-            "delete_path",
-            "copy_path",
-            "move_path",
-            "rename_symbol",
-            "apply_code_action",
-            "terminal",
-            "sandboxed_terminal",
-        ] {
-            assert!(
-                tool_changes_the_project(tool),
-                "{tool} can change the project, so planning must not be offered it"
-            );
-        }
+    fn planning_allows_only_read_capabilities() {
+        assert!(ToolCapability::ReadOnly.is_allowed_in(SessionMode::Plan));
+        assert!(ToolCapability::ExternalRead.is_allowed_in(SessionMode::Plan));
+        assert!(!ToolCapability::ProjectMutation.is_allowed_in(SessionMode::Plan));
+        assert!(!ToolCapability::ExternalMutation.is_allowed_in(SessionMode::Plan));
+        assert!(!ToolCapability::ArbitraryExecution.is_allowed_in(SessionMode::Plan));
     }
 
     #[test]
-    fn planning_keeps_the_tools_that_only_look() {
-        for tool in [
-            "read_file",
-            "grep",
-            "find_path",
-            "list_directory",
-            "diagnostics",
-            "go_to_definition",
-            "find_references",
-            "fetch",
-            "draft_plan",
-            "complete_step",
+    fn building_allows_every_capability() {
+        for capability in [
+            ToolCapability::ReadOnly,
+            ToolCapability::ProjectMutation,
+            ToolCapability::ExternalRead,
+            ToolCapability::ExternalMutation,
+            ToolCapability::ArbitraryExecution,
         ] {
-            assert!(
-                !tool_changes_the_project(tool),
-                "{tool} does not change the project, so planning should keep it"
-            );
+            assert!(capability.is_allowed_in(SessionMode::Build));
         }
     }
 

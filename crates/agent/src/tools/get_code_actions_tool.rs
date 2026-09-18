@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::symbol_locator::{CodeActionStore, PendingCodeActions, SymbolLocator};
-use crate::{AgentTool, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 
 /// Gets the list of available code actions at a symbol location from the language server.
 ///
@@ -42,6 +42,10 @@ impl AgentTool for GetCodeActionsTool {
     type Output = String;
 
     const NAME: &'static str = "get_code_actions";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Search

@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, sync::Arc};
 
-use crate::{AgentTool, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 
 const ANSWER_FIELD: &str = "answer";
 
@@ -286,6 +286,10 @@ impl AgentTool for AskQuestionTool {
     type Output = AskQuestionToolOutput;
 
     const NAME: &'static str = "ask_question";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Think

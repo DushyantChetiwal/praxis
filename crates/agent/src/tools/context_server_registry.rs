@@ -1,4 +1,4 @@
-use crate::{AgentToolOutput, AnyAgentTool, ToolCallEventStream, ToolInput};
+use crate::{AgentToolOutput, AnyAgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
 use collections::{BTreeMap, HashMap};
@@ -301,6 +301,19 @@ impl ContextServerTool {
     }
 }
 
+fn mcp_tool_capability(tool: &context_server::types::Tool) -> ToolCapability {
+    match tool.annotations.as_ref() {
+        Some(annotations) if annotations.read_only_hint == Some(true) => {
+            if annotations.open_world_hint == Some(true) {
+                ToolCapability::ExternalRead
+            } else {
+                ToolCapability::ReadOnly
+            }
+        }
+        _ => ToolCapability::ExternalMutation,
+    }
+}
+
 impl AnyAgentTool for ContextServerTool {
     fn name(&self) -> SharedString {
         self.tool.name.clone().into()
@@ -312,6 +325,10 @@ impl AnyAgentTool for ContextServerTool {
 
     fn kind(&self) -> acp::ToolKind {
         acp::ToolKind::Other
+    }
+
+    fn capability(&self) -> ToolCapability {
+        mcp_tool_capability(&self.tool)
     }
 
     fn initial_title(&self, input: serde_json::Value, _cx: &mut App) -> SharedString {
@@ -565,6 +582,45 @@ mod tests {
 
     // Note: Tests for MCP tool ID collision with built-in tools and permission
     // decisions are in crates/agent/src/tool_permissions.rs to avoid duplication.
+
+    fn mcp_tool(annotations: serde_json::Value) -> context_server::types::Tool {
+        serde_json::from_value(serde_json::json!({
+            "name": "test_tool",
+            "inputSchema": { "type": "object" },
+            "annotations": annotations,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn mcp_read_only_annotations_are_respected() {
+        let local_read = mcp_tool(serde_json::json!({ "readOnlyHint": true }));
+        assert_eq!(mcp_tool_capability(&local_read), ToolCapability::ReadOnly);
+
+        let external_read = mcp_tool(serde_json::json!({
+            "readOnlyHint": true,
+            "openWorldHint": true,
+        }));
+        assert_eq!(
+            mcp_tool_capability(&external_read),
+            ToolCapability::ExternalRead
+        );
+    }
+
+    #[test]
+    fn mcp_tools_without_an_explicit_read_only_hint_fail_closed() {
+        for annotations in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!({ "readOnlyHint": false }),
+        ] {
+            let tool = mcp_tool(annotations);
+            assert_eq!(
+                mcp_tool_capability(&tool),
+                ToolCapability::ExternalMutation
+            );
+        }
+    }
 
     #[test]
     fn test_format_mcp_initial_title_inlines_single_string_arg() {

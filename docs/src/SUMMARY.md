@@ -60,6 +60,7 @@
   - [Skills](./ai/skills.md)
   - [Instructions](./ai/instructions.md)
   - [Architect](./ai/architect.md)
+    - [Architecture and Demo](./ai/architect-portfolio.md)
 - [Parallel Agents](./ai/parallel-agents.md)
 - [Inline Assistant](./ai/inline-assistant.md)
 - [LLM Providers](./ai/llm-providers.md)

@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::{AgentTool, Thread, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 
 /// Draw the plan for this task as a flowchart on the Architect canvas.
 ///
@@ -65,8 +65,9 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolInput};
 ///
 /// ### Connections
 /// - Leave out `condition` when a step simply follows another.
-/// - Use `deterministic` when the answer can be checked without judgement,
-///   such as a command's exit status or whether a file exists.
+/// - Use `deterministic` for a condition phrased as an objective fact, such as
+///   a command's exit status or whether a file exists. The current runner still
+///   asks the model to evaluate that fact from the step summary.
 /// - Use `llm_evaluated` only when the decision genuinely needs judgement, and
 ///   phrase it as a yes-or-no question. The user will see which parts of their
 ///   control flow depend on a model's opinion, so do not reach for this to
@@ -136,6 +137,10 @@ impl AgentTool for DraftPlanTool {
     type Output = DraftPlanToolOutput;
 
     const NAME: &'static str = "draft_plan";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Think

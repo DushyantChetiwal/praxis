@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::{AgentTool, Thread, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 
 /// Report what you did in the step of the plan you have just finished.
 ///
@@ -70,6 +70,10 @@ impl AgentTool for CompleteStepTool {
     type Output = CompleteStepToolOutput;
 
     const NAME: &'static str = "complete_step";
+
+    fn capability() -> ToolCapability {
+        ToolCapability::ReadOnly
+    }
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Think

@@ -141,6 +141,9 @@ struct Frame {
     /// The steps walked to reach this plan; empty for the top-level plan.
     parents: Vec<NodeId>,
     current: NodeId,
+    /// Other entry points in this plan, in graph order. Architect runs each root
+    /// component deterministically instead of silently dropping all but one.
+    remaining_roots: Vec<NodeId>,
     phase: Phase,
     visits: HashMap<NodeId, usize>,
 }
@@ -177,24 +180,32 @@ impl PlanRun {
             return Err(RunRefusal::NotReady(problems));
         }
 
-        let entry = entry_of(graph).ok_or(RunRefusal::NothingToRun)?;
+        let entries = entries_of(graph);
+        if entries.is_empty() {
+            return Err(RunRefusal::NothingToRun);
+        }
         let mut run = Self {
             stack: Vec::new(),
             history: Vec::new(),
             outcome: None,
         };
-        run.push_frame(Vec::new(), entry);
+        run.push_frame(Vec::new(), entries);
         // The entry step may itself be a plan, so descend before handing back.
         run.descend_while_nested(graph);
         Ok(run)
     }
 
-    fn push_frame(&mut self, parents: Vec<NodeId>, current: NodeId) {
+    fn push_frame(&mut self, parents: Vec<NodeId>, entries: Vec<NodeId>) {
+        let mut entries = entries.into_iter();
+        let Some(current) = entries.next() else {
+            return;
+        };
         let mut visits = HashMap::default();
         visits.insert(current.clone(), 1);
         let frame = Frame {
             parents,
             current,
+            remaining_roots: entries.collect(),
             phase: Phase::Working,
             visits,
         };
@@ -411,16 +422,54 @@ impl PlanRun {
                 });
                 return;
             }
-            let Some(entry) = entry_of(subplan) else {
+            let entries = entries_of(subplan);
+            if entries.is_empty() {
                 return;
-            };
-            self.push_frame(path.0, entry);
+            }
+            self.push_frame(path.0, entries);
         }
     }
 
     /// The current plan has run out of steps. If it is a nested plan, the step
     /// that contained it is now finished, and the level above carries on.
     fn leave_frame(&mut self, graph: &ArchitectGraph) -> Decision {
+        let has_next_root = self
+            .stack
+            .last()
+            .is_some_and(|frame| !frame.remaining_roots.is_empty());
+        if has_next_root && self.history.len() >= MAX_RUN_STEPS {
+            return self.finish(RunOutcome::StepLimit {
+                steps: self.history.len(),
+            });
+        }
+
+        let next_root_path = self.stack.last_mut().and_then(|frame| {
+            if frame.remaining_roots.is_empty() {
+                return None;
+            }
+            let next = frame.remaining_roots.remove(0);
+            let visits = {
+                let visits = frame.visits.entry(next.clone()).or_insert(0);
+                *visits += 1;
+                *visits
+            };
+            frame.current = next;
+            frame.phase = Phase::Working;
+            Some((frame.path(), visits))
+        });
+        if let Some((path, visits)) = next_root_path {
+            if visits > MAX_NODE_VISITS {
+                let node = path
+                    .leaf()
+                    .cloned()
+                    .expect("a root path always contains a node");
+                return self.finish(RunOutcome::NodeLimit { node, visits });
+            }
+            self.history.push(path);
+            self.descend_while_nested(graph);
+            return self.decide(graph);
+        }
+
         self.stack.pop();
         if self.stack.is_empty() {
             return self.finish(RunOutcome::Completed);
@@ -434,14 +483,12 @@ impl PlanRun {
     }
 }
 
-/// Where a plan begins. Several entry points are possible and nothing in the
-/// graph ranks them, so node order decides: it is the order the steps were
-/// drafted in, and it makes the choice reproducible.
-fn entry_of(graph: &ArchitectGraph) -> Option<NodeId> {
-    graph
-        .roots()
-        .into_iter()
-        .min_by_key(|id| graph.node_index(id).unwrap_or(usize::MAX))
+/// Where a plan begins. Several entry points are valid; all are retained in
+/// graph order so disconnected root components run deterministically.
+fn entries_of(graph: &ArchitectGraph) -> Vec<NodeId> {
+    let mut roots = graph.roots();
+    roots.sort_by_key(|id| graph.node_index(id).unwrap_or(usize::MAX));
+    roots
 }
 
 /// The brief handed to the agent for one step.
@@ -529,13 +576,10 @@ pub fn step_prompt(
 /// Pinned steps are included wherever they are in the plan, which is the whole
 /// point of pinning: a decision taken early that everything after it depends on
 /// should not fall out of view once it is no longer a direct predecessor.
-fn incoming_summaries<'a>(
-    local: &'a ArchitectGraph,
-    node: &ArchitectNode,
-) -> Vec<(&'a str, &'a str)> {
+fn incoming_summaries(local: &ArchitectGraph, node: &ArchitectNode) -> Vec<(String, String)> {
     // Pinned first, so a standing decision is read before the detail of
     // whatever happened to run immediately before this step.
-    let mut candidates: Vec<&'a ArchitectNode> = local.pinned_nodes().collect();
+    let mut candidates: Vec<&ArchitectNode> = local.pinned_nodes().collect();
     for edge in local.edges_into(&node.id) {
         if let Some(source) = local.node(&edge.from) {
             candidates.push(source);
@@ -543,19 +587,19 @@ fn incoming_summaries<'a>(
     }
 
     let mut seen: Vec<&NodeId> = Vec::new();
-    let mut out: Vec<(&'a str, &'a str)> = Vec::new();
+    let mut out: Vec<(String, String)> = Vec::new();
     for candidate in candidates {
         if candidate.id == node.id || seen.contains(&&candidate.id) {
             continue;
         }
-        let Some(result) = &candidate.result else {
+        let Some(result) = candidate.handoff_result() else {
             continue;
         };
         if result.summary.trim().is_empty() {
             continue;
         }
         seen.push(&candidate.id);
-        out.push((candidate.title.as_str(), result.summary.trim()));
+        out.push((candidate.title.clone(), result.summary.trim().to_string()));
     }
     out
 }
@@ -655,6 +699,42 @@ mod tests {
         let mut run = PlanRun::start(&graph).unwrap();
         assert_eq!(run.current(), path(&["plan"]));
         assert_eq!(run.decide(&graph), Decision::Run(path(&["plan"])));
+    }
+
+    #[test]
+    fn every_root_component_runs_in_graph_order() {
+        let mut graph = ArchitectGraph::default();
+        for id in ["first-root", "first-end", "second-root", "second-end"] {
+            graph.add_node(ArchitectNode::new(id, id));
+        }
+        graph.connect("first-root", "first-end");
+        graph.connect("second-root", "second-end");
+        lock_deeply(&mut graph);
+
+        let mut run = PlanRun::start(&graph).unwrap();
+        assert_eq!(run.decide(&graph), Decision::Run(path(&["first-root"])));
+        assert_eq!(run.finish_step(&graph), Decision::Run(path(&["first-end"])));
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Run(path(&["second-root"]))
+        );
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Run(path(&["second-end"]))
+        );
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Done(RunOutcome::Completed)
+        );
+        assert_eq!(
+            run.history(),
+            &[
+                path(&["first-root"]),
+                path(&["first-end"]),
+                path(&["second-root"]),
+                path(&["second-end"]),
+            ]
+        );
     }
 
     #[test]
@@ -908,6 +988,26 @@ mod tests {
         let prompt = step_prompt(&graph, &path(&["handlers", "parse"]), 2, 1);
         assert!(
             prompt.contains("You are inside: Write handlers"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn a_successor_receives_the_completed_nested_plan_as_its_handoff() {
+        let mut graph = nested_graph();
+        let handlers = graph.node_mut(&NodeId::from("handlers")).unwrap();
+        let subplan = handlers.subplan.as_deref_mut().unwrap();
+        with_result(subplan, "parse", "Read and validated the request body.", 1);
+        with_result(subplan, "respond", "Returned the documented response.", 1);
+
+        let prompt = step_prompt(&graph, &path(&["ship"]), 4, 1);
+        assert!(prompt.contains("Write handlers:"), "{prompt}");
+        assert!(
+            prompt.contains("Parse body: Read and validated the request body."),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Respond: Returned the documented response."),
             "{prompt}"
         );
     }
