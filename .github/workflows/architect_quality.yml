@@ -99,7 +99,7 @@ jobs:
           cache-on-failure: true
 
       - name: Test Plan-mode capability filtering
-        run: cargo test --locked -p agent --lib session_mode_tests::
+        run: "cargo test --locked -p agent --lib session_mode_tests::"
 
       - name: Test capability and structured-read tools
         run: |
@@ -117,7 +117,7 @@ jobs:
           cargo test --locked -p agent --lib internal_tests::test_a_reopened_step_thread_gets_its_tool_back -- --exact
 
       - name: Test Architect canvas support
-        run: cargo test --locked -p agent_ui --lib architect_ui::
+        run: "cargo test --locked -p agent_ui --lib architect_ui::"
 
   clippy:
     name: Clippy package checks
