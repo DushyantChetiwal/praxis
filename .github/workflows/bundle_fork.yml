@@ -21,6 +21,11 @@ name: bundle_fork
 on:
   workflow_dispatch:
     inputs:
+      source_ref:
+        description: Exact branch, tag, or commit to build
+        required: true
+        default: Enhanced_Agents
+        type: string
       build_macos:
         description: Build the macOS disk image
         required: false
@@ -33,23 +38,32 @@ on:
         type: boolean
 
 permissions:
+  attestations: write
   contents: write
+  id-token: write
 
 concurrency:
   group: bundle-fork
   cancel-in-progress: false
 
 jobs:
+  quality:
+    name: Validate the release source
+    uses: ./.github/workflows/architect_quality.yml
+    with:
+      source_ref: ${{ inputs.source_ref }}
+
   prepare:
     name: Pin the source revision
+    needs: quality
     runs-on: ubuntu-24.04
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
     steps:
-      - name: Check out the Architect branch
-        uses: actions/checkout@v4
+      - name: Check out the selected source
+        uses: actions/checkout@v7
         with:
-          ref: Enhanced_Agents
+          ref: ${{ inputs.source_ref }}
 
       - name: Record the source revision
         id: source
@@ -73,7 +87,7 @@ jobs:
       RUST_BACKTRACE: 1
     steps:
       - name: Check out the fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
 
@@ -86,7 +100,7 @@ jobs:
       - name: Set up Node
         # `bundle-mac` installs `dmg-license` globally to attach the license
         # agreement to the .dmg.
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
 
@@ -99,7 +113,7 @@ jobs:
         run: ./script/bundle-mac aarch64-apple-darwin
 
       - name: Upload the disk image
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zed-architect-macos-aarch64-dmg
           path: target/aarch64-apple-darwin/release/Zed-aarch64.dmg
@@ -108,7 +122,7 @@ jobs:
       - name: Upload the remote server
         # Needed to open a project over SSH from the bundled app, since this
         # fork's channel is never published and so cannot download one.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zed-architect-remote-server-macos-aarch64
           path: target/zed-remote-server-macos-aarch64.gz
@@ -125,7 +139,7 @@ jobs:
       RUST_BACKTRACE: 1
     steps:
       - name: Check out the fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
 
@@ -144,7 +158,7 @@ jobs:
         run: bash ./script/build-linux-remote-server
 
       - name: Upload the remote server
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zed-architect-remote-server-linux-x86_64
           path: |
@@ -170,7 +184,7 @@ jobs:
       ZED_DEV_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
     steps:
       - name: Check out the fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
 
@@ -187,7 +201,7 @@ jobs:
           cache-on-failure: true
 
       - name: Download the Linux remote server
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: zed-architect-remote-server-linux-x86_64
           path: target
@@ -200,7 +214,7 @@ jobs:
         shell: pwsh
 
       - name: Upload the installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # `bundle-windows.ps1` names the installer after its target architecture.
           name: zed-architect-windows-x86_64-installer
@@ -222,18 +236,18 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the built source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
 
       - name: Download the Windows installer
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: zed-architect-windows-x86_64-installer
           path: release-assets
 
       - name: Download the macOS disk image
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: zed-architect-macos-aarch64-dmg
           path: release-assets
@@ -269,6 +283,15 @@ jobs:
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "version=${release_version}" >> "${GITHUB_OUTPUT}"
           echo "source_sha=${source_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Attest release asset provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            release-assets/Zed-x86_64.exe
+            release-assets/Zed-aarch64.dmg
+            release-assets/zed-dev-update-windows-x86_64.json
+            release-assets/zed-dev-update-macos-aarch64.json
 
       - name: Publish the latest Zed Dev release
         env:
