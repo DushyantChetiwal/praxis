@@ -1,0 +1,35 @@
+name: Format Architect branch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rustfmt:
+    name: Apply Rust formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the Architect branch
+        uses: actions/checkout@v4
+        with:
+          ref: Enhanced_Agents
+          fetch-depth: 0
+
+      - name: Format the Rust workspace
+        run: cargo fmt --all
+
+      - name: Commit formatting changes
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "Rust formatting is already clean."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add --update
+          git commit -m "Format Architect changes"
+          git push origin HEAD:Enhanced_Agents
