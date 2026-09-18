@@ -8043,6 +8043,44 @@ mod internal_tests {
     }
 
     #[gpui::test]
+    async fn test_architect_coordinator_owns_mode_and_cancellation(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let mut node = architect::ArchitectNode::new("build", "Build the feature");
+        node.locked = true;
+        let mut graph = architect::ArchitectGraph::default();
+        graph.add_node(node);
+        thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(graph.clone()), cx);
+            thread.set_session_mode(crate::SessionMode::Plan, cx);
+        });
+
+        cx.update(|cx| {
+            crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx)
+                .expect("a locked plan should start");
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.session_mode(), crate::SessionMode::Build);
+            let run = thread
+                .architect_run()
+                .expect("the thread should own the run");
+            assert!(run.is_running());
+            assert_eq!(
+                run.current.as_ref().and_then(architect::NodePath::leaf),
+                Some(&architect::NodeId::from("build"))
+            );
+        });
+
+        cx.update(|cx| crate::stop_architect_run(&thread, Some(&acp_thread), cx));
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.architect_run().is_none());
+            assert!(thread.architect_running_step().is_none());
+        });
+    }
+
+    #[gpui::test]
     async fn test_plan_mode_and_filtered_tools_survive_reopening(cx: &mut TestAppContext) {
         init_test(cx);
         let (connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
@@ -8289,6 +8327,54 @@ mod internal_tests {
             assert!(!enabled.contains_key("draft_plan"));
             assert!(!enabled.contains_key("edit_file"));
         });
+    }
+
+    #[gpui::test]
+    async fn test_each_architect_step_gets_an_independent_chat(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let parent_session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+        let first = cx
+            .update(|cx| {
+                connection.create_architect_step_thread(
+                    &parent_session_id,
+                    architect::NodePath(vec![
+                        architect::NodeId::from("first-parent"),
+                        architect::NodeId::from("shared-child"),
+                    ]),
+                    "First child".into(),
+                    cx,
+                )
+            })
+            .expect("the first step chat should open");
+        let second = cx
+            .update(|cx| {
+                connection.create_architect_step_thread(
+                    &parent_session_id,
+                    architect::NodePath(vec![
+                        architect::NodeId::from("second-parent"),
+                        architect::NodeId::from("shared-child"),
+                    ]),
+                    "Second child".into(),
+                    cx,
+                )
+            })
+            .expect("the second step chat should open");
+        let first_id = first.read_with(cx, |thread, _| thread.session_id().clone());
+        let second_id = second.read_with(cx, |thread, _| thread.session_id().clone());
+        assert_ne!(first_id, second_id);
+
+        for (session_id, title) in [(first_id, "First child"), (second_id, "Second child")] {
+            let step = agent.read_with(cx, |agent, _| {
+                agent.sessions.get(&session_id).unwrap().thread.clone()
+            });
+            step.read_with(cx, |thread, _| {
+                assert_eq!(thread.title().as_deref(), Some(title));
+                assert!(thread.has_registered_tool(RefineStepTool::NAME));
+                assert_eq!(thread.parent_thread_id(), Some(parent_session_id.clone()));
+            });
+        }
     }
 
     /// Tools live in code, not in the saved thread, so a step thread reopened

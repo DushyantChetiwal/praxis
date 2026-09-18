@@ -659,3 +659,186 @@ impl ArchitectPane {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{path::Path, rc::Rc};
+
+    use acp_thread::AgentConnection as _;
+    use gpui::{Modifiers, MouseMoveEvent, Task, TestAppContext, VisualTestContext};
+    use project::{FakeFs, Project};
+    use serde_json::json;
+    use util::path_list::PathList;
+    use workspace::MultiWorkspace;
+
+    use super::*;
+    use crate::conversation_view::tests::init_test;
+
+    #[gpui::test]
+    async fn canvas_edits_nested_navigation_and_locking_follow_graph_rules(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/", json!({ "a": {} })).await;
+        let project = Project::test(fs.clone(), [Path::new("/a")], cx).await;
+        let thread_store = cx.new(|cx| agent::ThreadStore::new(cx));
+        let native_agent =
+            cx.update(|cx| agent::NativeAgent::new(thread_store, agent::Templates::new(), fs, cx));
+        let connection = Rc::new(agent::NativeAgentConnection(native_agent));
+        let acp_thread = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new("/a")]),
+                    cx,
+                )
+            })
+            .await
+            .expect("the Architect test session should open");
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx
+            .update(|cx| connection.thread(&session_id, cx))
+            .expect("the native thread should exist");
+
+        let parent = NodeId::from("parent");
+        let child = NodeId::from("child");
+        let target = NodeId::from("target");
+        let mut nested = ArchitectGraph::default();
+        let mut child_node = ArchitectNode::new(child.clone(), "Child");
+        child_node.position = Some(Position { x: 0.0, y: 0.0 });
+        nested.add_node(child_node);
+        let mut graph = ArchitectGraph::default();
+        let mut parent_node = ArchitectNode::new(parent.clone(), "Parent");
+        parent_node.position = Some(Position { x: 0.0, y: 0.0 });
+        parent_node.subplan = Some(Box::new(nested));
+        graph.add_node(parent_node);
+        let mut target_node = ArchitectNode::new(target.clone(), "Target");
+        target_node.position = Some(Position { x: 400.0, y: 0.0 });
+        graph.add_node(target_node);
+        thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
+
+        let multi_workspace =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace
+            .read_with(cx, |multi_workspace, _cx| {
+                multi_workspace.workspace().clone()
+            })
+            .unwrap();
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let pane = workspace.update_in(cx, |_workspace, _window, cx| {
+            let workspace = cx.weak_entity();
+            cx.new(|cx| ArchitectPane::new(thread.clone(), workspace, cx))
+        });
+
+        pane.update_in(cx, |pane, window, cx| {
+            pane.interaction = Interaction::DraggingNode {
+                id: parent.clone(),
+                grab: point(0.0, 0.0),
+            };
+            pane.handle_mouse_move(
+                &MouseMoveEvent {
+                    position: point(px(83.0), px(39.0)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers::default(),
+                },
+                window,
+                cx,
+            );
+            assert_eq!(
+                pane.root_graph(cx)
+                    .and_then(|graph| graph.node(&parent))
+                    .and_then(|node| node.position),
+                Some(Position { x: 80.0, y: 40.0 })
+            );
+
+            pane.interaction = Interaction::Connecting {
+                from: parent.clone(),
+                at: point(px(80.0), px(40.0)),
+            };
+            pane.handle_mouse_up(
+                &MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: point(px(400.0), px(0.0)),
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                },
+                window,
+                cx,
+            );
+            let edge = pane
+                .root_graph(cx)
+                .and_then(|graph| graph.edges.first())
+                .expect("dragging a connector onto a step should create an edge")
+                .id
+                .clone();
+            pane.selection = Some(Selection::Edge(edge));
+            pane.delete_selection(window, cx);
+            assert!(pane.root_graph(cx).unwrap().edges.is_empty());
+
+            pane.interaction = Interaction::Connecting {
+                from: parent.clone(),
+                at: point(px(80.0), px(40.0)),
+            };
+            pane.handle_mouse_up(
+                &MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: point(px(400.0), px(0.0)),
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                },
+                window,
+                cx,
+            );
+            pane.selection = Some(Selection::Node(target.clone()));
+            pane.delete_selection(window, cx);
+            let graph = pane.root_graph(cx).unwrap();
+            assert!(graph.node(&target).is_none());
+            assert!(graph.edges.is_empty(), "deleting a step removes its edges");
+
+            pane.toggle_lock(parent.clone(), window, cx);
+            assert!(!pane.root_graph(cx).unwrap().node(&parent).unwrap().locked);
+            pane.drill_into(parent.clone(), window, cx);
+            assert_eq!(pane.focus, NodePath::root(parent.clone()));
+            pane.toggle_lock(child.clone(), window, cx);
+            assert!(pane.graph(cx).unwrap().node(&child).unwrap().locked);
+            assert!(pane.drill_out(window, cx));
+            assert_eq!(pane.selection, Some(Selection::Node(parent.clone())));
+            pane.toggle_lock(parent.clone(), window, cx);
+            assert!(pane.root_graph(cx).unwrap().node(&parent).unwrap().locked);
+
+            pane.drill_into(parent.clone(), window, cx);
+            pane.focus_depth(0, window, cx);
+            assert_eq!(pane.focus, NodePath::default());
+        });
+
+        thread.update_in(cx, |thread, _window, cx| {
+            thread.start_architect_run(
+                NodePath::root(parent.clone()),
+                "Parent".into(),
+                Task::ready(()),
+                cx,
+            );
+        });
+        drop(pane);
+
+        let reopened = workspace.update_in(cx, |_workspace, _window, cx| {
+            let workspace = cx.weak_entity();
+            cx.new(|cx| ArchitectPane::new(thread.clone(), workspace, cx))
+        });
+        reopened.read_with(cx, |pane, cx| {
+            assert!(
+                pane.is_running(cx),
+                "closing the canvas must not stop its run"
+            );
+            assert_eq!(pane.running_node(cx), Some(&parent));
+        });
+        reopened.update_in(cx, |pane, _window, cx| pane.stop_run(cx));
+        reopened.read_with(cx, |pane, cx| {
+            assert!(
+                !pane.is_running(cx),
+                "the reopened canvas must be able to cancel"
+            );
+        });
+    }
+}
