@@ -177,9 +177,9 @@ impl ArchitectPane {
         edit: impl FnOnce(&mut ArchitectGraph) -> Result<(), GraphMutationError>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let result = self.thread.update(cx, |thread, cx| {
-            thread.update_architect_graph(edit, cx)
-        });
+        let result = self
+            .thread
+            .update(cx, |thread, cx| thread.update_architect_graph(edit, cx));
         match result {
             Some(Ok(())) => {
                 cx.notify();
@@ -658,5 +658,4 @@ impl ArchitectPane {
             _ => {}
         }
     }
-
 }

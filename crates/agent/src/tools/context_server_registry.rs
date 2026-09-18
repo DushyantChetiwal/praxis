@@ -615,10 +615,7 @@ mod tests {
             serde_json::json!({ "readOnlyHint": false }),
         ] {
             let tool = mcp_tool(annotations);
-            assert_eq!(
-                mcp_tool_capability(&tool),
-                ToolCapability::ExternalMutation
-            );
+            assert_eq!(mcp_tool_capability(&tool), ToolCapability::ExternalMutation);
         }
     }
 

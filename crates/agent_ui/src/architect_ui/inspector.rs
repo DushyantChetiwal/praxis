@@ -349,16 +349,18 @@ impl ArchitectPane {
         }
 
         let path = self.focus.child(id);
-        self.edit_checked(
-            move |graph| graph.set_locked_at(&path, !locked),
-            cx,
-        );
+        self.edit_checked(move |graph| graph.set_locked_at(&path, !locked), cx);
         self.refresh_inspector(window, cx);
     }
 
     /// Locks or unlocks everything, descending into nested plans so that a
     /// parent is never left locked over steps that are not.
-    pub(super) fn set_all_locked(&mut self, locked: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn set_all_locked(
+        &mut self,
+        locked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         fn apply(graph: &mut ArchitectGraph, locked: bool) {
             for node in &mut graph.nodes {
                 node.locked = locked;
@@ -1078,5 +1080,4 @@ impl ArchitectPane {
                 .into_any(),
         )
     }
-
 }

@@ -5,9 +5,8 @@ use crate::{
     GetCodeActionsTool, GitBranchesTool, GitDiffTool, GitRemotesTool, GitShowTool, GitStatusTool,
     GoToDefinitionTool, GrepTool, ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool,
     ProjectSnapshot, PullRequestTool, ReadFileTool, RenameTool, SandboxedTerminalTool,
-    SpawnAgentTool, SystemPromptTemplate, Template, Templates, TerminalTool, ToolPermissionDecision,
-    WebSearchTool,
-    WriteFileTool, decide_permission_from_settings,
+    SpawnAgentTool, SystemPromptTemplate, Template, Templates, TerminalTool,
+    ToolPermissionDecision, WebSearchTool, WriteFileTool, decide_permission_from_settings,
 };
 use acp_thread::{ClientUserMessageId, MentionUri};
 use action_log::ActionLog;

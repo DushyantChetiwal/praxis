@@ -342,10 +342,8 @@ impl AgentTool for PullRequestTool {
             let target = parse_pull_request_url(&input.url).map_err(|error| error.to_string())?;
 
             let authorize = cx.update(|cx| {
-                let context = crate::ToolPermissionContext::new(
-                    Self::NAME,
-                    vec![input.url.clone()],
-                );
+                let context =
+                    crate::ToolPermissionContext::new(Self::NAME, vec![input.url.clone()]);
                 event_stream.authorize(
                     format!("Inspect {} pull request", target.provider_name()),
                     context,
@@ -389,23 +387,13 @@ impl AgentTool for PullRequestTool {
                     owner,
                     repo,
                     number,
-                } => inspect_github(
-                    &http_client,
-                    &target,
-                    owner,
-                    repo,
-                    *number,
-                    &input.sections,
-                )
-                .await,
-                PullRequestTarget::Gitlab { project, number } => inspect_gitlab(
-                    &http_client,
-                    &target,
-                    project,
-                    *number,
-                    &input.sections,
-                )
-                .await,
+                } => {
+                    inspect_github(&http_client, &target, owner, repo, *number, &input.sections)
+                        .await
+                }
+                PullRequestTarget::Gitlab { project, number } => {
+                    inspect_gitlab(&http_client, &target, project, *number, &input.sections).await
+                }
             }
             .map_err(|error| error.to_string())?;
 
@@ -439,10 +427,8 @@ mod tests {
     #[test]
     fn parses_nested_gitlab_merge_request_urls() {
         assert_eq!(
-            parse_pull_request_url(
-                "https://gitlab.com/example/nested/project/-/merge_requests/42"
-            )
-            .unwrap(),
+            parse_pull_request_url("https://gitlab.com/example/nested/project/-/merge_requests/42")
+                .unwrap(),
             PullRequestTarget::Gitlab {
                 project: "example/nested/project".into(),
                 number: 42,

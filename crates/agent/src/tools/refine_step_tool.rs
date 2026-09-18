@@ -185,9 +185,7 @@ fn apply_refinement(
     if lock {
         revised.set_locked_at(node_path, true)?;
     }
-    let locked = revised
-        .node_at(node_path)
-        .is_some_and(|node| node.locked);
+    let locked = revised.node_at(node_path).is_some_and(|node| node.locked);
     *graph = revised;
     Ok((title, locked, unknown_steps))
 }
@@ -249,11 +247,10 @@ impl AgentTool for RefineStepTool {
                     error: "This step's plan is no longer available.".into(),
                 });
             };
-            let (step, locked, unknown_steps) = outcome.map_err(|error| {
-                RefineStepToolOutput::Error {
+            let (step, locked, unknown_steps) =
+                outcome.map_err(|error| RefineStepToolOutput::Error {
                     error: format!("Could not refine this step: {error}"),
-                }
-            })?;
+                })?;
 
             Ok(RefineStepToolOutput::Success {
                 step,
@@ -359,7 +356,10 @@ mod tests {
                 .intent,
             ""
         );
-        assert_eq!(graph.node_at(&path).unwrap().intent, "Only this nested step");
+        assert_eq!(
+            graph.node_at(&path).unwrap().intent,
+            "Only this nested step"
+        );
     }
 
     #[test]

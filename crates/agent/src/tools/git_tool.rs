@@ -80,7 +80,9 @@ fn truncate_utf8(mut text: String, max_bytes: usize) -> String {
         boundary -= 1;
     }
     text.truncate(boundary);
-    text.push_str("\n\n[Diff truncated. Increase `max_bytes` to inspect more, up to 200000 bytes.]\n");
+    text.push_str(
+        "\n\n[Diff truncated. Increase `max_bytes` to inspect more, up to 200000 bytes.]\n",
+    );
     text
 }
 
@@ -234,8 +236,12 @@ impl AgentTool for GitBranchesTool {
             for (repository, receiver) in jobs {
                 let result = receiver
                     .await
-                    .map_err(|error| format!("Could not inspect branches for {repository}: {error}"))?
-                    .map_err(|error| format!("Could not inspect branches for {repository}: {error}"))?;
+                    .map_err(|error| {
+                        format!("Could not inspect branches for {repository}: {error}")
+                    })?
+                    .map_err(|error| {
+                        format!("Could not inspect branches for {repository}: {error}")
+                    })?;
                 writeln!(output, "# {repository}").unwrap();
                 if let Some(error) = result.error {
                     writeln!(output, "Warning: {error}").unwrap();
@@ -330,8 +336,12 @@ impl AgentTool for GitRemotesTool {
             for (repository, receiver) in jobs {
                 let remotes = receiver
                     .await
-                    .map_err(|error| format!("Could not inspect remotes for {repository}: {error}"))?
-                    .map_err(|error| format!("Could not inspect remotes for {repository}: {error}"))?;
+                    .map_err(|error| {
+                        format!("Could not inspect remotes for {repository}: {error}")
+                    })?
+                    .map_err(|error| {
+                        format!("Could not inspect remotes for {repository}: {error}")
+                    })?;
                 writeln!(output, "# {repository}").unwrap();
                 let mut remotes = remotes.into_iter().collect::<Vec<_>>();
                 remotes.sort_by(|left, right| left.0.cmp(&right.0));
@@ -534,9 +544,8 @@ impl AgentTool for GitShowTool {
                         .into_iter()
                         .map(|repository| {
                             let name = repository_name(&repository, cx);
-                            let details = repository.update(cx, |repository, _cx| {
-                                repository.show(revision.clone())
-                            });
+                            let details = repository
+                                .update(cx, |repository, _cx| repository.show(revision.clone()));
                             let diff = repository.update(cx, |repository, _cx| {
                                 repository.load_commit_diff(revision.clone(), false)
                             });
@@ -560,12 +569,21 @@ impl AgentTool for GitShowTool {
                 };
                 let diff = diff
                     .await
-                    .map_err(|error| format!("Could not read changed files for {repository}: {error}"))?
-                    .map_err(|error| format!("Could not read changed files for {repository}: {error}"))?;
+                    .map_err(|error| {
+                        format!("Could not read changed files for {repository}: {error}")
+                    })?
+                    .map_err(|error| {
+                        format!("Could not read changed files for {repository}: {error}")
+                    })?;
 
                 writeln!(output, "# {repository}").unwrap();
                 writeln!(output, "Commit: {}", details.sha).unwrap();
-                writeln!(output, "Author: {} <{}>", details.author_name, details.author_email).unwrap();
+                writeln!(
+                    output,
+                    "Author: {} <{}>",
+                    details.author_name, details.author_email
+                )
+                .unwrap();
                 writeln!(output, "Timestamp: {}", details.commit_timestamp).unwrap();
                 writeln!(output, "Message:\n{}", details.message).unwrap();
                 if diff.is_shallow_boundary {
@@ -576,7 +594,8 @@ impl AgentTool for GitShowTool {
                 } else {
                     output.push_str("Changed files:\n");
                     for file in diff.files {
-                        writeln!(output, "- {:?} {}", file.status(), file.path.as_unix_str()).unwrap();
+                        writeln!(output, "- {:?} {}", file.status(), file.path.as_unix_str())
+                            .unwrap();
                     }
                     output.push('\n');
                 }
