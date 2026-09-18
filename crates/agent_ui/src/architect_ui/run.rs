@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 use architect::{NodeId, NodePath};
-use gpui::{Context, SharedString, Window};
+use gpui::{App, Context, SharedString, Window};
 
 use super::ArchitectPane;
 
@@ -78,7 +78,7 @@ impl ArchitectPane {
         cx.notify();
     }
 
-    pub(super) fn is_running(&self, cx: &Context<Self>) -> bool {
+    pub(super) fn is_running(&self, cx: &App) -> bool {
         self.run_starting.get()
             || self
                 .thread
@@ -89,7 +89,7 @@ impl ArchitectPane {
 
     /// The step the run is carrying out, if one is. Only the leaf matters for
     /// highlighting, since the canvas shows one level at a time.
-    pub(super) fn running_node<'a>(&self, cx: &'a Context<Self>) -> Option<&'a NodeId> {
+    pub(super) fn running_node<'a>(&self, cx: &'a App) -> Option<&'a NodeId> {
         self.thread
             .read(cx)
             .architect_run()?
