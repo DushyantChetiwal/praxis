@@ -7,7 +7,7 @@ use gpui::{
     Task, TaskExt, Window, actions,
 };
 use http_client::{HttpClient, HttpClientWithUrl};
-use paths::remote_servers_dir;
+
 use release_channel::{AppCommitSha, ReleaseChannel};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -1041,19 +1041,9 @@ async fn download_remote_server_binary(
     release: ReleaseAsset,
     client: Arc<HttpClientWithUrl>,
 ) -> Result<()> {
-    let temp = tempfile::Builder::new().tempfile_in(remote_servers_dir())?;
-    let mut temp_file = File::create(&temp).await?;
-
-    let mut response = client.get(&release.url, Default::default(), true).await?;
-    anyhow::ensure!(
-        response.status().is_success(),
-        "failed to download remote server release: {:?}",
-        response.status()
-    );
-    smol::io::copy(response.body_mut(), &mut temp_file).await?;
-    smol::fs::rename(&temp, &target_path).await?;
-
-    Ok(())
+    download_release(target_path, release, client, |_| {})
+        .await
+        .context("failed to download remote server release")
 }
 
 async fn cleanup_remote_server_cache(
@@ -1113,19 +1103,39 @@ async fn cleanup_remote_server_cache(
     Ok(())
 }
 
+fn parse_sha256(value: Option<&str>) -> Result<Option<[u8; 32]>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    anyhow::ensure!(
+        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "update checksum must contain exactly 64 hexadecimal characters"
+    );
+    let mut digest = [0; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .context("update checksum contains invalid hexadecimal")?;
+    }
+    Ok(Some(digest))
+}
+
 async fn download_release(
     target_path: &Path,
     release: ReleaseAsset,
     client: Arc<HttpClientWithUrl>,
     mut on_progress: impl FnMut(Option<f32>),
 ) -> Result<()> {
-    let mut target_file = File::create(&target_path).await?;
-    let expected_sha256 = release
-        .sha256
-        .as_deref()
-        .map(str::trim)
-        .filter(|sha256| !sha256.is_empty());
+    let expected_sha256 = parse_sha256(release.sha256.as_deref())?;
     let mut hasher = expected_sha256.map(|_| Sha256::new());
+    let parent = target_path
+        .parent()
+        .context("download target has no parent directory")?;
+    let temp_dir = tempfile::Builder::new()
+        .prefix(".zed-update-download-")
+        .tempdir_in(parent)?;
+    let temp_path = temp_dir.path().join("download");
+    let mut target_file = File::create(&temp_path).await?;
 
     let mut response = client.get(&release.url, Default::default(), true).await?;
     anyhow::ensure!(
@@ -1169,12 +1179,32 @@ async fn download_release(
     target_file.flush().await?;
 
     if let (Some(expected_sha256), Some(hasher)) = (expected_sha256, hasher) {
-        let actual_sha256 = format!("{:x}", hasher.finalize());
-        anyhow::ensure!(
-            actual_sha256.eq_ignore_ascii_case(expected_sha256),
-            "downloaded update checksum mismatch: expected {expected_sha256}, got {actual_sha256}"
-        );
+        let actual_sha256: [u8; 32] = hasher.finalize().into();
+        if actual_sha256 != expected_sha256 {
+            let expected_sha256 = expected_sha256
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join("");
+            let actual_sha256 = actual_sha256
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join("");
+            anyhow::bail!(
+                "downloaded update checksum mismatch: expected {expected_sha256}, got \
+                 {actual_sha256}"
+            );
+        }
     }
+
+    drop(target_file);
+    fs::rename(&temp_path, target_path).await.with_context(|| {
+        format!(
+            "failed to promote verified update to {}",
+            target_path.display()
+        )
+    })?;
 
     if total_bytes.is_some() && last_reported_percent != Some(100) {
         on_progress(Some(1.0));
@@ -1566,6 +1596,85 @@ mod tests {
         let path = path.unwrap();
         assert_eq!(path, tmp_dir.path().join("zed"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-zed-update>");
+    }
+
+    #[test]
+    fn test_update_checksums_require_exact_sha256_format() {
+        assert!(parse_sha256(None).unwrap().is_none());
+        assert!(parse_sha256(Some(&"ab".repeat(32))).unwrap().is_some());
+        assert!(parse_sha256(Some("")).is_err());
+        assert!(parse_sha256(Some("abc")).is_err());
+        assert!(parse_sha256(Some(&"gg".repeat(32))).is_err());
+        assert!(parse_sha256(Some(&"ab".repeat(33))).is_err());
+    }
+
+    #[gpui::test]
+    async fn test_checksum_mismatch_keeps_target_and_removes_temporary_download(
+        cx: &mut TestAppContext,
+    ) {
+        cx.background_executor.allow_parking();
+        let client = FakeHttpClient::create(|_| async move {
+            Ok(Response::builder()
+                .status(200)
+                .body("tampered update".into())
+                .unwrap())
+        });
+        let temp_dir = tempdir().unwrap();
+        let target_path = temp_dir.path().join("zed-download");
+        std::fs::write(&target_path, "existing verified update").unwrap();
+        let entries_before = std::fs::read_dir(temp_dir.path()).unwrap().count();
+        let release = ReleaseAsset {
+            version: "1.0.0".to_string(),
+            url: "https://test.example/download".to_string(),
+            sha256: Some("00".repeat(32)),
+        };
+
+        let error = download_release(&target_path, release, client, |_| {})
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("checksum mismatch"));
+        assert_eq!(
+            std::fs::read_to_string(&target_path).unwrap(),
+            "existing verified update"
+        );
+        assert_eq!(
+            std::fs::read_dir(temp_dir.path()).unwrap().count(),
+            entries_before,
+            "a failed download must not leave a temporary directory behind"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_verified_download_is_promoted_only_after_checksum_passes(
+        cx: &mut TestAppContext,
+    ) {
+        cx.background_executor.allow_parking();
+        let body = b"verified update".to_vec();
+        let sha256 = format!("{:x}", Sha256::digest(&body));
+        let client = FakeHttpClient::create({
+            let body = body.clone();
+            move |_| {
+                let body = body.clone();
+                async move { Ok(Response::builder().status(200).body(body.into()).unwrap()) }
+            }
+        });
+        let temp_dir = tempdir().unwrap();
+        let target_path = temp_dir.path().join("zed-download");
+        let release = ReleaseAsset {
+            version: "1.0.0".to_string(),
+            url: "https://test.example/download".to_string(),
+            sha256: Some(sha256),
+        };
+
+        download_release(&target_path, release, client, |_| {})
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&target_path).unwrap(), body);
+        assert_eq!(
+            std::fs::read_dir(temp_dir.path()).unwrap().count(),
+            1,
+            "only the promoted update should remain"
+        );
     }
 
     #[gpui::test]
