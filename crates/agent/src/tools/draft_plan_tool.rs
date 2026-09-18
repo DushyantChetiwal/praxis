@@ -65,9 +65,9 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 ///
 /// ### Connections
 /// - Leave out `condition` when a step simply follows another.
-/// - Use `deterministic` for a condition phrased as an objective fact, such as
-///   a command's exit status or whether a file exists. The current runner still
-///   asks the model to evaluate that fact from the step summary.
+/// - Use `objective` for an externally observable statement, such as whether a
+///   command succeeded or a file exists. The current runner asks the model to
+///   evaluate that statement from the step summary; it is not executable code.
 /// - Use `llm_evaluated` only when the decision genuinely needs judgement, and
 ///   phrase it as a yes-or-no question. The user will see which parts of their
 ///   control flow depend on a model's opinion, so do not reach for this to

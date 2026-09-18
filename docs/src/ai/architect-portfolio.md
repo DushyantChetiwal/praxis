@@ -30,11 +30,12 @@ The main responsibilities are split across three packages:
   status inside Zed.
 
 A step carries a goal, rules, a capture contract, lock state, and optional
-nested plan. A connection is unconditional or model-mediated. The legacy
-`deterministic` variant records an objective fact, but the built-in runner still
-asks the model to evaluate that fact from the completed step summary; it does
-not execute a free-form expression. The runner, not the model, applies the
-verdict and chooses the next connection.
+nested plan. A connection is unconditional or model-mediated. An `objective`
+condition records an externally observable statement, but the built-in runner
+still asks the model to evaluate it from the completed step summary; it does not
+execute a free-form expression. The old serialized name `deterministic` remains
+a read-only compatibility alias. The runner, not the model, applies the verdict
+and chooses the next connection.
 
 ## Capability boundary {#capability-boundary}
 
@@ -191,7 +192,7 @@ behavior or the Architect changes.
 - MCP read-only annotations are declarations made by the server. Plan mode
   enforces the declaration boundary but cannot prove that a dishonest server
   implemented its tool without side effects.
-- `deterministic` conditions are model-mediated in the built-in runner until a
-  typed evaluator exists. The documentation and API expose that behavior
-  explicitly instead of implying a free-form string is safely executable.
+- `objective` conditions remain model-mediated in the built-in runner until a
+  typed evaluator exists. The API names what the statement represents without
+  implying that its free-form text is deterministically executable.
 - Fork releases are unsigned, so operating-system trust prompts are expected.

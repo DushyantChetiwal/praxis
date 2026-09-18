@@ -73,9 +73,13 @@ pub struct StepRoute {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RouteCondition {
-    /// An objective fact, such as a command's exit status. The current runner
-    /// still asks the model to evaluate it from the completed step summary.
-    Deterministic { expression: String },
+    /// An objective statement, such as whether a command succeeded. The current
+    /// runner asks the model to evaluate it from the completed step summary.
+    #[serde(alias = "deterministic")]
+    Objective {
+        #[serde(alias = "expression")]
+        statement: String,
+    },
     /// A yes-or-no question that genuinely needs judgement.
     LlmEvaluated { question: String },
 }
@@ -83,9 +87,7 @@ pub enum RouteCondition {
 impl From<RouteCondition> for EdgeCondition {
     fn from(condition: RouteCondition) -> Self {
         match condition {
-            RouteCondition::Deterministic { expression } => {
-                EdgeCondition::Deterministic { expression }
-            }
+            RouteCondition::Objective { statement } => EdgeCondition::Objective { statement },
             RouteCondition::LlmEvaluated { question } => EdgeCondition::LlmEvaluated { question },
         }
     }
@@ -278,6 +280,10 @@ mod tests {
                     "to": "fix",
                     "condition": { "kind": "llm_evaluated", "question": "Did any endpoint still accept it?" },
                 },
+                {
+                    "to": "ship",
+                    "condition": { "kind": "objective", "statement": "all checks passed" },
+                },
             ],
             "lock": true,
         }))
@@ -294,6 +300,10 @@ mod tests {
         assert!(matches!(
             routing[1].condition,
             Some(RouteCondition::LlmEvaluated { .. })
+        ));
+        assert!(matches!(
+            routing[2].condition,
+            Some(RouteCondition::Objective { .. })
         ));
     }
 

@@ -84,8 +84,8 @@ pub fn compile_spec(graph: &ArchitectGraph) -> Result<String, Vec<GraphProblem>>
 
             match &edge.condition {
                 EdgeCondition::Always => writeln!(spec, "- {destination}.").ok(),
-                EdgeCondition::Deterministic { expression } => {
-                    writeln!(spec, "- If {expression}, {destination}.").ok()
+                EdgeCondition::Objective { statement } => {
+                    writeln!(spec, "- If {statement}, {destination}.").ok()
                 }
                 EdgeCondition::LlmEvaluated { question } => writeln!(
                     spec,

@@ -74,18 +74,16 @@ pub enum ConditionEvaluation {
 pub enum EdgeCondition {
     /// The step always follows.
     Always,
-    /// A legacy name for a free-form description of an externally observable
-    /// condition, retained for source and serialized-data compatibility.
-    ///
-    /// Architect does not interpret this string. Doing so would require an
-    /// expression language and a trusted evaluation environment, neither of
-    /// which this crate defines. [`crate::PlanRun`] therefore returns it through
-    /// [`crate::Decision::Ask`], just like [`EdgeCondition::LlmEvaluated`]. A
-    /// caller with a safe, typed evaluator may resolve it and pass the verdict to
-    /// [`crate::PlanRun::answer`]; the default prompt-based integration asks the
-    /// model to check it. New free-form model decisions should use
-    /// [`EdgeCondition::LlmEvaluated`] so their execution semantics are explicit.
-    Deterministic { expression: String },
+    /// An externally observable statement, such as whether a command succeeded.
+    /// The built-in integration asks the model to evaluate it from the completed
+    /// step summary; this is not an executable expression or a deterministic
+    /// evaluator. The old serialized name `deterministic` and field `expression`
+    /// remain accepted so saved plans continue to load.
+    #[serde(alias = "deterministic")]
+    Objective {
+        #[serde(alias = "expression")]
+        statement: String,
+    },
     /// A judgement the model has to make, phrased as a yes-or-no question.
     LlmEvaluated { question: String },
 }
@@ -94,7 +92,7 @@ impl EdgeCondition {
     pub fn label(&self) -> Option<&str> {
         match self {
             EdgeCondition::Always => None,
-            EdgeCondition::Deterministic { expression } => Some(expression),
+            EdgeCondition::Objective { statement } => Some(statement),
             EdgeCondition::LlmEvaluated { question } => Some(question),
         }
     }
@@ -103,12 +101,11 @@ impl EdgeCondition {
         matches!(self, EdgeCondition::Always)
     }
 
-    /// Describes what the built-in runner actually does, rather than what a
-    /// condition's legacy variant name might imply.
+    /// Describes what the built-in runner actually does.
     pub fn evaluation(&self) -> ConditionEvaluation {
         match self {
             EdgeCondition::Always => ConditionEvaluation::Unconditional,
-            EdgeCondition::Deterministic { .. } | EdgeCondition::LlmEvaluated { .. } => {
+            EdgeCondition::Objective { .. } | EdgeCondition::LlmEvaluated { .. } => {
                 ConditionEvaluation::ModelMediated
             }
         }
@@ -595,7 +592,7 @@ impl ArchitectGraph {
             for edge in self.edges_from(&node.id) {
                 let when = match &edge.condition {
                     EdgeCondition::Always => "always".to_string(),
-                    EdgeCondition::Deterministic { expression } => format!("if {expression}"),
+                    EdgeCondition::Objective { statement } => format!("if {statement}"),
                     EdgeCondition::LlmEvaluated { question } => {
                         format!("model decides: {question}")
                     }
@@ -1261,6 +1258,26 @@ mod tests {
                 },
             ));
         graph
+    }
+
+    #[test]
+    fn legacy_deterministic_conditions_load_as_objective_statements() {
+        let condition: EdgeCondition = serde_json::from_value(serde_json::json!({
+            "kind": "deterministic",
+            "expression": "the build failed",
+        }))
+        .unwrap();
+        assert_eq!(
+            condition,
+            EdgeCondition::Objective {
+                statement: "the build failed".into(),
+            }
+        );
+
+        let serialized = serde_json::to_value(condition).unwrap();
+        assert_eq!(serialized["kind"], "objective");
+        assert_eq!(serialized["statement"], "the build failed");
+        assert!(serialized.get("expression").is_none());
     }
 
     #[test]

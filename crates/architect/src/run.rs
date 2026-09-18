@@ -614,8 +614,8 @@ pub fn branch_prompt(graph: &ArchitectGraph, branch: &Branch) -> String {
 
     let question = match &branch.condition {
         EdgeCondition::Always => "Should the plan continue?".to_string(),
-        EdgeCondition::Deterministic { expression } => format!(
-            "Check whether this is true right now: {expression}\n\nCheck it, rather than \
+        EdgeCondition::Objective { statement } => format!(
+            "Check whether this is true right now: {statement}\n\nCheck it, rather than \
              recalling what was true earlier."
         ),
         EdgeCondition::LlmEvaluated { question } => format!("Answer this question: {question}"),
@@ -777,8 +777,8 @@ mod tests {
         graph
             .edges
             .push(ArchitectEdge::new("broken", "check", "fix").with_condition(
-                EdgeCondition::Deterministic {
-                    expression: "the build failed".into(),
+                EdgeCondition::Objective {
+                    statement: "the build failed".into(),
                 },
             ));
         graph.connect("check", "ship");

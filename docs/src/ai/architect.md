@@ -34,11 +34,11 @@ Each **step** is one meaningful unit of work and carries:
 
 Each **connection** says when one step leads to another:
 
-| Condition         | When to use it                                                                                                                    |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| _(none)_          | The step simply follows.                                                                                                          |
-| **Deterministic** | An objective fact such as a command's exit status. The built-in runner still asks the model to evaluate it from the step summary. |
-| **LLM-evaluated** | The decision genuinely needs judgement, phrased as a yes-or-no question.                                                          |
+| Condition         | When to use it                                                                                                                        |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| _(none)_          | The step simply follows.                                                                                                              |
+| **Objective**     | An observable statement such as whether a command succeeded. The built-in runner asks the model to evaluate it from the step summary. |
+| **LLM-evaluated** | The decision genuinely needs judgement, phrased as a yes-or-no question.                                                              |
 
 Pointing a connection back at an earlier step forms a loop, which is how you express "go back and fix it if the tests fail". Loops are expected; just make sure something can leave the loop.
 
