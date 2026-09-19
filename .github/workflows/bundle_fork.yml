@@ -11,12 +11,12 @@
 #
 # Both artifacts are UNSIGNED. Expect:
 #   macOS   — Gatekeeper refuses the first open. Right-click → Open, or
-#             `xattr -d com.apple.quarantine /Applications/Zed\ Dev.app`.
+#             `xattr -d com.apple.quarantine /Applications/Praxis\ Dev.app`.
 #   Windows — SmartScreen warns about an unknown publisher.
 #
 # It can be run from the Actions tab and is also dispatched after a successful
 # automated upstream sync.
-name: bundle_fork
+name: Bundle Praxis
 
 on:
   workflow_dispatch:
@@ -79,9 +79,9 @@ jobs:
     env:
       # Nothing is reused between runs, so incremental artifacts are only cost.
       CARGO_INCREMENTAL: 0
-      # Compile the fork's release feed into Zed Dev without redirecting any
-      # other Zed Cloud traffic.
-      ZED_DEV_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
+      # Compile the Praxis release feed without redirecting any upstream cloud
+      # traffic.
+      PRAXIS_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
       # `bundle-mac` ad-hoc signs when the Apple secrets are absent, which is the
       # case here. Left unset deliberately rather than defined empty.
       RUST_BACKTRACE: 1
@@ -115,8 +115,8 @@ jobs:
       - name: Upload the disk image
         uses: actions/upload-artifact@v7
         with:
-          name: zed-architect-macos-aarch64-dmg
-          path: target/aarch64-apple-darwin/release/Zed-aarch64.dmg
+          name: praxis-macos-aarch64-dmg
+          path: target/aarch64-apple-darwin/release/Praxis-aarch64.dmg
           if-no-files-found: error
 
       - name: Upload the remote server
@@ -124,7 +124,7 @@ jobs:
         # fork's channel is never published and so cannot download one.
         uses: actions/upload-artifact@v7
         with:
-          name: zed-architect-remote-server-macos-aarch64
+          name: praxis-remote-server-macos-aarch64
           path: target/zed-remote-server-macos-aarch64.gz
           if-no-files-found: warn
 
@@ -160,7 +160,7 @@ jobs:
       - name: Upload the remote server
         uses: actions/upload-artifact@v7
         with:
-          name: zed-architect-remote-server-linux-x86_64
+          name: praxis-remote-server-linux-x86_64
           path: |
             target/zed-remote-server-linux-x86_64.gz
             target/zed-remote-server-linux-x86_64.gz.sha256
@@ -181,7 +181,7 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
       RUST_BACKTRACE: 1
-      ZED_DEV_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
+      PRAXIS_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
     steps:
       - name: Check out the fork
         uses: actions/checkout@v7
@@ -203,7 +203,7 @@ jobs:
       - name: Download the Linux remote server
         uses: actions/download-artifact@v8
         with:
-          name: zed-architect-remote-server-linux-x86_64
+          name: praxis-remote-server-linux-x86_64
           path: target
 
       - name: Show the toolchain
@@ -217,8 +217,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           # `bundle-windows.ps1` names the installer after its target architecture.
-          name: zed-architect-windows-x86_64-installer
-          path: target/Zed-x86_64.exe
+          name: praxis-windows-x86_64-installer
+          path: target/Praxis-x86_64.exe
           if-no-files-found: error
 
   publish:
@@ -243,13 +243,13 @@ jobs:
       - name: Download the Windows installer
         uses: actions/download-artifact@v8
         with:
-          name: zed-architect-windows-x86_64-installer
+          name: praxis-windows-x86_64-installer
           path: release-assets
 
       - name: Download the macOS disk image
         uses: actions/download-artifact@v8
         with:
-          name: zed-architect-macos-aarch64-dmg
+          name: praxis-macos-aarch64-dmg
           path: release-assets
 
       - name: Create update manifests
@@ -260,25 +260,25 @@ jobs:
 
           version="$(python -c 'import tomllib; print(tomllib.load(open("crates/zed/Cargo.toml", "rb"))["package"]["version"])')"
           source_sha="$(git rev-parse HEAD)"
-          tag="zed-dev-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
-          release_version="${version}+dev.${GITHUB_RUN_NUMBER}.${source_sha}"
+          tag="praxis-dev-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+          release_version="${version}+praxis.${GITHUB_RUN_NUMBER}.${source_sha}"
           repository_url="https://github.com/${GITHUB_REPOSITORY}"
-          windows_sha256="$(sha256sum release-assets/Zed-x86_64.exe | cut -d ' ' -f 1)"
-          macos_sha256="$(sha256sum release-assets/Zed-aarch64.dmg | cut -d ' ' -f 1)"
+          windows_sha256="$(sha256sum release-assets/Praxis-x86_64.exe | cut -d ' ' -f 1)"
+          macos_sha256="$(sha256sum release-assets/Praxis-aarch64.dmg | cut -d ' ' -f 1)"
 
           jq -n \
             --arg version "${release_version}" \
-            --arg url "${repository_url}/releases/download/${tag}/Zed-x86_64.exe" \
+            --arg url "${repository_url}/releases/download/${tag}/Praxis-x86_64.exe" \
             --arg sha256 "${windows_sha256}" \
             '{version: $version, url: $url, sha256: $sha256}' \
-            > release-assets/zed-dev-update-windows-x86_64.json
+            > release-assets/praxis-update-windows-x86_64.json
 
           jq -n \
             --arg version "${release_version}" \
-            --arg url "${repository_url}/releases/download/${tag}/Zed-aarch64.dmg" \
+            --arg url "${repository_url}/releases/download/${tag}/Praxis-aarch64.dmg" \
             --arg sha256 "${macos_sha256}" \
             '{version: $version, url: $url, sha256: $sha256}' \
-            > release-assets/zed-dev-update-macos-aarch64.json
+            > release-assets/praxis-update-macos-aarch64.json
 
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "version=${release_version}" >> "${GITHUB_OUTPUT}"
@@ -288,12 +288,12 @@ jobs:
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
-            release-assets/Zed-x86_64.exe
-            release-assets/Zed-aarch64.dmg
-            release-assets/zed-dev-update-windows-x86_64.json
-            release-assets/zed-dev-update-macos-aarch64.json
+            release-assets/Praxis-x86_64.exe
+            release-assets/Praxis-aarch64.dmg
+            release-assets/praxis-update-windows-x86_64.json
+            release-assets/praxis-update-macos-aarch64.json
 
-      - name: Publish the latest Zed Dev release
+      - name: Publish the latest Praxis Dev release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -303,13 +303,13 @@ jobs:
           gh release create "${{ steps.release.outputs.tag }}" \
             --repo "${GITHUB_REPOSITORY}" \
             --target "${{ steps.release.outputs.source_sha }}" \
-            --title "Zed Dev ${{ steps.release.outputs.version }}" \
-            --notes "Automated Architect build from ${{ steps.release.outputs.source_sha }}. The Windows and macOS installers are unsigned." \
+            --title "Praxis Dev ${{ steps.release.outputs.version }}" \
+            --notes "Automated Praxis build from ${{ steps.release.outputs.source_sha }}. The Windows and macOS installers are unsigned." \
             --draft \
-            release-assets/Zed-x86_64.exe \
-            release-assets/Zed-aarch64.dmg \
-            release-assets/zed-dev-update-windows-x86_64.json \
-            release-assets/zed-dev-update-macos-aarch64.json
+            release-assets/Praxis-x86_64.exe \
+            release-assets/Praxis-aarch64.dmg \
+            release-assets/praxis-update-windows-x86_64.json \
+            release-assets/praxis-update-macos-aarch64.json
 
           gh release edit "${{ steps.release.outputs.tag }}" \
             --repo "${GITHUB_REPOSITORY}" \
