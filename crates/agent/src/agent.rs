@@ -76,6 +76,12 @@ use util::path_list::PathList;
 use util::rel_path::RelPath;
 
 const MAXIMUM_RETRY_JITTER_FRACTION: f64 = 0.1;
+const UNSUPPORTED_GLOBAL_SKILL_NAMES: &[&str] = &["canvas"];
+
+fn is_skill_supported_by_native_host(skill: &Skill) -> bool {
+    skill.source != SkillSource::Global
+        || !UNSUPPORTED_GLOBAL_SKILL_NAMES.contains(&skill.name.as_str())
+}
 
 pub(crate) fn jitter_retry_delay(delay: Duration) -> Duration {
     let jitter = delay.mul_f64(rand::rng().random_range(0.0..MAXIMUM_RETRY_JITTER_FRACTION));
@@ -1249,7 +1255,14 @@ impl NativeAgent {
             // global vs. project-local skills via the source label.
             // Project-overrides-global is applied below, only for the
             // model-facing catalog.
-            let global_skills = global_skills_task.await;
+            let global_skills = global_skills_task
+                .await
+                .into_iter()
+                .filter(|result| match result {
+                    Ok(skill) => is_skill_supported_by_native_host(skill),
+                    Err(_) => true,
+                })
+                .collect::<Vec<_>>();
             let project_skills_results = project_skills_task.await;
             let (skills, skill_errors) =
                 combine_skills(global_skills, project_skills_results.into_iter().flatten());
@@ -4124,6 +4137,21 @@ mod internal_tests {
             disable_model_invocation: false,
             embedded_body: None,
         }
+    }
+
+    #[test]
+    fn test_native_host_filters_only_the_incompatible_global_canvas_skill() {
+        let global_canvas = make_global_skill("canvas", "Cursor Canvas integration");
+        let global_other = make_global_skill("review", "Review changes");
+        let mut project_canvas = global_canvas.clone();
+        project_canvas.source = SkillSource::ProjectLocal {
+            worktree_id: SkillScopeId(1),
+            worktree_root_name: "project".into(),
+        };
+
+        assert!(!is_skill_supported_by_native_host(&global_canvas));
+        assert!(is_skill_supported_by_native_host(&global_other));
+        assert!(is_skill_supported_by_native_host(&project_canvas));
     }
 
     async fn setup_native_agent_session(
