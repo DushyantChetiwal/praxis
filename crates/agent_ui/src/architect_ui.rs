@@ -1444,7 +1444,25 @@ mod tests {
 
         let (workspace, cx) =
             cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let (weak_workspace, async_window_context) = cx.update(|window, cx| {
+            (workspace.downgrade(), window.to_async(cx))
+        });
+        let project_panel = ProjectPanel::load(
+            weak_workspace.clone(),
+            async_window_context.clone(),
+        )
+        .await
+        .expect("the native Project panel should load");
+        let git_panel = GitPanel::load(weak_workspace.clone(), async_window_context.clone())
+            .await
+            .expect("the native Git panel should load");
+        let terminal_panel = TerminalPanel::load(weak_workspace, async_window_context)
+            .await
+            .expect("the native Terminal panel should load");
         workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(project_panel, window, cx);
+            workspace.add_panel(git_panel, window, cx);
+            workspace.add_panel(terminal_panel, window, cx);
             let agent_panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
             workspace.add_panel(agent_panel, window, cx);
         });
