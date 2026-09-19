@@ -699,7 +699,10 @@ pub fn init(
              cx: &mut Context<Workspace>| {
                 if workspace
                     .active_item_as::<crate::architect_ui::ArchitectPane>(cx)
-                    .is_some()
+                    .is_some_and(|architect| {
+                        architect.read(cx).mode()
+                            == crate::architect_ui::ArchitectWorkspaceMode::Architect
+                    })
                 {
                     crate::architect_ui::ArchitectPane::activate_code(workspace, window, cx);
                     return;
