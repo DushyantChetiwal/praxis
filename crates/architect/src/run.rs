@@ -59,6 +59,7 @@ pub enum RunOutcome {
     StepLimit { steps: usize },
     NodeLimit { node: NodeId, visits: usize },
     DepthLimit { node: NodeId },
+    Failed { message: String },
     Cancelled,
 }
 
@@ -90,6 +91,8 @@ impl RunOutcome {
                  \"{}\". Flatten that part of the plan before running it again.",
                 title(node)
             ),
+            RunOutcome::Failed { message } => format!("The run failed: {message}"),
+            RunOutcome::Cancelled => "The run was cancelled before it finished.".into(),
             RunOutcome::Cancelled => "The run was stopped.".into(),
         }
     }

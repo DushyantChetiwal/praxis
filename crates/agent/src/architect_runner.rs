@@ -76,40 +76,63 @@ pub fn start_architect_run(
                     let step_number = plan_run.steps_taken();
                     let attempt = node.leaf().map(|id| plan_run.attempt(id)).unwrap_or(1);
                     let title = step_title(&graph, &node);
-                    weak_thread
-                        .update(cx, |thread, cx| {
-                            thread.note_architect_run_position(
-                                node.clone(),
-                                title,
-                                step_number,
-                                attempt,
-                                cx,
-                            );
-                        })
-                        .ok();
-
-                    let prompt = architect::step_prompt(&graph, &node, step_number, attempt);
-                    let sent = send_and_wait(&acp_thread, prompt, cx).await;
-                    weak_thread
-                        .update(cx, |thread, _cx| thread.clear_architect_step_visit())
-                        .ok();
-                    if let Err(error) = sent {
-                        log::error!("Architect: step \"{node}\" could not run: {error}");
+                    if let Err(error) = weak_thread.update(cx, |thread, cx| {
+                        thread.note_architect_run_position(
+                            node.clone(),
+                            title,
+                            step_number,
+                            attempt,
+                            cx,
+                        );
+                    }) {
+                        log::info!(
+                            "Architect: stopped updating a run whose thread was closed: {error}"
+                        );
                         break RunOutcome::Cancelled;
                     }
 
-                    let reported = weak_thread
-                        .read_with(cx, |thread, _cx| {
-                            thread
-                                .architect_graph()
-                                .and_then(|graph| graph.node_at(&node))
-                                .and_then(|step| step.result.as_ref())
-                                .filter(|result| result.attempt == attempt)
-                                .map(|result| result.summary.trim().to_string())
-                                .filter(|summary| !summary.is_empty())
-                        })
-                        .ok()
-                        .flatten();
+                    let prompt = architect::step_prompt(&graph, &node, step_number, attempt);
+                    let sent = send_and_wait(&acp_thread, prompt, cx).await;
+                    if let Err(error) = weak_thread
+                        .update(cx, |thread, _cx| thread.clear_architect_step_visit())
+                    {
+                        log::info!(
+                            "Architect: stopped clearing a run whose thread was closed: {error}"
+                        );
+                        break RunOutcome::Cancelled;
+                    }
+                    if let Err(error) = sent {
+                        let message = format!("Step \"{node}\" could not run: {error}");
+                        log::error!("Architect: {message}");
+                        let output: SharedString = message.clone().into();
+                        if let Err(update_error) = weak_thread.update(cx, |thread, cx| {
+                            thread.finish_architect_run_step(Some(output), cx);
+                        }) {
+                            log::info!(
+                                "Architect: could not attach failure output after the thread closed: \
+                                 {update_error}"
+                            );
+                        }
+                        break RunOutcome::Failed { message };
+                    }
+
+                    let reported = match weak_thread.read_with(cx, |thread, _cx| {
+                        thread
+                            .architect_graph()
+                            .and_then(|graph| graph.node_at(&node))
+                            .and_then(|step| step.result.as_ref())
+                            .filter(|result| result.attempt == attempt)
+                            .map(|result| result.summary.trim().to_string())
+                            .filter(|summary| !summary.is_empty())
+                    }) {
+                        Ok(reported) => reported,
+                        Err(error) => {
+                            log::info!(
+                                "Architect: stopped reading a run whose thread was closed: {error}"
+                            );
+                            break RunOutcome::Cancelled;
+                        }
+                    };
                     let summary = match reported {
                         Some(summary) => summary,
                         None => {
@@ -123,31 +146,38 @@ pub fn start_architect_run(
                                 .to_string();
                             let path = node.clone();
                             let recorded = summary.clone();
-                            weak_thread
-                                .update(cx, |thread, cx| {
-                                    thread.update_architect_graph(
-                                        move |graph| {
-                                            if let Some(step) = graph.node_at_mut(&path) {
-                                                step.result = Some(architect::StepResult {
-                                                    summary: recorded,
-                                                    attempt,
-                                                });
-                                            }
-                                        },
-                                        cx,
-                                    );
-                                })
-                                .ok();
+                            if let Err(error) = weak_thread.update(cx, |thread, cx| {
+                                thread.update_architect_graph(
+                                    move |graph| {
+                                        if let Some(step) = graph.node_at_mut(&path) {
+                                            step.result = Some(architect::StepResult {
+                                                summary: recorded,
+                                                attempt,
+                                            });
+                                        }
+                                    },
+                                    cx,
+                                );
+                            }) {
+                                log::info!(
+                                    "Architect: could not save fallback output after the thread \
+                                     closed: {error}"
+                                );
+                                break RunOutcome::Cancelled;
+                            }
                             summary
                         }
                     };
 
                     let reported: SharedString = summary.clone().into();
-                    weak_thread
-                        .update(cx, |thread, cx| {
-                            thread.finish_architect_run_step(Some(reported), cx);
-                        })
-                        .ok();
+                    if let Err(error) = weak_thread.update(cx, |thread, cx| {
+                        thread.finish_architect_run_step(Some(reported), cx);
+                    }) {
+                        log::info!(
+                            "Architect: could not finish a run step after the thread closed: {error}"
+                        );
+                        break RunOutcome::Cancelled;
+                    }
 
                     if let Some(step) = graph.node_at_mut(&node) {
                         step.result = Some(architect::StepResult { summary, attempt });
@@ -157,8 +187,9 @@ pub fn start_architect_run(
                 Decision::Ask(branch) => {
                     let prompt = architect::branch_prompt(&graph, &branch);
                     if let Err(error) = send_and_wait(&acp_thread, prompt, cx).await {
-                        log::error!("Architect: a branch could not be decided: {error}");
-                        break RunOutcome::Cancelled;
+                        let message = format!("A branch could not be decided: {error}");
+                        log::error!("Architect: {message}");
+                        break RunOutcome::Failed { message };
                     }
 
                     let reply =
@@ -183,11 +214,11 @@ pub fn start_architect_run(
             log::error!("Architect: could not report how the run ended: {error}");
         }
 
-        weak_thread
-            .update(cx, |thread, cx| {
-                thread.finish_architect_run(outcome, cx);
-            })
-            .ok();
+        if let Err(error) = weak_thread.update(cx, |thread, cx| {
+            thread.finish_architect_run(outcome, cx);
+        }) {
+            log::info!("Architect: run finished after its thread was closed: {error}");
+        }
     });
 
     thread.update(cx, |thread, cx| {

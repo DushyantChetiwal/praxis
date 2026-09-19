@@ -8574,7 +8574,30 @@ mod internal_tests {
 
         thread.update(cx, |thread, cx| {
             thread.start_architect_run(first.clone(), "First".into(), Task::ready(()), cx);
-            thread.note_architect_run_position(first, "First".into(), 1, 1, cx);
+            thread.note_architect_run_position(first.clone(), "First".into(), 1, 1, cx);
+            thread.finish_architect_run(
+                architect::RunOutcome::Failed {
+                    message: "provider disconnected".to_string(),
+                },
+                cx,
+            );
+        });
+        thread.read_with(cx, |thread, _| {
+            let run = thread
+                .architect_run()
+                .expect("transport failure should remain visible");
+            assert_eq!(
+                run.outcome,
+                Some(architect::RunOutcome::Failed {
+                    message: "provider disconnected".to_string(),
+                })
+            );
+            assert!(run.history().iter().all(|step| !step.is_running()));
+        });
+
+        thread.update(cx, |thread, cx| {
+            thread.start_architect_run(first.clone(), "First".into(), Task::ready(()), cx);
+            thread.note_architect_run_position(first.clone(), "First".into(), 1, 1, cx);
             thread.finish_architect_run(architect::RunOutcome::Completed, cx);
         });
         thread.read_with(cx, |thread, _| {

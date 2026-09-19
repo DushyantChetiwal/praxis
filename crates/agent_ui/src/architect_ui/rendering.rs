@@ -56,14 +56,13 @@ impl Render for ArchitectStatusItem {
             return div().into_any();
         };
         let pane = pane.read(cx);
-        let title = pane
-            .thread
-            .read(cx)
+        let thread = pane.thread.read(cx);
+        let title = thread
             .title()
             .unwrap_or_else(|| SharedString::from("Untitled plan"));
         let status = if pane.is_running(cx) {
             "running"
-        } else if pane.root_graph(cx).is_some_and(|graph| {
+        } else if thread.architect_graph().is_some_and(|graph| {
             graph.is_fully_locked_deeply() && graph.blocking_problems().is_empty()
         }) {
             "ready"
@@ -160,6 +159,7 @@ impl ArchitectPane {
                                 .into_any_element()
                         } else {
                             Button::new(("architect-crumb", ix), title)
+                                .tab_index(0isize)
                                 .label_size(LabelSize::Small)
                                 .color(Color::Muted)
                                 .style(ButtonStyle::Subtle)
@@ -381,6 +381,7 @@ impl ArchitectPane {
                     .when(!compact, |this| {
                         this.child(
                             Button::new("architect-share", "Share")
+                                .tab_index(0isize)
                                 .label_size(LabelSize::Small)
                                 .style(ButtonStyle::Subtle)
                                 .start_icon(
@@ -395,6 +396,7 @@ impl ArchitectPane {
                     .when(!compact, |this| {
                         this.child(
                             Button::new("architect-review", "Review Plan")
+                                .tab_index(0isize)
                                 .label_size(LabelSize::Small)
                                 .style(ButtonStyle::Subtle)
                                 .start_icon(Icon::new(IconName::ListTodo).size(IconSize::XSmall))
@@ -408,6 +410,7 @@ impl ArchitectPane {
                     .when(compact, |this| {
                         this.child(
                             IconButton::new("architect-share-compact", IconName::ArrowUpRight)
+                                .tab_index(0isize)
                                 .icon_size(IconSize::Small)
                                 .tooltip(Tooltip::text("Share this project with collaborators"))
                                 .on_click(|_, window, cx| {
@@ -416,6 +419,7 @@ impl ArchitectPane {
                         )
                         .child(
                             IconButton::new("architect-review-compact", IconName::ListTodo)
+                                .tab_index(0isize)
                                 .icon_size(IconSize::Small)
                                 .disabled(step_count == 0)
                                 .tooltip(Tooltip::text("Focus the first step that needs attention"))
@@ -426,6 +430,7 @@ impl ArchitectPane {
                     })
                     .child(if running {
                         Button::new("architect-stop", "Stop")
+                            .tab_index(0isize)
                             .label_size(LabelSize::Small)
                             .style(ButtonStyle::Tinted(TintColor::Warning))
                             .start_icon(Icon::new(IconName::Stop).size(IconSize::XSmall))
@@ -433,6 +438,7 @@ impl ArchitectPane {
                             .on_click(cx.listener(|this, _, _, cx| this.stop_run(cx)))
                     } else {
                         Button::new("architect-run", "Run")
+                            .tab_index(0isize)
                             .label_size(LabelSize::Small)
                             .style(ButtonStyle::Tinted(TintColor::Accent))
                             .start_icon(Icon::new(IconName::PlayFilled).size(IconSize::XSmall))
@@ -442,6 +448,7 @@ impl ArchitectPane {
                     })
                     .child(
                         Button::new("architect-open-code", "Code")
+                            .tab_index(0isize)
                             .label_size(LabelSize::Small)
                             .style(ButtonStyle::Subtle)
                             .start_icon(Icon::new(IconName::Code).size(IconSize::XSmall))
@@ -479,6 +486,7 @@ impl ArchitectPane {
                     .when(show_navigation, |this| {
                         this.child(
                             Button::new("architect-open-outline", "Plan")
+                                .tab_index(0isize)
                                 .label_size(LabelSize::Small)
                                 .style(ButtonStyle::Subtle)
                                 .start_icon(Icon::new(IconName::ListTree).size(IconSize::XSmall))
@@ -497,6 +505,7 @@ impl ArchitectPane {
                     .when(!show_navigation, |this| {
                         this.child(
                             Button::new("architect-search", "Search")
+                                .tab_index(0isize)
                                 .label_size(LabelSize::Small)
                                 .style(ButtonStyle::Subtle)
                                 .start_icon(
@@ -512,6 +521,7 @@ impl ArchitectPane {
                         )
                         .child(
                             Button::new("architect-tidy", "Tidy")
+                                .tab_index(0isize)
                                 .label_size(LabelSize::Small)
                                 .style(ButtonStyle::Subtle)
                                 .start_icon(Icon::new(IconName::RotateCw).size(IconSize::XSmall))
@@ -521,6 +531,7 @@ impl ArchitectPane {
                         )
                         .child(
                             Button::new("architect-add-step", "Add Step")
+                                .tab_index(0isize)
                                 .label_size(LabelSize::Small)
                                 .style(ButtonStyle::Subtle)
                                 .start_icon(Icon::new(IconName::Plus).size(IconSize::XSmall))
@@ -534,6 +545,7 @@ impl ArchitectPane {
                     .when(show_navigation, |this| {
                         this.child(
                             IconButton::new("architect-search-compact", IconName::MagnifyingGlass)
+                                .tab_index(0isize)
                                 .icon_size(IconSize::Small)
                                 .disabled(self.graph(cx).is_none_or(ArchitectGraph::is_empty))
                                 .tooltip(Tooltip::text("Search plan steps"))
@@ -543,6 +555,7 @@ impl ArchitectPane {
                         )
                         .child(
                             IconButton::new("architect-tidy-compact", IconName::RotateCw)
+                                .tab_index(0isize)
                                 .icon_size(IconSize::Small)
                                 .disabled(running)
                                 .tooltip(Tooltip::text("Tidy up the graph layout"))
@@ -550,6 +563,7 @@ impl ArchitectPane {
                         )
                         .child(
                             IconButton::new("architect-add-step-compact", IconName::Plus)
+                                .tab_index(0isize)
                                 .icon_size(IconSize::Small)
                                 .disabled(running)
                                 .tooltip(Tooltip::text("Add a step to this plan"))
@@ -671,6 +685,7 @@ impl ArchitectPane {
                                             "architect-outline-narrower",
                                             IconName::Dash,
                                         )
+                                        .tab_index(0isize)
                                         .icon_size(IconSize::XSmall)
                                         .tooltip(Tooltip::text("Make the plan outline narrower"))
                                         .on_click(
@@ -681,6 +696,7 @@ impl ArchitectPane {
                                     )
                                     .child(
                                         IconButton::new("architect-outline-wider", IconName::Plus)
+                                            .tab_index(0isize)
                                             .icon_size(IconSize::XSmall)
                                             .tooltip(Tooltip::text("Make the plan outline wider"))
                                             .on_click(cx.listener(|this, _, _, cx| {
@@ -727,6 +743,7 @@ impl ArchitectPane {
                     )
                     .child(
                         Button::new("architect-plan-conversation", "Plan Conversation")
+                            .tab_index(0isize)
                             .full_width()
                             .label_size(LabelSize::Small)
                             .style(ButtonStyle::Tinted(TintColor::Accent))
@@ -765,6 +782,7 @@ impl ArchitectPane {
                                                 ("architect-readiness-problem", index),
                                                 truncate(&problem.to_string(), 42),
                                             )
+                                            .tab_index(0isize)
                                             .full_width()
                                             .label_size(LabelSize::XSmall)
                                             .style(ButtonStyle::Subtle)
@@ -792,6 +810,7 @@ impl ArchitectPane {
                                                 ("architect-readiness-handoff", index),
                                                 "Add a handoff summary",
                                             )
+                                            .tab_index(0isize)
                                             .full_width()
                                             .label_size(LabelSize::XSmall)
                                             .style(ButtonStyle::Subtle)
@@ -831,7 +850,8 @@ impl ArchitectPane {
                             })
                             .children(ordered_nodes.into_iter().enumerate().map(
                                 |(index, node)| {
-                                    let id = node.id.clone();
+                                    let click_id = node.id.clone();
+                                    let keyboard_id = node.id.clone();
                                     let is_selected = selected == Some(&node.id);
                                     let is_running = running == Some(&node.id);
                                     let is_failed = failed_node == Some(&node.id);
@@ -860,6 +880,13 @@ impl ArchitectPane {
 
                                     v_flex()
                                         .id(("architect-outline-step", index))
+                                        .tab_index(0isize)
+                                        .role(gpui::Role::Button)
+                                        .aria_label(format!(
+                                            "Step {}: {} ({state})",
+                                            index + 1,
+                                            node.title
+                                        ))
                                         .w_full()
                                         .gap_0p5()
                                         .px_2()
@@ -877,9 +904,40 @@ impl ArchitectPane {
                                             cx.theme().colors().element_background
                                         })
                                         .cursor(CursorStyle::PointingHand)
+                                        .focus_visible(|style| {
+                                            style.border_color(cx.theme().colors().border_focused)
+                                        })
+                                        .on_key_down(cx.listener(
+                                            move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                                match event.keystroke.key.as_str() {
+                                                    "down" | "right" => {
+                                                        this.select_adjacent_step(true, window, cx);
+                                                        cx.stop_propagation();
+                                                    }
+                                                    "up" | "left" => {
+                                                        this.select_adjacent_step(
+                                                            false, window, cx,
+                                                        );
+                                                        cx.stop_propagation();
+                                                    }
+                                                    "enter" | "space" => {
+                                                        this.set_selection(
+                                                            Some(Selection::Node(
+                                                                keyboard_id.clone(),
+                                                            )),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                        this.open_inspector_drawer(window, cx);
+                                                        cx.stop_propagation();
+                                                    }
+                                                    _ => {}
+                                                }
+                                            },
+                                        ))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.set_selection(
-                                                Some(Selection::Node(id.clone())),
+                                                Some(Selection::Node(click_id.clone())),
                                                 window,
                                                 cx,
                                             )
@@ -1022,17 +1080,21 @@ impl ArchitectPane {
                         .gap_0p5()
                         .child(Label::new(status).size(LabelSize::Small).truncate())
                         .child(
-                            Label::new(output_source)
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted)
-                                .truncate(),
-                        )
-                        .when_some(latest_output, |this, output| {
-                            this.child(
-                                Label::new(output)
+                            div().id("architect-run-source").child(
+                                Label::new(output_source)
                                     .size(LabelSize::XSmall)
                                     .color(Color::Muted)
                                     .truncate(),
+                            ),
+                        )
+                        .when_some(latest_output, |this, output| {
+                            this.child(
+                                div().id("architect-run-output").child(
+                                    Label::new(output)
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                        .truncate(),
+                                ),
                             )
                         })
                         .child(
@@ -1067,6 +1129,7 @@ impl ArchitectPane {
                 .when_some(remote_workflow_url, |this, url| {
                     this.child(
                         Button::new("architect-open-workflow", "Open Workflow")
+                            .tab_index(0isize)
                             .label_size(LabelSize::Small)
                             .style(ButtonStyle::Subtle)
                             .start_icon(Icon::new(IconName::ArrowUpRight).size(IconSize::XSmall))
@@ -1192,6 +1255,7 @@ impl ArchitectPane {
                 .opacity(0.94))
             .child(
                 IconButton::new("architect-zoom-out", IconName::Dash)
+                    .tab_index(0isize)
                     .icon_size(IconSize::XSmall)
                     .disabled(zoom <= MIN_ZOOM + f32::EPSILON)
                     .tooltip(Tooltip::text("Zoom out"))
@@ -1201,6 +1265,7 @@ impl ArchitectPane {
             )
             .child(
                 Button::new("architect-zoom-reset", format!("{:.0}%", zoom * 100.0))
+                    .tab_index(0isize)
                     .label_size(LabelSize::XSmall)
                     .color(Color::Muted)
                     .style(ButtonStyle::Subtle)
@@ -1209,6 +1274,7 @@ impl ArchitectPane {
             )
             .child(
                 Button::new("architect-fit", "Fit")
+                    .tab_index(0isize)
                     .label_size(LabelSize::XSmall)
                     .style(ButtonStyle::Subtle)
                     .start_icon(Icon::new(IconName::Maximize).size(IconSize::XSmall))
@@ -1217,6 +1283,7 @@ impl ArchitectPane {
             )
             .child(
                 IconButton::new("architect-zoom-in", IconName::Plus)
+                    .tab_index(0isize)
                     .icon_size(IconSize::XSmall)
                     .disabled(zoom >= MAX_ZOOM - f32::EPSILON)
                     .tooltip(Tooltip::text("Zoom in"))
@@ -1231,6 +1298,7 @@ impl ArchitectPane {
         let planning = self.thread.read(cx).session_mode() == agent::SessionMode::Plan;
 
         v_flex()
+            .id("architect-empty-state")
             .size_full()
             .items_center()
             .justify_center()
@@ -1262,6 +1330,7 @@ impl ArchitectPane {
                     .into_any_element()
             } else {
                 Button::new("architect-switch-to-plan", "Switch to Plan mode")
+                    .tab_index(0isize)
                     .style(ButtonStyle::Tinted(TintColor::Accent))
                     .start_icon(Icon::new(IconName::ListTodo).size(IconSize::Small))
                     .tooltip(Tooltip::text(
@@ -1887,6 +1956,7 @@ impl ArchitectPane {
                                                     IconName::ChevronDown
                                                 },
                                             )
+                                            .tab_index(0isize)
                                             .icon_size(IconSize::XSmall)
                                             .icon_color(Color::Muted)
                                             .tooltip(Tooltip::text(if expanded {
@@ -2204,6 +2274,7 @@ impl Render for ArchitectPane {
                 .child(
                     div().absolute().right(px(8.0)).top(px(8.0)).child(
                         IconButton::new("architect-close-outline", IconName::Close)
+                            .tab_index(0isize)
                             .icon_size(IconSize::Small)
                             .tooltip(Tooltip::text("Close plan navigation"))
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -2226,6 +2297,7 @@ impl Render for ArchitectPane {
                 .child(
                     div().absolute().right(px(14.0)).top(px(14.0)).child(
                         IconButton::new("architect-close-inspector", IconName::Close)
+                            .tab_index(0isize)
                             .icon_size(IconSize::Small)
                             .tooltip(Tooltip::text("Close inspector"))
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -2239,6 +2311,7 @@ impl Render for ArchitectPane {
         v_flex()
             .id("architect-pane")
             .key_context("ArchitectPane")
+            .tab_group()
             .track_focus(&self.focus_handle)
             .size_full()
             .overflow_hidden()
@@ -2374,5 +2447,12 @@ mod tests {
             ArchitectLayout::for_width(px(600.0)),
             ArchitectLayout::Compact
         );
+    }
+
+    #[test]
+    fn truncation_preserves_unicode_boundaries_and_marks_overflow() {
+        assert_eq!(truncate("Short plan", 20), "Short plan");
+        assert_eq!(truncate("架構設計與驗證流程", 6), "架構設計與…");
+        assert_eq!(truncate("🙂🙂🙂🙂", 3), "🙂🙂…");
     }
 }

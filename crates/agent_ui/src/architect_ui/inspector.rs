@@ -516,12 +516,14 @@ impl ArchitectPane {
             .gap_0p5()
             .child(
                 IconButton::new("architect-inspector-narrower", IconName::Dash)
+                    .tab_index(0isize)
                     .icon_size(IconSize::XSmall)
                     .tooltip(Tooltip::text("Make the inspector narrower"))
                     .on_click(cx.listener(|this, _, _, cx| this.resize_inspector(-16.0, cx))),
             )
             .child(
                 IconButton::new("architect-inspector-wider", IconName::Plus)
+                    .tab_index(0isize)
                     .icon_size(IconSize::XSmall)
                     .tooltip(Tooltip::text("Make the inspector wider"))
                     .on_click(cx.listener(|this, _, _, cx| this.resize_inspector(16.0, cx))),
@@ -590,6 +592,7 @@ impl ArchitectPane {
                                             "architect-close-plan-conversation",
                                             IconName::Close,
                                         )
+                                        .tab_index(0isize)
                                         .icon_size(IconSize::Small)
                                         .tooltip(Tooltip::text(
                                             "Return to the contextual inspector",
@@ -881,6 +884,7 @@ impl ArchitectPane {
                                                     "architect-edge-always",
                                                     "Always",
                                                 )
+                                                .tab_index(0isize)
                                                 .label_size(LabelSize::XSmall)
                                                 .toggle_state(is_always)
                                                 .selected_style(ButtonStyle::Tinted(
@@ -903,6 +907,7 @@ impl ArchitectPane {
                                                     "architect-edge-objective",
                                                     "Observed",
                                                 )
+                                                .tab_index(0isize)
                                                 .label_size(LabelSize::XSmall)
                                                 .toggle_state(is_objective)
                                                 .selected_style(ButtonStyle::Tinted(
@@ -935,6 +940,7 @@ impl ArchitectPane {
                                                     "architect-edge-model",
                                                     "Model Decides",
                                                 )
+                                                .tab_index(0isize)
                                                 .label_size(LabelSize::XSmall)
                                                 .toggle_state(is_model)
                                                 .selected_style(ButtonStyle::Tinted(
@@ -980,6 +986,7 @@ impl ArchitectPane {
                             )
                             .child(
                                 Button::new("architect-delete-edge", "Delete Connection")
+                                    .tab_index(0isize)
                                     .full_width()
                                     .label_size(LabelSize::Small)
                                     .style(ButtonStyle::Subtle)
@@ -1212,6 +1219,7 @@ impl ArchitectPane {
                         .border_color(cx.theme().colors().border)
                         .child(
                             Button::new("architect-tab-details", "Details")
+                                .tab_index(0isize)
                                 .label_size(LabelSize::Small)
                                 .toggle_state(tab == InspectorTab::Details)
                                 .selected_style(ButtonStyle::Tinted(TintColor::Accent))
@@ -1223,6 +1231,7 @@ impl ArchitectPane {
                         )
                         .child(
                             Button::new("architect-tab-chat", "Conversation")
+                                .tab_index(0isize)
                                 .label_size(LabelSize::Small)
                                 .start_icon(
                                     Icon::new(if has_chat {
@@ -1241,6 +1250,7 @@ impl ArchitectPane {
                         )
                         .child(
                             Button::new("architect-tab-subplan", "Activity")
+                                .tab_index(0isize)
                                 .label_size(LabelSize::Small)
                                 .toggle_state(tab == InspectorTab::Activity)
                                 .selected_style(ButtonStyle::Tinted(TintColor::Accent))
@@ -1389,6 +1399,7 @@ impl ArchitectPane {
                                                     ("architect-rule-remove", ix),
                                                     IconName::Close,
                                                 )
+                                                .tab_index(0isize)
                                                 .icon_size(IconSize::XSmall)
                                                 .tooltip(Tooltip::text("Remove this rule"))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -1425,6 +1436,7 @@ impl ArchitectPane {
                                                     "architect-rule-add",
                                                     IconName::Plus,
                                                 )
+                                                .tab_index(0isize)
                                                 .icon_size(IconSize::Small)
                                                 .tooltip(Tooltip::text("Add this rule"))
                                                 .on_click(cx.listener(
@@ -1507,6 +1519,7 @@ impl ArchitectPane {
                                                             IconName::Star
                                                         },
                                                     )
+                                                    .tab_index(0isize)
                                                     .icon_size(IconSize::XSmall)
                                                     .icon_color(if node.pinned {
                                                         Color::Accent
@@ -1576,6 +1589,7 @@ impl ArchitectPane {
                                             }
                                         },
                                     )
+                                    .tab_index(0isize)
                                     .full_width()
                                     .label_size(LabelSize::Small)
                                     .start_icon(
@@ -1634,6 +1648,7 @@ impl ArchitectPane {
                         .when(!locked, |this| {
                             this.child(
                                 Button::new("architect-delete-step", "Delete Step")
+                                    .tab_index(0isize)
                                     .full_width()
                                     .label_size(LabelSize::Small)
                                     .style(ButtonStyle::Subtle)
@@ -1970,6 +1985,7 @@ impl ArchitectPane {
                                     "Lock this step"
                                 },
                             )
+                            .tab_index(0isize)
                             .full_width()
                             .label_size(LabelSize::Small)
                             .style(ButtonStyle::Tinted(if locked {

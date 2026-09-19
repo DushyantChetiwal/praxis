@@ -23,7 +23,7 @@ use architect::{
 use editor::Editor;
 use git_ui::git_panel::GitPanel;
 use gpui::{
-    AppContext as _, Bounds, Context, Entity, FocusHandle, KeyDownEvent, MouseButton,
+    AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent,
     Subscription, WeakEntity, Window, point, px,
 };
@@ -1251,13 +1251,12 @@ impl ArchitectPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The inspector's editors have focus of their own, so a keypress that
-        // reaches the canvas is one meant for the canvas.
+        let canvas_focused = self.focus_handle.is_focused(window);
         match event.keystroke.key.as_str() {
-            "delete" | "backspace" => self.delete_selection(window, cx),
-            "down" | "right" => self.select_adjacent_step(true, window, cx),
-            "up" | "left" => self.select_adjacent_step(false, window, cx),
-            "enter" => {
+            "delete" | "backspace" if canvas_focused => self.delete_selection(window, cx),
+            "down" | "right" if canvas_focused => self.select_adjacent_step(true, window, cx),
+            "up" | "left" if canvas_focused => self.select_adjacent_step(false, window, cx),
+            "enter" if canvas_focused => {
                 if self.selection.is_some() {
                     self.open_inspector_drawer(window, cx);
                 }
@@ -1288,7 +1287,7 @@ mod tests {
     use std::{path::Path, rc::Rc};
 
     use acp_thread::AgentConnection as _;
-    use gpui::{Modifiers, MouseMoveEvent, Task, TestAppContext, VisualTestContext};
+    use gpui::{Modifiers, MouseMoveEvent, Task, TestAppContext, VisualTestContext, size};
     use project::{FakeFs, Project};
     use serde_json::json;
     use util::path_list::PathList;
@@ -1522,10 +1521,74 @@ mod tests {
                 .item_of_type::<ArchitectPane>(cx)
                 .expect("Architect should be retained by the workspace")
         });
-        architect.update(cx, |architect, cx| {
+        let active_pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        let project_panel =
+            workspace.read_with(cx, |workspace, cx| workspace.panel::<ProjectPanel>(cx));
+        let git_panel = workspace.read_with(cx, |workspace, cx| workspace.panel::<GitPanel>(cx));
+        let terminal_panel =
+            workspace.read_with(cx, |workspace, cx| workspace.panel::<TerminalPanel>(cx));
+        let agent_panel =
+            workspace.read_with(cx, |workspace, cx| workspace.panel::<AgentPanel>(cx));
+        let status_item = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .status_bar()
+                .read(cx)
+                .item_of_type::<rendering::ArchitectStatusItem>()
+                .expect("Architect should register one native status item")
+        });
+
+        cx.simulate_resize(size(px(1500.0), px(900.0)));
+        architect.update_in(cx, |architect, window, cx| {
+            architect.selection = None;
+            architect.pan = point(px(0.0), px(0.0));
+            architect.focus_handle.focus(window, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for selector in [
+            "architect-pane",
+            "architect-plan-header",
+            "architect-outline",
+            "architect-graph-workspace",
+            "architect-canvas",
+            "architect-overview-inspector",
+            "architect-status-context",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "wide Architect layout should render {selector}"
+            );
+        }
+
+        cx.simulate_keystrokes("right");
+        architect.read_with(cx, |architect, _| {
+            assert_eq!(architect.selection, Some(Selection::Node(parent.clone())));
+        });
+        cx.simulate_keystrokes("enter");
+        architect.read_with(cx, |architect, _| {
+            assert!(architect.inspector_drawer_open);
+        });
+        cx.simulate_keystrokes("escape escape");
+        architect.read_with(cx, |architect, _| {
+            assert!(!architect.inspector_drawer_open);
+            assert!(architect.selection.is_none());
+        });
+
+        let search_focus = architect.read_with(cx, |architect, cx| {
+        let search_focus =
+            architect.read_with(cx, |architect, cx| architect.search_editor.focus_handle(cx));
+        let code_focus = code_item.read_with(cx, |code_item, cx| code_item.focus_handle(cx));
+        architect.update_in(cx, |architect, window, cx| {
             architect.selection = Some(Selection::Node(parent.clone()));
             architect.pan = point(px(72.0), px(-24.0));
+            search_focus.focus(window, cx);
             cx.notify();
+        });
+        cx.update(|window, _| {
+            assert!(
+                search_focus.is_focused(window),
+                "the outline search should receive focus before switching"
+            );
         });
 
         workspace.update_in(cx, |workspace, window, cx| {
@@ -1534,6 +1597,10 @@ mod tests {
                 workspace.active_item_as::<TestItem>(cx),
                 Some(code_item.clone()),
                 "Code mode should restore the exact native item"
+            );
+            assert!(
+                code_focus.is_focused(window),
+                "Code should restore the native item's focus"
             );
         });
         architect.read_with(cx, |architect, _| {
@@ -1549,11 +1616,407 @@ mod tests {
                 Some(architect.clone()),
                 "switching back should reuse the retained Architect entity"
             );
+            assert!(
+                search_focus.is_focused(window),
+                "Architect should restore its independently remembered focus"
+            );
         });
         architect.read_with(cx, |architect, _| {
             assert_eq!(architect.mode(), ArchitectWorkspaceMode::Architect);
-            assert_eq!(architect.selection, Some(Selection::Node(parent)));
+            assert_eq!(architect.selection, Some(Selection::Node(parent.clone())));
             assert_eq!(architect.pan, point(px(72.0), px(-24.0)));
         });
+
+        for _ in 0..3 {
+            workspace.update_in(cx, |workspace, window, cx| {
+                ArchitectPane::activate_code(workspace, window, cx);
+                assert_eq!(workspace.active_pane(), &active_pane);
+                ArchitectPane::open(thread.clone(), workspace, window, cx);
+                assert_eq!(
+                    workspace.item_of_type::<ArchitectPane>(cx),
+                    Some(architect.clone())
+                );
+                assert_eq!(
+                    workspace
+                        .status_bar()
+                        .read(cx)
+                        .item_of_type::<rendering::ArchitectStatusItem>(),
+                    Some(status_item.clone()),
+                    "switching must not register duplicate status items"
+                );
+            });
+        }
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(workspace.panel::<ProjectPanel>(cx), project_panel);
+            assert_eq!(workspace.panel::<GitPanel>(cx), git_panel);
+            assert_eq!(workspace.panel::<TerminalPanel>(cx), terminal_panel);
+            assert_eq!(workspace.panel::<AgentPanel>(cx), agent_panel);
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            ArchitectPane::activate_code(workspace, window, cx);
+            workspace.open_panel::<ProjectPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("project-panel").is_some(),
+            "Code should render the native Project panel"
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_panel::<GitPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("git_panel").is_some(),
+            "Code should render the native Git panel as the alternate left tab"
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            ArchitectPane::open(thread.clone(), workspace, window, cx);
+        });
+
+        let base_graph = thread
+            .read_with(cx, |thread, _| thread.architect_graph().cloned())
+            .expect("the nested test graph should remain available");
+        cx.simulate_resize(size(px(1500.0), px(900.0)));
+        architect.update_in(cx, |architect, window, cx| {
+            architect.set_selection(Some(Selection::Node(parent.clone())), window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("architect-step-inspector").is_some(),
+            "selecting a step should render the contextual inspector"
+        );
+
+        architect.update(cx, |architect, cx| {
+            architect.inspector_tab = InspectorTab::Conversation;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("architect-step-conversation").is_some(),
+            "the selected-step conversation state should render"
+        );
+
+        architect.update_in(cx, |architect, window, cx| {
+            architect.open_plan_conversation(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("architect-plan-conversation-inspector")
+                .is_some(),
+            "the root plan conversation should have an explicit visual state"
+        );
+        architect.update_in(cx, |architect, window, cx| {
+            architect.close_plan_conversation(window, cx);
+        });
+
+        let edge_target = NodeId::from("edge-target");
+        let edge = {
+            let mut graph = base_graph.clone();
+            let mut target_node = ArchitectNode::new(edge_target.clone(), "Edge target");
+            target_node.position = Some(Position { x: 400.0, y: 0.0 });
+            graph.add_node(target_node);
+            let edge = graph.connect(parent.clone(), edge_target);
+            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
+            edge
+        };
+        architect.update_in(cx, |architect, window, cx| {
+            architect.set_selection(Some(Selection::Edge(edge)), window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("architect-edge-inspector").is_some(),
+            "selecting a connection should render its inspector"
+        );
+
+        thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(base_graph.clone()), cx)
+        });
+        architect.update_in(cx, |architect, window, cx| {
+            architect.set_selection(Some(Selection::Node(parent.clone())), window, cx);
+            architect.drill_into(parent.clone(), window, cx);
+            assert_eq!(architect.focus, NodePath::root(parent.clone()));
+            assert!(architect.drill_out(window, cx));
+        });
+
+        thread.update(cx, |thread, cx| {
+            thread.start_architect_run(
+                NodePath::root(parent.clone()),
+                "Parent".into(),
+                Task::ready(()),
+                cx,
+            );
+            thread.set_architect_run_remote_workflow_url(
+                Some("https://example.com/workflows/architect-run".into()),
+                cx,
+            );
+            thread.note_architect_run_position(
+                NodePath::root(parent.clone()),
+                "Parent".into(),
+                1,
+                1,
+                cx,
+            );
+            thread.finish_architect_run_step(
+                Some("Validated the selected step output".into()),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("architect-run-bar").is_some());
+        assert!(cx.debug_bounds("architect-run-source").is_some());
+        assert!(cx.debug_bounds("architect-run-output").is_some());
+        assert!(
+            cx.debug_bounds("architect-open-workflow").is_some(),
+            "a remote run should expose exactly one workflow action"
+        );
+        thread.update(cx, |thread, cx| {
+            thread.finish_architect_run(architect::RunOutcome::StepLimit { steps: 1 }, cx)
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(
+                thread.architect_run().and_then(|run| run.outcome.as_ref()),
+                Some(&architect::RunOutcome::StepLimit { steps: 1 })
+            );
+        });
+        thread.update(cx, |thread, cx| {
+            thread.start_architect_run(
+                NodePath::root(parent.clone()),
+                "Parent".into(),
+                Task::ready(()),
+                cx,
+            );
+            thread.finish_architect_run(architect::RunOutcome::Completed, cx);
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(
+                thread.architect_run().and_then(|run| run.outcome.as_ref()),
+                Some(&architect::RunOutcome::Completed)
+            );
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("architect-open-workflow").is_none(),
+            "local runs must not render a dead workflow action"
+        );
+
+        cx.simulate_resize(size(px(1200.0), px(800.0)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("architect-outline").is_some());
+        assert!(cx.debug_bounds("architect-step-inspector").is_some());
+        assert!(cx.debug_bounds("architect-outline-drawer").is_none());
+        assert!(cx.debug_bounds("architect-inspector-drawer").is_none());
+
+        cx.simulate_resize(size(px(900.0), px(760.0)));
+        architect.update_in(cx, |architect, window, cx| {
+            architect.focus_handle.focus(window, cx);
+            architect.open_inspector_drawer(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("architect-inspector-drawer").is_some(),
+            "narrow layouts should overlay the inspector"
+        );
+        architect.update_in(cx, |architect, window, cx| {
+            architect.close_inspector_drawer(window, cx);
+            assert!(architect.focus_handle.is_focused(window));
+        });
+
+        cx.simulate_resize(size(px(680.0), px(700.0)));
+        architect.update_in(cx, |architect, window, cx| {
+            architect.focus_handle.focus(window, cx);
+            architect.open_outline_drawer(true, window, cx);
+            assert!(architect.search_editor.focus_handle(cx).is_focused(window));
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("architect-outline-drawer").is_some(),
+            "compact layouts should overlay plan navigation"
+        );
+        architect.update_in(cx, |architect, window, cx| {
+            architect.close_outline_drawer(window, cx);
+            assert!(architect.focus_handle.is_focused(window));
+        });
+
+        let positioned_node = |id: &str, title: &str, x: f32, y: f32| {
+            let mut node = ArchitectNode::new(NodeId::from(id), title);
+            node.position = Some(Position { x, y });
+            node
+        };
+        let mut small = ArchitectGraph::default();
+        small.add_node(positioned_node("small", "Small plan", 0.0, 0.0));
+
+        let mut branching = ArchitectGraph::default();
+        branching.add_node(positioned_node("branch-root", "Branch root", 0.0, 0.0));
+        branching.add_node(positioned_node("branch-left", "Left path", -280.0, 260.0));
+        branching.add_node(positioned_node("branch-right", "Right path", 280.0, 260.0));
+        branching.connect("branch-root", "branch-left");
+        branching.connect("branch-root", "branch-right");
+
+        let mut cyclic = ArchitectGraph::default();
+        cyclic.add_node(positioned_node("cycle-a", "Cycle A", -180.0, 0.0));
+        cyclic.add_node(positioned_node("cycle-b", "Cycle B", 180.0, 0.0));
+        cyclic.connect("cycle-a", "cycle-b");
+        cyclic.connect("cycle-b", "cycle-a");
+
+        cx.simulate_resize(size(px(1500.0), px(900.0)));
+        for graph in [small, branching, cyclic, base_graph.clone()] {
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph), cx)
+            });
+            architect.update_in(cx, |architect, window, cx| {
+                architect.set_selection(None, window, cx);
+                architect.focus = NodePath::default();
+                architect.pan = point(px(0.0), px(0.0));
+                architect.zoom = 1.0;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("architect-canvas").is_some());
+        }
+
+        let mut large = ArchitectGraph::default();
+        for index in 0..200 {
+            large.add_node(positioned_node(
+                &format!("large-{index}"),
+                &format!(
+                    "Large plan step {index} · 架構驗證 · a deliberately long localized title"
+                ),
+                index as f32 * 1000.0,
+                0.0,
+            ));
+        }
+        thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(large), cx)
+        });
+        architect.update(cx, |architect, cx| {
+            architect.pan = point(px(0.0), px(0.0));
+            architect.zoom = 1.0;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("architect-node-0").is_some(),
+            "the visible portion of a large plan should render"
+        );
+        assert!(
+            cx.debug_bounds("architect-node-199").is_none(),
+            "far-off nodes should be culled"
+        );
+        architect.update(cx, |architect, cx| {
+            architect.pan = point(px(-1000.0), px(0.0));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("architect-node-1").is_some(),
+            "panning should reveal the next culled region"
+        );
+        architect.update(cx, |architect, cx| {
+            architect.zoom = 0.5;
+            architect.pan = point(px(-500.0), px(0.0));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("architect-node-1").is_some());
+
+        thread.update(cx, |thread, cx| {
+            thread.start_architect_run(
+                NodePath::root(NodeId::from("large-1")),
+                "Large plan step 1".into(),
+                Task::ready(()),
+                cx,
+            );
+            thread.note_architect_run_position(
+                NodePath::root(NodeId::from("large-1")),
+                "Large plan step 1".into(),
+                1,
+                1,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("architect-run-bar").is_some());
+        thread.update(cx, |thread, cx| thread.stop_architect_run(cx));
+
+        thread.update(cx, |thread, cx| thread.set_architect_graph(None, cx));
+        architect.update_in(cx, |architect, window, cx| {
+            architect.set_selection(None, window, cx);
+            architect.focus_handle.focus(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("architect-empty-state").is_some());
+        assert!(cx.debug_bounds("architect-canvas").is_none());
+        cx.simulate_keystrokes("right delete");
+        architect.read_with(cx, |architect, _| {
+            assert!(architect.selection.is_none());
+        });
+
+        let replacement_acp_thread = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new("/a")]),
+                    cx,
+                )
+            })
+            .await
+            .expect("a replacement Architect session should open");
+        let replacement_session_id =
+            replacement_acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let replacement_thread = cx
+            .update(|cx| connection.thread(&replacement_session_id, cx))
+            .expect("the replacement native thread should exist");
+        let mut replacement_graph = ArchitectGraph::default();
+        replacement_graph.add_node(positioned_node(
+            "replacement",
+            "Replacement thread step",
+            0.0,
+            0.0,
+        ));
+        replacement_thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(replacement_graph), cx)
+        });
+        architect.update(cx, |architect, cx| {
+            architect.selection = Some(Selection::Node(parent.clone()));
+            architect.focus = NodePath::root(parent.clone());
+            architect.pan = point(px(80.0), px(40.0));
+            architect.activity.push(ArchitectActivityEntry {
+                path: Some(NodePath::root(parent.clone())),
+                message: "Stale activity".to_string(),
+            });
+            cx.notify();
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            ArchitectPane::open(replacement_thread.clone(), workspace, window, cx);
+        });
+        architect.read_with(cx, |architect, _| {
+            assert_eq!(architect.thread, replacement_thread);
+            assert!(architect.selection.is_none());
+            assert_eq!(architect.focus, NodePath::default());
+            assert_eq!(architect.pan, point(px(0.0), px(0.0)));
+            assert!(architect.activity.is_empty());
+        });
+
+        active_pane.update_in(cx, |pane, window, cx| {
+            pane.remove_item(architect.entity_id(), false, false, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.item_of_type::<ArchitectPane>(cx).is_none());
+            assert_eq!(
+                workspace.active_item_as::<TestItem>(cx),
+                Some(code_item.clone()),
+                "closing Architect should restore Code without destroying it"
+            );
+        });
+
+        let reopened_architect = workspace.update_in(cx, |workspace, window, cx| {
+            ArchitectPane::open(replacement_thread, workspace, window, cx);
+            workspace
+                .item_of_type::<ArchitectPane>(cx)
+                .expect("Architect should reopen after being closed")
+        });
+        assert_ne!(reopened_architect.entity_id(), architect.entity_id());
     }
 }
