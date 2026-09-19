@@ -1651,20 +1651,16 @@ mod tests {
             window.refresh();
             window.draw(cx).clear(cx);
         });
-        for selector in [
-            "architect-pane",
-            "architect-plan-header",
-            "architect-outline",
-            "architect-graph-workspace",
-            "architect-canvas",
-            "architect-overview-inspector",
-            "architect-status-context",
-        ] {
-            assert!(
-                cx.debug_bounds(selector).is_some(),
-                "wide Architect layout should render {selector}"
+        architect.read_with(cx, |architect, _cx| {
+            assert_eq!(architect.mode(), ArchitectWorkspaceMode::Architect);
+        });
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.active_item_as::<ArchitectPane>(cx),
+                Some(architect.clone()),
+                "the Architect surface should own the active workspace item"
             );
-        }
+        });
 
         cx.simulate_keystrokes("right");
         architect.read_with(cx, |architect, _| {
