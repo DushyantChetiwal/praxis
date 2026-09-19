@@ -327,8 +327,12 @@ actions!(
         ImportThreadsFromOtherChannels,
         /// Starts a new terminal thread.
         NewTerminalThread,
-        /// Opens the Architect canvas for the active thread's plan.
+        /// Opens the Architect workspace for the active thread's plan.
         OpenArchitect,
+        /// Returns to the native Code workspace without closing Architect.
+        OpenCodeWorkspace,
+        /// Switches between the Architect and Code workspaces.
+        ToggleArchitectWorkspace,
     ]
 );
 
@@ -667,11 +671,50 @@ pub fn init(
                     .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx));
 
                 let Some(thread) = thread else {
-                    // Silently doing nothing here sends people hunting for a
-                    // bug that isn't one, so say which precondition is missing.
                     workspace.show_toast(
                         workspace::Toast::new(
                             workspace::notifications::NotificationId::unique::<OpenArchitect>(),
+                            "Architect needs an open Zed Agent thread. Open the agent panel and \
+                             start a thread, then try again.",
+                        ),
+                        cx,
+                    );
+                    return;
+                };
+                crate::architect_ui::ArchitectPane::open(thread, workspace, window, cx);
+            },
+        );
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &OpenCodeWorkspace,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                crate::architect_ui::ArchitectPane::activate_code(workspace, window, cx);
+            },
+        );
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &ToggleArchitectWorkspace,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                if workspace
+                    .active_item_as::<crate::architect_ui::ArchitectPane>(cx)
+                    .is_some()
+                {
+                    crate::architect_ui::ArchitectPane::activate_code(workspace, window, cx);
+                    return;
+                }
+
+                let thread = workspace
+                    .panel::<AgentPanel>(cx)
+                    .and_then(|panel| panel.read(cx).active_thread_view(cx))
+                    .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx));
+                let Some(thread) = thread else {
+                    workspace.show_toast(
+                        workspace::Toast::new(
+                            workspace::notifications::NotificationId::unique::<
+                                ToggleArchitectWorkspace,
+                            >(),
                             "Architect needs an open Zed Agent thread. Open the agent panel and \
                              start a thread, then try again.",
                         ),

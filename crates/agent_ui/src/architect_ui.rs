@@ -21,11 +21,11 @@ use architect::{
     Position,
 };
 use gpui::{
-    Bounds, Context, DismissEvent, Entity, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
+    Bounds, Context, Entity, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, Subscription,
     WeakEntity, Window, point, px,
 };
-use workspace::Workspace;
+use workspace::{Workspace, ZoomIn, ZoomOut, dock::DockPosition, item::WeakItemHandle};
 
 use crate::AgentPanel;
 use geometry::{
@@ -81,9 +81,25 @@ impl Interaction {
 /// than stacking up behind it.
 struct ArchitectNotice;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArchitectWorkspaceMode {
+    Architect,
+    Code,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DockSnapshot {
+    position: DockPosition,
+    open: bool,
+    active_panel_index: Option<usize>,
+}
+
 pub struct ArchitectPane {
     thread: Entity<Thread>,
     workspace: WeakEntity<Workspace>,
+    mode: ArchitectWorkspaceMode,
+    previous_code_item: Option<Box<dyn WeakItemHandle>>,
+    code_docks: Vec<DockSnapshot>,
     focus_handle: FocusHandle,
     /// The canvas layer reports its bounds during paint; everything that
     /// converts between screen and canvas space needs them.
@@ -111,15 +127,20 @@ pub struct ArchitectPane {
 }
 
 impl ArchitectPane {
-    pub fn new(
+    fn new(
         thread: Entity<Thread>,
         workspace: WeakEntity<Workspace>,
+        previous_code_item: Option<Box<dyn WeakItemHandle>>,
+        code_docks: Vec<DockSnapshot>,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscription = cx.observe(&thread, |_, _, cx| cx.notify());
         Self {
             thread,
             workspace,
+            mode: ArchitectWorkspaceMode::Architect,
+            previous_code_item,
+            code_docks,
             focus_handle: cx.focus_handle(),
             viewport: Rc::new(Cell::new(None)),
             pan: point(px(0.0), px(0.0)),
@@ -136,17 +157,172 @@ impl ArchitectPane {
         }
     }
 
-    /// Opens the canvas over the workspace for a thread's plan, or closes it if
-    /// it is already showing.
+    pub fn mode(&self) -> ArchitectWorkspaceMode {
+        self.mode
+    }
+
+    fn capture_docks(workspace: &Workspace, cx: &Context<Workspace>) -> Vec<DockSnapshot> {
+        workspace
+            .all_docks()
+            .into_iter()
+            .map(|dock| {
+                let dock = dock.read(cx);
+                DockSnapshot {
+                    position: dock.position(),
+                    open: dock.is_open(),
+                    active_panel_index: dock.active_panel_index(),
+                }
+            })
+            .collect()
+    }
+
+    fn hide_code_docks(
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        for dock in workspace.all_docks() {
+            dock.update(cx, |dock, cx| dock.set_open(false, window, cx));
+        }
+    }
+
+    fn restore_code_docks(
+        workspace: &mut Workspace,
+        snapshots: &[DockSnapshot],
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        for snapshot in snapshots {
+            let dock = workspace.dock_at_position(snapshot.position);
+            dock.update(cx, |dock, cx| {
+                if let Some(index) = snapshot.active_panel_index
+                    && index < dock.panels_len()
+                {
+                    dock.activate_panel(index, window, cx);
+                }
+                dock.set_open(snapshot.open, window, cx);
+            });
+        }
+    }
+
+    fn replace_thread(&mut self, thread: Entity<Thread>, cx: &mut Context<Self>) {
+        if self.thread == thread {
+            return;
+        }
+
+        self.thread = thread.clone();
+        self._thread_subscription = cx.observe(&thread, |_, _, cx| cx.notify());
+        self.focus = NodePath::default();
+        self.selection = None;
+        self.inspector = None;
+        self.interaction = Interaction::None;
+        self.hovered_node = None;
+        self.expanded.clear();
+        self.inspector_tab = InspectorTab::Details;
+        self.pan = point(px(0.0), px(0.0));
+        self.zoom = 1.0;
+        cx.notify();
+    }
+
+    /// Activates the workspace-owned Architect surface for this plan thread.
+    /// Existing Code items and panels remain alive and are restored on return.
     pub fn open(
         thread: Entity<Thread>,
         workspace: &mut Workspace,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        let handle = cx.weak_entity();
-        workspace.toggle_modal(window, cx, |_window, cx| {
-            ArchitectPane::new(thread, handle, cx)
+        let existing = workspace.item_of_type::<ArchitectPane>(cx);
+        let already_active = workspace
+            .active_item_as::<ArchitectPane>(cx)
+            .is_some_and(|active| existing.as_ref() == Some(&active));
+
+        let previous_code_item = (!already_active)
+            .then(|| workspace.active_item(cx))
+            .flatten()
+            .filter(|item| item.downcast::<ArchitectPane>().is_none())
+            .map(|item| item.downgrade_item());
+        let code_docks = (!already_active).then(|| Self::capture_docks(workspace, cx));
+
+        Self::hide_code_docks(workspace, window, cx);
+
+        if let Some(existing) = existing {
+            existing.update(cx, |architect, cx| {
+                architect.replace_thread(thread, cx);
+                architect.mode = ArchitectWorkspaceMode::Architect;
+                if let Some(previous_code_item) = previous_code_item {
+                    architect.previous_code_item = Some(previous_code_item);
+                }
+                if let Some(code_docks) = code_docks {
+                    architect.code_docks = code_docks;
+                }
+            });
+            workspace.activate_item(&existing, true, true, window, cx);
+        } else {
+            let workspace_handle = cx.weak_entity();
+            let architect = cx.new(|cx| {
+                ArchitectPane::new(
+                    thread,
+                    workspace_handle,
+                    previous_code_item,
+                    code_docks.unwrap_or_default(),
+                    cx,
+                )
+            });
+            workspace.add_item_to_active_pane(Box::new(architect), None, true, window, cx);
+        }
+
+        workspace
+            .active_pane()
+            .update(cx, |pane, cx| pane.zoom_in(&ZoomIn, window, cx));
+    }
+
+    pub fn activate_code(
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let Some(architect) = workspace.item_of_type::<ArchitectPane>(cx) else {
+            return;
+        };
+        let (previous_code_item, code_docks) = architect.update(cx, |architect, cx| {
+            architect.mode = ArchitectWorkspaceMode::Code;
+            cx.notify();
+            (
+                architect
+                    .previous_code_item
+                    .as_ref()
+                    .and_then(|item| item.upgrade()),
+                architect.code_docks.clone(),
+            )
+        });
+
+        workspace
+            .active_pane()
+            .update(cx, |pane, cx| pane.zoom_out(&ZoomOut, window, cx));
+
+        let code_item = previous_code_item.or_else(|| {
+            workspace
+                .items(cx)
+                .find(|item| item.downcast::<ArchitectPane>().is_none())
+                .map(|item| item.boxed_clone())
+        });
+        if let Some(code_item) = code_item {
+            workspace.activate_item(code_item.as_ref(), true, true, window, cx);
+        }
+
+        Self::restore_code_docks(workspace, &code_docks, window, cx);
+    }
+
+    fn request_code_mode(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |window, cx| {
+            let Some(workspace) = workspace.upgrade() else {
+                return;
+            };
+            workspace.update(cx, |workspace, cx| {
+                Self::activate_code(workspace, window, cx);
+            });
         });
     }
 
@@ -640,17 +816,14 @@ impl ArchitectPane {
         // reaches the canvas is one meant for the canvas.
         match event.keystroke.key.as_str() {
             "delete" | "backspace" => self.delete_selection(window, cx),
-            // Escape works outwards: it drops whatever is selected first, and
-            // only once nothing is selected does it leave the plan being shown.
-            // Escape works outwards: it drops whatever is selected, then leaves
-            // the plan being shown, and only closes the canvas once there is
-            // nothing left to back out of.
+            // Escape works outwards without leaving the Architect workspace: it
+            // drops the selection first, then leaves a nested plan.
             "escape" => {
                 self.interaction = Interaction::None;
                 if self.selection.is_some() {
                     self.set_selection(None, window, cx);
-                } else if !self.drill_out(window, cx) {
-                    cx.emit(DismissEvent);
+                } else {
+                    self.drill_out(window, cx);
                 }
             }
             _ => {}
@@ -729,7 +902,7 @@ mod tests {
         let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
         let pane = workspace.update_in(cx, |_workspace, _window, cx| {
             let workspace = cx.weak_entity();
-            cx.new(|cx| ArchitectPane::new(thread.clone(), workspace, cx))
+            cx.new(|cx| ArchitectPane::new(thread.clone(), workspace, None, Vec::new(), cx))
         });
 
         pane.update_in(cx, |pane, window, cx| {
@@ -825,7 +998,7 @@ mod tests {
 
         let reopened = workspace.update_in(cx, |_workspace, _window, cx| {
             let workspace = cx.weak_entity();
-            cx.new(|cx| ArchitectPane::new(thread.clone(), workspace, cx))
+            cx.new(|cx| ArchitectPane::new(thread.clone(), workspace, None, Vec::new(), cx))
         });
         reopened.read_with(cx, |pane, cx| {
             assert!(

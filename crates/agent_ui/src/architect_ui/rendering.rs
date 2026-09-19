@@ -2,15 +2,11 @@ use architect::{
     ArchitectGraph, ArchitectNode, EdgeCondition, GraphProblem, NodeId, NodePath, Position,
 };
 use gpui::{
-    App, Bounds, Context, CursorStyle, DismissEvent, EventEmitter, FocusHandle, Focusable, Hsla,
-    MouseButton, MouseDownEvent, PathBuilder, Pixels, Render, SharedString, Window, canvas, div,
-    point, px, relative,
+    App, Bounds, Context, CursorStyle, EventEmitter, FocusHandle, Focusable, Hsla, MouseButton,
+    MouseDownEvent, PathBuilder, Pixels, Render, SharedString, Window, canvas, div, point, px,
 };
 use ui::{TintColor, Tooltip, prelude::*};
-use workspace::{
-    ModalView,
-    item::{Item, ItemEvent},
-};
+use workspace::item::{Item, ItemEvent};
 
 use super::geometry::{EdgeCurve, NODE_WIDTH, paint_curve};
 use super::{
@@ -315,19 +311,14 @@ impl ArchitectPane {
                             .on_click(cx.listener(|this, _, window, cx| this.run(window, cx)))
                     })
                     .child(
-                        Label::new("Esc")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        IconButton::new("architect-close", IconName::Close)
-                            .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text(if self.focus.is_empty() {
-                                "Close the canvas. The plan is kept."
-                            } else {
-                                "Close the canvas. Escape goes up one level first."
-                            }))
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(DismissEvent))),
+                        Button::new("architect-open-code", "Code")
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Subtle)
+                            .start_icon(Icon::new(IconName::Code).size(IconSize::XSmall))
+                            .tooltip(Tooltip::text("Return to the Code workspace"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.request_code_mode(window, cx)
+                            })),
                     ),
             )
             .into_any()
@@ -1315,15 +1306,8 @@ impl Render for ArchitectPane {
         v_flex()
             .key_context("ArchitectPane")
             .track_focus(&self.focus_handle)
-            // Nearly the whole window: a plan is read by its shape, and a
-            // centred dialog would leave no room for one.
-            .w(relative(0.94))
-            .h(relative(0.92))
+            .size_full()
             .overflow_hidden()
-            .rounded_lg()
-            .border_1()
-            .border_color(cx.theme().colors().border)
-            .shadow_lg()
             .bg(cx.theme().colors().editor_background)
             .on_key_down(cx.listener(Self::handle_key_down))
             .child(toolbar)
@@ -1372,31 +1356,8 @@ impl Focusable for ArchitectPane {
     }
 }
 
-impl EventEmitter<DismissEvent> for ArchitectPane {}
-
-/// The canvas covers the workspace rather than taking a tab, because a plan
-/// belongs to a conversation rather than to the project. A tab would outlive the
-/// thread it was opened for and leave a plan stranded next to unrelated files.
-impl ModalView for ArchitectPane {
-    fn fade_out_background(&self) -> bool {
-        true
-    }
-
-    /// The canvas draws its own frame at close to the full size of the window,
-    /// so the usual dialog chrome would only box it in. Bare modals are still
-    /// overlaid and centred; they just size themselves.
-    fn render_bare(&self) -> bool {
-        true
-    }
-}
-
 impl EventEmitter<ItemEvent> for ArchitectPane {}
 
-#[allow(
-    dead_code,
-    reason = "kept so the canvas can be reopened in a tab if the \
-                             overlay turns out to be the wrong home for it"
-)]
 impl Item for ArchitectPane {
     type Event = ItemEvent;
 
@@ -1413,6 +1374,14 @@ impl Item for ArchitectPane {
     }
 
     fn show_toolbar(&self) -> bool {
+        false
+    }
+
+    fn preserve_preview(&self, _cx: &App) -> bool {
+        true
+    }
+
+    fn include_in_nav_history() -> bool {
         false
     }
 
