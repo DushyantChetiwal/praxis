@@ -886,10 +886,7 @@ impl ArchitectPane {
                 .unwrap_or_else(|| SharedString::from("Run finished")),
             None => format!("Running {}", run.current_title).into(),
         };
-        let succeeded = run
-            .outcome
-            .as_ref()
-            .is_some_and(RunOutcome::is_success);
+        let succeeded = run.outcome.as_ref().is_some_and(RunOutcome::is_success);
         let cancelled = matches!(run.outcome.as_ref(), Some(RunOutcome::Cancelled));
         let failed = run.outcome.is_some() && !succeeded && !cancelled;
         let (border, background, color) = if failed {
@@ -950,21 +947,17 @@ impl ArchitectPane {
                                 .h(px(4.0))
                                 .rounded_full()
                                 .bg(cx.theme().colors().border_variant)
-                                .child(
-                                    div()
-                                        .w(px(220.0 * progress))
-                                        .h_full()
-                                        .rounded_full()
-                                        .bg(if succeeded {
-                                            cx.theme().status().success
-                                        } else if failed {
-                                            cx.theme().status().error
-                                        } else if cancelled {
-                                            cx.theme().status().warning
-                                        } else {
-                                            cx.theme().status().info
-                                        }),
-                                ),
+                                .child(div().w(px(220.0 * progress)).h_full().rounded_full().bg(
+                                    if succeeded {
+                                        cx.theme().status().success
+                                    } else if failed {
+                                        cx.theme().status().error
+                                    } else if cancelled {
+                                        cx.theme().status().warning
+                                    } else {
+                                        cx.theme().status().info
+                                    },
+                                )),
                         ),
                 )
                 .child(div().flex_1())
@@ -1595,13 +1588,13 @@ impl ArchitectPane {
         let running = self.running_node(cx) == Some(&node.id);
         let run = self.thread.read(cx).architect_run();
         let run_active = run.is_some_and(agent::ArchitectRun::is_running);
-        let failed = run
-            .and_then(|run| run.outcome.as_ref())
-            .is_some_and(|outcome| match outcome {
-                RunOutcome::NodeLimit { node: failed, .. }
-                | RunOutcome::DepthLimit { node: failed } => failed == &node.id,
-                _ => false,
-            });
+        let failed =
+            run.and_then(|run| run.outcome.as_ref())
+                .is_some_and(|outcome| match outcome {
+                    RunOutcome::NodeLimit { node: failed, .. }
+                    | RunOutcome::DepthLimit { node: failed } => failed == &node.id,
+                    _ => false,
+                });
         let subplan_steps = node.subplan().map_or(0, |subplan| subplan.nodes.len());
         // Naming the steps inside without opening it: enough to tell two
         // sub-plans apart at a glance, without the canvas drawing a graph
@@ -1812,15 +1805,15 @@ impl ArchitectPane {
                                             "draft"
                                         })
                                         .size(LabelSize::XSmall)
-                                        .color(if running {
-                                            Color::Info
-                                        } else if failed {
-                                            Color::Error
-                                        } else if done || node.locked {
-                                            Color::Success
-                                        } else {
-                                            Color::Muted
-                                        }),
+                                        .color(
+                                            if running {
+                                                Color::Info
+                                            } else if failed {
+                                                Color::Error
+                                            } else if done || node.locked {
+                                                Color::Success
+                                            } else {
+                                                Color::Muted
                                             },
                                         ),
                                     ),
