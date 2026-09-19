@@ -1574,7 +1574,6 @@ mod tests {
             assert!(architect.selection.is_none());
         });
 
-        let search_focus = architect.read_with(cx, |architect, cx| {
         let search_focus =
             architect.read_with(cx, |architect, cx| architect.search_editor.focus_handle(cx));
         let code_focus = code_item.read_with(cx, |code_item, cx| code_item.focus_handle(cx));
@@ -1757,10 +1756,7 @@ mod tests {
                 1,
                 cx,
             );
-            thread.finish_architect_run_step(
-                Some("Validated the selected step output".into()),
-                cx,
-            );
+            thread.finish_architect_run_step(Some("Validated the selected step output".into()), cx);
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("architect-run-bar").is_some());
@@ -1861,9 +1857,7 @@ mod tests {
 
         cx.simulate_resize(size(px(1500.0), px(900.0)));
         for graph in [small, branching, cyclic, base_graph.clone()] {
-            thread.update(cx, |thread, cx| {
-                thread.set_architect_graph(Some(graph), cx)
-            });
+            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
             architect.update_in(cx, |architect, window, cx| {
                 architect.set_selection(None, window, cx);
                 architect.focus = NodePath::default();
@@ -1886,9 +1880,7 @@ mod tests {
                 0.0,
             ));
         }
-        thread.update(cx, |thread, cx| {
-            thread.set_architect_graph(Some(large), cx)
-        });
+        thread.update(cx, |thread, cx| thread.set_architect_graph(Some(large), cx));
         architect.update(cx, |architect, cx| {
             architect.pan = point(px(0.0), px(0.0));
             architect.zoom = 1.0;
