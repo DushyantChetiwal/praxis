@@ -1947,7 +1947,7 @@ mod tests {
         });
 
         let replacement_acp_thread = cx
-            .update(|cx| {
+            .update(|_window, cx| {
                 connection.clone().new_session(
                     project.clone(),
                     PathList::new(&[Path::new("/a")]),
@@ -1959,7 +1959,7 @@ mod tests {
         let replacement_session_id =
             replacement_acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
         let replacement_thread = cx
-            .update(|cx| connection.thread(&replacement_session_id, cx))
+            .update(|_window, cx| connection.thread(&replacement_session_id, cx))
             .expect("the replacement native thread should exist");
         let mut replacement_graph = ArchitectGraph::default();
         replacement_graph.add_node(positioned_node(

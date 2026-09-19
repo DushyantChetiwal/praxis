@@ -287,9 +287,18 @@ impl ArchitectPane {
     /// the conversation that owns the plan.
     fn discuss_node(&mut self, id: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(node) = self.graph(cx).and_then(|graph| graph.node(&id)).cloned() else {
+            self.report(
+                "That step is no longer available. Select another step and try again.".to_string(),
+                cx,
+            );
             return;
         };
         let Some(conversation_view) = self.plan_conversation_view(cx) else {
+            self.report(
+                "The overall plan conversation is unavailable. Open Code, restore the root plan conversation, and try again."
+                    .to_string(),
+                cx,
+            );
             return;
         };
         let node_path = self.focus.child(id);
@@ -307,7 +316,11 @@ impl ArchitectPane {
         });
 
         let Some(session_id) = session_id else {
-            log::error!("Architect: could not open a conversation for this step");
+            self.report(
+                "The selected-step conversation could not be opened. Open Code, verify the overall plan conversation, and try again."
+                    .to_string(),
+                cx,
+            );
             return;
         };
 
