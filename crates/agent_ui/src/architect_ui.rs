@@ -246,9 +246,6 @@ impl ArchitectPane {
         self.mode
     }
 
-    pub fn owns_thread(&self, thread: &Entity<Thread>) -> bool {
-        &self.thread == thread
-    }
 
     fn workspace_mode_key(workspace: &Workspace) -> Option<String> {
         workspace
@@ -1318,7 +1315,7 @@ impl ArchitectPane {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, rc::Rc, time::Duration};
+    use std::{path::Path, rc::Rc};
 
     use acp_thread::AgentConnection as _;
     use fs::Fs as _;
@@ -1633,29 +1630,9 @@ mod tests {
             .expect("the native Agent panel should exist")
             .clone();
         agent_panel_entity.update_in(cx, |agent_panel, window, cx| {
-            agent_panel.open_thread(
-                session_id.clone(),
-                Some(PathList::new(&[Path::new("/a")])),
-                None,
-                window,
-                cx,
-            );
+            agent_panel.activate_draft(false, crate::AgentThreadSource::AgentPanel, window, cx);
         });
         cx.run_until_parked();
-        for _ in 0..20 {
-            let root_thread_loaded = agent_panel_entity.read_with(cx, |agent_panel, cx| {
-                agent_panel
-                    .active_conversation_view()
-                    .is_some_and(|conversation| conversation.read(cx).root_thread_view().is_some())
-            });
-            if root_thread_loaded {
-                break;
-            }
-            cx.background_executor
-                .timer(Duration::from_millis(25))
-                .await;
-            cx.run_until_parked();
-        }
         let agent_conversation = agent_panel_entity.read_with(cx, |agent_panel, _| {
             agent_panel
                 .active_conversation_view()

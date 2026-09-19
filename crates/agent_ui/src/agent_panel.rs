@@ -6243,9 +6243,13 @@ impl AgentPanel {
 
         let restoration = match self.workspace.read_with(cx, |workspace, cx| {
             let mode = crate::architect_ui::ArchitectPane::persisted_mode(workspace, cx);
-            let stale_or_missing = workspace
+            // Rendering another Agent-panel thread must not silently retarget a
+            // live Architect workspace. The user can explicitly open that
+            // thread in Architect; automatic restoration only fills a missing
+            // workspace item.
+            let architect_missing = workspace
                 .item_of_type::<crate::architect_ui::ArchitectPane>(cx)
-                .is_none_or(|pane| !pane.read(cx).owns_thread(&thread));
+                .is_none();
             let code_layout_needed = mode == crate::architect_ui::ArchitectWorkspaceMode::Code
                 && (panel_needs_position::<project_panel::ProjectPanel>(
                     workspace,
@@ -6269,7 +6273,7 @@ impl AgentPanel {
                     cx,
                 ));
             (
-                stale_or_missing && mode == crate::architect_ui::ArchitectWorkspaceMode::Architect,
+                architect_missing && mode == crate::architect_ui::ArchitectWorkspaceMode::Architect,
                 code_layout_needed,
             )
         }) {
