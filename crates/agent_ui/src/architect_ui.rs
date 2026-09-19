@@ -1398,11 +1398,14 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         init_test(cx);
-        cx.update(|cx| language_model::LanguageModelRegistry::test(cx));
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree("/", json!({ "a": {} })).await;
         let project = Project::test(fs.clone(), [Path::new("/a")], cx).await;
-        let thread_store = cx.new(|cx| agent::ThreadStore::new(cx));
+        let thread_store = cx.update(|cx| agent::ThreadStore::global(cx));
         let native_agent = cx.update(|cx| {
             agent::NativeAgent::new(thread_store, agent::Templates::new(), fs.clone(), cx)
         });
