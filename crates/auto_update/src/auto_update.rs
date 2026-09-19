@@ -1251,7 +1251,12 @@ async fn install_release_linux(
     } else {
         String::default()
     };
-    let app_folder_name = format!("zed{}.app", suffix);
+    let app_folder_prefix = if channel == "dev" && dev_update_manifest_base_url().is_some() {
+        "praxis"
+    } else {
+        "zed"
+    };
+    let app_folder_name = format!("{app_folder_prefix}{suffix}.app");
 
     let from = extracted.join(&app_folder_name);
     let mut to = home_dir.join(".local");
@@ -1274,7 +1279,7 @@ async fn install_release_linux(
 
     anyhow::ensure!(
         output.status.success(),
-        "failed to copy Zed update from {:?} to {:?}: {:?}",
+        "failed to copy {app_folder_prefix} update from {:?} to {:?}: {:?}",
         from,
         to,
         String::from_utf8_lossy(&output.stderr)

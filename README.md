@@ -32,11 +32,13 @@ for the architecture and reproducible demo.
 
 ## Installation and updates
 
-Unsigned Windows and macOS builds are published through this repository's
-GitHub releases:
+Unsigned Windows, macOS, and Linux builds are published through this
+repository's GitHub releases:
 
-- Windows: `Praxis-x86_64.exe`
+- Windows x86_64: `Praxis-x86_64.exe`
 - macOS Apple silicon: `Praxis-aarch64.dmg`
+- macOS Intel: `Praxis-x86_64.dmg`
+- Linux x86_64: `praxis-linux-x86_64.tar.gz`
 
 Installed **Praxis Dev** builds poll the repository's signed-hash update
 manifest and update through the in-app updater. Praxis uses its own application,

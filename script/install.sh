@@ -54,10 +54,10 @@ main() {
 
     "$platform" "$@"
 
-    if [ "$(command -v zed)" = "$HOME/.local/bin/zed" ]; then
-        echo "Zed has been installed. Run with 'zed'"
+    if [ "$(command -v "$cli_name")" = "$HOME/.local/bin/$cli_name" ]; then
+        echo "$app_name has been installed. Run with '$cli_name'"
     else
-        echo "To run Zed from your terminal, you must add ~/.local/bin to your PATH"
+        echo "To run $app_name from your terminal, you must add ~/.local/bin to your PATH"
         echo "Run:"
 
         case "$SHELL" in
@@ -74,7 +74,7 @@ main() {
                 ;;
         esac
 
-        echo "To run Zed now, '~/.local/bin/zed'"
+        echo "To run $app_name now, '~/.local/bin/$cli_name'"
     fi
 }
 
@@ -96,8 +96,8 @@ linux() {
     if [ -n "${ZED_BUNDLE_PATH:-}" ]; then
         cp "$ZED_BUNDLE_PATH" "$archive"
     elif [ "$channel" = "dev" ]; then
-        echo "Praxis Linux installation requires ZED_BUNDLE_PATH."
-        exit 1
+        echo "Downloading the latest Praxis Dev release"
+        curl "https://github.com/DushyantChetiwal/praxis/releases/latest/download/praxis-linux-$arch.tar.gz" > "$archive"
     else
         echo "Downloading Zed version: $ZED_VERSION"
         curl "https://cloud.zed.dev/releases/$channel/$ZED_VERSION/download?asset=zed&arch=$arch&os=linux&source=install.sh" > "$archive"
@@ -164,9 +164,11 @@ linux() {
 
 macos() {
     cli_name="zed"
+    app_name="Zed"
     if [ "$channel" = "dev" ]; then
         echo "Downloading the latest Praxis Dev release"
         cli_name="praxis"
+        app_name="Praxis"
         disk_image="$temp/Praxis-$arch.dmg"
         curl -L "https://github.com/DushyantChetiwal/praxis/releases/latest/download/Praxis-$arch.dmg" > "$disk_image"
     else
