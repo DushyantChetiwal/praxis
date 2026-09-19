@@ -1326,7 +1326,7 @@ mod tests {
     use project::{FakeFs, Project};
     use serde_json::json;
     use util::path_list::PathList;
-    use workspace::{MultiWorkspace, Panel as _, item::test::TestItem};
+    use workspace::{Panel as _, Workspace, item::test::TestItem};
 
     use super::*;
     use crate::conversation_view::tests::init_test;
@@ -1442,11 +1442,8 @@ mod tests {
         graph.add_node(target_node);
         thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
 
-        let (multi_workspace, cx) =
-            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-        let workspace = multi_workspace.read_with(cx, |multi_workspace, _cx| {
-            multi_workspace.workspace().clone()
-        });
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
         workspace.update_in(cx, |workspace, window, cx| {
             let agent_panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
             workspace.add_panel(agent_panel, window, cx);
