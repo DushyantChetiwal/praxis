@@ -1868,7 +1868,7 @@ mod tests {
             let mut target_node = ArchitectNode::new(edge_target.clone(), "Edge target");
             target_node.position = Some(Position { x: 400.0, y: 0.0 });
             graph.add_node(target_node);
-            let edge = graph.connect(parent.clone(), edge_target);
+            let edge = graph.connect(parent.clone(), edge_target.clone());
             thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
             edge
         };
