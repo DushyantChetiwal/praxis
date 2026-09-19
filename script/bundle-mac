@@ -55,8 +55,10 @@ popd
 
 if [[ "$channel" = "dev" ]]; then
     product_name="Praxis"
+    license_definition="script/terms/praxis-terms.json"
 else
     product_name="Zed"
+    license_definition="script/terms/terms.json"
 fi
 
 export ZED_BUNDLE=true
@@ -273,7 +275,7 @@ function sign_app_binaries() {
 
         echo "Adding license agreement to DMG"
         npm install --global dmg-license minimist
-        dmg-license script/terms/terms.json "${dmg_file_path}"
+        dmg-license "${license_definition}" "${dmg_file_path}"
 
         if [[ $can_code_sign = true ]]; then
             echo "Notarizing DMG with Apple"

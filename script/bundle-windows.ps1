@@ -306,6 +306,7 @@ function BuildInstaller {
     $appPublisherUrl = "https://www.zed.dev/"
     $appSupportUrl = "https://www.zed.dev/"
     $appUpdatesUrl = "https://www.zed.dev/"
+    $licenseFile = "script\terms\terms.rtf"
     switch ($channel) {
         "stable" {
             $appId = "{{2DB0DA96-CA55-49BB-AF4F-64AF36A86712}"
@@ -366,6 +367,7 @@ function BuildInstaller {
             $appPublisherUrl = "https://github.com/DushyantChetiwal/praxis"
             $appSupportUrl = "https://github.com/DushyantChetiwal/praxis/issues"
             $appUpdatesUrl = "https://github.com/DushyantChetiwal/praxis/releases"
+            $licenseFile = "script\terms\praxis.rtf"
         }
         default {
             Write-Error "can't bundle installer for $channel."
@@ -389,6 +391,7 @@ function BuildInstaller {
         "AppPublisherUrl" = $appPublisherUrl
         "AppSupportUrl"  = $appSupportUrl
         "AppUpdatesUrl"  = $appUpdatesUrl
+        "LicenseFile"    = $licenseFile
         "RegValueName"   = $regValueName
         "AppMutex"       = $appMutex
         "AppExeName"     = $appExeName
