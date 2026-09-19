@@ -1597,6 +1597,10 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
         for selector in [
             "architect-pane",
             "architect-plan-header",
