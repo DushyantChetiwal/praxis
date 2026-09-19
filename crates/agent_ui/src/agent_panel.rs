@@ -6225,28 +6225,72 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let should_restore = match self.workspace.read_with(cx, |workspace, cx| {
+        fn panel_needs_position<T: Panel>(
+            workspace: &Workspace,
+            position: DockPosition,
+            window: &Window,
+            cx: &App,
+        ) -> bool {
+            workspace.panel::<T>(cx).is_some_and(|panel| {
+                workspace.effective_panel_position(&panel, window, cx) != position
+                    || workspace
+                        .dock_at_position(position)
+                        .read(cx)
+                        .panel_for_id(panel.entity_id())
+                        .is_none()
+            })
+        }
+
+        let restoration = match self.workspace.read_with(cx, |workspace, cx| {
+            let mode = crate::architect_ui::ArchitectPane::persisted_mode(workspace, cx);
             let stale_or_missing = workspace
                 .item_of_type::<crate::architect_ui::ArchitectPane>(cx)
                 .is_none_or(|pane| !pane.read(cx).owns_thread(&thread));
-            stale_or_missing
-                && crate::architect_ui::ArchitectPane::persisted_mode(workspace, cx)
-                    == crate::architect_ui::ArchitectWorkspaceMode::Architect
+            let code_layout_needed = mode == crate::architect_ui::ArchitectWorkspaceMode::Code
+                && (panel_needs_position::<project_panel::ProjectPanel>(
+                    workspace,
+                    DockPosition::Left,
+                    window,
+                    cx,
+                ) || panel_needs_position::<git_ui::git_panel::GitPanel>(
+                    workspace,
+                    DockPosition::Left,
+                    window,
+                    cx,
+                ) || panel_needs_position::<TerminalPanel>(
+                    workspace,
+                    DockPosition::Bottom,
+                    window,
+                    cx,
+                ) || panel_needs_position::<AgentPanel>(
+                    workspace,
+                    DockPosition::Right,
+                    window,
+                    cx,
+                ));
+            (
+                stale_or_missing && mode == crate::architect_ui::ArchitectWorkspaceMode::Architect,
+                code_layout_needed,
+            )
         }) {
-            Ok(should_restore) => should_restore,
+            Ok(restoration) => restoration,
             Err(error) => {
                 log::error!("Could not inspect the workspace while restoring Architect: {error:#}");
-                false
+                (false, false)
             }
         };
-        if !should_restore {
+        if !restoration.0 && !restoration.1 {
             return;
         }
 
         let workspace = self.workspace.clone();
         window.defer(cx, move |window, cx| {
             if let Err(error) = workspace.update(cx, |workspace, cx| {
-                crate::architect_ui::ArchitectPane::open(thread, workspace, window, cx);
+                if restoration.0 {
+                    crate::architect_ui::ArchitectPane::open(thread, workspace, window, cx);
+                } else {
+                    crate::architect_ui::ArchitectPane::arrange_code_panels(workspace, window, cx);
+                }
             }) {
                 log::error!("Could not restore the Architect workspace: {error:#}");
             }
@@ -6286,11 +6330,11 @@ impl AgentPanel {
                     else {
                         return;
                     };
-                    this.workspace
-                        .update(cx, |workspace, cx| {
-                            crate::architect_ui::ArchitectPane::open(thread, workspace, window, cx);
-                        })
-                        .ok();
+                    if let Err(error) = this.workspace.update(cx, |workspace, cx| {
+                        crate::architect_ui::ArchitectPane::open(thread, workspace, window, cx);
+                    }) {
+                        log::error!("Could not open the Architect workspace: {error:#}");
+                    }
                 }))
                 .into_any_element(),
         )

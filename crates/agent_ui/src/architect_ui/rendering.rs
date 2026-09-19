@@ -372,7 +372,7 @@ impl ArchitectPane {
                             .start_icon(Icon::new(IconName::PlayFilled).size(IconSize::XSmall))
                             .disabled(!ready_to_run)
                             .tooltip(Tooltip::text(run_tooltip))
-                            .on_click(cx.listener(|this, _, window, cx| this.run(window, cx)))
+                            .on_click(cx.listener(|this, _, _, cx| this.run(cx)))
                     })
                     .child(
                         Button::new("architect-open-code", "Code")
@@ -672,9 +672,9 @@ impl ArchitectPane {
                             .tooltip(Tooltip::text(
                                 "Open the root conversation that owns this plan",
                             ))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.show_plan_chat(window, cx)),
-                            ),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_plan_conversation(window, cx)
+                            })),
                     ),
             )
             .child(

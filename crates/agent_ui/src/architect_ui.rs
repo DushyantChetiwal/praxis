@@ -86,6 +86,12 @@ impl Interaction {
 /// than stacking up behind it.
 struct ArchitectNotice;
 
+#[derive(Clone, Debug)]
+pub(super) struct ArchitectActivityEntry {
+    pub path: Option<NodePath>,
+    pub message: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArchitectWorkspaceMode {
@@ -164,9 +170,11 @@ pub struct ArchitectPane {
     inspector_tab: InspectorTab,
     outline_drawer_open: bool,
     inspector_drawer_open: bool,
+    plan_conversation_open: bool,
     outline_width: Pixels,
     inspector_width: Pixels,
     search_editor: Entity<Editor>,
+    activity: Vec<ArchitectActivityEntry>,
     /// Set while a run is being started, so the toolbar can show it before the
     /// thread has been told. The run itself belongs to the thread.
     run_starting: Cell<bool>,
@@ -213,9 +221,11 @@ impl ArchitectPane {
             inspector_tab: InspectorTab::Details,
             outline_drawer_open: false,
             inspector_drawer_open: false,
+            plan_conversation_open: false,
             outline_width,
             inspector_width,
             search_editor,
+            activity: Vec::new(),
             run_starting: Cell::new(false),
             _thread_subscription: subscription,
             _search_subscription: search_subscription,
@@ -384,9 +394,11 @@ impl ArchitectPane {
         self.interaction = Interaction::None;
         self.hovered_node = None;
         self.expanded.clear();
+        self.activity.clear();
         self.inspector_tab = InspectorTab::Details;
         self.outline_drawer_open = false;
         self.inspector_drawer_open = false;
+        self.plan_conversation_open = false;
         self.pan = point(px(0.0), px(0.0));
         self.zoom = 1.0;
         cx.notify();
@@ -448,6 +460,32 @@ impl ArchitectPane {
             .active_pane()
             .update(cx, |pane, cx| pane.zoom_in(&ZoomIn, window, cx));
         Self::persist_mode(workspace, ArchitectWorkspaceMode::Architect, cx);
+    }
+
+    pub(super) fn arrange_code_panels(
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        if let Some(project_panel) = workspace.panel::<ProjectPanel>(cx) {
+            workspace.relocate_panel(&project_panel, DockPosition::Left, window, cx);
+        }
+        if let Some(git_panel) = workspace.panel::<GitPanel>(cx) {
+            workspace.relocate_panel(&git_panel, DockPosition::Left, window, cx);
+        }
+        if let Some(terminal_panel) = workspace.panel::<TerminalPanel>(cx) {
+            workspace.relocate_panel(&terminal_panel, DockPosition::Bottom, window, cx);
+        }
+        if let Some(agent_panel) = workspace.panel::<AgentPanel>(cx) {
+            workspace.relocate_panel(&agent_panel, DockPosition::Right, window, cx);
+            if let Some(conversation_view) =
+                agent_panel.read(cx).active_conversation_view().cloned()
+            {
+                conversation_view.update(cx, |conversation_view, cx| {
+                    conversation_view.return_to_root_thread(cx);
+                });
+            }
+        }
     }
 
     fn restore_code_surface(
@@ -623,6 +661,7 @@ impl ArchitectPane {
         }
 
         if !existing {
+            let nested_path = self.focus.child(id.clone());
             let id = id.clone();
             self.edit_graph(
                 move |graph| {
@@ -630,6 +669,7 @@ impl ArchitectPane {
                 },
                 cx,
             );
+            self.record_activity(Some(nested_path), "Created a nested plan", cx);
         }
 
         self.focus = self.focus.child(id);
@@ -842,17 +882,47 @@ impl ArchitectPane {
         match selection {
             Selection::Node(id) => {
                 let path = self.focus.child(id);
+                let activity_path = path.clone();
                 if self.edit_checked(move |graph| graph.remove_node_at(&path), cx) {
+                    self.record_activity(
+                        Some(activity_path),
+                        "Deleted this step from the plan",
+                        cx,
+                    );
                     self.set_selection(None, window, cx);
                 }
             }
             Selection::Edge(id) => {
                 let graph_path = self.focus.clone();
+                let activity_path = graph_path.clone();
                 if self.edit_checked(move |graph| graph.disconnect_at(&graph_path, &id), cx) {
+                    self.record_activity(
+                        Some(activity_path),
+                        "Deleted a connection from this plan",
+                        cx,
+                    );
                     self.set_selection(None, window, cx);
                 }
             }
         }
+    }
+
+    fn record_activity(
+        &mut self,
+        path: Option<NodePath>,
+        message: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        const MAX_ACTIVITY_ENTRIES: usize = 100;
+        if self.activity.len() >= MAX_ACTIVITY_ENTRIES {
+            let remove_count = self.activity.len() + 1 - MAX_ACTIVITY_ENTRIES;
+            self.activity.drain(..remove_count);
+        }
+        self.activity.push(ArchitectActivityEntry {
+            path,
+            message: message.into(),
+        });
+        cx.notify();
     }
 
     /// Tells the user something the canvas cannot show in place.
@@ -872,24 +942,12 @@ impl ArchitectPane {
         });
     }
 
-    /// Brings the conversation that owns the plan back on screen, so a run is
-    /// not carried out somewhere the user cannot see it.
-    fn show_plan_chat(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(workspace) = self.workspace.upgrade() else {
-            return;
-        };
-        workspace.update(cx, |workspace, cx| {
-            let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
-                return;
-            };
-            let Some(conversation_view) = panel.read(cx).active_conversation_view().cloned() else {
-                return;
-            };
-            conversation_view.update(cx, |conversation_view, cx| {
-                conversation_view.return_to_root_thread(cx);
-            });
-            workspace.focus_panel::<AgentPanel>(window, cx);
-        });
+    fn open_plan_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.plan_conversation_open = true;
+        self.inspector_drawer_open = true;
+        self.record_activity(None, "Opened the overall plan conversation", cx);
+        self.focus_handle.focus(window, cx);
+        cx.notify();
     }
 
     fn add_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -906,11 +964,14 @@ impl ArchitectPane {
             },
             cx,
         );
+        let path = self.focus.child(id.clone());
+        self.record_activity(Some(path), "Added this step to the plan", cx);
         self.set_selection(Some(Selection::Node(id)), window, cx);
     }
 
     fn tidy_up(&mut self, cx: &mut Context<Self>) {
         self.edit_graph(|graph| graph.relayout(), cx);
+        self.record_activity(Some(self.focus.clone()), "Tidied the graph layout", cx);
         self.zoom_to_fit(cx);
     }
 
@@ -927,19 +988,27 @@ impl ArchitectPane {
     }
 
     fn review_plan(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let selection = self.graph(cx).and_then(|graph| {
-            graph
-                .blocking_problems()
-                .first()
-                .map(Self::problem_selection)
-                .or_else(|| {
-                    graph
-                        .execution_order()
-                        .first()
-                        .cloned()
-                        .map(Selection::Node)
-                })
+        let review = self.graph(cx).map(|graph| {
+            let problems = graph.blocking_problems();
+            let selection = problems.first().map(Self::problem_selection).or_else(|| {
+                graph
+                    .execution_order()
+                    .first()
+                    .cloned()
+                    .map(Selection::Node)
+            });
+            (selection, problems.len())
         });
+        let (selection, problem_count) = review.unwrap_or_default();
+        self.record_activity(
+            None,
+            if problem_count == 0 {
+                "Reviewed the plan: ready"
+            } else {
+                "Reviewed the plan: issues need attention"
+            },
+            cx,
+        );
         self.set_selection(selection, window, cx);
     }
 
@@ -1055,14 +1124,21 @@ impl ArchitectPane {
                 && to != from
             {
                 let from_path = self.focus.child(from);
-                self.edit_checked(
+                let activity_path = self.focus.child(to.clone());
+                if self.edit_checked(
                     move |graph| {
                         graph
                             .connect_from_at(&from_path, to, EdgeCondition::Always)
                             .map(|_| ())
                     },
                     cx,
-                );
+                ) {
+                    self.record_activity(
+                        Some(activity_path),
+                        "Connected this step to a predecessor",
+                        cx,
+                    );
+                }
             }
         }
         self.interaction = Interaction::None;
@@ -1112,6 +1188,10 @@ impl ArchitectPane {
                     cx.notify();
                 } else if self.outline_drawer_open {
                     self.outline_drawer_open = false;
+                    self.focus_handle.focus(window, cx);
+                    cx.notify();
+                } else if self.plan_conversation_open {
+                    self.plan_conversation_open = false;
                     self.focus_handle.focus(window, cx);
                     cx.notify();
                 } else if self.selection.is_some() {

@@ -76,6 +76,7 @@ impl ArchitectPane {
         }
 
         self.selection = selection;
+        self.plan_conversation_open = false;
         if self.selection.is_some() && f32::from(window.viewport_size().width) < 1060.0 {
             self.inspector_drawer_open = true;
         }
@@ -259,11 +260,21 @@ impl ArchitectPane {
         condition: EdgeCondition,
         cx: &mut Context<Self>,
     ) -> bool {
+        let description = match &condition {
+            EdgeCondition::Always => "Set this connection to always run",
+            EdgeCondition::Objective { .. } => "Updated an observed routing condition",
+            EdgeCondition::LlmEvaluated { .. } => "Updated a model-decided routing condition",
+        };
         let focus = self.focus.clone();
-        self.edit_checked(
+        let activity_path = focus.clone();
+        let changed = self.edit_checked(
             move |graph| graph.set_edge_condition_at(&focus, &id, condition),
             cx,
-        )
+        );
+        if changed {
+            self.record_activity(Some(activity_path), description, cx);
+        }
+        changed
     }
 
     /// Opens the step's own conversation in the inspector, beside the step.
@@ -301,10 +312,11 @@ impl ArchitectPane {
 
         if node.chat.as_ref() != Some(&session_id) {
             let session_id = session_id.clone();
+            let metadata_path = node_path.clone();
             self.thread.update(cx, |thread, cx| {
                 thread.update_architect_graph(
                     move |graph| {
-                        if let Some(node) = graph.node_at_mut(&node_path) {
+                        if let Some(node) = graph.node_at_mut(&metadata_path) {
                             // Chat identity is persistence metadata, not a
                             // refinement of the settled step itself.
                             node.chat = Some(session_id);
@@ -320,6 +332,15 @@ impl ArchitectPane {
         if is_first_visit {
             self.seed_step_thread(&node, &session_id, window, cx);
         }
+        self.record_activity(
+            Some(node_path),
+            if is_first_visit {
+                "Created this step's conversation"
+            } else {
+                "Opened this step's conversation"
+            },
+            cx,
+        );
     }
 
     /// Puts the step's brief in the composer of its own thread, ready to send.
@@ -456,7 +477,18 @@ impl ArchitectPane {
         }
 
         let path = self.focus.child(id);
-        self.edit_checked(move |graph| graph.set_locked_at(&path, !locked), cx);
+        let activity_path = path.clone();
+        if self.edit_checked(move |graph| graph.set_locked_at(&path, !locked), cx) {
+            self.record_activity(
+                Some(activity_path),
+                if locked {
+                    "Reopened this step for editing"
+                } else {
+                    "Marked this step as settled"
+                },
+                cx,
+            );
+        }
         self.refresh_inspector(window, cx);
     }
 
@@ -492,6 +524,105 @@ impl ArchitectPane {
                     .icon_size(IconSize::XSmall)
                     .tooltip(Tooltip::text("Make the inspector wider"))
                     .on_click(cx.listener(|this, _, _, cx| this.resize_inspector(16.0, cx))),
+            )
+            .into_any()
+    }
+
+    fn render_plan_conversation_inspector(
+        &self,
+        width: gpui::Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let root_thread = self
+            .plan_conversation_view(cx)
+            .and_then(|conversation| conversation.read(cx).root_thread_view());
+
+        div()
+            .flex_none()
+            .h_full()
+            .py_2()
+            .pr_2()
+            .child(
+                v_flex()
+                    .w(width)
+                    .h_full()
+                    .overflow_hidden()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .shadow_md()
+                    .bg(cx.theme().colors().panel_background)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .gap_2()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(cx.theme().colors().border)
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .gap_0p5()
+                                    .child(
+                                        Label::new("Overall Plan Conversation")
+                                            .size(LabelSize::Default)
+                                            .truncate(),
+                                    )
+                                    .child(
+                                        Label::new("Root plan scope · project context")
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    ),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_0p5()
+                                    .child(self.render_inspector_resize_controls(cx))
+                                    .child(
+                                        IconButton::new(
+                                            "architect-close-plan-conversation",
+                                            IconName::Close,
+                                        )
+                                        .icon_size(IconSize::Small)
+                                        .tooltip(Tooltip::text(
+                                            "Return to the contextual inspector",
+                                        ))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.plan_conversation_open = false;
+                                            this.focus_handle.focus(window, cx);
+                                            cx.notify();
+                                        })),
+                                    ),
+                            ),
+                    )
+                    .child(match root_thread {
+                        Some(view) => div()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(view)
+                            .into_any(),
+                        None => v_flex()
+                            .flex_1()
+                            .items_center()
+                            .justify_center()
+                            .p_3()
+                            .gap_1()
+                            .child(
+                                Label::new("The root plan conversation is unavailable.")
+                                    .size(LabelSize::Small),
+                            )
+                            .child(
+                                Label::new(
+                                    "Open the Agent panel in Code and select the conversation that owns this plan.",
+                                )
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                            )
+                            .into_any(),
+                    }),
             )
             .into_any()
     }
@@ -867,6 +998,9 @@ impl ArchitectPane {
         width: gpui::Pixels,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        if self.plan_conversation_open {
+            return Some(self.render_plan_conversation_inspector(width, cx));
+        }
         match &self.selection {
             None => return Some(self.render_overview_inspector(width, cx)),
             Some(Selection::Edge(id)) => return Some(self.render_edge_inspector(id, width, cx)),
@@ -904,6 +1038,16 @@ impl ArchitectPane {
                     .collect()
             })
             .unwrap_or_default();
+        let receives_from: Vec<SharedString> = self
+            .graph(cx)
+            .map(|graph| {
+                graph
+                    .edges_into(&node.id)
+                    .filter_map(|edge| graph.node(&edge.from))
+                    .map(|source| SharedString::from(source.title.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
         // Where this step hands off to, and on what terms.
         let leads_to: Vec<(SharedString, SharedString, bool)> = self
             .graph(cx)
@@ -927,6 +1071,13 @@ impl ArchitectPane {
             .unwrap_or_default();
 
         let node_path = self.focus.child(node.id.clone());
+        let plan_activity: Vec<String> = self
+            .activity
+            .iter()
+            .rev()
+            .filter(|entry| entry.path.as_ref().is_none_or(|path| path == &node_path))
+            .map(|entry| entry.message.clone())
+            .collect();
         let run_activity: Vec<(SharedString, usize, u64, bool, Option<SharedString>)> = self
             .thread
             .read(cx)
@@ -1240,11 +1391,46 @@ impl ArchitectPane {
                         .child(
                             v_flex()
                                 .gap_1()
+                                .child(field("Receives Context From"))
+                                .when(receives_from.is_empty(), |this| {
+                                    this.child(
+                                        Label::new(
+                                            "Plan start · root conversation and project context",
+                                        )
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                    )
+                                })
+                                .children(receives_from.iter().enumerate().map(
+                                    |(index, source)| {
+                                        h_flex()
+                                            .id(("architect-receives-from", index))
+                                            .gap_1()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .bg(cx.theme().colors().element_background)
+                                            .child(
+                                                Icon::new(IconName::ArrowRight)
+                                                    .size(IconSize::XSmall)
+                                                    .color(Color::Muted),
+                                            )
+                                            .child(
+                                                Label::new(source.clone())
+                                                    .size(LabelSize::Small)
+                                                    .truncate(),
+                                            )
+                                    },
+                                )),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_1()
                                 .child(
                                     h_flex()
                                         .w_full()
                                         .justify_between()
-                                        .child(field("Capture In Summary"))
+                                        .child(field("Captures For Handoff"))
                                         .child(
                                             h_flex()
                                                 .gap_1()
@@ -1494,6 +1680,38 @@ impl ArchitectPane {
                                                             .color(Color::Muted),
                                                     )
                                                 })
+                                        },
+                                    )),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(field("Plan Changes"))
+                                    .when(plan_activity.is_empty(), |this| {
+                                        this.child(
+                                            Label::new("No recorded changes for this step yet.")
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted),
+                                        )
+                                    })
+                                    .children(plan_activity.iter().enumerate().map(
+                                        |(index, message)| {
+                                            h_flex()
+                                                .id(("architect-plan-activity", index))
+                                                .gap_1()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .bg(cx.theme().colors().element_background)
+                                                .child(
+                                                    Icon::new(IconName::Check)
+                                                        .size(IconSize::XSmall)
+                                                        .color(Color::Muted),
+                                                )
+                                                .child(
+                                                    Label::new(message.clone())
+                                                        .size(LabelSize::Small),
+                                                )
                                         },
                                     )),
                             )

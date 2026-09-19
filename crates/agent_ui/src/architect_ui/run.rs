@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 use architect::{NodeId, NodePath};
-use gpui::{App, Context, SharedString, Window};
+use gpui::{App, Context, SharedString};
 
 use super::ArchitectPane;
 
@@ -28,7 +28,7 @@ impl ArchitectPane {
     ///
     /// Execution policy lives in `agent::start_architect_run`; this pane only
     /// supplies the owning conversation and presents start failures.
-    pub(super) fn run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn run(&mut self, cx: &mut Context<Self>) {
         if self.is_running(cx) {
             return;
         }
@@ -49,14 +49,13 @@ impl ArchitectPane {
             return;
         };
 
-        // Everything the run says belongs in the conversation that owns the
-        // plan, not in whichever step's chat happens to be on screen.
-        self.show_plan_chat(window, cx);
         if let Err(error) = agent::start_architect_run(self.thread.clone(), acp_thread, graph, cx) {
+            self.record_activity(None, format!("Run could not start: {error}"), cx);
             self.report(error.to_string(), cx);
             return;
         }
 
+        self.record_activity(None, "Started the plan run", cx);
         drop(run_starting);
         cx.notify();
     }
@@ -74,6 +73,7 @@ impl ArchitectPane {
     pub(super) fn stop_run(&mut self, cx: &mut Context<Self>) {
         let acp_thread = self.plan_acp_thread(cx);
         agent::stop_architect_run(&self.thread, acp_thread.as_ref(), cx);
+        self.record_activity(None, "Requested that the plan run stop", cx);
         self.run_starting.set(false);
         cx.notify();
     }

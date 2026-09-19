@@ -2885,6 +2885,16 @@ impl Workspace {
         self.panel_position_overrides.get(&panel_id).copied()
     }
 
+    pub fn effective_panel_position<T: Panel>(
+        &self,
+        panel: &Entity<T>,
+        window: &Window,
+        cx: &App,
+    ) -> DockPosition {
+        self.panel_position_override(panel.entity_id())
+            .unwrap_or_else(|| panel.position(window, cx))
+    }
+
     pub(crate) fn clear_panel_position_override(&mut self, panel_id: EntityId) {
         self.panel_position_overrides.remove(&panel_id);
     }
