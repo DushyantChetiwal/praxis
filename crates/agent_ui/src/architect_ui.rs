@@ -1318,7 +1318,7 @@ impl ArchitectPane {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, rc::Rc};
+    use std::{path::Path, rc::Rc, time::Duration};
 
     use acp_thread::AgentConnection as _;
     use fs::Fs as _;
@@ -1642,6 +1642,20 @@ mod tests {
             );
         });
         cx.run_until_parked();
+        for _ in 0..20 {
+            let root_thread_loaded = agent_panel_entity.read_with(cx, |agent_panel, cx| {
+                agent_panel
+                    .active_conversation_view()
+                    .is_some_and(|conversation| conversation.read(cx).root_thread_view().is_some())
+            });
+            if root_thread_loaded {
+                break;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(25))
+                .await;
+            cx.run_until_parked();
+        }
         let agent_conversation = agent_panel_entity.read_with(cx, |agent_panel, _| {
             agent_panel
                 .active_conversation_view()
