@@ -93,7 +93,6 @@ impl RunOutcome {
             ),
             RunOutcome::Failed { message } => format!("The run failed: {message}"),
             RunOutcome::Cancelled => "The run was cancelled before it finished.".into(),
-            RunOutcome::Cancelled => "The run was stopped.".into(),
         }
     }
 }
@@ -700,6 +699,18 @@ mod tests {
 
     fn path(ids: &[&str]) -> NodePath {
         NodePath(ids.iter().map(|id| NodeId((*id).into())).collect())
+    }
+
+    #[test]
+    fn failure_outcomes_preserve_actionable_context() {
+        let outcome = RunOutcome::Failed {
+            message: "provider disconnected".to_string(),
+        };
+        assert_eq!(
+            outcome.describe(&ArchitectGraph::default()),
+            "The run failed: provider disconnected"
+        );
+        assert!(!outcome.is_success());
     }
 
     #[test]

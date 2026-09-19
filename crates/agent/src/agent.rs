@@ -8058,8 +8058,12 @@ mod internal_tests {
         });
 
         cx.update(|cx| {
-            crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx)
+            crate::start_architect_run(thread.clone(), acp_thread.clone(), graph.clone(), cx)
                 .expect("a locked plan should start");
+            assert!(matches!(
+                crate::start_architect_run(thread.clone(), acp_thread.clone(), graph.clone(), cx),
+                Err(crate::ArchitectRunStartError::AlreadyRunning)
+            ));
         });
         thread.read_with(cx, |thread, _| {
             assert_eq!(thread.session_mode(), crate::SessionMode::Build);
@@ -8073,7 +8077,10 @@ mod internal_tests {
             );
         });
 
-        cx.update(|cx| crate::stop_architect_run(&thread, Some(&acp_thread), cx));
+        cx.update(|cx| {
+            crate::stop_architect_run(&thread, Some(&acp_thread), cx);
+            crate::stop_architect_run(&thread, Some(&acp_thread), cx);
+        });
         thread.read_with(cx, |thread, _| {
             let run = thread
                 .architect_run()
@@ -8081,6 +8088,28 @@ mod internal_tests {
             assert!(!run.is_running());
             assert_eq!(run.outcome, Some(architect::RunOutcome::Cancelled));
             assert!(thread.architect_running_step().is_none());
+        });
+
+        cx.update(|cx| {
+            assert!(matches!(
+                crate::start_architect_run(
+                    thread.clone(),
+                    acp_thread.clone(),
+                    architect::ArchitectGraph::default(),
+                    cx,
+                ),
+                Err(crate::ArchitectRunStartError::Refused(
+                    architect::RunRefusal::NothingToRun
+                ))
+            ));
+            let mut unlocked = architect::ArchitectGraph::default();
+            unlocked.add_node(architect::ArchitectNode::new("draft", "Draft"));
+            assert!(matches!(
+                crate::start_architect_run(thread.clone(), acp_thread.clone(), unlocked, cx),
+                Err(crate::ArchitectRunStartError::Refused(
+                    architect::RunRefusal::NotReady(_)
+                ))
+            ));
         });
     }
 

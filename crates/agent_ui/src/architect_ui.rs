@@ -1287,6 +1287,7 @@ mod tests {
     use std::{path::Path, rc::Rc};
 
     use acp_thread::AgentConnection as _;
+    use fs::Fs as _;
     use gpui::{Modifiers, MouseMoveEvent, Task, TestAppContext, VisualTestContext, size};
     use project::{FakeFs, Project};
     use serde_json::json;
@@ -1330,8 +1331,9 @@ mod tests {
         fs.insert_tree("/", json!({ "a": {} })).await;
         let project = Project::test(fs.clone(), [Path::new("/a")], cx).await;
         let thread_store = cx.new(|cx| agent::ThreadStore::new(cx));
-        let native_agent =
-            cx.update(|cx| agent::NativeAgent::new(thread_store, agent::Templates::new(), fs, cx));
+        let native_agent = cx.update(|cx| {
+            agent::NativeAgent::new(thread_store, agent::Templates::new(), fs.clone(), cx)
+        });
         let connection = Rc::new(agent::NativeAgentConnection(native_agent));
         let acp_thread = cx
             .update(|cx| {
@@ -1969,6 +1971,15 @@ mod tests {
         replacement_thread.update(cx, |thread, cx| {
             thread.set_architect_graph(Some(replacement_graph), cx)
         });
+        fs.remove_dir(
+            Path::new("/a"),
+            fs::RemoveOptions {
+                recursive: true,
+                ignore_if_not_exists: false,
+            },
+        )
+        .await
+        .expect("the fake project directory should be removable");
         architect.update(cx, |architect, cx| {
             architect.selection = Some(Selection::Node(parent.clone()));
             architect.focus = NodePath::root(parent.clone());
