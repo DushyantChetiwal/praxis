@@ -2207,6 +2207,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn primary_actions_have_one_rendering_owner() {
+        let source = include_str!("rendering.rs");
+        for suffix in ["fit", "run", "stop", "plan-conversation"] {
+            let id = format!("\"architect-{suffix}\"");
+            assert_eq!(
+                source.matches(&id).count(),
+                1,
+                "{id} must have exactly one rendering owner"
+            );
+        }
+    }
+
+    #[test]
     fn responsive_layout_uses_all_four_shell_states() {
         assert_eq!(
             ArchitectLayout::for_width(px(1500.0)),
