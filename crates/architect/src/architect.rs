@@ -131,6 +131,9 @@ pub struct StepResult {
 pub struct ArchitectNode {
     pub id: NodeId,
     pub title: String,
+    /// The area of work this step owns.
+    #[serde(default)]
+    pub responsibility: String,
     /// What this step has to accomplish.
     #[serde(default)]
     pub intent: String,
@@ -170,6 +173,7 @@ impl ArchitectNode {
         Self {
             id: id.into(),
             title: title.into(),
+            responsibility: String::new(),
             intent: String::new(),
             rules: Vec::new(),
             capture: String::new(),
@@ -260,6 +264,8 @@ pub enum GraphProblem {
     },
     /// A node no entry point can reach, so it would never run.
     Unreachable(NodeId),
+    /// A conditional connection with no statement or question to evaluate.
+    EmptyCondition(EdgeId),
     /// A step still open for deliberation.
     Unlocked(NodeId),
     /// Something wrong inside a step's nested plan.
@@ -282,6 +288,9 @@ impl Display for GraphProblem {
             ),
             GraphProblem::Unreachable(id) => {
                 write!(formatter, "nothing leads to {id}, so it would never run")
+            }
+            GraphProblem::EmptyCondition(id) => {
+                write!(formatter, "connection {} has an empty condition", id.0)
             }
             GraphProblem::Unlocked(id) => write!(formatter, "{id} is not locked yet"),
             GraphProblem::InSubplan { node, problem } => {
@@ -491,6 +500,7 @@ impl ArchitectGraph {
                 None => true,
                 Some(drafted) => {
                     drafted.title != settled.title
+                        || drafted.responsibility.trim() != settled.responsibility.trim()
                         || drafted.intent.trim() != settled.intent.trim()
                         || drafted.rules != settled.rules
                         || drafted.capture.trim() != settled.capture.trim()
@@ -527,6 +537,10 @@ impl ArchitectGraph {
             // A redraw that only changes the shape of the plan should not empty
             // out the steps it keeps.
             let mut kept_detail = false;
+            if node.responsibility.trim().is_empty() && !existing.responsibility.trim().is_empty() {
+                node.responsibility = existing.responsibility.clone();
+                kept_detail = true;
+            }
             if node.intent.trim().is_empty() && !existing.intent.trim().is_empty() {
                 node.intent = existing.intent.clone();
                 kept_detail = true;
@@ -577,6 +591,12 @@ impl ArchitectGraph {
                     ""
                 }
             );
+            if !node.responsibility.trim().is_empty() {
+                out.push_str(&format!(
+                    "{pad}  responsibility: {}\n",
+                    node.responsibility.trim()
+                ));
+            }
             if !node.intent.trim().is_empty() {
                 let _ = writeln!(out, "{pad}  goal: {}", node.intent.trim());
             }
@@ -701,6 +721,47 @@ impl ArchitectGraph {
 
     pub fn edges_into<'a>(&'a self, id: &'a NodeId) -> impl Iterator<Item = &'a ArchitectEdge> {
         self.edges.iter().filter(move |edge| &edge.to == id)
+    }
+
+    /// Every step in deterministic semantic execution order.
+    ///
+    /// Entries are walked breadth-first in node and edge insertion order. Cycles
+    /// are visited once, and disconnected components follow in node order so a
+    /// malformed draft remains fully inspectable.
+    pub fn execution_order(&self) -> Vec<NodeId> {
+        let mut order = Vec::with_capacity(self.nodes.len());
+        let mut visited = HashSet::default();
+        let mut pending = Vec::with_capacity(self.nodes.len());
+
+        let mut enqueue_component =
+            |entry: NodeId, order: &mut Vec<NodeId>, visited: &mut HashSet<NodeId>| {
+                pending.clear();
+                pending.push(entry);
+                let mut next = 0;
+                while let Some(id) = pending.get(next).cloned() {
+                    next += 1;
+                    if !visited.insert(id.clone()) {
+                        continue;
+                    }
+                    order.push(id.clone());
+                    pending.extend(
+                        self.edges_from(&id)
+                            .filter(|edge| self.node(&edge.to).is_some())
+                            .map(|edge| edge.to.clone()),
+                    );
+                }
+            };
+
+        for root in self.roots() {
+            enqueue_component(root, &mut order, &mut visited);
+        }
+        for node in &self.nodes {
+            if !visited.contains(&node.id) {
+                enqueue_component(node.id.clone(), &mut order, &mut visited);
+            }
+        }
+
+        order
     }
 
     /// Where a run begins.
@@ -883,6 +944,44 @@ impl ArchitectGraph {
             });
         }
         Ok(graph.connect_with(from_id, to, condition))
+    }
+
+    /// Changes a connection condition unless its source step or a containing
+    /// step is locked.
+    pub fn set_edge_condition_at(
+        &mut self,
+        graph_path: &NodePath,
+        edge_id: &EdgeId,
+        condition: EdgeCondition,
+    ) -> Result<(), GraphMutationError> {
+        let edge = self
+            .graph_at(graph_path)
+            .and_then(|graph| graph.edges.iter().find(|edge| &edge.id == edge_id))
+            .cloned()
+            .ok_or_else(|| GraphMutationError::EdgeNotFound {
+                graph: graph_path.clone(),
+                edge: edge_id.clone(),
+            })?;
+        let source_path = graph_path.child(edge.from);
+        let (graph, source_id) = self.containing_graph_mut(&source_path)?;
+        let source = graph
+            .node(&source_id)
+            .ok_or_else(|| GraphMutationError::NodeNotFound {
+                path: source_path.clone(),
+            })?;
+        if source.locked {
+            return Err(GraphMutationError::Locked { path: source_path });
+        }
+        let target = graph
+            .edges
+            .iter_mut()
+            .find(|edge| &edge.id == edge_id)
+            .ok_or_else(|| GraphMutationError::EdgeNotFound {
+                graph: graph_path.clone(),
+                edge: edge_id.clone(),
+            })?;
+        target.condition = condition;
+        Ok(())
     }
 
     /// Removes a connection unless its source step or a containing step is locked.
@@ -1082,6 +1181,13 @@ impl ArchitectGraph {
             problems.push(GraphProblem::Unreachable(id));
         }
 
+        problems.extend(self.edges.iter().filter_map(|edge| {
+            edge.condition
+                .label()
+                .is_some_and(|label| label.trim().is_empty())
+                .then(|| GraphProblem::EmptyCondition(edge.id.clone()))
+        }));
+
         problems
     }
 
@@ -1164,6 +1270,9 @@ pub struct ProposedNode {
     pub id: NodeId,
     /// A short human-readable name for the step.
     pub title: String,
+    /// The area of work this step owns, such as `Authentication` or `Tests`.
+    #[serde(default)]
+    pub responsibility: String,
     /// What this step has to accomplish.
     #[serde(default)]
     pub intent: String,
@@ -1208,6 +1317,7 @@ impl ProposedGraph {
             graph.add_node(ArchitectNode {
                 id: node.id,
                 title: node.title,
+                responsibility: node.responsibility,
                 intent: node.intent,
                 rules: node.rules,
                 capture: node.capture,
@@ -1318,6 +1428,46 @@ mod tests {
         assert_eq!(graph.problems(), vec![]);
     }
 
+    #[test]
+    fn execution_order_is_stable_for_branches_cycles_and_disconnected_steps() {
+        let mut graph = ArchitectGraph::default();
+        for id in ["start", "left", "right", "finish", "detached"] {
+            graph.add_node(ArchitectNode::new(id, id));
+        }
+        graph.connect("start", "left");
+        graph.connect("start", "right");
+        graph.connect("left", "finish");
+        graph.connect("right", "finish");
+        graph.connect("finish", "left");
+
+        assert_eq!(
+            graph.execution_order(),
+            vec!["start", "left", "right", "finish", "detached"]
+                .into_iter()
+                .map(NodeId::from)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn responsibility_is_optional_for_saved_and_proposed_graphs() {
+        let saved: ArchitectNode = serde_json::from_value(serde_json::json!({
+            "id": "inspect",
+            "title": "Inspect",
+        }))
+        .unwrap();
+        assert!(saved.responsibility.is_empty());
+
+        let proposed = draft(serde_json::json!({
+            "nodes": [{
+                "id": "inspect",
+                "title": "Inspect",
+                "responsibility": "Diagnostics"
+            }]
+        }));
+        assert_eq!(proposed.nodes[0].responsibility, "Diagnostics");
+    }
+
     /// A plan that ends by looping back to its first step has nothing with a
     /// clear "nothing leads here" entry, but it is perfectly ordinary.
     #[test]
@@ -1346,6 +1496,26 @@ mod tests {
         assert!(
             problems.contains(&GraphProblem::Unreachable(NodeId("orphan".into()))),
             "expected the orphan to be reported, got {problems:?}"
+        );
+    }
+
+    #[test]
+    fn reports_an_empty_routing_condition() {
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(ArchitectNode::new("plan", "Plan"));
+        graph.add_node(ArchitectNode::new("build", "Build"));
+        let edge = graph.connect_with(
+            "plan",
+            "build",
+            EdgeCondition::Objective {
+                statement: "  ".into(),
+            },
+        );
+
+        assert!(
+            graph
+                .problems()
+                .contains(&GraphProblem::EmptyCondition(edge))
         );
     }
 
@@ -1523,6 +1693,16 @@ mod tests {
 
         assert_eq!(
             graph.disconnect_at(&NodePath::default(), &edge),
+            Err(GraphMutationError::Locked { path: from.clone() })
+        );
+        assert_eq!(
+            graph.set_edge_condition_at(
+                &NodePath::default(),
+                &edge,
+                EdgeCondition::Objective {
+                    statement: "tests passed".into(),
+                },
+            ),
             Err(GraphMutationError::Locked { path: from.clone() })
         );
         assert_eq!(

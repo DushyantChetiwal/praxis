@@ -544,6 +544,12 @@ pub fn step_prompt(
         );
     }
 
+    if !node.responsibility.trim().is_empty() {
+        prompt.push_str("\nResponsibility: ");
+        prompt.push_str(node.responsibility.trim());
+        prompt.push('\n');
+    }
+
     if !node.intent.trim().is_empty() {
         let _ = write!(prompt, "\nGoal: {}\n", node.intent.trim());
     }

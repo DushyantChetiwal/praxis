@@ -3,13 +3,13 @@ use gpui::{Hsla, PathBuilder, Pixels, Point, Window, point, px};
 
 /// Node size in canvas units. The layout's spacing is chosen around these, so
 /// the two have to agree.
-pub(super) const NODE_WIDTH: f32 = 248.0;
-pub(super) const NODE_HEIGHT: f32 = 104.0;
+pub(super) const NODE_WIDTH: f32 = 280.0;
+pub(super) const NODE_HEIGHT: f32 = 132.0;
 
 /// A step showing its sub-plan inside itself. Wider and taller than a plain
 /// step, because it has a row of children to fit.
-pub(super) const EXPANDED_NODE_WIDTH: f32 = 344.0;
-pub(super) const EXPANDED_NODE_HEIGHT: f32 = 188.0;
+pub(super) const EXPANDED_NODE_WIDTH: f32 = 392.0;
+pub(super) const EXPANDED_NODE_HEIGHT: f32 = 220.0;
 
 /// How close a click has to be to an edge to select it, in screen pixels.
 pub(super) const EDGE_HIT_TOLERANCE: f32 = 9.0;

@@ -2873,6 +2873,70 @@ impl Workspace {
         }
     }
 
+    /// Moves a live panel entity for this workspace without changing the user's
+    /// global panel-position setting.
+    pub fn relocate_panel<T: Panel>(
+        &mut self,
+        panel: &Entity<T>,
+        position: DockPosition,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let panel_id = panel.entity_id();
+        let Some(source) = self
+            .all_docks()
+            .into_iter()
+            .find(|dock| dock.read(cx).panel_for_id(panel_id).is_some())
+        else {
+            return false;
+        };
+        let source_position = source.read(cx).position();
+        if source_position == position {
+            return false;
+        }
+
+        let (was_active, was_visible, size_state) = {
+            let source = source.read(cx);
+            let was_active = source
+                .active_panel()
+                .is_some_and(|active| active.panel_id() == panel_id);
+            let was_visible = source.is_open()
+                && source
+                    .visible_panel()
+                    .is_some_and(|visible| visible.panel_id() == panel_id);
+            let size_state = source
+                .panel_for_id(panel_id)
+                .and_then(|panel| source.stored_panel_size_state(panel.as_ref()))
+                .unwrap_or_default();
+            (was_active, was_visible, size_state)
+        };
+        let size_state = if source_position.axis() == position.axis() {
+            size_state
+        } else {
+            dock::PanelSizeState::default()
+        };
+
+        let removed = source.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
+        if !removed {
+            return false;
+        }
+
+        let target = self.dock_at_position(position);
+        let workspace = self.weak_self.clone();
+        target.update(cx, |dock, cx| {
+            let index = dock.add_panel(panel.clone(), workspace.clone(), window, cx);
+            dock.set_panel_size_state(panel, size_state, cx);
+            if was_active {
+                dock.activate_panel(index, window, cx);
+            }
+            if was_visible {
+                dock.set_open(true, window, cx);
+            }
+        });
+        self.serialize_workspace(window, cx);
+        true
+    }
+
     pub fn status_bar(&self) -> &Entity<StatusBar> {
         &self.status_bar
     }
@@ -14562,6 +14626,41 @@ mod tests {
             let (top, nested) = nested_axis(workspace);
             assert_eq!(*top.flexes.lock(), vec![1.0; top.members.len()]);
             assert_eq!(*nested.flexes.lock(), vec![1.0; nested.members.len()]);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_relocate_panel_is_workspace_local(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            assert!(workspace.relocate_panel(&panel, DockPosition::Left, window, cx,));
+            panel
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_eq!(
+                workspace.left_dock().read(cx).panel::<TestPanel>(),
+                Some(panel.clone())
+            );
+            assert!(
+                workspace
+                    .right_dock()
+                    .read(cx)
+                    .panel::<TestPanel>()
+                    .is_none()
+            );
+            assert_eq!(
+                panel.read(cx).position(window, cx),
+                DockPosition::Right,
+                "workspace relocation must not rewrite the panel's global setting"
+            );
         });
     }
 

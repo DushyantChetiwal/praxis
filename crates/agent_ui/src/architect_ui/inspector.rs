@@ -1,6 +1,6 @@
 use acp_thread::AcpThread;
 use agent_client_protocol::schema::v1 as acp;
-use architect::{ArchitectGraph, ArchitectNode, EdgeCondition, NodeId};
+use architect::{ArchitectEdge, ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, NodeId};
 use editor::{Editor, EditorEvent};
 use gpui::{App, Context, Entity, Focusable, SharedString, Subscription, Window, div, px};
 use ui::{TintColor, Tooltip, prelude::*};
@@ -16,16 +16,23 @@ use super::{ArchitectPane, Interaction, Selection};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum InspectorTab {
     Details,
-    Chat,
-    Subplan,
+    Conversation,
+    Activity,
 }
 
 /// The editors backing the inspector for the selected step. They are rebuilt
 /// whenever the selection changes, which is also what keeps their contents from
 /// drifting away from the graph.
+pub(super) struct EdgeInspector {
+    edge: EdgeId,
+    condition: Entity<Editor>,
+    _subscription: Subscription,
+}
+
 pub(super) struct NodeInspector {
     node: NodeId,
     title: Entity<Editor>,
+    responsibility: Entity<Editor>,
     goal: Entity<Editor>,
     capture: Entity<Editor>,
     new_rule: Entity<Editor>,
@@ -43,15 +50,86 @@ impl ArchitectPane {
             Some(Selection::Node(id)) => Some(id.clone()),
             _ => None,
         };
+        let selected_edge = match &selection {
+            Some(Selection::Edge(id)) => Some(id.clone()),
+            _ => None,
+        };
 
         if self.inspector.as_ref().map(|inspector| &inspector.node) != selected_node.as_ref() {
             self.inspector = selected_node
                 .and_then(|id| self.graph(cx).and_then(|graph| graph.node(&id)).cloned())
                 .map(|node| self.build_inspector(node, window, cx));
         }
+        if self
+            .edge_inspector
+            .as_ref()
+            .map(|inspector| &inspector.edge)
+            != selected_edge.as_ref()
+        {
+            self.edge_inspector = selected_edge
+                .and_then(|id| {
+                    self.graph(cx)
+                        .and_then(|graph| graph.edges.iter().find(|edge| edge.id == id))
+                        .cloned()
+                })
+                .map(|edge| self.build_edge_inspector(edge, window, cx));
+        }
 
         self.selection = selection;
+        if self.selection.is_some() && f32::from(window.viewport_size().width) < 1060.0 {
+            self.inspector_drawer_open = true;
+        }
         cx.notify();
+    }
+
+    fn build_edge_inspector(
+        &self,
+        edge: ArchitectEdge,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> EdgeInspector {
+        let source_locked = self
+            .graph(cx)
+            .and_then(|graph| graph.node(&edge.from))
+            .is_some_and(|node| node.locked);
+        let condition = cx.new(|cx| {
+            let mut editor = Editor::auto_height(2, 5, window, cx);
+            editor.set_placeholder_text(
+                "Describe when this connection should be taken",
+                window,
+                cx,
+            );
+            editor.set_text(edge.condition.label().unwrap_or_default(), window, cx);
+            editor.set_read_only(source_locked);
+            editor
+        });
+        let edge_id = edge.id.clone();
+        let subscription = cx.subscribe(&condition, move |this, editor, event, cx| {
+            if !matches!(event, EditorEvent::BufferEdited) {
+                return;
+            }
+            let text = editor.read(cx).text(cx);
+            if text.trim().is_empty() {
+                return;
+            }
+            let current = this
+                .graph(cx)
+                .and_then(|graph| graph.edges.iter().find(|edge| edge.id == edge_id))
+                .map(|edge| edge.condition.clone());
+            let condition = match current {
+                Some(EdgeCondition::LlmEvaluated { .. }) => {
+                    EdgeCondition::LlmEvaluated { question: text }
+                }
+                _ => EdgeCondition::Objective { statement: text },
+            };
+            this.set_edge_condition(edge_id.clone(), condition, cx);
+        });
+
+        EdgeInspector {
+            edge: edge.id,
+            condition,
+            _subscription: subscription,
+        }
     }
 
     fn build_inspector(
@@ -63,6 +141,13 @@ impl ArchitectPane {
         let title = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
             editor.set_text(node.title.clone(), window, cx);
+            editor.set_read_only(node.locked);
+            editor
+        });
+        let responsibility = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("What area of work does this step own?", window, cx);
+            editor.set_text(node.responsibility.clone(), window, cx);
             editor.set_read_only(node.locked);
             editor
         });
@@ -91,6 +176,7 @@ impl ArchitectPane {
         });
 
         let id_for_title = node.id.clone();
+        let id_for_responsibility = node.id.clone();
         let id_for_goal = node.id.clone();
         let id_for_capture = node.id.clone();
         let subscriptions = vec![
@@ -99,6 +185,13 @@ impl ArchitectPane {
                     let text = editor.read(cx).text(cx);
                     let id = id_for_title.clone();
                     this.edit_node(id, move |node| node.title = text, cx);
+                }
+            }),
+            cx.subscribe(&responsibility, move |this, editor, event, cx| {
+                if matches!(event, EditorEvent::BufferEdited) {
+                    let text = editor.read(cx).text(cx);
+                    let id = id_for_responsibility.clone();
+                    this.edit_node(id, move |node| node.responsibility = text, cx);
                 }
             }),
             cx.subscribe(&goal, move |this, editor, event, cx| {
@@ -120,6 +213,7 @@ impl ArchitectPane {
         NodeInspector {
             node: node.id,
             title,
+            responsibility,
             goal,
             capture,
             new_rule,
@@ -159,6 +253,19 @@ impl ArchitectPane {
         );
     }
 
+    fn set_edge_condition(
+        &mut self,
+        id: EdgeId,
+        condition: EdgeCondition,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let focus = self.focus.clone();
+        self.edit_checked(
+            move |graph| graph.set_edge_condition_at(&focus, &id, condition),
+            cx,
+        )
+    }
+
     /// Opens the step's own conversation in the inspector, beside the step.
     ///
     /// Each step gets a thread of its own, inheriting the main conversation so
@@ -175,7 +282,7 @@ impl ArchitectPane {
         };
         let node_path = self.focus.child(id);
 
-        self.inspector_tab = InspectorTab::Chat;
+        self.inspector_tab = InspectorTab::Conversation;
         let is_first_visit = node.chat.is_none();
         let session_id = conversation_view.update(cx, |conversation_view, cx| {
             conversation_view.ensure_architect_step_thread(
@@ -353,26 +460,6 @@ impl ArchitectPane {
         self.refresh_inspector(window, cx);
     }
 
-    /// Locks or unlocks everything, descending into nested plans so that a
-    /// parent is never left locked over steps that are not.
-    pub(super) fn set_all_locked(
-        &mut self,
-        locked: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        fn apply(graph: &mut ArchitectGraph, locked: bool) {
-            for node in &mut graph.nodes {
-                node.locked = locked;
-                if let Some(subplan) = node.subplan.as_deref_mut() {
-                    apply(subplan, locked);
-                }
-            }
-        }
-        self.edit_graph(move |graph| apply(graph, locked), cx);
-        self.refresh_inspector(window, cx);
-    }
-
     /// Rebuilds the inspector so its fields match the step again, which is what
     /// makes them go read-only the moment a step is locked.
     fn refresh_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -391,21 +478,383 @@ impl ArchitectPane {
         cx.notify();
     }
 
-    /// The panel beside the canvas where a single step is settled: its goal and
-    /// rules edited directly, or talked through in the chat.
-    pub(super) fn render_inspector(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_overview_inspector(&self, width: gpui::Pixels, cx: &mut Context<Self>) -> AnyElement {
+        let graph = self.graph(cx);
+        let step_count = graph.map_or(0, |graph| graph.nodes.len());
+        let settled = graph.map_or(0, |graph| {
+            graph.nodes.iter().filter(|node| node.locked).count()
+        });
+        let issues = graph
+            .map(ArchitectGraph::blocking_problems)
+            .unwrap_or_default();
+        let captures = graph
+            .map(ArchitectGraph::steps_without_capture)
+            .unwrap_or_default();
+        let ready = step_count > 0 && issues.is_empty();
+        let latest_run = self.thread.read(cx).architect_run().map(|run| {
+            (
+                run.history().len(),
+                if run.is_running() {
+                    "in progress"
+                } else {
+                    "finished"
+                },
+            )
+        });
+
+        div()
+            .flex_none()
+            .h_full()
+            .py_2()
+            .pr_2()
+            .child(
+                v_flex()
+                    .w(width)
+                    .h_full()
+                    .overflow_hidden()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .shadow_md()
+                    .bg(cx.theme().colors().panel_background)
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .px_3()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(cx.theme().colors().border)
+                            .child(Label::new("Plan Overview").size(LabelSize::Default))
+                            .child(
+                                Label::new(if ready {
+                                    "Ready for execution"
+                                } else {
+                                    "Review the plan before execution"
+                                })
+                                .size(LabelSize::Small)
+                                .color(if ready {
+                                    Color::Success
+                                } else {
+                                    Color::Warning
+                                }),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p_3()
+                            .gap_3()
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        Label::new("PLAN HEALTH")
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(
+                                        Label::new(format!(
+                                            "{step_count} steps · {settled} settled · {} draft",
+                                            step_count.saturating_sub(settled)
+                                        ))
+                                        .size(LabelSize::Small),
+                                    )
+                                    .child(
+                                        Label::new(format!(
+                                            "{} blocking issues · {} incomplete handoffs",
+                                            issues.len(),
+                                            captures.len()
+                                        ))
+                                        .size(LabelSize::Small)
+                                        .color(if issues.is_empty() && captures.is_empty() {
+                                            Color::Muted
+                                        } else {
+                                            Color::Warning
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        Label::new("HOW TO USE ARCHITECT")
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(
+                                        Label::new(
+                                            "Select a step in the outline or graph to edit its goal, constraints, handoff, conversation, and activity. Select a connection to inspect its routing condition.",
+                                        )
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                    ),
+                            )
+                            .when_some(latest_run, |this, (visits, state)| {
+                                this.child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(
+                                            Label::new("LATEST RUN")
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        )
+                                        .child(
+                                            Label::new(format!("{visits} visits · {state}"))
+                                                .size(LabelSize::Small),
+                                        ),
+                                )
+                            }),
+                    ),
+            )
+            .into_any()
+    }
+
+    fn render_edge_inspector(
+        &self,
+        id: &EdgeId,
+        width: gpui::Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let edge = self
+            .graph(cx)
+            .and_then(|graph| graph.edges.iter().find(|edge| &edge.id == id))
+            .cloned();
+        let Some(edge) = edge else {
+            return self.render_overview_inspector(width, cx);
+        };
+        let graph = self.graph(cx);
+        let source = graph
+            .and_then(|graph| graph.node(&edge.from))
+            .map(|node| node.title.clone())
+            .unwrap_or_else(|| edge.from.0.clone());
+        let target = graph
+            .and_then(|graph| graph.node(&edge.to))
+            .map(|node| node.title.clone())
+            .unwrap_or_else(|| edge.to.0.clone());
+        let source_locked = graph
+            .and_then(|graph| graph.node(&edge.from))
+            .is_some_and(|node| node.locked);
+        let Some(condition_editor) = self
+            .edge_inspector
+            .as_ref()
+            .filter(|inspector| inspector.edge == edge.id)
+            .map(|inspector| inspector.condition.clone())
+        else {
+            return self.render_overview_inspector(width, cx);
+        };
+        let observed_editor = condition_editor.clone();
+        let model_editor = condition_editor.clone();
+        let always_id = edge.id.clone();
+        let observed_id = edge.id.clone();
+        let model_id = edge.id.clone();
+        let delete_id = edge.id.clone();
+        let is_always = matches!(edge.condition, EdgeCondition::Always);
+        let is_objective = matches!(edge.condition, EdgeCondition::Objective { .. });
+        let is_model = matches!(edge.condition, EdgeCondition::LlmEvaluated { .. });
+        let evaluation = if is_always {
+            "No evaluation required"
+        } else {
+            "Evaluated by the model from the completed step summary"
+        };
+
+        div()
+            .flex_none()
+            .h_full()
+            .py_2()
+            .pr_2()
+            .child(
+                v_flex()
+                    .w(width)
+                    .h_full()
+                    .overflow_hidden()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .shadow_md()
+                    .bg(cx.theme().colors().panel_background)
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .px_3()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(cx.theme().colors().border)
+                            .child(Label::new("Connection").size(LabelSize::Default))
+                            .child(
+                                Label::new(format!("{source} → {target}"))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted)
+                                    .truncate(),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p_3()
+                            .gap_3()
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        Label::new("ROUTING CONDITION")
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .w_full()
+                                            .gap_1()
+                                            .child(
+                                                Button::new(
+                                                    "architect-edge-always",
+                                                    "Always",
+                                                )
+                                                .label_size(LabelSize::XSmall)
+                                                .toggle_state(is_always)
+                                                .selected_style(ButtonStyle::Tinted(
+                                                    TintColor::Accent,
+                                                ))
+                                                .style(ButtonStyle::Subtle)
+                                                .disabled(source_locked)
+                                                .on_click(cx.listener(
+                                                    move |this, _, _, cx| {
+                                                        this.set_edge_condition(
+                                                            always_id.clone(),
+                                                            EdgeCondition::Always,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                            )
+                                            .child(
+                                                Button::new(
+                                                    "architect-edge-objective",
+                                                    "Observed",
+                                                )
+                                                .label_size(LabelSize::XSmall)
+                                                .toggle_state(is_objective)
+                                                .selected_style(ButtonStyle::Tinted(
+                                                    TintColor::Accent,
+                                                ))
+                                                .style(ButtonStyle::Subtle)
+                                                .disabled(source_locked)
+                                                .on_click(cx.listener(
+                                                    move |this, _, _, cx| {
+                                                        let statement =
+                                                            observed_editor.read(cx).text(cx);
+                                                        if statement.trim().is_empty() {
+                                                            this.report(
+                                                                "Describe the observed condition first."
+                                                                    .to_string(),
+                                                                cx,
+                                                            );
+                                                            return;
+                                                        }
+                                                        this.set_edge_condition(
+                                                            observed_id.clone(),
+                                                            EdgeCondition::Objective { statement },
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                            )
+                                            .child(
+                                                Button::new(
+                                                    "architect-edge-model",
+                                                    "Model Decides",
+                                                )
+                                                .label_size(LabelSize::XSmall)
+                                                .toggle_state(is_model)
+                                                .selected_style(ButtonStyle::Tinted(
+                                                    TintColor::Accent,
+                                                ))
+                                                .style(ButtonStyle::Subtle)
+                                                .disabled(source_locked)
+                                                .on_click(cx.listener(
+                                                    move |this, _, _, cx| {
+                                                        let question = model_editor.read(cx).text(cx);
+                                                        if question.trim().is_empty() {
+                                                            this.report(
+                                                                "Write the yes-or-no routing question first."
+                                                                    .to_string(),
+                                                                cx,
+                                                            );
+                                                            return;
+                                                        }
+                                                        this.set_edge_condition(
+                                                            model_id.clone(),
+                                                            EdgeCondition::LlmEvaluated { question },
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_sm()
+                                            .border_1()
+                                            .border_color(cx.theme().colors().border)
+                                            .bg(cx.theme().colors().editor_background)
+                                            .child(condition_editor),
+                                    )
+                                    .child(
+                                        Label::new(evaluation)
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    ),
+                            )
+                            .child(
+                                Button::new("architect-delete-edge", "Delete Connection")
+                                    .full_width()
+                                    .label_size(LabelSize::Small)
+                                    .style(ButtonStyle::Subtle)
+                                    .start_icon(Icon::new(IconName::Trash).size(IconSize::XSmall))
+                                    .disabled(source_locked)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.set_selection(
+                                            Some(Selection::Edge(delete_id.clone())),
+                                            window,
+                                            cx,
+                                        );
+                                        this.delete_selection(window, cx);
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any()
+    }
+
+    /// The contextual panel beside the graph.
+    pub(super) fn render_inspector(
+        &self,
+        width: gpui::Pixels,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        match &self.selection {
+            None => return Some(self.render_overview_inspector(width, cx)),
+            Some(Selection::Edge(id)) => return Some(self.render_edge_inspector(id, width, cx)),
+            Some(Selection::Node(_)) => {}
+        }
+
         let inspector = self.inspector.as_ref()?;
         let node = self.graph(cx)?.node(&inspector.node)?.clone();
 
         let title_editor = inspector.title.clone();
+        let responsibility_editor = inspector.responsibility.clone();
         let goal_editor = inspector.goal.clone();
         let capture_editor = inspector.capture.clone();
         let rule_editor = inspector.new_rule.clone();
         let id = node.id.clone();
-        let lock_id = node.id.clone();
         let footer_lock_id = node.id.clone();
         let pin_id = node.id.clone();
-        let subplan_id = node.id.clone();
+        let details_subplan_id = node.id.clone();
         let chat_tab_id = node.id.clone();
         let tab = self.inspector_tab;
         let step_chat = node
@@ -447,6 +896,27 @@ impl ArchitectPane {
             })
             .unwrap_or_default();
 
+        let node_path = self.focus.child(node.id.clone());
+        let run_activity: Vec<(SharedString, usize, u64, bool, Option<SharedString>)> = self
+            .thread
+            .read(cx)
+            .architect_run()
+            .map(|run| {
+                run.history()
+                    .iter()
+                    .filter(|step| step.path == node_path)
+                    .map(|step| {
+                        (
+                            step.title.clone(),
+                            step.attempt,
+                            step.elapsed().as_secs(),
+                            step.is_running(),
+                            step.summary.clone(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let locked = node.locked;
         let has_chat = node.chat.is_some();
         // A step nothing leads out of has nobody to hand anything to, so an
@@ -479,7 +949,7 @@ impl ArchitectPane {
             // inspector is about one step, and butting it against the edge makes
             // it read as part of the window instead.
             v_flex()
-                .w(px(384.0))
+                .w(width)
                 .h_full()
                 .overflow_hidden()
                 .rounded_lg()
@@ -504,26 +974,30 @@ impl ArchitectPane {
                                 .truncate(),
                         )
                         .child(
-                            IconButton::new(
-                                "architect-inspector-lock",
-                                if locked {
-                                    IconName::Lock
-                                } else {
-                                    IconName::Pencil
-                                },
-                            )
-                            .icon_size(IconSize::Small)
-                            .icon_color(if locked { Color::Accent } else { Color::Muted })
-                            .tooltip(Tooltip::text(if locked {
-                                "Locked. Click to reopen for changes"
-                            } else {
-                                "Draft. Click to lock"
-                            }))
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.toggle_lock(lock_id.clone(), window, cx);
-                                },
-                            )),
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Icon::new(if locked {
+                                        IconName::Lock
+                                    } else {
+                                        IconName::Pencil
+                                    })
+                                    .size(IconSize::XSmall)
+                                    .color(if locked {
+                                        Color::Success
+                                    } else {
+                                        Color::Muted
+                                    }),
+                                )
+                                .child(
+                                    Label::new(if locked { "Settled" } else { "Draft" })
+                                        .size(LabelSize::Small)
+                                        .color(if locked {
+                                            Color::Success
+                                        } else {
+                                            Color::Muted
+                                        }),
+                                ),
                         ),
                 )
                 .child(
@@ -546,7 +1020,7 @@ impl ArchitectPane {
                                 })),
                         )
                         .child(
-                            Button::new("architect-tab-chat", "Chat")
+                            Button::new("architect-tab-chat", "Conversation")
                                 .label_size(LabelSize::Small)
                                 .start_icon(
                                     Icon::new(if has_chat {
@@ -556,7 +1030,7 @@ impl ArchitectPane {
                                     })
                                     .size(IconSize::XSmall),
                                 )
-                                .toggle_state(tab == InspectorTab::Chat)
+                                .toggle_state(tab == InspectorTab::Conversation)
                                 .selected_style(ButtonStyle::Tinted(TintColor::Accent))
                                 .style(ButtonStyle::Subtle)
                                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -564,23 +1038,23 @@ impl ArchitectPane {
                                 })),
                         )
                         .child(
-                            Button::new("architect-tab-subplan", "Sub-plan")
+                            Button::new("architect-tab-subplan", "Activity")
                                 .label_size(LabelSize::Small)
-                                .toggle_state(tab == InspectorTab::Subplan)
+                                .toggle_state(tab == InspectorTab::Activity)
                                 .selected_style(ButtonStyle::Tinted(TintColor::Accent))
                                 .style(ButtonStyle::Subtle)
                                 .tooltip(Tooltip::text(if subplan_steps > 0 {
-                                    "The plan inside this step, and where it leads"
+                                    "Execution history, nested work, and handoffs"
                                 } else {
-                                    "Break this step into its own plan, or see where it leads"
+                                    "Execution history and handoffs for this step"
                                 }))
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.inspector_tab = InspectorTab::Subplan;
+                                    this.inspector_tab = InspectorTab::Activity;
                                     cx.notify();
                                 })),
                         ),
                 )
-                .when(tab == InspectorTab::Chat, |this| {
+                .when(tab == InspectorTab::Conversation, |this| {
                     this.child(match step_chat {
                         // `min_h_0` so the conversation can shrink inside the
                         // card instead of growing it and pushing the lock
@@ -637,6 +1111,21 @@ impl ArchitectPane {
                                 ),
                             )
                         })
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(field("Responsibility"))
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(cx.theme().colors().border)
+                                        .bg(cx.theme().colors().editor_background)
+                                        .child(responsibility_editor),
+                                ),
+                        )
                         .child(
                             v_flex().gap_1().child(field("Goal")).child(
                                 div()
@@ -806,6 +1295,39 @@ impl ArchitectPane {
                                     )
                                 })
                         )
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .child(field("Nested Plan"))
+                                .child(
+                                    Button::new(
+                                        "architect-details-open-subplan",
+                                        match subplan_steps {
+                                            0 => "Break Into Steps".to_string(),
+                                            1 => "Open Nested Plan (1 step)".to_string(),
+                                            count => {
+                                                format!("Open Nested Plan ({count} steps)")
+                                            }
+                                        },
+                                    )
+                                    .full_width()
+                                    .label_size(LabelSize::Small)
+                                    .start_icon(
+                                        Icon::new(IconName::ListTree).size(IconSize::XSmall),
+                                    )
+                                    .disabled(locked && subplan_steps == 0)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.drill_into(details_subplan_id.clone(), window, cx);
+                                    })),
+                                )
+                                .child(
+                                    Label::new(
+                                        "Use a nested plan when this responsibility needs several coordinated steps at a closer level.",
+                                    )
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                                ),
+                        )
                         .when_some(node.result.clone(), |this, result| {
                             this.child(
                                 v_flex()
@@ -862,7 +1384,7 @@ impl ArchitectPane {
                         }),
                 )
                 })
-                .when(tab == InspectorTab::Subplan, |this| {
+                .when(tab == InspectorTab::Activity, |this| {
                     this.child(
                         v_flex()
                             .id("architect-inspector-subplan")
@@ -878,7 +1400,80 @@ impl ArchitectPane {
                                         h_flex()
                                             .w_full()
                                             .justify_between()
-                                            .child(field("Sub-plan"))
+                                            .child(field("Run Activity"))
+                                            .child(
+                                                Label::new("source · plan conversation")
+                                                    .size(LabelSize::XSmall)
+                                                    .color(Color::Muted),
+                                            ),
+                                    )
+                                    .when(run_activity.is_empty(), |this| {
+                                        this.child(
+                                            Label::new(
+                                                "No execution visits have reached this step yet.",
+                                            )
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                        )
+                                    })
+                                    .children(run_activity.iter().enumerate().map(
+                                        |(index, (title, attempt, elapsed, running, summary))| {
+                                            v_flex()
+                                                .id(("architect-step-activity", index))
+                                                .gap_0p5()
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_sm()
+                                                .bg(cx.theme().colors().element_background)
+                                                .child(
+                                                    h_flex()
+                                                        .w_full()
+                                                        .gap_1()
+                                                        .child(
+                                                            Icon::new(if *running {
+                                                                IconName::PlayFilled
+                                                            } else {
+                                                                IconName::Check
+                                                            })
+                                                            .size(IconSize::XSmall)
+                                                            .color(if *running {
+                                                                Color::Info
+                                                            } else {
+                                                                Color::Success
+                                                            }),
+                                                        )
+                                                        .child(
+                                                            Label::new(title.clone())
+                                                                .size(LabelSize::Small)
+                                                                .truncate(),
+                                                        )
+                                                        .child(div().flex_1())
+                                                        .child(
+                                                            Label::new(format!(
+                                                                "attempt {attempt} · {elapsed}s"
+                                                            ))
+                                                            .size(LabelSize::XSmall)
+                                                            .color(Color::Muted),
+                                                        ),
+                                                )
+                                                .when_some(summary.clone(), |this, summary| {
+                                                    this.child(
+                                                        Label::new(summary)
+                                                            .size(LabelSize::XSmall)
+                                                            .color(Color::Muted),
+                                                    )
+                                                })
+                                        },
+                                    )),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        h_flex()
+                                            .w_full()
+                                            .justify_between()
+                                            .child(field("Nested Plan"))
                                             .child(
                                                 Label::new(match subplan_steps {
                                                     0 => "none yet".to_string(),
@@ -946,31 +1541,6 @@ impl ArchitectPane {
                                                 .id(("architect-subplan-step", ix))
                                         },
                                     ))
-                                    .child(
-                                        Button::new(
-                                            "architect-open-subplan",
-                                            match subplan_steps {
-                                                0 => "Break Into Steps".to_string(),
-                                                1 => "Open Sub-plan (1 step)".to_string(),
-                                                count => format!("Open Sub-plan ({count} steps)"),
-                                            },
-                                        )
-                                        .full_width()
-                                        .label_size(LabelSize::Small)
-                                        .start_icon(
-                                            Icon::new(IconName::ListTree).size(IconSize::XSmall),
-                                        )
-                                        .end_icon(
-                                            Icon::new(IconName::ArrowUpRight)
-                                                .size(IconSize::XSmall),
-                                        )
-                                        .disabled(locked && subplan_steps == 0)
-                                        .on_click(
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.drill_into(subplan_id.clone(), window, cx);
-                                            }),
-                                        ),
-                                    )
                                     .child(
                                         Label::new(if subplan_steps > 0 {
                                             "This step is carried out by running the plan inside \

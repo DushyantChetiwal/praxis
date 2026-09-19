@@ -6219,10 +6219,49 @@ impl AgentPanel {
     /// existed was a deadlock: the canvas is where you learn that planning
     /// exists, so gating it on a plan meant nobody could reach the feature that
     /// produces one.
-    fn render_architect_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn restore_architect_if_needed(
+        &self,
+        thread: Entity<agent::Thread>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let should_restore = match self.workspace.read_with(cx, |workspace, cx| {
+            let stale_or_missing = workspace
+                .item_of_type::<crate::architect_ui::ArchitectPane>(cx)
+                .is_none_or(|pane| !pane.read(cx).owns_thread(&thread));
+            stale_or_missing
+                && crate::architect_ui::ArchitectPane::persisted_mode(workspace, cx)
+                    == crate::architect_ui::ArchitectWorkspaceMode::Architect
+        }) {
+            Ok(should_restore) => should_restore,
+            Err(error) => {
+                log::error!("Could not inspect the workspace while restoring Architect: {error:#}");
+                false
+            }
+        };
+        if !should_restore {
+            return;
+        }
+
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |window, cx| {
+            if let Err(error) = workspace.update(cx, |workspace, cx| {
+                crate::architect_ui::ArchitectPane::open(thread, workspace, window, cx);
+            }) {
+                log::error!("Could not restore the Architect workspace: {error:#}");
+            }
+        });
+    }
+
+    fn render_architect_button(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let thread = self
             .active_thread_view(cx)
             .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))?;
+        self.restore_architect_if_needed(thread.clone(), window, cx);
 
         let step_count = thread
             .read(cx)
@@ -6591,7 +6630,7 @@ impl AgentPanel {
                     thread_view.update(cx, |thread_view, cx| thread_view.render_sandbox_status(cx))
                 });
 
-            let architect_button = self.render_architect_button(cx);
+            let architect_button = self.render_architect_button(window, cx);
 
             base_container
                 .child(

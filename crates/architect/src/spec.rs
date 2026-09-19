@@ -49,6 +49,12 @@ pub fn compile_spec(graph: &ArchitectGraph) -> Result<String, Vec<GraphProblem>>
 
         write!(spec, "\n## Step {number}: {}\n", node.title).ok();
 
+        if !node.responsibility.trim().is_empty() {
+            spec.push_str("\nResponsibility: ");
+            spec.push_str(node.responsibility.trim());
+            spec.push('\n');
+        }
+
         if !node.intent.trim().is_empty() {
             write!(spec, "\nGoal: {}\n", node.intent.trim()).ok();
         }

@@ -2,17 +2,44 @@ use architect::{
     ArchitectGraph, ArchitectNode, EdgeCondition, GraphProblem, NodeId, NodePath, Position,
 };
 use gpui::{
-    App, Bounds, Context, CursorStyle, EventEmitter, FocusHandle, Focusable, Hsla, MouseButton,
-    MouseDownEvent, PathBuilder, Pixels, Render, SharedString, Window, canvas, div, point, px,
+    App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
+    MouseButton, MouseDownEvent, PathBuilder, Pixels, Render, SharedString, Window, canvas, div,
+    point, px,
 };
 use ui::{TintColor, Tooltip, prelude::*};
-use workspace::item::{Item, ItemEvent};
+use workspace::{
+    ShareProject,
+    item::{Item, ItemEvent},
+};
 
 use super::geometry::{EdgeCurve, NODE_WIDTH, paint_curve};
 use super::{
     ArchitectPane, DETAIL_ZOOM_THRESHOLD, EXPANDED_CHILD_LIMIT, Interaction, MAX_ZOOM, MIN_ZOOM,
     Selection,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArchitectLayout {
+    Wide,
+    Medium,
+    Narrow,
+    Compact,
+}
+
+impl ArchitectLayout {
+    fn for_width(width: Pixels) -> Self {
+        let width = f32::from(width);
+        if width >= 1320.0 {
+            Self::Wide
+        } else if width >= 1060.0 {
+            Self::Medium
+        } else if width >= 760.0 {
+            Self::Narrow
+        } else {
+            Self::Compact
+        }
+    }
+}
 
 impl ArchitectPane {
     // -- Rendering ------------------------------------------------------------
@@ -94,7 +121,7 @@ impl ArchitectPane {
             .into_any()
     }
 
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_plan_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let graph = self.graph(cx);
         let step_count = graph.map_or(0, |graph| graph.nodes.len());
         let locked_count = graph.map_or(0, |graph| {
@@ -103,7 +130,9 @@ impl ArchitectPane {
         // Readiness is a property of the whole plan, not of the level on
         // screen: a run started from inside a sub-plan still runs everything.
         let root = self.root_graph(cx);
-        let problems: Vec<GraphProblem> = root.map(|root| root.problems()).unwrap_or_default();
+        let problems: Vec<GraphProblem> = root
+            .map(ArchitectGraph::blocking_problems)
+            .unwrap_or_default();
         let all_locked = step_count > 0 && locked_count == step_count;
         let ready_to_run = root.is_some_and(ArchitectGraph::is_fully_locked_deeply)
             && root.is_some_and(|root| root.blocking_problems().is_empty());
@@ -155,7 +184,20 @@ impl ArchitectPane {
             }
         }
 
-        let breadcrumb = self.render_breadcrumb(cx);
+        let plan_title = self
+            .thread
+            .read(cx)
+            .title()
+            .unwrap_or_else(|| SharedString::from("Untitled plan"));
+        let readiness = if running {
+            "Running"
+        } else if ready_to_run {
+            "Ready to run"
+        } else if step_count == 0 {
+            "Waiting for a plan"
+        } else {
+            "Needs review"
+        };
 
         h_flex()
             .w_full()
@@ -168,53 +210,52 @@ impl ArchitectPane {
             .border_color(cx.theme().colors().border)
             .bg(cx.theme().colors().toolbar_background)
             .child(
-                h_flex()
-                    .gap_3()
+                v_flex()
+                    .gap_0p5()
                     .min_w_0()
-                    .child(breadcrumb)
                     .child(
                         h_flex()
-                            .gap_1p5()
+                            .gap_2()
                             .min_w_0()
-                            .child(
-                                Label::new("PLAN")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .child(
-                                Label::new(summary)
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted)
-                                    .truncate(),
-                            ),
+                            .child(Label::new(plan_title).size(LabelSize::Default).truncate())
+                            .child(chip(
+                                readiness,
+                                Some(if running {
+                                    IconName::PlayFilled
+                                } else if ready_to_run {
+                                    IconName::Check
+                                } else {
+                                    IconName::Warning
+                                }),
+                                if running {
+                                    Color::Info
+                                } else if ready_to_run {
+                                    Color::Success
+                                } else {
+                                    Color::Warning
+                                },
+                                if running {
+                                    cx.theme().status().info_border
+                                } else if ready_to_run {
+                                    cx.theme().status().success_border
+                                } else {
+                                    cx.theme().status().warning_border
+                                },
+                                if running {
+                                    cx.theme().status().info_background
+                                } else if ready_to_run {
+                                    cx.theme().status().success_background
+                                } else {
+                                    cx.theme().status().warning_background
+                                },
+                            )),
                     )
-                    .when(!problems.is_empty(), |this| {
-                        let summary: SharedString = problems
-                            .iter()
-                            .map(|problem| problem.to_string())
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                            .into();
-                        this.child(
-                            h_flex()
-                                .id("architect-problems")
-                                .gap_1()
-                                .child(
-                                    Icon::new(IconName::Warning)
-                                        .size(IconSize::XSmall)
-                                        .color(Color::Warning),
-                                )
-                                .child(
-                                    Label::new(match problems.len() {
-                                        1 => "1 problem".to_string(),
-                                        count => format!("{count} problems"),
-                                    })
-                                    .size(LabelSize::Small)
-                                    .color(Color::Warning),
-                                )
-                                .tooltip(Tooltip::text(summary)),
-                        )
-                    }),
+                    .child(
+                        Label::new(format!("{summary} · live workspace state"))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                            .truncate(),
+                    ),
             )
             .child(
                 h_flex()
@@ -265,34 +306,25 @@ impl ArchitectPane {
                         )
                     })
                     .child(
-                        IconButton::new("architect-add-step", IconName::Plus)
-                            .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text("Add a step"))
-                            .on_click(cx.listener(|this, _, window, cx| this.add_step(window, cx))),
+                        Button::new("architect-share", "Share")
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Subtle)
+                            .start_icon(Icon::new(IconName::ArrowUpRight).size(IconSize::XSmall))
+                            .tooltip(Tooltip::text("Share this project with collaborators"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(ShareProject), cx);
+                            }),
                     )
                     .child(
-                        IconButton::new("architect-tidy", IconName::RotateCw)
-                            .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text("Tidy up the layout"))
-                            .on_click(cx.listener(|this, _, _, cx| this.tidy_up(cx))),
-                    )
-                    .child(
-                        IconButton::new("architect-fit", IconName::Maximize)
-                            .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text("Fit to view"))
-                            .on_click(cx.listener(|this, _, _, cx| this.zoom_to_fit(cx))),
-                    )
-                    .child(
-                        Button::new(
-                            "architect-lock-all",
-                            if all_locked { "Unlock All" } else { "Lock All" },
-                        )
-                        .label_size(LabelSize::Small)
-                        .start_icon(Icon::new(IconName::Lock).size(IconSize::XSmall))
-                        .disabled(step_count == 0 || running)
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| this.set_all_locked(!all_locked, window, cx),
-                        )),
+                        Button::new("architect-review", "Review Plan")
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Subtle)
+                            .start_icon(Icon::new(IconName::ListTodo).size(IconSize::XSmall))
+                            .disabled(step_count == 0)
+                            .tooltip(Tooltip::text("Focus the first step that needs attention"))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.review_plan(window, cx)),
+                            ),
                     )
                     .child(if running {
                         Button::new("architect-stop", "Stop")
@@ -322,6 +354,485 @@ impl ArchitectPane {
                     ),
             )
             .into_any()
+    }
+
+    fn render_canvas_command_bar(
+        &self,
+        show_navigation: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let running = self.is_running(cx);
+        let breadcrumb = self.render_breadcrumb(cx);
+
+        h_flex()
+            .w_full()
+            .flex_none()
+            .px_2()
+            .py_1()
+            .gap_2()
+            .justify_between()
+            .border_b_1()
+            .border_color(cx.theme().colors().border)
+            .bg(cx.theme().colors().editor_background)
+            .child(
+                h_flex()
+                    .gap_1()
+                    .min_w_0()
+                    .when(show_navigation, |this| {
+                        this.child(
+                            Button::new("architect-open-outline", "Plan")
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Subtle)
+                                .start_icon(Icon::new(IconName::ListTree).size(IconSize::XSmall))
+                                .tooltip(Tooltip::text("Open plan navigation"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.outline_drawer_open = true;
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .child(breadcrumb),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .flex_none()
+                    .child(
+                        Button::new("architect-search", "Search")
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Subtle)
+                            .start_icon(Icon::new(IconName::MagnifyingGlass).size(IconSize::XSmall))
+                            .disabled(self.graph(cx).is_none_or(ArchitectGraph::is_empty))
+                            .tooltip(Tooltip::text(
+                                "Open the ordered plan navigator to find a step",
+                            ))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.outline_drawer_open = true;
+                                this.search_editor.focus_handle(cx).focus(window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("architect-tidy", "Tidy")
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Subtle)
+                            .start_icon(Icon::new(IconName::RotateCw).size(IconSize::XSmall))
+                            .disabled(running)
+                            .tooltip(Tooltip::text("Tidy up the graph layout"))
+                            .on_click(cx.listener(|this, _, _, cx| this.tidy_up(cx))),
+                    )
+                    .child(
+                        Button::new("architect-add-step", "Add Step")
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Subtle)
+                            .start_icon(Icon::new(IconName::Plus).size(IconSize::XSmall))
+                            .disabled(running)
+                            .tooltip(Tooltip::text("Add a step to this plan"))
+                            .on_click(cx.listener(|this, _, window, cx| this.add_step(window, cx))),
+                    ),
+            )
+            .into_any()
+    }
+
+    fn render_outline(&self, width: Pixels, cx: &mut Context<Self>) -> AnyElement {
+        let graph = self.graph(cx);
+        let query = self.search_editor.read(cx).text(cx).trim().to_lowercase();
+        let all_ordered_nodes: Vec<ArchitectNode> = graph
+            .map(|graph| {
+                graph
+                    .execution_order()
+                    .into_iter()
+                    .filter_map(|id| graph.node(&id).cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let ordered_nodes: Vec<ArchitectNode> = all_ordered_nodes
+            .iter()
+            .filter(|node| {
+                query.is_empty()
+                    || node.title.to_lowercase().contains(&query)
+                    || node.responsibility.to_lowercase().contains(&query)
+                    || node.intent.to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect();
+        let blocking_problems = graph
+            .map(ArchitectGraph::blocking_problems)
+            .unwrap_or_default();
+        let incomplete_handoffs = graph
+            .map(ArchitectGraph::steps_without_capture)
+            .unwrap_or_default();
+        let selected = match &self.selection {
+            Some(Selection::Node(id)) => Some(id),
+            _ => None,
+        };
+        let running = self.running_node(cx);
+        let run_active = self.is_running(cx);
+        let settled = all_ordered_nodes.iter().filter(|node| node.locked).count();
+        let completed = all_ordered_nodes
+            .iter()
+            .filter(|node| {
+                node.result
+                    .as_ref()
+                    .is_some_and(|result| !result.summary.trim().is_empty())
+            })
+            .count();
+        let draft = all_ordered_nodes.len().saturating_sub(settled);
+        let ready = !all_ordered_nodes.is_empty() && blocking_problems.is_empty();
+
+        v_flex()
+            .w(width)
+            .h_full()
+            .flex_none()
+            .overflow_hidden()
+            .border_r_1()
+            .border_color(cx.theme().colors().border)
+            .bg(cx.theme().colors().panel_background)
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_3()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .child(
+                                Label::new("PLAN OUTLINE")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(chip(
+                                if ready { "Ready" } else { "Review" },
+                                Some(if ready {
+                                    IconName::Check
+                                } else {
+                                    IconName::Warning
+                                }),
+                                if ready {
+                                    Color::Success
+                                } else {
+                                    Color::Warning
+                                },
+                                if ready {
+                                    cx.theme().status().success_border
+                                } else {
+                                    cx.theme().status().warning_border
+                                },
+                                if ready {
+                                    cx.theme().status().success_background
+                                } else {
+                                    cx.theme().status().warning_background
+                                },
+                            )),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Label::new(format!("{} settled", settled))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                Label::new(format!("{draft} draft"))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                Label::new(format!("{completed} complete"))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_1()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(cx.theme().colors().border)
+                            .bg(cx.theme().colors().editor_background)
+                            .child(
+                                Icon::new(IconName::MagnifyingGlass)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(self.search_editor.clone()),
+                    )
+                    .child(
+                        Button::new("architect-plan-conversation", "Plan Conversation")
+                            .full_width()
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Tinted(TintColor::Accent))
+                            .start_icon(Icon::new(IconName::Sparkle).size(IconSize::XSmall))
+                            .tooltip(Tooltip::text(
+                                "Open the root conversation that owns this plan",
+                            ))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.show_plan_chat(window, cx)),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_2()
+                    .gap_3()
+                    .when(
+                        !blocking_problems.is_empty() || !incomplete_handoffs.is_empty(),
+                        |this| {
+                            this.child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(
+                                        Label::new("READINESS")
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    )
+                                    .children(blocking_problems.iter().enumerate().map(
+                                        |(index, problem)| {
+                                            let selection = Self::problem_selection(problem);
+                                            Button::new(
+                                                ("architect-readiness-problem", index),
+                                                truncate(&problem.to_string(), 42),
+                                            )
+                                            .full_width()
+                                            .label_size(LabelSize::XSmall)
+                                            .style(ButtonStyle::Subtle)
+                                            .start_icon(
+                                                Icon::new(IconName::Warning)
+                                                    .size(IconSize::XSmall)
+                                                    .color(Color::Warning),
+                                            )
+                                            .tooltip(Tooltip::text(problem.to_string()))
+                                            .on_click(
+                                                cx.listener(move |this, _, window, cx| {
+                                                    this.set_selection(
+                                                        Some(selection.clone()),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                }),
+                                            )
+                                        },
+                                    ))
+                                    .children(incomplete_handoffs.iter().enumerate().map(
+                                        |(index, id)| {
+                                            let id = id.clone();
+                                            Button::new(
+                                                ("architect-readiness-handoff", index),
+                                                "Add a handoff summary",
+                                            )
+                                            .full_width()
+                                            .label_size(LabelSize::XSmall)
+                                            .style(ButtonStyle::Subtle)
+                                            .start_icon(
+                                                Icon::new(IconName::ArrowRight)
+                                                    .size(IconSize::XSmall)
+                                                    .color(Color::Warning),
+                                            )
+                                            .on_click(
+                                                cx.listener(move |this, _, window, cx| {
+                                                    this.set_selection(
+                                                        Some(Selection::Node(id.clone())),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                }),
+                                            )
+                                        },
+                                    )),
+                            )
+                        },
+                    )
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(
+                                Label::new("EXECUTION ORDER")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .children(ordered_nodes.into_iter().enumerate().map(
+                                |(index, node)| {
+                                    let id = node.id.clone();
+                                    let is_selected = selected == Some(&node.id);
+                                    let is_running = running == Some(&node.id);
+                                    let is_complete = node
+                                        .result
+                                        .as_ref()
+                                        .is_some_and(|result| !result.summary.trim().is_empty());
+                                    let (state, state_color) = if is_running {
+                                        ("running", Color::Info)
+                                    } else if is_complete {
+                                        ("completed", Color::Success)
+                                    } else if node.locked {
+                                        ("settled", Color::Success)
+                                    } else if run_active {
+                                        ("queued", Color::Muted)
+                                    } else {
+                                        ("draft", Color::Muted)
+                                    };
+                                    let responsibility = if node.responsibility.trim().is_empty() {
+                                        "Responsibility not set".to_string()
+                                    } else {
+                                        node.responsibility.clone()
+                                    };
+
+                                    v_flex()
+                                        .id(("architect-outline-step", index))
+                                        .w_full()
+                                        .gap_0p5()
+                                        .px_2()
+                                        .py_1p5()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(if is_selected {
+                                            cx.theme().colors().border_focused
+                                        } else {
+                                            cx.theme().colors().border_variant
+                                        })
+                                        .bg(if is_selected {
+                                            cx.theme().colors().element_selected
+                                        } else {
+                                            cx.theme().colors().element_background
+                                        })
+                                        .cursor(CursorStyle::PointingHand)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.set_selection(
+                                                Some(Selection::Node(id.clone())),
+                                                window,
+                                                cx,
+                                            )
+                                        }))
+                                        .child(
+                                            h_flex()
+                                                .gap_1()
+                                                .min_w_0()
+                                                .child(
+                                                    Label::new(format!("{:02}", index + 1))
+                                                        .size(LabelSize::XSmall)
+                                                        .color(Color::Muted),
+                                                )
+                                                .child(
+                                                    Label::new(node.title)
+                                                        .size(LabelSize::Small)
+                                                        .truncate(),
+                                                ),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .w_full()
+                                                .justify_between()
+                                                .gap_1()
+                                                .child(
+                                                    Label::new(responsibility)
+                                                        .size(LabelSize::XSmall)
+                                                        .color(Color::Muted)
+                                                        .truncate(),
+                                                )
+                                                .child(
+                                                    Label::new(state)
+                                                        .size(LabelSize::XSmall)
+                                                        .color(state_color),
+                                                ),
+                                        )
+                                },
+                            )),
+                    ),
+            )
+            .into_any()
+    }
+
+    fn render_run_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let thread = self.thread.read(cx);
+        let run = thread.architect_run()?;
+        let total = self
+            .root_graph(cx)
+            .map(|graph| graph.execution_order().len())
+            .unwrap_or_default()
+            .max(1);
+        let completed = run
+            .history()
+            .iter()
+            .filter(|step| !step.is_running())
+            .count();
+        let progress = (completed as f32 / total as f32).clamp(0.0, 1.0);
+        let elapsed = run
+            .history()
+            .iter()
+            .map(|step| step.elapsed())
+            .sum::<std::time::Duration>();
+        let status: SharedString = match &run.outcome {
+            Some(outcome) => self
+                .root_graph(cx)
+                .map(|graph| outcome.describe(graph).into())
+                .unwrap_or_else(|| SharedString::from("Run finished")),
+            None => format!("Running {}", run.current_title).into(),
+        };
+
+        Some(
+            h_flex()
+                .w_full()
+                .flex_none()
+                .px_3()
+                .py_1p5()
+                .gap_3()
+                .border_b_1()
+                .border_color(cx.theme().status().info_border)
+                .bg(cx.theme().status().info_background)
+                .child(
+                    Icon::new(if run.is_running() {
+                        IconName::PlayFilled
+                    } else {
+                        IconName::Check
+                    })
+                    .size(IconSize::Small)
+                    .color(if run.is_running() {
+                        Color::Info
+                    } else {
+                        Color::Success
+                    }),
+                )
+                .child(
+                    v_flex()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(Label::new(status).size(LabelSize::Small).truncate())
+                        .child(
+                            div()
+                                .w(px(220.0))
+                                .h(px(4.0))
+                                .rounded_full()
+                                .bg(cx.theme().colors().border_variant)
+                                .child(
+                                    div()
+                                        .w(px(220.0 * progress))
+                                        .h_full()
+                                        .rounded_full()
+                                        .bg(cx.theme().status().info),
+                                ),
+                        ),
+                )
+                .child(div().flex_1())
+                .child(
+                    Label::new(format!(
+                        "{} of {} · {}s",
+                        completed.min(total),
+                        total,
+                        elapsed.as_secs()
+                    ))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+                )
+                .into_any(),
+        )
     }
 
     /// A scaled-down plan of the level on screen, so a graph too big to fit is
@@ -452,6 +963,14 @@ impl ArchitectPane {
                     .style(ButtonStyle::Subtle)
                     .tooltip(Tooltip::text("Back to actual size"))
                     .on_click(cx.listener(|this, _, _, cx| this.set_zoom(1.0, None, cx))),
+            )
+            .child(
+                Button::new("architect-fit", "Fit")
+                    .label_size(LabelSize::XSmall)
+                    .style(ButtonStyle::Subtle)
+                    .start_icon(Icon::new(IconName::Maximize).size(IconSize::XSmall))
+                    .tooltip(Tooltip::text("Fit the entire plan in the graph workspace"))
+                    .on_click(cx.listener(|this, _, _, cx| this.zoom_to_fit(cx))),
             )
             .child(
                 IconButton::new("architect-zoom-in", IconName::Plus)
@@ -728,7 +1247,7 @@ impl ArchitectPane {
 
         // The nodes are copied out before rendering: building elements needs
         // mutable access to the context, which is where the graph is read from.
-        let Some((nodes, invalid)) = self.graph(cx).map(|graph| {
+        let Some((nodes, invalid, execution_order)) = self.graph(cx).map(|graph| {
             let invalid: Vec<NodeId> = graph
                 .problems()
                 .iter()
@@ -737,7 +1256,7 @@ impl ArchitectPane {
                     _ => None,
                 })
                 .collect();
-            (graph.nodes.clone(), invalid)
+            (graph.nodes.clone(), invalid, graph.execution_order())
         }) else {
             return Vec::new();
         };
@@ -754,6 +1273,11 @@ impl ArchitectPane {
                 let left = screen.x - bounds.origin.x - width / 2.0;
                 let top = screen.y - bounds.origin.y - height / 2.0;
                 let is_invalid = invalid.contains(&node.id);
+                let step_number = execution_order
+                    .iter()
+                    .position(|id| id == &node.id)
+                    .map(|index| index + 1)
+                    .unwrap_or(ix + 1);
 
                 Some(
                     div()
@@ -762,7 +1286,7 @@ impl ArchitectPane {
                         .top(top)
                         .w(width)
                         .h(height)
-                        .child(self.render_node(ix, node, is_invalid, cx))
+                        .child(self.render_node(ix, step_number, node, is_invalid, cx))
                         .into_any(),
                 )
             })
@@ -895,6 +1419,7 @@ impl ArchitectPane {
     fn render_node(
         &self,
         ix: usize,
+        step_number: usize,
         node: ArchitectNode,
         invalid: bool,
         cx: &mut Context<Self>,
@@ -959,7 +1484,6 @@ impl ArchitectPane {
         };
 
         let id = node.id.clone();
-        let lock_id = node.id.clone();
         let connect_id = node.id.clone();
         let expand_id = node.id.clone();
         let expanded = self.expanded.contains(&node.id);
@@ -1037,6 +1561,11 @@ impl ArchitectPane {
                                     .gap_1()
                                     .min_w_0()
                                     .overflow_hidden()
+                                    .child(
+                                        Label::new(format!("{step_number:02}"))
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    )
                                     .when(running, |this| {
                                         this.child(
                                             Icon::new(IconName::PlayFilled)
@@ -1096,35 +1625,40 @@ impl ArchitectPane {
                                         )
                                     })
                                     .child(
-                                        IconButton::new(
-                                            ("architect-node-lock", ix),
-                                            if node.locked {
-                                                IconName::Lock
-                                            } else {
-                                                IconName::Pencil
-                                            },
-                                        )
-                                        .icon_size(IconSize::XSmall)
-                                        .icon_color(if node.locked {
-                                            Color::Accent
+                                        Label::new(if running {
+                                            "running"
+                                        } else if done {
+                                            "completed"
+                                        } else if node.locked {
+                                            "settled"
                                         } else {
-                                            Color::Muted
+                                            "draft"
                                         })
-                                        .tooltip(Tooltip::text(if node.locked {
-                                            "Locked. Click to reopen for changes"
-                                        } else {
-                                            "Draft. Click to lock"
-                                        }))
-                                        .on_click(
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.toggle_lock(lock_id.clone(), window, cx);
-                                            }),
+                                        .size(LabelSize::XSmall)
+                                        .color(
+                                            if running {
+                                                Color::Info
+                                            } else if done || node.locked {
+                                                Color::Success
+                                            } else {
+                                                Color::Muted
+                                            },
                                         ),
                                     ),
                             ),
                     )
                     .when(detailed, |this| {
                         this.child(
+                            Label::new(if node.responsibility.trim().is_empty() {
+                                "Responsibility not set".to_string()
+                            } else {
+                                node.responsibility.clone()
+                            })
+                            .size(LabelSize::XSmall)
+                            .color(Color::Accent)
+                            .truncate(),
+                        )
+                        .child(
                             div().flex_1().overflow_hidden().child(
                                 Label::new(if node.intent.trim().is_empty() {
                                     "No goal set yet".to_string()
@@ -1256,6 +1790,59 @@ impl ArchitectPane {
             )
             .into_any()
     }
+
+    fn render_graph_workspace(
+        &self,
+        has_plan: bool,
+        show_navigation: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let command_bar = self.render_canvas_command_bar(show_navigation, cx);
+        let edges = self.render_edges(cx);
+        let edge_labels = self.render_edge_labels(cx);
+        let nodes = self.render_nodes(cx);
+        let minimap = self.render_minimap(cx);
+        let zoom_control = self.render_zoom_control(cx);
+
+        v_flex()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .overflow_hidden()
+            .child(command_bar)
+            .child(if has_plan {
+                div()
+                    .id("architect-canvas")
+                    .relative()
+                    .flex_1()
+                    .w_full()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .cursor(if self.interaction.is_idle() {
+                        CursorStyle::Arrow
+                    } else {
+                        CursorStyle::ClosedHand
+                    })
+                    .on_scroll_wheel(cx.listener(Self::handle_scroll))
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
+                    .on_mouse_move(cx.listener(Self::handle_mouse_move))
+                    .child(edges)
+                    .children(edge_labels)
+                    .children(nodes)
+                    .children(minimap)
+                    .child(zoom_control)
+                    .into_any()
+            } else {
+                div()
+                    .flex_1()
+                    .w_full()
+                    .min_h_0()
+                    .child(self.render_empty_state(cx))
+                    .into_any()
+            })
+            .into_any()
+    }
 }
 
 /// A small tinted label. Nodes have room for about three words, so the canvas
@@ -1292,16 +1879,77 @@ pub(super) fn truncate(text: &str, limit: usize) -> String {
 }
 
 impl Render for ArchitectPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_plan = self.graph(cx).is_some_and(|graph| !graph.is_empty());
-
-        let toolbar = self.render_toolbar(cx);
-        let edges = self.render_edges(cx);
-        let edge_labels = self.render_edge_labels(cx);
-        let nodes = self.render_nodes(cx);
-        let minimap = self.render_minimap(cx);
-        let zoom_control = self.render_zoom_control(cx);
-        let inspector = self.render_inspector(cx);
+        let viewport_width = window.viewport_size().width;
+        let layout = ArchitectLayout::for_width(viewport_width);
+        let inline_outline = !matches!(layout, ArchitectLayout::Compact);
+        let inline_inspector = matches!(layout, ArchitectLayout::Wide | ArchitectLayout::Medium);
+        let outline_width = match layout {
+            ArchitectLayout::Wide => self.outline_width,
+            ArchitectLayout::Medium | ArchitectLayout::Narrow => px(204.0),
+            ArchitectLayout::Compact => px((f32::from(viewport_width) - 24.0).clamp(240.0, 320.0)),
+        };
+        let inspector_width = match layout {
+            ArchitectLayout::Wide => self.inspector_width,
+            ArchitectLayout::Medium => px(312.0),
+            ArchitectLayout::Narrow => px(348.0),
+            ArchitectLayout::Compact => px((f32::from(viewport_width) - 24.0).clamp(280.0, 348.0)),
+        };
+        let header = self.render_plan_header(cx);
+        let run_bar = self.render_run_bar(cx);
+        let graph =
+            self.render_graph_workspace(has_plan, matches!(layout, ArchitectLayout::Compact), cx);
+        let outline = inline_outline.then(|| self.render_outline(outline_width, cx));
+        let inspector = inline_inspector
+            .then(|| self.render_inspector(inspector_width, cx))
+            .flatten();
+        let outline_drawer = (!inline_outline && self.outline_drawer_open).then(|| {
+            div()
+                .absolute()
+                .left(px(0.0))
+                .top(px(0.0))
+                .bottom(px(0.0))
+                .w(outline_width)
+                .shadow_lg()
+                .child(self.render_outline(outline_width, cx))
+                .child(
+                    div().absolute().right(px(8.0)).top(px(8.0)).child(
+                        IconButton::new("architect-close-outline", IconName::Close)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Close plan navigation"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.outline_drawer_open = false;
+                                this.focus_handle.focus(window, cx);
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .into_any()
+        });
+        let inspector_drawer = (!inline_inspector && self.inspector_drawer_open).then(|| {
+            div()
+                .absolute()
+                .right(px(0.0))
+                .top(px(0.0))
+                .bottom(px(0.0))
+                .w(inspector_width + px(8.0))
+                .shadow_lg()
+                .children(self.render_inspector(inspector_width, cx))
+                .child(
+                    div().absolute().right(px(14.0)).top(px(14.0)).child(
+                        IconButton::new("architect-close-inspector", IconName::Close)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Close inspector"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.inspector_drawer_open = false;
+                                this.focus_handle.focus(window, cx);
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .into_any()
+        });
 
         v_flex()
             .key_context("ArchitectPane")
@@ -1310,42 +1958,25 @@ impl Render for ArchitectPane {
             .overflow_hidden()
             .bg(cx.theme().colors().editor_background)
             .on_key_down(cx.listener(Self::handle_key_down))
-            .child(toolbar)
+            .child(header)
+            .children(run_bar)
             .child(
-                h_flex()
+                div()
+                    .relative()
                     .flex_1()
-                    .size_full()
+                    .w_full()
+                    .min_h_0()
                     .overflow_hidden()
-                    .child(if has_plan {
-                        div()
-                            .id("architect-canvas")
-                            .relative()
-                            .flex_1()
-                            .h_full()
+                    .child(
+                        h_flex()
+                            .size_full()
                             .overflow_hidden()
-                            .cursor(if self.interaction.is_idle() {
-                                CursorStyle::Arrow
-                            } else {
-                                CursorStyle::ClosedHand
-                            })
-                            .on_scroll_wheel(cx.listener(Self::handle_scroll))
-                            .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
-                            .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
-                            .on_mouse_move(cx.listener(Self::handle_mouse_move))
-                            .child(edges)
-                            .children(edge_labels)
-                            .children(nodes)
-                            .children(minimap)
-                            .child(zoom_control)
-                            .into_any()
-                    } else {
-                        div()
-                            .flex_1()
-                            .h_full()
-                            .child(self.render_empty_state(cx))
-                            .into_any()
-                    })
-                    .children(inspector),
+                            .children(outline)
+                            .child(graph)
+                            .children(inspector),
+                    )
+                    .children(outline_drawer)
+                    .children(inspector_drawer),
             )
     }
 }
@@ -1379,6 +2010,15 @@ impl Item for ArchitectPane {
 
     fn preserve_preview(&self, _cx: &App) -> bool {
         true
+    }
+
+    fn discarded(
+        &self,
+        _project: Entity<project::Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.restore_after_discard(window, cx);
     }
 
     fn include_in_nav_history() -> bool {

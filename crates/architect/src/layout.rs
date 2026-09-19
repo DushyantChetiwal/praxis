@@ -29,9 +29,9 @@ impl Position {
 
 /// Horizontal distance between columns, wide enough for an edge label to sit on
 /// the connection without touching either node.
-pub const COLUMN_SPACING: f32 = 340.0;
+pub const COLUMN_SPACING: f32 = 392.0;
 /// Vertical distance between steps sharing a column.
-pub const ROW_SPACING: f32 = 168.0;
+pub const ROW_SPACING: f32 = 196.0;
 
 /// The number of reordering passes. Each pass pulls a step toward the average
 /// position of the steps that lead to it; a handful of passes is enough to
@@ -245,6 +245,12 @@ mod tests {
 
         assert!(x_of(&positions, "a") < x_of(&positions, "b"));
         assert!(x_of(&positions, "b") < x_of(&positions, "c"));
+    }
+
+    #[test]
+    fn layout_spacing_clears_final_card_bounds() {
+        assert!(COLUMN_SPACING > 280.0);
+        assert!(ROW_SPACING > 132.0);
     }
 
     #[test]

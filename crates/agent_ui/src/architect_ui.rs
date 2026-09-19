@@ -17,14 +17,18 @@ use std::rc::Rc;
 
 use agent::Thread;
 use architect::{
-    ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, GraphMutationError, NodeId, NodePath,
-    Position,
+    ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, GraphMutationError, GraphProblem, NodeId,
+    NodePath, Position,
 };
+use editor::Editor;
+use git_ui::git_panel::GitPanel;
 use gpui::{
     AppContext as _, Bounds, Context, Entity, FocusHandle, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent,
     Subscription, WeakEntity, Window, point, px,
 };
+use project_panel::ProjectPanel;
+use terminal_view::terminal_panel::TerminalPanel;
 use workspace::{Workspace, ZoomIn, ZoomOut, dock::DockPosition, item::WeakItemHandle};
 
 use crate::AgentPanel;
@@ -32,7 +36,7 @@ use geometry::{
     EDGE_HIT_TOLERANCE, EXPANDED_NODE_HEIGHT, EXPANDED_NODE_WIDTH, EdgeCurve, NODE_HEIGHT,
     NODE_WIDTH, snap,
 };
-use inspector::{InspectorTab, NodeInspector};
+use inspector::{EdgeInspector, InspectorTab, NodeInspector};
 
 /// How many children an expanded step shows before it stops and says how many
 /// are left. Past this the cards are too narrow to read.
@@ -41,6 +45,7 @@ const EXPANDED_CHILD_LIMIT: usize = 4;
 const MIN_ZOOM: f32 = 0.35;
 const MAX_ZOOM: f32 = 2.0;
 const SCROLL_LINE_HEIGHT: f32 = 20.0;
+const WORKSPACE_MODE_KEY_PREFIX: &str = "architect-workspace-mode";
 
 /// Below this, node text would be an unreadable smear, so nodes show their
 /// title alone and let the shape of the graph do the talking.
@@ -108,6 +113,7 @@ pub struct ArchitectPane {
     zoom: f32,
     selection: Option<Selection>,
     inspector: Option<NodeInspector>,
+    edge_inspector: Option<EdgeInspector>,
     interaction: Interaction,
     hovered_node: Option<NodeId>,
     /// Which plan the canvas is showing. Empty is the top-level plan; each id
@@ -117,13 +123,19 @@ pub struct ArchitectPane {
     /// count. One level: a child of an expanded step is drawn as a plain card
     /// even if it has a plan of its own, and drilling in is how you go deeper.
     expanded: HashSet<NodeId>,
-    /// Which half of the inspector is showing.
+    /// Which inspector concern is showing.
     inspector_tab: InspectorTab,
+    outline_drawer_open: bool,
+    inspector_drawer_open: bool,
+    outline_width: Pixels,
+    inspector_width: Pixels,
+    search_editor: Entity<Editor>,
     /// Set while a run is being started, so the toolbar can show it before the
     /// thread has been told. The run itself belongs to the thread.
     run_starting: Cell<bool>,
 
     _thread_subscription: Subscription,
+    _search_subscription: Subscription,
 }
 
 impl ArchitectPane {
@@ -132,9 +144,16 @@ impl ArchitectPane {
         workspace: WeakEntity<Workspace>,
         previous_code_item: Option<Box<dyn WeakItemHandle>>,
         code_docks: Vec<DockSnapshot>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscription = cx.observe(&thread, |_, _, cx| cx.notify());
+        let search_editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("Search steps", window, cx);
+            editor
+        });
+        let search_subscription = cx.observe(&search_editor, |_, _, cx| cx.notify());
         Self {
             thread,
             workspace,
@@ -147,18 +166,69 @@ impl ArchitectPane {
             zoom: 1.0,
             selection: None,
             inspector: None,
+            edge_inspector: None,
             interaction: Interaction::None,
             hovered_node: None,
             focus: NodePath::default(),
             expanded: HashSet::default(),
             inspector_tab: InspectorTab::Details,
+            outline_drawer_open: false,
+            inspector_drawer_open: false,
+            outline_width: px(226.0),
+            inspector_width: px(348.0),
+            search_editor,
             run_starting: Cell::new(false),
             _thread_subscription: subscription,
+            _search_subscription: search_subscription,
         }
     }
 
     pub fn mode(&self) -> ArchitectWorkspaceMode {
         self.mode
+    }
+
+    pub fn owns_thread(&self, thread: &Entity<Thread>) -> bool {
+        &self.thread == thread
+    }
+
+    fn workspace_mode_key(workspace: &Workspace) -> Option<String> {
+        workspace
+            .database_id()
+            .map(|id| i64::from(id).to_string())
+            .or_else(|| workspace.session_id())
+            .map(|id| format!("{WORKSPACE_MODE_KEY_PREFIX}:{id}"))
+    }
+
+    pub fn persisted_mode(workspace: &Workspace, cx: &gpui::App) -> ArchitectWorkspaceMode {
+        let Some(key) = Self::workspace_mode_key(workspace) else {
+            return ArchitectWorkspaceMode::Architect;
+        };
+        match db::kvp::KeyValueStore::global(cx).read_kvp(&key) {
+            Ok(Some(value)) if value == "code" => ArchitectWorkspaceMode::Code,
+            Ok(Some(value)) if value == "architect" => ArchitectWorkspaceMode::Architect,
+            Ok(Some(value)) => {
+                log::warn!("Ignoring unknown Architect workspace mode `{value}` for {key}");
+                ArchitectWorkspaceMode::Architect
+            }
+            Ok(None) => ArchitectWorkspaceMode::Architect,
+            Err(error) => {
+                log::error!("Could not read Architect workspace mode for {key}: {error:#}");
+                ArchitectWorkspaceMode::Architect
+            }
+        }
+    }
+
+    fn persist_mode(workspace: &Workspace, mode: ArchitectWorkspaceMode, cx: &mut gpui::App) {
+        let Some(key) = Self::workspace_mode_key(workspace) else {
+            return;
+        };
+        let value = match mode {
+            ArchitectWorkspaceMode::Architect => "architect",
+            ArchitectWorkspaceMode::Code => "code",
+        }
+        .to_string();
+        let store = db::kvp::KeyValueStore::global(cx);
+        db::write_and_log(cx, move || async move { store.write_kvp(key, value).await });
     }
 
     fn capture_docks(workspace: &Workspace, cx: &Context<Workspace>) -> Vec<DockSnapshot> {
@@ -215,10 +285,13 @@ impl ArchitectPane {
         self.focus = NodePath::default();
         self.selection = None;
         self.inspector = None;
+        self.edge_inspector = None;
         self.interaction = Interaction::None;
         self.hovered_node = None;
         self.expanded.clear();
         self.inspector_tab = InspectorTab::Details;
+        self.outline_drawer_open = false;
+        self.inspector_drawer_open = false;
         self.pan = point(px(0.0), px(0.0));
         self.zoom = 1.0;
         cx.notify();
@@ -266,6 +339,7 @@ impl ArchitectPane {
                     workspace_handle,
                     previous_code_item,
                     code_docks.unwrap_or_default(),
+                    window,
                     cx,
                 )
             });
@@ -275,6 +349,33 @@ impl ArchitectPane {
         workspace
             .active_pane()
             .update(cx, |pane, cx| pane.zoom_in(&ZoomIn, window, cx));
+        Self::persist_mode(workspace, ArchitectWorkspaceMode::Architect, cx);
+    }
+
+    fn restore_code_surface(
+        workspace: &mut Workspace,
+        previous_code_item: Option<Box<dyn workspace::item::ItemHandle>>,
+        code_docks: Vec<DockSnapshot>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        workspace
+            .active_pane()
+            .update(cx, |pane, cx| pane.zoom_out(&ZoomOut, window, cx));
+        Self::arrange_code_panels(workspace, window, cx);
+
+        let code_item = previous_code_item.or_else(|| {
+            workspace
+                .items(cx)
+                .find(|item| item.downcast::<ArchitectPane>().is_none())
+                .map(|item| item.boxed_clone())
+        });
+        if let Some(code_item) = code_item {
+            workspace.activate_item(code_item.as_ref(), true, true, window, cx);
+        }
+
+        Self::restore_code_docks(workspace, &code_docks, window, cx);
+        Self::persist_mode(workspace, ArchitectWorkspaceMode::Code, cx);
     }
 
     pub fn activate_code(
@@ -296,22 +397,7 @@ impl ArchitectPane {
                 architect.code_docks.clone(),
             )
         });
-
-        workspace
-            .active_pane()
-            .update(cx, |pane, cx| pane.zoom_out(&ZoomOut, window, cx));
-
-        let code_item = previous_code_item.or_else(|| {
-            workspace
-                .items(cx)
-                .find(|item| item.downcast::<ArchitectPane>().is_none())
-                .map(|item| item.boxed_clone())
-        });
-        if let Some(code_item) = code_item {
-            workspace.activate_item(code_item.as_ref(), true, true, window, cx);
-        }
-
-        Self::restore_code_docks(workspace, &code_docks, window, cx);
+        Self::restore_code_surface(workspace, previous_code_item, code_docks, window, cx);
     }
 
     fn request_code_mode(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -320,9 +406,33 @@ impl ArchitectPane {
             let Some(workspace) = workspace.upgrade() else {
                 return;
             };
-            workspace.update(cx, |workspace, cx| {
+            if let Err(error) = workspace.update(cx, |workspace, cx| {
                 Self::activate_code(workspace, window, cx);
-            });
+            }) {
+                log::error!("Could not activate the Code workspace: {error:#}");
+            }
+        });
+    }
+
+    fn restore_after_discard(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode != ArchitectWorkspaceMode::Architect {
+            return;
+        }
+        let workspace = self.workspace.clone();
+        let previous_code_item = self
+            .previous_code_item
+            .as_ref()
+            .and_then(|item| item.upgrade());
+        let code_docks = self.code_docks.clone();
+        window.defer(cx, move |window, cx| {
+            let Some(workspace) = workspace.upgrade() else {
+                return;
+            };
+            if let Err(error) = workspace.update(cx, |workspace, cx| {
+                Self::restore_code_surface(workspace, previous_code_item, code_docks, window, cx);
+            }) {
+                log::error!("Could not restore Code after closing Architect: {error:#}");
+            }
         });
     }
 
@@ -427,6 +537,7 @@ impl ArchitectPane {
         self.focus = self.focus.child(id);
         self.selection = None;
         self.inspector = None;
+        self.edge_inspector = None;
         self.interaction = Interaction::None;
         self.hovered_node = None;
         self.zoom_to_fit(cx);
@@ -456,6 +567,7 @@ impl ArchitectPane {
         self.focus = NodePath(self.focus.0[..depth].to_vec());
         self.selection = None;
         self.inspector = None;
+        self.edge_inspector = None;
         self.interaction = Interaction::None;
         self.hovered_node = None;
         self.zoom_to_fit(cx);
@@ -687,6 +799,57 @@ impl ArchitectPane {
         self.zoom_to_fit(cx);
     }
 
+    fn problem_selection(problem: &GraphProblem) -> Selection {
+        match problem {
+            GraphProblem::DuplicateNode(id)
+            | GraphProblem::Unreachable(id)
+            | GraphProblem::Unlocked(id)
+            | GraphProblem::InSubplan { node: id, .. } => Selection::Node(id.clone()),
+            GraphProblem::DanglingEdge { edge, .. } | GraphProblem::EmptyCondition(edge) => {
+                Selection::Edge(edge.clone())
+            }
+        }
+    }
+
+    fn review_plan(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selection = self.graph(cx).and_then(|graph| {
+            graph
+                .blocking_problems()
+                .first()
+                .map(Self::problem_selection)
+                .or_else(|| {
+                    graph
+                        .execution_order()
+                        .first()
+                        .cloned()
+                        .map(Selection::Node)
+                })
+        });
+        self.set_selection(selection, window, cx);
+    }
+
+    fn select_adjacent_step(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(order) = self.graph(cx).map(ArchitectGraph::execution_order) else {
+            return;
+        };
+        if order.is_empty() {
+            return;
+        }
+        let selected = match &self.selection {
+            Some(Selection::Node(id)) => order.iter().position(|candidate| candidate == id),
+            _ => None,
+        };
+        let index = match (selected, forward) {
+            (Some(index), true) => (index + 1).min(order.len().saturating_sub(1)),
+            (Some(index), false) => index.saturating_sub(1),
+            (None, true) => 0,
+            (None, false) => order.len().saturating_sub(1),
+        };
+        if let Some(id) = order.get(index).cloned() {
+            self.set_selection(Some(Selection::Node(id)), window, cx);
+        }
+    }
+
     // -- Input ----------------------------------------------------------------
 
     fn handle_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -816,11 +979,27 @@ impl ArchitectPane {
         // reaches the canvas is one meant for the canvas.
         match event.keystroke.key.as_str() {
             "delete" | "backspace" => self.delete_selection(window, cx),
+            "down" | "right" => self.select_adjacent_step(true, window, cx),
+            "up" | "left" => self.select_adjacent_step(false, window, cx),
+            "enter" => {
+                if self.selection.is_some() {
+                    self.inspector_drawer_open = true;
+                    cx.notify();
+                }
+            }
             // Escape works outwards without leaving the Architect workspace: it
             // drops the selection first, then leaves a nested plan.
             "escape" => {
                 self.interaction = Interaction::None;
-                if self.selection.is_some() {
+                if self.inspector_drawer_open {
+                    self.inspector_drawer_open = false;
+                    self.focus_handle.focus(window, cx);
+                    cx.notify();
+                } else if self.outline_drawer_open {
+                    self.outline_drawer_open = false;
+                    self.focus_handle.focus(window, cx);
+                    cx.notify();
+                } else if self.selection.is_some() {
                     self.set_selection(None, window, cx);
                 } else {
                     self.drill_out(window, cx);
@@ -898,9 +1077,9 @@ mod tests {
             })
             .unwrap();
         let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
-        let pane = workspace.update_in(cx, |_workspace, _window, cx| {
+        let pane = workspace.update_in(cx, |_workspace, window, cx| {
             let workspace = cx.weak_entity();
-            cx.new(|cx| ArchitectPane::new(thread.clone(), workspace, None, Vec::new(), cx))
+            cx.new(|cx| ArchitectPane::new(thread.clone(), workspace, None, Vec::new(), window, cx))
         });
 
         pane.update_in(cx, |pane, window, cx| {
@@ -994,9 +1173,9 @@ mod tests {
         });
         drop(pane);
 
-        let reopened = workspace.update_in(cx, |_workspace, _window, cx| {
+        let reopened = workspace.update_in(cx, |_workspace, window, cx| {
             let workspace = cx.weak_entity();
-            cx.new(|cx| ArchitectPane::new(thread.clone(), workspace, None, Vec::new(), cx))
+            cx.new(|cx| ArchitectPane::new(thread.clone(), workspace, None, Vec::new(), window, cx))
         });
         reopened.read_with(cx, |pane, cx| {
             assert!(
