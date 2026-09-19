@@ -1449,11 +1449,11 @@ mod tests {
                 multi_workspace.workspace().clone()
             })
             .unwrap();
+        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
         workspace.update_in(cx, |workspace, window, cx| {
             let agent_panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
             workspace.add_panel(agent_panel, window, cx);
         });
-        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
         let pane = workspace.update_in(cx, |_workspace, window, cx| {
             let workspace = cx.weak_entity();
             cx.new(|cx| {
