@@ -31,7 +31,7 @@ pub(super) struct EdgeInspector {
 
 pub(super) struct NodeInspector {
     node: NodeId,
-    title: Entity<Editor>,
+    pub(super) title: Entity<Editor>,
     responsibility: Entity<Editor>,
     goal: Entity<Editor>,
     capture: Entity<Editor>,
@@ -285,7 +285,7 @@ impl ArchitectPane {
     /// point: settling this step cannot crowd out the context the next step will
     /// be settled in. The agent panel is deliberately left where it is, showing
     /// the conversation that owns the plan.
-    fn discuss_node(&mut self, id: NodeId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn discuss_node(&mut self, id: NodeId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(node) = self.graph(cx).and_then(|graph| graph.node(&id)).cloned() else {
             self.report(
                 "That step is no longer available. Select another step and try again.".to_string(),
