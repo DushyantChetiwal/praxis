@@ -149,6 +149,7 @@ pub struct ArchitectPane {
     previous_code_item: Option<Box<dyn WeakItemHandle>>,
     code_docks: Vec<DockSnapshot>,
     focus_handle: FocusHandle,
+    last_code_focus: Option<FocusHandle>,
     last_architect_focus: Option<FocusHandle>,
     transient_return_focus: Option<FocusHandle>,
     /// The canvas layer reports its bounds during paint; everything that
@@ -191,6 +192,7 @@ impl ArchitectPane {
         workspace: WeakEntity<Workspace>,
         previous_code_item: Option<Box<dyn WeakItemHandle>>,
         code_docks: Vec<DockSnapshot>,
+        last_code_focus: Option<FocusHandle>,
         outline_width: Pixels,
         inspector_width: Pixels,
         window: &mut Window,
@@ -213,6 +215,7 @@ impl ArchitectPane {
             previous_code_item,
             code_docks,
             focus_handle: cx.focus_handle(),
+            last_code_focus,
             last_architect_focus: None,
             transient_return_focus: None,
             viewport: Rc::new(Cell::new(None)),
@@ -435,6 +438,7 @@ impl ArchitectPane {
             .flatten()
             .filter(|item| item.downcast::<ArchitectPane>().is_none())
             .map(|item| item.downgrade_item());
+        let last_code_focus = (!already_active).then(|| window.focused(cx)).flatten();
         let code_docks = (!already_active).then(|| Self::capture_docks(workspace, cx));
 
         Self::hide_code_docks(workspace, window, cx);
@@ -461,6 +465,9 @@ impl ArchitectPane {
                 if let Some(code_docks) = code_docks {
                     architect.code_docks = code_docks;
                 }
+                if let Some(last_code_focus) = last_code_focus {
+                    architect.last_code_focus = Some(last_code_focus);
+                }
             });
             workspace.activate_item(&existing, true, true, window, cx);
             let focus = existing
@@ -477,6 +484,7 @@ impl ArchitectPane {
                     workspace_handle,
                     previous_code_item,
                     code_docks.unwrap_or_default(),
+                    last_code_focus,
                     px(persisted_state.outline_width),
                     px(persisted_state.inspector_width),
                     window,
@@ -522,6 +530,7 @@ impl ArchitectPane {
         workspace: &mut Workspace,
         previous_code_item: Option<Box<dyn workspace::item::ItemHandle>>,
         code_docks: Vec<DockSnapshot>,
+        last_code_focus: Option<FocusHandle>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
@@ -541,6 +550,9 @@ impl ArchitectPane {
         }
 
         Self::restore_code_docks(workspace, &code_docks, window, cx);
+        if let Some(last_code_focus) = last_code_focus {
+            last_code_focus.focus(window, cx);
+        }
         Self::persist_mode(workspace, ArchitectWorkspaceMode::Code, cx);
     }
 
@@ -552,18 +564,27 @@ impl ArchitectPane {
         let Some(architect) = workspace.item_of_type::<ArchitectPane>(cx) else {
             return;
         };
-        let (previous_code_item, code_docks) = architect.update(cx, |architect, cx| {
-            architect.mode = ArchitectWorkspaceMode::Code;
-            cx.notify();
-            (
-                architect
-                    .previous_code_item
-                    .as_ref()
-                    .and_then(|item| item.upgrade()),
-                architect.code_docks.clone(),
-            )
-        });
-        Self::restore_code_surface(workspace, previous_code_item, code_docks, window, cx);
+        let (previous_code_item, code_docks, last_code_focus) =
+            architect.update(cx, |architect, cx| {
+                architect.mode = ArchitectWorkspaceMode::Code;
+                cx.notify();
+                (
+                    architect
+                        .previous_code_item
+                        .as_ref()
+                        .and_then(|item| item.upgrade()),
+                    architect.code_docks.clone(),
+                    architect.last_code_focus.clone(),
+                )
+            });
+        Self::restore_code_surface(
+            workspace,
+            previous_code_item,
+            code_docks,
+            last_code_focus,
+            window,
+            cx,
+        );
     }
 
     fn remember_transient_focus(&mut self, window: &Window, cx: &Context<Self>) {
@@ -639,12 +660,20 @@ impl ArchitectPane {
             .as_ref()
             .and_then(|item| item.upgrade());
         let code_docks = self.code_docks.clone();
+        let last_code_focus = self.last_code_focus.clone();
         window.defer(cx, move |window, cx| {
             let Some(workspace) = workspace.upgrade() else {
                 return;
             };
             workspace.update(cx, |workspace, cx| {
-                Self::restore_code_surface(workspace, previous_code_item, code_docks, window, cx);
+                Self::restore_code_surface(
+                    workspace,
+                    previous_code_item,
+                    code_docks,
+                    last_code_focus,
+                    window,
+                    cx,
+                );
             });
         });
     }
@@ -1292,7 +1321,7 @@ mod tests {
     use project::{FakeFs, Project};
     use serde_json::json;
     use util::path_list::PathList;
-    use workspace::{MultiWorkspace, item::test::TestItem};
+    use workspace::{MultiWorkspace, Panel as _, item::test::TestItem};
 
     use super::*;
     use crate::conversation_view::tests::init_test;
@@ -1383,6 +1412,7 @@ mod tests {
                     workspace,
                     None,
                     Vec::new(),
+                    None,
                     px(226.0),
                     px(348.0),
                     window,
@@ -1490,6 +1520,7 @@ mod tests {
                     workspace,
                     None,
                     Vec::new(),
+                    None,
                     px(226.0),
                     px(348.0),
                     window,
@@ -1537,6 +1568,25 @@ mod tests {
                 .read(cx)
                 .item_of_type::<rendering::ArchitectStatusItem>()
                 .expect("Architect should register one native status item")
+        });
+        let agent_panel_entity = agent_panel
+            .as_ref()
+            .expect("the native Agent panel should exist")
+            .clone();
+        agent_panel_entity.update_in(cx, |agent_panel, window, cx| {
+            agent_panel.activate_draft(false, crate::AgentThreadSource::AgentPanel, window, cx);
+        });
+        cx.run_until_parked();
+        let agent_conversation = agent_panel_entity.read_with(cx, |agent_panel, _| {
+            agent_panel
+                .active_conversation_view()
+                .expect("the Agent panel should retain an active conversation")
+                .clone()
+        });
+        let root_conversation = agent_conversation.read_with(cx, |conversation, _| {
+            conversation
+                .root_thread_view()
+                .expect("the active Agent conversation should have a root thread")
         });
 
         cx.simulate_resize(size(px(1500.0), px(900.0)));
@@ -1653,6 +1703,13 @@ mod tests {
             assert_eq!(workspace.panel::<TerminalPanel>(cx), terminal_panel);
             assert_eq!(workspace.panel::<AgentPanel>(cx), agent_panel);
         });
+        assert_eq!(
+            agent_panel_entity.read_with(cx, |agent_panel, _| {
+                agent_panel.active_conversation_view().cloned()
+            }),
+            Some(agent_conversation.clone()),
+            "switching should retain the exact native Agent conversation"
+        );
 
         workspace.update_in(cx, |workspace, window, cx| {
             ArchitectPane::activate_code(workspace, window, cx);
@@ -1671,7 +1728,26 @@ mod tests {
             cx.debug_bounds("git_panel").is_some(),
             "Code should render the native Git panel as the alternate left tab"
         );
+        let git_panel_focus = git_panel
+            .as_ref()
+            .expect("the native Git panel should exist")
+            .read_with(cx, |git_panel, cx| git_panel.activation_focus_handle(cx));
+        cx.update(|window, cx| git_panel_focus.focus(window, cx));
+        cx.update(|window, _| {
+            assert!(
+                git_panel_focus.is_focused(window),
+                "the native Git panel should own focus before switching"
+            );
+        });
         workspace.update_in(cx, |workspace, window, cx| {
+            ArchitectPane::open(thread.clone(), workspace, window, cx);
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            ArchitectPane::activate_code(workspace, window, cx);
+            assert!(
+                git_panel_focus.is_focused(window),
+                "Code should restore focus to the exact native panel control"
+            );
             ArchitectPane::open(thread.clone(), workspace, window, cx);
         });
 
@@ -1687,11 +1763,82 @@ mod tests {
             cx.debug_bounds("architect-step-inspector").is_some(),
             "selecting a step should render the contextual inspector"
         );
-
-        architect.update(cx, |architect, cx| {
-            architect.inspector_tab = InspectorTab::Conversation;
-            cx.notify();
+        let locked_title_editor = architect.read_with(cx, |architect, _| {
+            architect
+                .inspector
+                .as_ref()
+                .expect("the selected step should have an inspector")
+                .title
+                .clone()
         });
+        assert!(
+            locked_title_editor.read_with(cx, |editor, cx| editor.read_only(cx)),
+            "settled steps should expose read-only inspector editors"
+        );
+
+        architect.update_in(cx, |architect, window, cx| {
+            architect.discuss_node(parent.clone(), window, cx);
+        });
+        cx.run_until_parked();
+        let step_session = thread.read_with(cx, |thread, _| {
+            thread
+                .architect_graph()
+                .and_then(|graph| graph.node(&parent))
+                .and_then(|node| node.chat.clone())
+                .expect("opening a selected-step conversation should persist its session")
+        });
+        let step_conversation = agent_conversation.read_with(cx, |conversation, _| {
+            conversation
+                .thread_view(&step_session)
+                .expect("the selected-step conversation should remain loaded")
+        });
+        assert_eq!(
+            agent_conversation.read_with(cx, |conversation, _| {
+                conversation.active_thread().cloned()
+            }),
+            Some(root_conversation.clone()),
+            "opening a step conversation must not navigate the Agent panel away from the root plan"
+        );
+        let step_composer =
+            step_conversation.read_with(cx, |conversation, _| conversation.message_editor.clone());
+        assert!(
+            step_composer
+                .read_with(cx, |composer, cx| composer.text(cx))
+                .contains("We are settling one step of the plan"),
+            "a new step conversation should keep its editable seeded draft"
+        );
+        step_composer.update_in(cx, |composer, window, cx| {
+            composer.set_text("Keep this selected-step draft", window, cx);
+        });
+        architect.update_in(cx, |architect, window, cx| {
+            architect.discuss_node(parent.clone(), window, cx);
+        });
+        assert_eq!(
+            thread.read_with(cx, |thread, _| {
+                thread
+                    .architect_graph()
+                    .and_then(|graph| graph.node(&parent))
+                    .and_then(|node| node.chat.clone())
+            }),
+            Some(step_session.clone()),
+            "reopening a step conversation should reuse its persisted session"
+        );
+        assert_eq!(
+            agent_conversation.read_with(cx, |conversation, _| {
+                conversation.thread_view(&step_session)
+            }),
+            Some(step_conversation.clone()),
+            "reopening a step conversation should reuse its live view"
+        );
+        workspace.update_in(cx, |workspace, window, cx| {
+            ArchitectPane::activate_code(workspace, window, cx);
+            ArchitectPane::open(thread.clone(), workspace, window, cx);
+        });
+        assert_eq!(
+            step_composer.read_with(cx, |composer, cx| composer.text(cx)),
+            "Keep this selected-step draft",
+            "mode switching must not discard an unsent selected-step draft"
+        );
         cx.run_until_parked();
         assert!(
             cx.debug_bounds("architect-step-conversation").is_some(),
@@ -1729,6 +1876,37 @@ mod tests {
             cx.debug_bounds("architect-edge-inspector").is_some(),
             "selecting a connection should render its inspector"
         );
+        architect.update_in(cx, |architect, window, cx| {
+            architect.set_selection(Some(Selection::Node(edge_target.clone())), window, cx);
+        });
+        let rapid_title_editor = architect.read_with(cx, |architect, _| {
+            architect
+                .inspector
+                .as_ref()
+                .expect("rapid selection should build the target inspector")
+                .title
+                .clone()
+        });
+        rapid_title_editor.update_in(cx, |editor, window, cx| {
+            editor.set_text("Rapidly selected target", window, cx);
+        });
+        architect.update_in(cx, |architect, window, cx| {
+            architect.set_selection(Some(Selection::Node(parent.clone())), window, cx);
+        });
+        thread.read_with(cx, |thread, _| {
+            let graph = thread
+                .architect_graph()
+                .expect("the rapid-selection graph should remain available");
+            assert_eq!(
+                graph.node(&edge_target).map(|node| node.title.as_str()),
+                Some("Rapidly selected target")
+            );
+            assert_eq!(
+                graph.node(&parent).map(|node| node.title.as_str()),
+                Some("Parent"),
+                "a stale inspector must not write into the newly selected step"
+            );
+        });
 
         thread.update(cx, |thread, cx| {
             thread.set_architect_graph(Some(base_graph.clone()), cx)
