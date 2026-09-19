@@ -1651,7 +1651,7 @@ mod tests {
             if root_thread_loaded {
                 break;
             }
-            cx.background_executor()
+            cx.background_executor
                 .timer(Duration::from_millis(25))
                 .await;
             cx.run_until_parked();
