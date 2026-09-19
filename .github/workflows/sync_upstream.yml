@@ -127,7 +127,8 @@ jobs:
             --ref main \
             -f source_ref="${STAGING_SHA}" \
             -f build_macos=true \
-            -f build_windows=true
+            -f build_windows=true \
+            -f build_linux=true
 
   cleanup:
     name: Remove the staging ref

@@ -2,14 +2,14 @@
 #
 # Upstream's `run_bundling.yml` cannot be used here: it runs on Zed Industries'
 # private runners (`namespace-profile-mac-large`, `self-32vcpu-windows-2022`) and
-# expects their Sentry, Apple and signing secrets. This does the same two jobs on
-# GitHub-hosted runners with no secrets at all.
+# expects their Sentry, Apple and signing secrets. This builds each supported
+# desktop platform on GitHub-hosted runners with no secrets at all.
 #
 # A macOS installer can only be produced on macOS — `script/bundle-mac` needs
 # `hdiutil` to make the .dmg, plus `codesign` and the Apple SDK — which is why
 # this workflow exists rather than a local build script.
 #
-# Both artifacts are UNSIGNED. Expect:
+# Desktop packages are UNSIGNED. Expect:
 #   macOS   — Gatekeeper refuses the first open. Right-click → Open, or
 #             `xattr -d com.apple.quarantine /Applications/Praxis\ Dev.app`.
 #   Windows — SmartScreen warns about an unknown publisher.
@@ -32,7 +32,12 @@ on:
         default: true
         type: boolean
       build_windows:
-        description: Build the Windows installer and Linux remote server
+        description: Build the Windows installer
+        required: false
+        default: true
+        type: boolean
+      build_linux:
+        description: Build the Linux desktop archive and remote server
         required: false
         default: true
         type: boolean
@@ -71,11 +76,21 @@ jobs:
         run: echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
   macos:
-    name: macOS (aarch64)
+    name: macOS (${{ matrix.architecture }})
     if: inputs.build_macos
     needs: prepare
-    runs-on: macos-15
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: aarch64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - architecture: x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
     env:
       # Nothing is reused between runs, so incremental artifacts are only cost.
       CARGO_INCREMENTAL: 0
@@ -94,7 +109,7 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: bundle-macos-aarch64
+          shared-key: bundle-macos-${{ matrix.architecture }}
           cache-on-failure: true
 
       - name: Set up Node
@@ -110,33 +125,32 @@ jobs:
         run: rustup show && cargo --version
 
       - name: Bundle
-        run: ./script/bundle-mac aarch64-apple-darwin
+        run: ./script/bundle-mac ${{ matrix.target }}
 
       - name: Upload the disk image
         uses: actions/upload-artifact@v7
         with:
-          name: praxis-macos-aarch64-dmg
-          path: target/aarch64-apple-darwin/release/Praxis-aarch64.dmg
+          name: praxis-macos-${{ matrix.architecture }}-dmg
+          path: target/${{ matrix.target }}/release/Praxis-${{ matrix.architecture }}.dmg
           if-no-files-found: error
 
       - name: Upload the remote server
-        # Needed to open a project over SSH from the bundled app, since this
-        # fork's channel is never published and so cannot download one.
         uses: actions/upload-artifact@v7
         with:
-          name: praxis-remote-server-macos-aarch64
-          path: target/zed-remote-server-macos-aarch64.gz
-          if-no-files-found: warn
+          name: praxis-remote-server-macos-${{ matrix.architecture }}
+          path: target/zed-remote-server-macos-${{ matrix.architecture }}.gz
+          if-no-files-found: error
 
-  linux_remote_server_x86_64:
-    name: Linux remote server (x86_64 musl)
-    if: inputs.build_windows
+  linux:
+    name: Linux (x86_64)
+    if: inputs.build_linux || inputs.build_windows
     needs: prepare
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 240
     env:
       CARGO_INCREMENTAL: 0
       RUST_BACKTRACE: 1
+      PRAXIS_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
     steps:
       - name: Check out the fork
         uses: actions/checkout@v7
@@ -146,34 +160,39 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: remote-server-linux-x86_64
+          shared-key: bundle-linux-x86_64
           cache-on-failure: true
 
-      - name: Install musl and LLVM tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes musl-tools llvm
+      - name: Install Linux build dependencies
+        run: ./script/linux
 
-      - name: Build the remote server
-        run: bash ./script/build-linux-remote-server
+      - name: Download the WASI SDK
+        run: ./script/download-wasi-sdk
+
+      - name: Bundle the desktop app and remote server
+        run: ./script/bundle-linux
+
+      - name: Upload the desktop archive
+        if: inputs.build_linux
+        uses: actions/upload-artifact@v7
+        with:
+          name: praxis-linux-x86_64-archive
+          path: target/release/praxis-linux-x86_64.tar.gz
+          if-no-files-found: error
 
       - name: Upload the remote server
         uses: actions/upload-artifact@v7
         with:
           name: praxis-remote-server-linux-x86_64
-          path: |
-            target/zed-remote-server-linux-x86_64.gz
-            target/zed-remote-server-linux-x86_64.gz.sha256
-            target/zed-remote-server-linux-x86_64.json
+          path: target/zed-remote-server-linux-x86_64.gz
           if-no-files-found: error
-          retention-days: 14
 
   windows:
     name: Windows (x86_64)
     if: inputs.build_windows
     needs:
       - prepare
-      - linux_remote_server_x86_64
+      - linux
     # Pinned to 2022 on purpose: `bundle-windows.ps1` expects Inno Setup 6 at its
     # default location, which the 2022 image has and later images may not.
     runs-on: windows-2022
@@ -221,18 +240,28 @@ jobs:
           path: target/Praxis-x86_64.exe
           if-no-files-found: error
 
+      - name: Upload the remote server
+        uses: actions/upload-artifact@v7
+        with:
+          name: praxis-remote-server-windows-x86_64
+          path: target/zed-remote-server-windows-x86_64.zip
+          if-no-files-found: error
+
   publish:
     name: Publish the self-update release
     if: >-
       always() &&
       inputs.build_macos &&
       inputs.build_windows &&
+      inputs.build_linux &&
       needs.macos.result == 'success' &&
-      needs.windows.result == 'success'
+      needs.windows.result == 'success' &&
+      needs.linux.result == 'success'
     needs:
       - prepare
       - macos
       - windows
+      - linux
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the built source
@@ -246,11 +275,25 @@ jobs:
           name: praxis-windows-x86_64-installer
           path: release-assets
 
-      - name: Download the macOS disk image
+      - name: Download the macOS disk images
         uses: actions/download-artifact@v8
         with:
-          name: praxis-macos-aarch64-dmg
+          pattern: praxis-macos-*-dmg
           path: release-assets
+          merge-multiple: true
+
+      - name: Download the Linux desktop archive
+        uses: actions/download-artifact@v8
+        with:
+          name: praxis-linux-x86_64-archive
+          path: release-assets
+
+      - name: Download the remote servers
+        uses: actions/download-artifact@v8
+        with:
+          pattern: praxis-remote-server-*
+          path: release-assets
+          merge-multiple: true
 
       - name: Create update manifests
         id: release
@@ -264,7 +307,9 @@ jobs:
           release_version="${version}+praxis.${GITHUB_RUN_NUMBER}.${source_sha}"
           repository_url="https://github.com/${GITHUB_REPOSITORY}"
           windows_sha256="$(sha256sum release-assets/Praxis-x86_64.exe | cut -d ' ' -f 1)"
-          macos_sha256="$(sha256sum release-assets/Praxis-aarch64.dmg | cut -d ' ' -f 1)"
+          macos_aarch64_sha256="$(sha256sum release-assets/Praxis-aarch64.dmg | cut -d ' ' -f 1)"
+          macos_x86_64_sha256="$(sha256sum release-assets/Praxis-x86_64.dmg | cut -d ' ' -f 1)"
+          linux_x86_64_sha256="$(sha256sum release-assets/praxis-linux-x86_64.tar.gz | cut -d ' ' -f 1)"
 
           jq -n \
             --arg version "${release_version}" \
@@ -276,9 +321,23 @@ jobs:
           jq -n \
             --arg version "${release_version}" \
             --arg url "${repository_url}/releases/download/${tag}/Praxis-aarch64.dmg" \
-            --arg sha256 "${macos_sha256}" \
+            --arg sha256 "${macos_aarch64_sha256}" \
             '{version: $version, url: $url, sha256: $sha256}' \
             > release-assets/praxis-update-macos-aarch64.json
+
+          jq -n \
+            --arg version "${release_version}" \
+            --arg url "${repository_url}/releases/download/${tag}/Praxis-x86_64.dmg" \
+            --arg sha256 "${macos_x86_64_sha256}" \
+            '{version: $version, url: $url, sha256: $sha256}' \
+            > release-assets/praxis-update-macos-x86_64.json
+
+          jq -n \
+            --arg version "${release_version}" \
+            --arg url "${repository_url}/releases/download/${tag}/praxis-linux-x86_64.tar.gz" \
+            --arg sha256 "${linux_x86_64_sha256}" \
+            '{version: $version, url: $url, sha256: $sha256}' \
+            > release-assets/praxis-update-linux-x86_64.json
 
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "version=${release_version}" >> "${GITHUB_OUTPUT}"
@@ -290,8 +349,16 @@ jobs:
           subject-path: |
             release-assets/Praxis-x86_64.exe
             release-assets/Praxis-aarch64.dmg
+            release-assets/Praxis-x86_64.dmg
+            release-assets/praxis-linux-x86_64.tar.gz
+            release-assets/zed-remote-server-windows-x86_64.zip
+            release-assets/zed-remote-server-macos-aarch64.gz
+            release-assets/zed-remote-server-macos-x86_64.gz
+            release-assets/zed-remote-server-linux-x86_64.gz
             release-assets/praxis-update-windows-x86_64.json
             release-assets/praxis-update-macos-aarch64.json
+            release-assets/praxis-update-macos-x86_64.json
+            release-assets/praxis-update-linux-x86_64.json
 
       - name: Publish the latest Praxis Dev release
         env:
@@ -304,12 +371,20 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --target "${{ steps.release.outputs.source_sha }}" \
             --title "Praxis Dev ${{ steps.release.outputs.version }}" \
-            --notes "Automated Praxis build from ${{ steps.release.outputs.source_sha }}. The Windows and macOS installers are unsigned." \
+            --notes "Automated Praxis build from ${{ steps.release.outputs.source_sha }}. Desktop packages are unsigned." \
             --draft \
             release-assets/Praxis-x86_64.exe \
             release-assets/Praxis-aarch64.dmg \
+            release-assets/Praxis-x86_64.dmg \
+            release-assets/praxis-linux-x86_64.tar.gz \
+            release-assets/zed-remote-server-windows-x86_64.zip \
+            release-assets/zed-remote-server-macos-aarch64.gz \
+            release-assets/zed-remote-server-macos-x86_64.gz \
+            release-assets/zed-remote-server-linux-x86_64.gz \
             release-assets/praxis-update-windows-x86_64.json \
-            release-assets/praxis-update-macos-aarch64.json
+            release-assets/praxis-update-macos-aarch64.json \
+            release-assets/praxis-update-macos-x86_64.json \
+            release-assets/praxis-update-linux-x86_64.json
 
           gh release edit "${{ steps.release.outputs.tag }}" \
             --repo "${GITHUB_REPOSITORY}" \
