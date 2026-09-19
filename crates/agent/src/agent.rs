@@ -8075,7 +8075,11 @@ mod internal_tests {
 
         cx.update(|cx| crate::stop_architect_run(&thread, Some(&acp_thread), cx));
         thread.read_with(cx, |thread, _| {
-            assert!(thread.architect_run().is_none());
+            let run = thread
+                .architect_run()
+                .expect("cancellation should retain the run history");
+            assert!(!run.is_running());
+            assert_eq!(run.outcome, Some(architect::RunOutcome::Cancelled));
             assert!(thread.architect_running_step().is_none());
         });
     }
@@ -8487,6 +8491,10 @@ mod internal_tests {
 
         thread.update(cx, |thread, cx| {
             thread.start_architect_run(first.clone(), "First".into(), Task::ready(()), cx);
+            thread.set_architect_run_remote_workflow_url(
+                Some("https://example.com/workflows/architect-run".into()),
+                cx,
+            );
             thread.note_architect_run_position(first.clone(), "First".into(), 1, 1, cx);
         });
 
@@ -8495,6 +8503,12 @@ mod internal_tests {
             assert_eq!(history.len(), 1);
             assert_eq!(history[0].title, "First");
             assert!(history[0].is_running());
+            assert_eq!(
+                thread
+                    .architect_run()
+                    .and_then(ArchitectRun::remote_workflow_url),
+                Some("https://example.com/workflows/architect-run"),
+            );
         });
 
         thread.update(cx, |thread, cx| {
@@ -8520,9 +8534,11 @@ mod internal_tests {
             assert!(history[1].is_running());
         });
 
-        // Stopping mid-step must not leave that step running forever.
+        // Stopping mid-step must not leave that step running forever, discard
+        // its history, or become unsafe when requested twice.
         thread.update(cx, |thread, cx| {
-            thread.finish_architect_run(architect::RunOutcome::Cancelled, cx);
+            thread.stop_architect_run(cx);
+            thread.stop_architect_run(cx);
         });
 
         thread.read_with(cx, |thread, _| {
@@ -8532,11 +8548,41 @@ mod internal_tests {
                 run.history().iter().all(|step| !step.is_running()),
                 "a run that has ended cannot still have a step in progress",
             );
+            assert_eq!(run.outcome, Some(architect::RunOutcome::Cancelled));
             assert_eq!(
                 run.history().len(),
                 2,
                 "the record of what a run did outlives the run",
             );
+        });
+
+        thread.update(cx, |thread, cx| {
+            thread.start_architect_run(first.clone(), "First".into(), Task::ready(()), cx);
+            thread.note_architect_run_position(first.clone(), "First".into(), 1, 1, cx);
+            thread.finish_architect_run(architect::RunOutcome::StepLimit { steps: 1 }, cx);
+        });
+        thread.read_with(cx, |thread, _| {
+            let run = thread
+                .architect_run()
+                .expect("failed run should remain visible");
+            assert_eq!(
+                run.outcome,
+                Some(architect::RunOutcome::StepLimit { steps: 1 })
+            );
+            assert!(run.history().iter().all(|step| !step.is_running()));
+        });
+
+        thread.update(cx, |thread, cx| {
+            thread.start_architect_run(first.clone(), "First".into(), Task::ready(()), cx);
+            thread.note_architect_run_position(first, "First".into(), 1, 1, cx);
+            thread.finish_architect_run(architect::RunOutcome::Completed, cx);
+        });
+        thread.read_with(cx, |thread, _| {
+            let run = thread
+                .architect_run()
+                .expect("successful run should remain visible");
+            assert_eq!(run.outcome, Some(architect::RunOutcome::Completed));
+            assert!(run.history().iter().all(|step| !step.is_running()));
         });
     }
 

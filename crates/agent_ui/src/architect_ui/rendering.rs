@@ -1,16 +1,18 @@
+use std::collections::{HashMap, HashSet};
+
 use architect::{
     ArchitectGraph, ArchitectNode, EdgeCondition, GraphProblem, NodeId, NodePath, Position,
     RunOutcome,
 };
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    MouseButton, MouseDownEvent, PathBuilder, Pixels, Render, SharedString, Window, canvas, div,
-    point, px,
+    MouseButton, MouseDownEvent, PathBuilder, Pixels, Render, SharedString, Subscription,
+    WeakEntity, Window, canvas, div, point, px,
 };
 use ui::{TintColor, Tooltip, prelude::*};
 use workspace::{
-    ShareProject,
-    item::{Item, ItemEvent},
+    HideStatusItem, ShareProject, StatusItemView,
+    item::{Item, ItemEvent, ItemHandle},
 };
 
 use super::geometry::{EdgeCurve, NODE_WIDTH, paint_curve};
@@ -39,6 +41,69 @@ impl ArchitectLayout {
         } else {
             Self::Compact
         }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct ArchitectStatusItem {
+    active: Option<WeakEntity<ArchitectPane>>,
+    _subscription: Option<Subscription>,
+}
+
+impl Render for ArchitectStatusItem {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(pane) = self.active.as_ref().and_then(|pane| pane.upgrade()) else {
+            return div().into_any();
+        };
+        let pane = pane.read(cx);
+        let title = pane
+            .thread
+            .read(cx)
+            .title()
+            .unwrap_or_else(|| SharedString::from("Untitled plan"));
+        let status = if pane.is_running(cx) {
+            "running"
+        } else if pane.root_graph(cx).is_some_and(|graph| {
+            graph.is_fully_locked_deeply() && graph.blocking_problems().is_empty()
+        }) {
+            "ready"
+        } else {
+            "planning"
+        };
+
+        h_flex()
+            .id("architect-status-context")
+            .gap_1()
+            .child(
+                Icon::new(IconName::GitBranch)
+                    .size(IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new(format!("Architect · {} · {status}", truncate(&title, 36)))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .truncate(),
+            )
+            .into_any()
+    }
+}
+
+impl StatusItemView for ArchitectStatusItem {
+    fn set_active_pane_item(
+        &mut self,
+        active_pane_item: Option<&dyn ItemHandle>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = active_pane_item.and_then(|item| item.downcast::<ArchitectPane>());
+        self.active = pane.as_ref().map(Entity::downgrade);
+        self._subscription = pane.map(|pane| cx.observe(&pane, |_, _, cx| cx.notify()));
+        cx.notify();
+    }
+
+    fn hide_setting(&self, _cx: &App) -> Option<HideStatusItem> {
+        None
     }
 }
 
@@ -202,6 +267,7 @@ impl ArchitectPane {
         };
 
         h_flex()
+            .id("architect-plan-header")
             .w_full()
             .flex_none()
             .px_3()
@@ -417,9 +483,8 @@ impl ArchitectPane {
                                 .style(ButtonStyle::Subtle)
                                 .start_icon(Icon::new(IconName::ListTree).size(IconSize::XSmall))
                                 .tooltip(Tooltip::text("Open plan navigation"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.outline_drawer_open = true;
-                                    cx.notify();
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_outline_drawer(false, window, cx);
                                 })),
                         )
                     })
@@ -442,9 +507,7 @@ impl ArchitectPane {
                                     "Open the ordered plan navigator to find a step",
                                 ))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.outline_drawer_open = true;
-                                    this.search_editor.focus_handle(cx).focus(window, cx);
-                                    cx.notify();
+                                    this.open_outline_drawer(true, window, cx);
                                 })),
                         )
                         .child(
@@ -475,9 +538,7 @@ impl ArchitectPane {
                                 .disabled(self.graph(cx).is_none_or(ArchitectGraph::is_empty))
                                 .tooltip(Tooltip::text("Search plan steps"))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.outline_drawer_open = true;
-                                    this.search_editor.focus_handle(cx).focus(window, cx);
-                                    cx.notify();
+                                    this.open_outline_drawer(true, window, cx);
                                 })),
                         )
                         .child(
@@ -556,6 +617,7 @@ impl ArchitectPane {
         let ready = !all_ordered_nodes.is_empty() && blocking_problems.is_empty();
 
         v_flex()
+            .id("architect-outline")
             .w(width)
             .h_full()
             .flex_none()
@@ -890,6 +952,21 @@ impl ArchitectPane {
         let succeeded = run.outcome.as_ref().is_some_and(RunOutcome::is_success);
         let cancelled = matches!(run.outcome.as_ref(), Some(RunOutcome::Cancelled));
         let failed = run.outcome.is_some() && !succeeded && !cancelled;
+        let latest_output: Option<SharedString> = run.history().iter().rev().find_map(|step| {
+            step.summary
+                .as_ref()
+                .map(|summary| format!("{}: {}", step.title, truncate(summary, 96)).into())
+        });
+        let output_source: SharedString = format!(
+            "Source · overall plan conversation · {}",
+            if run.current_title.as_ref().is_empty() {
+                "run coordinator"
+            } else {
+                run.current_title.as_ref()
+            }
+        )
+        .into();
+        let remote_workflow_url = run.remote_workflow_url().map(str::to_owned);
         let (border, background, color) = if failed {
             (
                 cx.theme().status().error_border,
@@ -918,6 +995,7 @@ impl ArchitectPane {
 
         Some(
             h_flex()
+                .id("architect-run-bar")
                 .w_full()
                 .flex_none()
                 .px_3()
@@ -939,9 +1017,24 @@ impl ArchitectPane {
                 )
                 .child(
                     v_flex()
+                        .flex_1()
                         .min_w_0()
                         .gap_0p5()
                         .child(Label::new(status).size(LabelSize::Small).truncate())
+                        .child(
+                            Label::new(output_source)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                        .when_some(latest_output, |this, output| {
+                            this.child(
+                                Label::new(output)
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted)
+                                    .truncate(),
+                            )
+                        })
                         .child(
                             div()
                                 .w(px(220.0))
@@ -961,7 +1054,6 @@ impl ArchitectPane {
                                 )),
                         ),
                 )
-                .child(div().flex_1())
                 .child(
                     Label::new(format!(
                         "{} of {} · {}s",
@@ -972,6 +1064,16 @@ impl ArchitectPane {
                     .size(LabelSize::Small)
                     .color(Color::Muted),
                 )
+                .when_some(remote_workflow_url, |this, url| {
+                    this.child(
+                        Button::new("architect-open-workflow", "Open Workflow")
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Subtle)
+                            .start_icon(Icon::new(IconName::ArrowUpRight).size(IconSize::XSmall))
+                            .tooltip(Tooltip::text("Open this run's remote workflow"))
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                })
                 .into_any(),
         )
     }
@@ -1404,8 +1506,8 @@ impl ArchitectPane {
 
         // The nodes are copied out before rendering: building elements needs
         // mutable access to the context, which is where the graph is read from.
-        let Some((nodes, invalid, execution_order)) = self.graph(cx).map(|graph| {
-            let invalid: Vec<NodeId> = graph
+        let Some((nodes, invalid, step_numbers)) = self.graph(cx).map(|graph| {
+            let invalid: HashSet<NodeId> = graph
                 .problems()
                 .iter()
                 .filter_map(|problem| match problem {
@@ -1413,7 +1515,13 @@ impl ArchitectPane {
                     _ => None,
                 })
                 .collect();
-            (graph.nodes.clone(), invalid, graph.execution_order())
+            let step_numbers: HashMap<NodeId, usize> = graph
+                .execution_order()
+                .into_iter()
+                .enumerate()
+                .map(|(index, id)| (id, index + 1))
+                .collect();
+            (graph.nodes.clone(), invalid, step_numbers)
         }) else {
             return Vec::new();
         };
@@ -1429,12 +1537,17 @@ impl ArchitectPane {
                 let height = px(node_height * self.zoom);
                 let left = screen.x - bounds.origin.x - width / 2.0;
                 let top = screen.y - bounds.origin.y - height / 2.0;
+                const VIEWPORT_OVERSCAN: f32 = 96.0;
+                let overscan = px(VIEWPORT_OVERSCAN);
+                if left + width < -overscan
+                    || top + height < -overscan
+                    || left > bounds.size.width + overscan
+                    || top > bounds.size.height + overscan
+                {
+                    return None;
+                }
                 let is_invalid = invalid.contains(&node.id);
-                let step_number = execution_order
-                    .iter()
-                    .position(|id| id == &node.id)
-                    .map(|index| index + 1)
-                    .unwrap_or(ix + 1);
+                let step_number = step_numbers.get(&node.id).copied().unwrap_or(ix + 1);
 
                 Some(
                     div()
@@ -1978,6 +2091,7 @@ impl ArchitectPane {
         let zoom_control = self.render_zoom_control(cx);
 
         v_flex()
+            .id("architect-graph-workspace")
             .flex_1()
             .h_full()
             .min_w_0()
@@ -2079,6 +2193,7 @@ impl Render for ArchitectPane {
             .flatten();
         let outline_drawer = (!inline_outline && self.outline_drawer_open).then(|| {
             div()
+                .id("architect-outline-drawer")
                 .absolute()
                 .left(px(0.0))
                 .top(px(0.0))
@@ -2092,9 +2207,7 @@ impl Render for ArchitectPane {
                             .icon_size(IconSize::Small)
                             .tooltip(Tooltip::text("Close plan navigation"))
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.outline_drawer_open = false;
-                                this.focus_handle.focus(window, cx);
-                                cx.notify();
+                                this.close_outline_drawer(window, cx);
                             })),
                     ),
                 )
@@ -2102,6 +2215,7 @@ impl Render for ArchitectPane {
         });
         let inspector_drawer = (!inline_inspector && self.inspector_drawer_open).then(|| {
             div()
+                .id("architect-inspector-drawer")
                 .absolute()
                 .right(px(0.0))
                 .top(px(0.0))
@@ -2115,9 +2229,7 @@ impl Render for ArchitectPane {
                             .icon_size(IconSize::Small)
                             .tooltip(Tooltip::text("Close inspector"))
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.inspector_drawer_open = false;
-                                this.focus_handle.focus(window, cx);
-                                cx.notify();
+                                this.close_inspector_drawer(window, cx);
                             })),
                     ),
                 )
@@ -2125,6 +2237,7 @@ impl Render for ArchitectPane {
         });
 
         v_flex()
+            .id("architect-pane")
             .key_context("ArchitectPane")
             .track_focus(&self.focus_handle)
             .size_full()
@@ -2165,8 +2278,19 @@ impl EventEmitter<ItemEvent> for ArchitectPane {}
 impl Item for ArchitectPane {
     type Event = ItemEvent;
 
-    fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
-        "Architect".into()
+    fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
+        self.thread
+            .read(cx)
+            .title()
+            .map(|title| format!("Architect · {}", truncate(&title, 48)).into())
+            .unwrap_or_else(|| "Architect".into())
+    }
+
+    fn tab_tooltip_text(&self, cx: &App) -> Option<SharedString> {
+        self.thread
+            .read(cx)
+            .title()
+            .map(|title| format!("Architect plan: {title}").into())
     }
 
     fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
@@ -2183,6 +2307,18 @@ impl Item for ArchitectPane {
 
     fn preserve_preview(&self, _cx: &App) -> bool {
         true
+    }
+
+    fn deactivated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_handle.contains_focused(window, cx) {
+            self.last_architect_focus = window.focused(cx);
+        }
+    }
+
+    fn workspace_deactivated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_handle.contains_focused(window, cx) {
+            self.last_architect_focus = window.focused(cx);
+        }
     }
 
     fn discarded(

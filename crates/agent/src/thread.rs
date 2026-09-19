@@ -247,6 +247,10 @@ pub struct ArchitectRun {
     /// Which step of the run this is, counting repeats.
     pub step_number: usize,
     pub outcome: Option<architect::RunOutcome>,
+    /// A remote workflow associated with this run, when the execution provider
+    /// exposes one. The UI keeps this optional so local runs do not grow a dead
+    /// workflow action.
+    remote_workflow_url: Option<SharedString>,
     /// Every step taken, in the order taken, including repeats. Kept after the
     /// run ends: what a run actually did is worth more once it is over.
     history: Vec<RunStep>,
@@ -262,6 +266,10 @@ impl ArchitectRun {
 
     pub fn history(&self) -> &[RunStep] {
         &self.history
+    }
+
+    pub fn remote_workflow_url(&self) -> Option<&str> {
+        self.remote_workflow_url.as_deref()
     }
 }
 
@@ -2297,10 +2305,22 @@ impl Thread {
             current_title,
             step_number: 1,
             outcome: None,
+            remote_workflow_url: None,
             history: Vec::new(),
             _task: task,
         });
         cx.notify();
+    }
+
+    pub fn set_architect_run_remote_workflow_url(
+        &mut self,
+        url: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(run) = self.architect_run.as_mut() {
+            run.remote_workflow_url = url;
+            cx.notify();
+        }
     }
 
     /// Records that the run has entered a step.
@@ -2371,9 +2391,21 @@ impl Thread {
         cx.notify();
     }
 
-    /// Ends a run by dropping the task driving it.
+    /// Cancels a run by dropping the task driving it while retaining its final
+    /// state and history for the workspace-wide run bar and Activity view.
     pub fn stop_architect_run(&mut self, cx: &mut Context<Self>) {
-        self.architect_run = None;
+        if let Some(run) = self.architect_run.as_mut() {
+            if run.outcome.is_none() {
+                run.current = None;
+                run.outcome = Some(architect::RunOutcome::Cancelled);
+                if let Some(step) = run.history.last_mut()
+                    && step.is_running()
+                {
+                    step.elapsed = Some(step.started_at.elapsed());
+                }
+            }
+            run._task = Task::ready(());
+        }
         self.architect_active_visit = None;
         cx.notify();
     }

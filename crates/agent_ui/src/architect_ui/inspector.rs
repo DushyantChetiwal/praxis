@@ -78,9 +78,10 @@ impl ArchitectPane {
         self.selection = selection;
         self.plan_conversation_open = false;
         if self.selection.is_some() && f32::from(window.viewport_size().width) < 1060.0 {
-            self.inspector_drawer_open = true;
+            self.open_inspector_drawer(window, cx);
+        } else {
+            cx.notify();
         }
-        cx.notify();
     }
 
     fn build_edge_inspector(
@@ -538,6 +539,7 @@ impl ArchitectPane {
             .and_then(|conversation| conversation.read(cx).root_thread_view());
 
         div()
+            .id("architect-plan-conversation-inspector")
             .flex_none()
             .h_full()
             .py_2()
@@ -571,9 +573,12 @@ impl ArchitectPane {
                                             .truncate(),
                                     )
                                     .child(
-                                        Label::new("Root plan scope · project context")
-                                            .size(LabelSize::XSmall)
-                                            .color(Color::Muted),
+                                        Label::new(
+                                            "Inherited: root plan + project · editor selections and terminal output only when attached",
+                                        )
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                        .truncate(),
                                     ),
                             )
                             .child(
@@ -590,9 +595,7 @@ impl ArchitectPane {
                                             "Return to the contextual inspector",
                                         ))
                                         .on_click(cx.listener(|this, _, window, cx| {
-                                            this.plan_conversation_open = false;
-                                            this.focus_handle.focus(window, cx);
-                                            cx.notify();
+                                            this.close_plan_conversation(window, cx);
                                         })),
                                     ),
                             ),
@@ -652,6 +655,7 @@ impl ArchitectPane {
         });
 
         div()
+            .id("architect-overview-inspector")
             .flex_none()
             .h_full()
             .py_2()
@@ -816,6 +820,7 @@ impl ArchitectPane {
         };
 
         div()
+            .id("architect-edge-inspector")
             .flex_none()
             .h_full()
             .py_2()
@@ -1108,6 +1113,18 @@ impl ArchitectPane {
             .graph(cx)
             .is_some_and(|graph| graph.edges_from(&node.id).next().is_some());
         let wants_capture = hands_on && node.capture.trim().is_empty();
+        let node_selection = Selection::Node(node.id.clone());
+        let validation_issues: Vec<String> = self
+            .graph(cx)
+            .map(|graph| {
+                graph
+                    .blocking_problems()
+                    .into_iter()
+                    .filter(|problem| Self::problem_selection(problem) == node_selection)
+                    .map(|problem| problem.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
 
         // Uppercase, so a field's name reads as a heading rather than as more
         // of the prose it labels.
@@ -1123,6 +1140,7 @@ impl ArchitectPane {
             // itself would collapse to its contents and leave the chat, and the
             // scrolling bodies, with no height to fill.
             div()
+                .id("architect-step-inspector")
                 .flex_none()
                 .h_full()
                 .py_2()
@@ -1239,36 +1257,65 @@ impl ArchitectPane {
                         ),
                 )
                 .when(tab == InspectorTab::Conversation, |this| {
-                    this.child(match step_chat {
-                        // `min_h_0` so the conversation can shrink inside the
-                        // card instead of growing it and pushing the lock
-                        // button out of the clipped edge.
-                        Some(view) => div()
+                    this.child(
+                        v_flex()
+                            .id("architect-step-conversation")
                             .flex_1()
-                            .w_full()
                             .min_h_0()
                             .overflow_hidden()
-                            .child(view)
-                            .into_any(),
-                        None => v_flex()
-                            .flex_1()
-                            .p_3()
-                            .gap_2()
                             .child(
-                                Label::new("Opening this step's conversation…")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
+                                v_flex()
+                                    .w_full()
+                                    .gap_0p5()
+                                    .px_3()
+                                    .py_1p5()
+                                    .border_b_1()
+                                    .border_color(cx.theme().colors().border)
+                                    .bg(cx.theme().colors().editor_background)
+                                    .child(
+                                        Label::new("Selected Step Conversation")
+                                            .size(LabelSize::Small),
+                                    )
+                                    .child(
+                                        Label::new(
+                                            "Inherited: root plan + project · scoped to this step · editor selections and terminal output only when attached",
+                                        )
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted)
+                                        .truncate(),
+                                    ),
                             )
-                            .child(
-                                Label::new(
-                                    "It starts knowing what the main conversation knows, then \
-                                     stays out of the other steps' way.",
-                                )
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
-                            )
-                            .into_any(),
-                    })
+                            .child(match step_chat {
+                                // `min_h_0` so the conversation can shrink inside the
+                                // card instead of growing it and pushing the lock
+                                // button out of the clipped edge.
+                                Some(view) => div()
+                                    .flex_1()
+                                    .w_full()
+                                    .min_h_0()
+                                    .overflow_hidden()
+                                    .child(view)
+                                    .into_any(),
+                                None => v_flex()
+                                    .flex_1()
+                                    .p_3()
+                                    .gap_2()
+                                    .child(
+                                        Label::new("Opening this step's conversation…")
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                    .child(
+                                        Label::new(
+                                            "It starts knowing what the main conversation knows, then \
+                                             stays out of the other steps' way.",
+                                        )
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                    )
+                                    .into_any(),
+                            }),
+                    )
                 })
                 .when(tab == InspectorTab::Details, |this| {
                     this.child(
@@ -1612,6 +1659,54 @@ impl ArchitectPane {
                             .overflow_y_scroll()
                             .p_3()
                             .gap_3()
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(field("Decision & Validation"))
+                                    .child(
+                                        Label::new(if has_chat {
+                                            "Conversation: established for this step"
+                                        } else {
+                                            "Conversation: not started"
+                                        })
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                    )
+                                    .child(
+                                        Label::new(if locked {
+                                            "Decision state: settled and read-only"
+                                        } else {
+                                            "Decision state: draft and editable"
+                                        })
+                                        .size(LabelSize::Small)
+                                        .color(if locked { Color::Success } else { Color::Muted }),
+                                    )
+                                    .child(
+                                        Label::new(format!(
+                                            "Routing decision: {} outgoing {}",
+                                            leads_to.len(),
+                                            if leads_to.len() == 1 { "path" } else { "paths" },
+                                        ))
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                    )
+                                    .child(
+                                        Label::new(if validation_issues.is_empty() {
+                                            "Validation: no blocking issue for this step".to_string()
+                                        } else {
+                                            format!(
+                                                "Validation: {}",
+                                                validation_issues.join(" · ")
+                                            )
+                                        })
+                                        .size(LabelSize::Small)
+                                        .color(if validation_issues.is_empty() {
+                                            Color::Success
+                                        } else {
+                                            Color::Warning
+                                        }),
+                                    ),
+                            )
                             .child(
                                 v_flex()
                                     .gap_1()

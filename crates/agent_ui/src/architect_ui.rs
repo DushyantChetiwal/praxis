@@ -149,6 +149,8 @@ pub struct ArchitectPane {
     previous_code_item: Option<Box<dyn WeakItemHandle>>,
     code_docks: Vec<DockSnapshot>,
     focus_handle: FocusHandle,
+    last_architect_focus: Option<FocusHandle>,
+    transient_return_focus: Option<FocusHandle>,
     /// The canvas layer reports its bounds during paint; everything that
     /// converts between screen and canvas space needs them.
     viewport: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -194,7 +196,10 @@ impl ArchitectPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscription = cx.observe(&thread, |_, _, cx| cx.notify());
+        let subscription = cx.observe(&thread, |_, _, cx| {
+            cx.emit(workspace::item::ItemEvent::UpdateTab);
+            cx.notify();
+        });
         let search_editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
             editor.set_placeholder_text("Search steps", window, cx);
@@ -208,6 +213,8 @@ impl ArchitectPane {
             previous_code_item,
             code_docks,
             focus_handle: cx.focus_handle(),
+            last_architect_focus: None,
+            transient_return_focus: None,
             viewport: Rc::new(Cell::new(None)),
             pan: point(px(0.0), px(0.0)),
             zoom: 1.0,
@@ -386,7 +393,10 @@ impl ArchitectPane {
         }
 
         self.thread = thread.clone();
-        self._thread_subscription = cx.observe(&thread, |_, _, cx| cx.notify());
+        self._thread_subscription = cx.observe(&thread, |_, _, cx| {
+            cx.emit(workspace::item::ItemEvent::UpdateTab);
+            cx.notify();
+        });
         self.focus = NodePath::default();
         self.selection = None;
         self.inspector = None;
@@ -399,6 +409,8 @@ impl ArchitectPane {
         self.outline_drawer_open = false;
         self.inspector_drawer_open = false;
         self.plan_conversation_open = false;
+        self.last_architect_focus = None;
+        self.transient_return_focus = None;
         self.pan = point(px(0.0), px(0.0));
         self.zoom = 1.0;
         cx.notify();
@@ -427,6 +439,18 @@ impl ArchitectPane {
 
         Self::hide_code_docks(workspace, window, cx);
 
+        let status_bar = workspace.status_bar().clone();
+        if status_bar
+            .read(cx)
+            .item_of_type::<rendering::ArchitectStatusItem>()
+            .is_none()
+        {
+            let status_item = cx.new(|_| rendering::ArchitectStatusItem::default());
+            status_bar.update(cx, |status_bar, cx| {
+                status_bar.add_left_item(status_item, window, cx);
+            });
+        }
+
         if let Some(existing) = existing {
             existing.update(cx, |architect, cx| {
                 architect.replace_thread(thread, cx);
@@ -439,6 +463,12 @@ impl ArchitectPane {
                 }
             });
             workspace.activate_item(&existing, true, true, window, cx);
+            let focus = existing
+                .read(cx)
+                .last_architect_focus
+                .clone()
+                .unwrap_or_else(|| existing.read(cx).focus_handle.clone());
+            focus.focus(window, cx);
         } else {
             let workspace_handle = cx.weak_entity();
             let architect = cx.new(|cx| {
@@ -536,6 +566,57 @@ impl ArchitectPane {
         Self::restore_code_surface(workspace, previous_code_item, code_docks, window, cx);
     }
 
+    fn remember_transient_focus(&mut self, window: &Window, cx: &Context<Self>) {
+        if self.transient_return_focus.is_none() && self.focus_handle.contains_focused(window, cx) {
+            self.transient_return_focus = window.focused(cx);
+        }
+    }
+
+    fn restore_transient_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.transient_return_focus
+            .take()
+            .unwrap_or_else(|| self.focus_handle.clone())
+            .focus(window, cx);
+    }
+
+    fn open_outline_drawer(
+        &mut self,
+        focus_search: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remember_transient_focus(window, cx);
+        self.outline_drawer_open = true;
+        if focus_search {
+            self.search_editor.focus_handle(cx).focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn open_inspector_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_transient_focus(window, cx);
+        self.inspector_drawer_open = true;
+        cx.notify();
+    }
+
+    fn close_outline_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.outline_drawer_open = false;
+        self.restore_transient_focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_inspector_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.inspector_drawer_open = false;
+        self.restore_transient_focus(window, cx);
+        cx.notify();
+    }
+
+    fn close_plan_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.plan_conversation_open = false;
+        self.restore_transient_focus(window, cx);
+        cx.notify();
+    }
+
     fn request_code_mode(&self, window: &mut Window, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
         window.defer(cx, move |window, cx| {
@@ -607,7 +688,14 @@ impl ArchitectPane {
                 self.report(format!("That change was refused: {error}"), cx);
                 false
             }
-            None => false,
+            None => {
+                self.report(
+                    "The plan is no longer available. Return to its root conversation or open another plan."
+                        .to_string(),
+                    cx,
+                );
+                false
+            }
         }
     }
 
@@ -939,6 +1027,7 @@ impl ArchitectPane {
     }
 
     fn open_plan_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_transient_focus(window, cx);
         self.plan_conversation_open = true;
         self.inspector_drawer_open = true;
         self.record_activity(None, "Opened the overall plan conversation", cx);
@@ -1170,26 +1259,19 @@ impl ArchitectPane {
             "up" | "left" => self.select_adjacent_step(false, window, cx),
             "enter" => {
                 if self.selection.is_some() {
-                    self.inspector_drawer_open = true;
-                    cx.notify();
+                    self.open_inspector_drawer(window, cx);
                 }
             }
-            // Escape works outwards without leaving the Architect workspace: it
-            // drops the selection first, then leaves a nested plan.
+            // Escape closes the innermost transient surface before changing
+            // navigation state, without ever leaving Architect mode.
             "escape" => {
                 self.interaction = Interaction::None;
-                if self.inspector_drawer_open {
-                    self.inspector_drawer_open = false;
-                    self.focus_handle.focus(window, cx);
-                    cx.notify();
+                if self.plan_conversation_open {
+                    self.close_plan_conversation(window, cx);
+                } else if self.inspector_drawer_open {
+                    self.close_inspector_drawer(window, cx);
                 } else if self.outline_drawer_open {
-                    self.outline_drawer_open = false;
-                    self.focus_handle.focus(window, cx);
-                    cx.notify();
-                } else if self.plan_conversation_open {
-                    self.plan_conversation_open = false;
-                    self.focus_handle.focus(window, cx);
-                    cx.notify();
+                    self.close_outline_drawer(window, cx);
                 } else if self.selection.is_some() {
                     self.set_selection(None, window, cx);
                 } else {
