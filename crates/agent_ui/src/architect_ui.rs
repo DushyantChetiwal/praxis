@@ -258,24 +258,29 @@ impl ArchitectPane {
             .map(|id| format!("{WORKSPACE_MODE_KEY_PREFIX}:{id}"))
     }
 
-    fn persisted_state(workspace: &Workspace, cx: &gpui::App) -> ArchitectWorkspaceState {
-        let Some(key) = Self::workspace_mode_key(workspace) else {
-            return ArchitectWorkspaceState::default();
-        };
-        match db::kvp::KeyValueStore::global(cx).read_kvp(&key) {
-            Ok(Some(value)) if value == "code" => ArchitectWorkspaceState {
+    fn state_from_persisted_value(key: &str, value: Option<&str>) -> ArchitectWorkspaceState {
+        match value {
+            Some("code") => ArchitectWorkspaceState {
                 mode: ArchitectWorkspaceMode::Code,
                 ..ArchitectWorkspaceState::default()
             },
-            Ok(Some(value)) if value == "architect" => ArchitectWorkspaceState::default(),
-            Ok(Some(value)) => match serde_json::from_str::<ArchitectWorkspaceState>(&value) {
+            Some("architect") | None => ArchitectWorkspaceState::default(),
+            Some(value) => match serde_json::from_str::<ArchitectWorkspaceState>(value) {
                 Ok(state) => state.sanitize(),
                 Err(error) => {
                     log::warn!("Ignoring invalid Architect workspace state for {key}: {error:#}");
                     ArchitectWorkspaceState::default()
                 }
             },
-            Ok(None) => ArchitectWorkspaceState::default(),
+        }
+    }
+
+    fn persisted_state(workspace: &Workspace, cx: &gpui::App) -> ArchitectWorkspaceState {
+        let Some(key) = Self::workspace_mode_key(workspace) else {
+            return ArchitectWorkspaceState::default();
+        };
+        match db::kvp::KeyValueStore::global(cx).read_kvp(&key) {
+            Ok(value) => Self::state_from_persisted_value(&key, value.as_deref()),
             Err(error) => {
                 log::error!("Could not read Architect workspace state for {key}: {error:#}");
                 ArchitectWorkspaceState::default()
@@ -1340,14 +1345,52 @@ mod tests {
         assert_eq!(state.inspector_width, 348.0);
 
         let serialized = serde_json::to_string(&state).expect("state should serialize");
-        let restored: ArchitectWorkspaceState =
-            serde_json::from_str(&serialized).expect("state should deserialize");
+        let restored =
+            ArchitectPane::state_from_persisted_value("test-workspace", Some(&serialized));
         assert_eq!(restored.mode, ArchitectWorkspaceMode::Code);
 
-        let partial: ArchitectWorkspaceState = serde_json::from_str(r#"{"mode":"code"}"#)
-            .expect("older partial state should use safe defaults");
+        let partial =
+            ArchitectPane::state_from_persisted_value("test-workspace", Some(r#"{"mode":"code"}"#));
         assert_eq!(partial.outline_width, 226.0);
         assert_eq!(partial.inspector_width, 348.0);
+        assert_eq!(
+            ArchitectPane::state_from_persisted_value("test-workspace", Some("code")).mode,
+            ArchitectWorkspaceMode::Code
+        );
+        assert_eq!(
+            ArchitectPane::state_from_persisted_value("test-workspace", Some("architect")).mode,
+            ArchitectWorkspaceMode::Architect
+        );
+        assert_eq!(
+            ArchitectPane::state_from_persisted_value("test-workspace", Some("obsolete")).mode,
+            ArchitectWorkspaceMode::Architect
+        );
+    }
+
+    #[gpui::test]
+    async fn architect_workspace_state_survives_the_persistence_boundary(cx: &mut TestAppContext) {
+        init_test(cx);
+        let key = "architect-workspace-mode:restart-test".to_string();
+        let expected = ArchitectWorkspaceState {
+            version: 1,
+            mode: ArchitectWorkspaceMode::Code,
+            outline_width: 272.0,
+            inspector_width: 416.0,
+        };
+
+        cx.update(|cx| {
+            ArchitectPane::persist_state_for_key(Some(key.clone()), expected, cx);
+        });
+        cx.run_until_parked();
+
+        let value = cx
+            .update(|cx| db::kvp::KeyValueStore::global(cx).read_kvp(&key))
+            .expect("persisted workspace state should be readable")
+            .expect("persisted workspace state should exist");
+        let restored = ArchitectPane::state_from_persisted_value(&key, Some(&value));
+        assert_eq!(restored.mode, ArchitectWorkspaceMode::Code);
+        assert_eq!(restored.outline_width, 272.0);
+        assert_eq!(restored.inspector_width, 416.0);
     }
 
     #[gpui::test]
