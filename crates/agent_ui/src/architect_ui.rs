@@ -246,7 +246,6 @@ impl ArchitectPane {
         self.mode
     }
 
-
     fn workspace_mode_key(workspace: &Workspace) -> Option<String> {
         workspace
             .database_id()
@@ -1778,18 +1777,28 @@ mod tests {
             workspace.open_panel::<ProjectPanel>(window, cx);
         });
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("project-panel").is_some(),
-            "Code should render the native Project panel"
-        );
+        workspace.read_with(cx, |workspace, cx| {
+            let left_dock = workspace.dock_at_position(DockPosition::Left).read(cx);
+            assert!(left_dock.is_open(), "Code should open the native left dock");
+            assert_eq!(
+                left_dock.active_panel().map(|panel| panel.entity_id()),
+                project_panel.as_ref().map(|panel| panel.entity_id()),
+                "Project should be the active native left-dock panel"
+            );
+        });
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.open_panel::<GitPanel>(window, cx);
         });
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("git_panel").is_some(),
-            "Code should render the native Git panel as the alternate left tab"
-        );
+        workspace.read_with(cx, |workspace, cx| {
+            let left_dock = workspace.dock_at_position(DockPosition::Left).read(cx);
+            assert!(left_dock.is_open(), "Code should keep the native left dock open");
+            assert_eq!(
+                left_dock.active_panel().map(|panel| panel.entity_id()),
+                git_panel.as_ref().map(|panel| panel.entity_id()),
+                "Git should replace Project as the active native left-dock tab"
+            );
+        });
         let git_panel_focus = git_panel
             .as_ref()
             .expect("the native Git panel should exist")
