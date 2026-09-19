@@ -542,11 +542,9 @@ impl ArchitectPane {
             let Some(workspace) = workspace.upgrade() else {
                 return;
             };
-            if let Err(error) = workspace.update(cx, |workspace, cx| {
+            workspace.update(cx, |workspace, cx| {
                 Self::activate_code(workspace, window, cx);
-            }) {
-                log::error!("Could not activate the Code workspace: {error:#}");
-            }
+            });
         });
     }
 
@@ -564,11 +562,9 @@ impl ArchitectPane {
             let Some(workspace) = workspace.upgrade() else {
                 return;
             };
-            if let Err(error) = workspace.update(cx, |workspace, cx| {
+            workspace.update(cx, |workspace, cx| {
                 Self::restore_code_surface(workspace, previous_code_item, code_docks, window, cx);
-            }) {
-                log::error!("Could not restore Code after closing Architect: {error:#}");
-            }
+            });
         });
     }
 

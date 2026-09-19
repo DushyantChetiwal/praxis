@@ -50,13 +50,14 @@ impl ArchitectPane {
         };
 
         if let Err(error) = agent::start_architect_run(self.thread.clone(), acp_thread, graph, cx) {
+            drop(run_starting);
             self.record_activity(None, format!("Run could not start: {error}"), cx);
             self.report(error.to_string(), cx);
             return;
         }
 
-        self.record_activity(None, "Started the plan run", cx);
         drop(run_starting);
+        self.record_activity(None, "Started the plan run", cx);
         cx.notify();
     }
 
