@@ -1637,6 +1637,12 @@ mod tests {
         });
 
         cx.simulate_resize(size(px(1500.0), px(900.0)));
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(
+                workspace.activate_item(&architect, true, true, window, cx),
+                "the retained Architect item should be activatable before drawing"
+            );
+        });
         architect.update_in(cx, |architect, window, cx| {
             architect.selection = None;
             architect.pan = point(px(0.0), px(0.0));
