@@ -1214,7 +1214,7 @@ mod tests {
     use project::{FakeFs, Project};
     use serde_json::json;
     use util::path_list::PathList;
-    use workspace::MultiWorkspace;
+    use workspace::{MultiWorkspace, item::test::TestItem};
 
     use super::*;
     use crate::conversation_view::tests::init_test;
@@ -1431,6 +1431,51 @@ mod tests {
                 !pane.is_running(cx),
                 "the reopened canvas must be able to cancel"
             );
+        });
+
+        let code_item = workspace.update_in(cx, |workspace, window, cx| {
+            let code_item = cx.new(TestItem::new);
+            workspace.add_item_to_active_pane(Box::new(code_item.clone()), None, true, window, cx);
+            code_item
+        });
+        let architect = workspace.update_in(cx, |workspace, window, cx| {
+            ArchitectPane::open(thread.clone(), workspace, window, cx);
+            workspace
+                .item_of_type::<ArchitectPane>(cx)
+                .expect("Architect should be retained by the workspace")
+        });
+        architect.update(cx, |architect, cx| {
+            architect.selection = Some(Selection::Node(parent.clone()));
+            architect.pan = point(px(72.0), px(-24.0));
+            cx.notify();
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            ArchitectPane::activate_code(workspace, window, cx);
+            assert_eq!(
+                workspace.active_item_as::<TestItem>(cx),
+                Some(code_item.clone()),
+                "Code mode should restore the exact native item"
+            );
+        });
+        architect.read_with(cx, |architect, _| {
+            assert_eq!(architect.mode(), ArchitectWorkspaceMode::Code);
+            assert_eq!(architect.selection, Some(Selection::Node(parent.clone())));
+            assert_eq!(architect.pan, point(px(72.0), px(-24.0)));
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            ArchitectPane::open(thread.clone(), workspace, window, cx);
+            assert_eq!(
+                workspace.item_of_type::<ArchitectPane>(cx),
+                Some(architect.clone()),
+                "switching back should reuse the retained Architect entity"
+            );
+        });
+        architect.read_with(cx, |architect, _| {
+            assert_eq!(architect.mode(), ArchitectWorkspaceMode::Architect);
+            assert_eq!(architect.selection, Some(Selection::Node(parent)));
+            assert_eq!(architect.pan, point(px(72.0), px(-24.0)));
         });
     }
 }
