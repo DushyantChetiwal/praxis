@@ -131,7 +131,7 @@ fi
 # elif [[ "$channel" == "nightly" ]]; then
 #     export APP_NAME="Zed Nightly"
 # elif [[ "$channel" == "dev" ]]; then
-#     export APP_NAME="Zed Devel"
+#     export APP_NAME="Praxis Dev"
 # else
 #     export APP_NAME="Zed"
 # fi

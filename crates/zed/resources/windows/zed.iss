@@ -2,10 +2,10 @@
 AppId={#AppId}
 AppName={#AppName}
 AppVerName={#AppDisplayName}
-AppPublisher=Zed Industries
-AppPublisherURL=https://www.zed.dev/
-AppSupportURL=https://www.zed.dev/
-AppUpdatesURL=https://www.zed.dev/
+AppPublisher={#AppPublisher}
+AppPublisherURL={#AppPublisherUrl}
+AppSupportURL={#AppSupportUrl}
+AppUpdatesURL={#AppUpdatesUrl}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 DisableReadyPage=yes
@@ -65,7 +65,7 @@ Name: "addtopath"; Description: "{cm:AddToPath}"; GroupDescription: "{cm:Other}"
 Name: "{app}"; AfterInstall: DisableAppDirInheritance
 
 [Files]
-Source: "{#ResourcesDir}\Zed.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
+Source: "{#ResourcesDir}\Zed.exe"; DestDir: "{code:GetInstallDir}"; DestName: "{#AppExeName}.exe"; Flags: ignoreversion
 #ifexist ResourcesDir + "\zed-remote-server-linux-x86_64.gz"
 Source: "{#ResourcesDir}\zed-remote-server-linux-x86_64.gz"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
 #endif
@@ -91,7 +91,7 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}.exe"; Tasks: de
 Filename: "{app}\{#AppExeName}.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall; Check: WizardNotSilent
 
 [UninstallRun]
-Filename: "powershell.exe"; Parameters: "Invoke-Command -ScriptBlock {{Remove-AppxPackage -Package ""{#AppxFullName}""}"; Check: IsWindows11OrLater; Flags: shellexec waituntilterminated runhidden
+Filename: "powershell.exe"; Parameters: "Invoke-Command -ScriptBlock {{Get-AppxPackage -Name ""{#AppxPackageName}"" | Remove-AppxPackage}"; Check: IsWindows11OrLater; Flags: shellexec waituntilterminated runhidden
 
 [Registry]
 Root: HKCU; Subkey: "Software\Classes\.ascx\OpenWithProgids"; ValueType: none; ValueName: "{#RegValueName}"; Flags: deletevalue uninsdeletevalue; Tasks: associatewithfiles
@@ -1380,7 +1380,7 @@ procedure RemoveAppxPackage();
 var
   RemoveAppxPackageResultCode: Integer;
 begin
-  ShellExec('', 'powershell.exe', '-Command ' + AddQuotes('Remove-AppxPackage -Package ''{#AppxFullName}'''), '', SW_HIDE, ewWaitUntilTerminated, RemoveAppxPackageResultCode);
+  ShellExec('', 'powershell.exe', '-Command ' + AddQuotes('Get-AppxPackage -Name ''{#AppxPackageName}'' | Remove-AppxPackage'), '', SW_HIDE, ewWaitUntilTerminated, RemoveAppxPackageResultCode);
   if not WizardIsTaskSelected('addcontextmenufiles') then begin
     RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\{#RegValueName}ContextMenu');
   end;

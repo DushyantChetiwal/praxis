@@ -1,18 +1,18 @@
 <#
 .SYNOPSIS
-    Builds this fork and installs it beside the released Zed, without an installer.
+    Builds Praxis and installs it beside the released Zed, without an installer.
 
 .DESCRIPTION
     The Inno Setup bundler (script/bundle-windows.ps1) produces a real installer,
     but it builds into its own `--target` directory from scratch and costs upwards
     of 100 GB of transient disk. This does the part that matters for using the
-    editor day to day: build, then copy the three files Zed needs to run.
+    editor day to day: build, then copy the three files Praxis needs to run.
 
-    `conpty.dll` and `OpenConsole.exe` have to sit beside `zed.exe` or the
+    `conpty.dll` and `OpenConsole.exe` have to sit beside the app executable or the
     built-in terminal fails to start, which is why they are copied too.
 
     What you do NOT get, versus the installer: a Start Menu entry, file
-    associations, the `zed` CLI on PATH, and the Explorer context-menu shell
+    associations, the `praxis` CLI on PATH, and the Explorer context-menu shell
     extension.
 
 .PARAMETER Profile
@@ -37,7 +37,8 @@ try {
     # directory. Keeping them aligned is what stops this build treating an
     # installed stable Zed's settings and threads as its own.
     $channel = (Get-Content 'crates/zed/RELEASE_CHANNEL' -Raw).Trim()
-    $appName = if ($channel -eq 'stable') { 'Zed' } else { "Zed $((Get-Culture).TextInfo.ToTitleCase($channel))" }
+    $appName = if ($channel -eq 'dev') { 'Praxis Dev' } elseif ($channel -eq 'stable') { 'Zed' } else { "Zed $((Get-Culture).TextInfo.ToTitleCase($channel))" }
+    $appExeName = if ($channel -eq 'dev') { 'Praxis.exe' } else { 'Zed.exe' }
     $dest = Join-Path $env:LOCALAPPDATA "Programs\$appName"
 
     Write-Host "Channel : $channel"
@@ -66,9 +67,10 @@ try {
     foreach ($file in 'zed.exe', 'conpty.dll', 'OpenConsole.exe') {
         $src = Join-Path $outDir $file
         if (-not (Test-Path $src)) { throw "Missing build output: $src" }
-        Copy-Item $src (Join-Path $dest $file) -Force
+        $installedName = if ($file -eq 'zed.exe') { $appExeName } else { $file }
+        Copy-Item $src (Join-Path $dest $installedName) -Force
         $mb = [math]::Round((Get-Item $src).Length / 1MB, 1)
-        Write-Host ("  {0,-18} {1,7} MB" -f $file, $mb)
+        Write-Host ("  {0,-18} {1,7} MB" -f $installedName, $mb)
     }
 
     $remoteServerName = 'zed-remote-server-linux-x86_64.gz'
@@ -91,7 +93,7 @@ try {
     Write-Host "User data in $(Join-Path $env:LOCALAPPDATA $appName)"
 
     if ($Run) {
-        Start-Process -FilePath (Join-Path $dest 'zed.exe') | Out-Null
+        Start-Process -FilePath (Join-Path $dest $appExeName) | Out-Null
         Write-Host 'Launched.'
     }
 }

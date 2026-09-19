@@ -130,8 +130,8 @@ or diagnostic run.
 ## Reproducible demo {#reproducible-demo}
 
 Use a disposable repository with at least one committed file and one uncommitted
-change. Install the latest unsigned Zed Dev build from this fork's GitHub
-release; no local Zed compilation is required.
+change. Install the latest unsigned Praxis Dev build from this project's GitHub
+release; no local compilation is required.
 
 1. Open the repository and start a native-agent thread in **Plan** mode.
 2. Ask the agent to inspect the working tree and draft a plan for the pending

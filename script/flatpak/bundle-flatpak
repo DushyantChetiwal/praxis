@@ -5,17 +5,21 @@ cd "$(dirname "$0")/../.."
 shopt -s extglob
 
 script/bundle-linux --flatpak
-archive_match="zed(-[a-zA-Z0-9]+)?-linux-$(uname -m)\.tar\.gz"
-archive=$(ls "target/release" | grep -E ${archive_match})
 channel=$(<crates/zed/RELEASE_CHANNEL)
+if [[ "$channel" == "dev" ]]; then
+    archive_match="praxis(-[a-zA-Z0-9]+)?-linux-$(uname -m)\.tar\.gz"
+else
+    archive_match="zed(-[a-zA-Z0-9]+)?-linux-$(uname -m)\.tar\.gz"
+fi
+archive=$(ls "target/release" | grep -E ${archive_match})
 
 export CHANNEL="$channel"
 export ARCHIVE="$archive"
 if [[ "$channel" == "dev" ]]; then
-    export APP_ID="dev.zed.ZedDev"
-    export APP_NAME="Zed Devel"
-    export BRANDING_LIGHT="#99c1f1"
-    export BRANDING_DARK="#1a5fb4"
+    export APP_ID="io.github.dushyantchetiwal.PraxisDev"
+    export APP_NAME="Praxis Dev"
+    export BRANDING_LIGHT="#8b7cf6"
+    export BRANDING_DARK="#352b67"
     export ICON_FILE="app-icon-dev"
 elif [[ "$channel" == "nightly" ]]; then
     export APP_ID="dev.zed.ZedNightly"

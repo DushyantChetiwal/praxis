@@ -2895,8 +2895,8 @@
   "stable": {
     // "theme": "Andromeda"
   },
-  // Settings overrides to use when using Zed Dev.
-  // Mostly useful for developers who are managing multiple instances of Zed.
+  // Settings overrides to use when using the development channel.
+  // Mostly useful for developers who are managing multiple app instances.
   "dev": {
     // "theme": "Andromeda"
     "instrumentation": {

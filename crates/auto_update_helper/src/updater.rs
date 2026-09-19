@@ -21,6 +21,49 @@ use windows::{
 
 use crate::windows_impl::WM_JOB_UPDATED;
 
+struct UpdatePaths {
+    application_executable: &'static str,
+    old_application_executable: &'static str,
+    cli_executable: &'static str,
+    old_cli_executable: &'static str,
+    cli_script: &'static str,
+    old_cli_script: &'static str,
+    staged_application_executable: &'static str,
+    staged_cli_executable: &'static str,
+    staged_cli_script: &'static str,
+}
+
+fn update_paths() -> &'static UpdatePaths {
+    static ZED_PATHS: UpdatePaths = UpdatePaths {
+        application_executable: "Zed.exe",
+        old_application_executable: "old\\Zed.exe",
+        cli_executable: "bin\\Zed.exe",
+        old_cli_executable: "old\\bin\\Zed.exe",
+        cli_script: "bin\\zed",
+        old_cli_script: "old\\bin\\zed",
+        staged_application_executable: "install\\Zed.exe",
+        staged_cli_executable: "install\\bin\\Zed.exe",
+        staged_cli_script: "install\\bin\\zed",
+    };
+    static PRAXIS_PATHS: UpdatePaths = UpdatePaths {
+        application_executable: "Praxis.exe",
+        old_application_executable: "old\\Praxis.exe",
+        cli_executable: "bin\\praxis.exe",
+        old_cli_executable: "old\\bin\\praxis.exe",
+        cli_script: "bin\\praxis",
+        old_cli_script: "old\\bin\\praxis",
+        staged_application_executable: "install\\Praxis.exe",
+        staged_cli_executable: "install\\bin\\praxis.exe",
+        staged_cli_script: "install\\bin\\praxis",
+    };
+
+    if option_env!("RELEASE_CHANNEL") == Some("dev") {
+        &PRAXIS_PATHS
+    } else {
+        &ZED_PATHS
+    }
+}
+
 pub(crate) struct Job {
     pub apply: Box<dyn Fn(&Path) -> Result<()> + Send + Sync>,
     pub rollback: Box<dyn Fn(&Path) -> Result<()> + Send + Sync>,
@@ -168,14 +211,18 @@ pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
     fn p(value: &str) -> &Path {
         Path::new(value)
     }
+    let paths = update_paths();
     [
         // Move old files
         // Not deleting because installing new files can fail
         Job::mkdir(p("old")),
-        Job::move_file(p("Zed.exe"), p("old\\Zed.exe")),
+        Job::move_file(
+            p(paths.application_executable),
+            p(paths.old_application_executable),
+        ),
         Job::mkdir(p("old\\bin")),
-        Job::move_file(p("bin\\Zed.exe"), p("old\\bin\\Zed.exe")),
-        Job::move_file(p("bin\\zed"), p("old\\bin\\zed")),
+        Job::move_file(p(paths.cli_executable), p(paths.old_cli_executable)),
+        Job::move_file(p(paths.cli_script), p(paths.old_cli_script)),
         //
         // TODO: remove after a few weeks once everyone is on the new version and this file never exists
         Job::move_if_exists(p("OpenConsole.exe"), p("old\\OpenConsole.exe")),
@@ -189,9 +236,12 @@ pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
         //
         Job::move_file(p("conpty.dll"), p("old\\conpty.dll")),
         // Copy new files
-        Job::move_file(p("install\\Zed.exe"), p("Zed.exe")),
-        Job::move_file(p("install\\bin\\Zed.exe"), p("bin\\Zed.exe")),
-        Job::move_file(p("install\\bin\\zed"), p("bin\\zed")),
+        Job::move_file(
+            p(paths.staged_application_executable),
+            p(paths.application_executable),
+        ),
+        Job::move_file(p(paths.staged_cli_executable), p(paths.cli_executable)),
+        Job::move_file(p(paths.staged_cli_script), p(paths.cli_script)),
         //
         Job::mkdir_if_exists(p("x64"), p("install\\x64")),
         Job::mkdir_if_exists(p("arm64"), p("install\\arm64")),
@@ -278,10 +328,11 @@ pub(crate) static JOBS: LazyLock<[Job; 9]> = LazyLock::new(|| {
 /// the retry logic.
 fn release_file_handles(app_dir: &Path) -> Result<()> {
     // Files that commonly get locked by Explorer or other processes
+    let paths = update_paths();
     let files_to_release = [
-        app_dir.join("Zed.exe"),
-        app_dir.join("bin\\Zed.exe"),
-        app_dir.join("bin\\zed"),
+        app_dir.join(paths.application_executable),
+        app_dir.join(paths.cli_executable),
+        app_dir.join(paths.cli_script),
         app_dir.join("conpty.dll"),
     ];
 
@@ -365,7 +416,8 @@ fn release_file_handles(app_dir: &Path) -> Result<()> {
 
 #[allow(clippy::disallowed_methods, reason = "doesn't run in the main binary")]
 fn zed_launch_command(app_dir: &Path, launch_arguments: &[OsString]) -> std::process::Command {
-    let mut command = std::process::Command::new(app_dir.join("Zed.exe"));
+    let mut command =
+        std::process::Command::new(app_dir.join(update_paths().application_executable));
     command.args(launch_arguments);
     command
 }
@@ -452,7 +504,7 @@ pub(crate) fn perform_update(
 mod test {
     use std::{ffi::OsString, path::Path};
 
-    use super::{perform_update, zed_launch_command};
+    use super::{perform_update, update_paths, zed_launch_command};
 
     #[test]
     fn test_zed_launch_command_preserves_arguments() {
@@ -464,7 +516,9 @@ mod test {
 
         assert_eq!(
             command.get_program(),
-            Path::new(r"C:\Program Files\Zed\Zed.exe").as_os_str()
+            Path::new(r"C:\Program Files\Zed")
+                .join(update_paths().application_executable)
+                .as_os_str()
         );
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),

@@ -233,11 +233,19 @@ function MakeAppx {
         "preview" {
             $manifestFile = "$env:ZED_WORKSPACE\crates\explorer_command_injector\AppxManifest-Preview.xml"
         }
+        "dev" {
+            $manifestFile = "$env:ZED_WORKSPACE\crates\explorer_command_injector\AppxManifest-Praxis.xml"
+        }
         default {
             $manifestFile = "$env:ZED_WORKSPACE\crates\explorer_command_injector\AppxManifest-Nightly.xml"
         }
     }
     Copy-Item -Path "$manifestFile" -Destination "$innoDir\make_appx\AppxManifest.xml"
+    if ($channel -eq "dev") {
+        New-Item -Path "$innoDir\make_appx\resources" -ItemType Directory -Force
+        Copy-Item -Path "$env:ZED_WORKSPACE\crates\zed\resources\app-icon-dev.png" -Destination "$innoDir\make_appx\resources\logo_150x150.png" -Force
+        Copy-Item -Path "$env:ZED_WORKSPACE\crates\zed\resources\app-icon-dev.png" -Destination "$innoDir\make_appx\resources\logo_70x70.png" -Force
+    }
     # Add makeAppx.exe to Path
     $sdk = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
     $env:Path += ';' + $sdk
@@ -273,8 +281,9 @@ function DownloadConpty {
 function CollectFiles {
     Move-Item -Path "$innoDir\zed_explorer_command_injector.appx" -Destination "$innoDir\appx\zed_explorer_command_injector.appx" -Force
     Move-Item -Path "$innoDir\zed_explorer_command_injector.dll" -Destination "$innoDir\appx\zed_explorer_command_injector.dll" -Force
-    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\zed.exe" -Force
-    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\zed" -Force
+    $cliName = if ($channel -eq "dev") { "praxis" } else { "zed" }
+    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\$cliName.exe" -Force
+    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\$cliName" -Force
     Move-Item -Path "$innoDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
     if($Architecture -eq "aarch64") {
         New-Item -Type Directory -Path "$innoDir\arm64" -Force
@@ -293,6 +302,10 @@ function CollectFiles {
 
 function BuildInstaller {
     $issFilePath = "$innoDir\zed.iss"
+    $appPublisher = "Zed Industries"
+    $appPublisherUrl = "https://www.zed.dev/"
+    $appSupportUrl = "https://www.zed.dev/"
+    $appUpdatesUrl = "https://www.zed.dev/"
     switch ($channel) {
         "stable" {
             $appId = "{{2DB0DA96-CA55-49BB-AF4F-64AF36A86712}"
@@ -306,7 +319,7 @@ function BuildInstaller {
             $regValueName = "Zed"
             $appUserId = "ZedIndustries.Zed"
             $appShellNameShort = "Z&ed"
-            $appAppxFullName = "ZedIndustries.Zed_1.0.0.0_neutral__japxn1gcva8rg"
+            $appAppxPackageName = "ZedIndustries.Zed"
         }
         "preview" {
             $appId = "{{F70E4811-D0E2-4D88-AC99-D63752799F95}"
@@ -320,7 +333,7 @@ function BuildInstaller {
             $regValueName = "ZedPreview"
             $appUserId = "ZedIndustries.Zed.Preview"
             $appShellNameShort = "Z&ed Preview"
-            $appAppxFullName = "ZedIndustries.Zed.Preview_1.0.0.0_neutral__japxn1gcva8rg"
+            $appAppxPackageName = "ZedIndustries.Zed.Preview"
         }
         "nightly" {
             $appId = "{{1BDB21D3-14E7-433C-843C-9C97382B2FE0}"
@@ -334,21 +347,25 @@ function BuildInstaller {
             $regValueName = "ZedNightly"
             $appUserId = "ZedIndustries.Zed.Nightly"
             $appShellNameShort = "Z&ed Editor Nightly"
-            $appAppxFullName = "ZedIndustries.Zed.Nightly_1.0.0.0_neutral__japxn1gcva8rg"
+            $appAppxPackageName = "ZedIndustries.Zed.Nightly"
         }
         "dev" {
-            $appId = "{{8357632E-24A4-4F32-BA97-E575B4D1FE5D}"
+            $appId = "{{F58CF30B-7BF0-454B-97D7-72EC55F0DE36}"
             $appIconName = "app-icon-dev"
-            $appName = "Zed Dev"
-            $appDisplayName = "Zed Dev"
-            $appSetupName = "Zed-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Dev-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedDev"
-            $appUserId = "ZedIndustries.Zed.Dev"
-            $appShellNameShort = "Z&ed Dev"
-            $appAppxFullName = "ZedIndustries.Zed.Dev_1.0.0.0_neutral__japxn1gcva8rg"
+            $appName = "Praxis Dev"
+            $appDisplayName = "Praxis Dev"
+            $appSetupName = "Praxis-$Architecture"
+            # The mutex name here must match release_channel::app_identifier.
+            $appMutex = "Praxis-Dev-Instance-Mutex"
+            $appExeName = "Praxis"
+            $regValueName = "PraxisDev"
+            $appUserId = "DushyantChetiwal.Praxis.Dev"
+            $appShellNameShort = "&Praxis Dev"
+            $appAppxPackageName = "DushyantChetiwal.Praxis.Dev"
+            $appPublisher = "Praxis Contributors"
+            $appPublisherUrl = "https://github.com/DushyantChetiwal/praxis"
+            $appSupportUrl = "https://github.com/DushyantChetiwal/praxis/issues"
+            $appUpdatesUrl = "https://github.com/DushyantChetiwal/praxis/releases"
         }
         default {
             Write-Error "can't bundle installer for $channel."
@@ -368,6 +385,10 @@ function BuildInstaller {
         "AppSetupName"   = $appSetupName
         "AppName"        = $appName
         "AppDisplayName" = $appDisplayName
+        "AppPublisher"   = $appPublisher
+        "AppPublisherUrl" = $appPublisherUrl
+        "AppSupportUrl"  = $appSupportUrl
+        "AppUpdatesUrl"  = $appUpdatesUrl
         "RegValueName"   = $regValueName
         "AppMutex"       = $appMutex
         "AppExeName"     = $appExeName
@@ -376,7 +397,7 @@ function BuildInstaller {
         "AppUserId"      = $appUserId
         "Version"        = "$env:RELEASE_VERSION"
         "SourceDir"      = "$env:ZED_WORKSPACE"
-        "AppxFullName"   = $appAppxFullName
+        "AppxPackageName" = $appAppxPackageName
     }
 
     $defs = @()

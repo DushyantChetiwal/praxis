@@ -5,6 +5,7 @@ if [ "$ZED_WSL_DEBUG_INFO" = true ]; then
 fi
 
 ZED_PATH="$(dirname "$(realpath "$0")")"
+APP_EXECUTABLE="$(basename "$0").exe"
 
 IN_WSL=false
 if [ -n "$WSL_DISTRO_NAME" ]; then
@@ -17,9 +18,9 @@ if [ $IN_WSL = true ]; then
     if [ -z "$WSL_USER" ]; then
         WSL_USER="$USERNAME"
     fi
-    "$ZED_PATH/zed.exe" --wsl "$WSL_USER@$WSL_DISTRO_NAME" "$@"
+    "$ZED_PATH/$APP_EXECUTABLE" --wsl "$WSL_USER@$WSL_DISTRO_NAME" "$@"
     exit $?
 else
-    "$ZED_PATH/zed.exe" "$@"
+    "$ZED_PATH/$APP_EXECUTABLE" "$@"
     exit $?
 fi

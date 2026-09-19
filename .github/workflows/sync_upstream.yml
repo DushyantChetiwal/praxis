@@ -1,4 +1,4 @@
-name: sync_upstream
+name: Sync Praxis with upstream Zed
 
 on:
   schedule:
@@ -30,7 +30,7 @@ jobs:
       staging_ref: ${{ steps.sync.outputs.staging_ref }}
       staging_sha: ${{ steps.sync.outputs.staging_sha }}
     steps:
-      - name: Check out the Architect branch
+      - name: Check out the Praxis branch
         uses: actions/checkout@v7
         with:
           ref: Enhanced_Agents
@@ -51,7 +51,7 @@ jobs:
           echo "base_sha=${base_sha}" >> "${GITHUB_OUTPUT}"
           if git merge-base --is-ancestor upstream/main HEAD; then
             echo "changed=false" >> "${GITHUB_OUTPUT}"
-            echo "Architect is already current with upstream." >> "${GITHUB_STEP_SUMMARY}"
+            echo "Praxis is already current with upstream." >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
 
@@ -68,7 +68,7 @@ jobs:
             exit 1
           fi
 
-          staging_branch="architect-sync/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          staging_branch="praxis-sync/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           staging_sha="$(git rev-parse HEAD)"
           git push origin "HEAD:refs/heads/${staging_branch}"
           echo "changed=true" >> "${GITHUB_OUTPUT}"
@@ -94,7 +94,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - name: Check out the Architect branch
+      - name: Check out the Praxis branch
         uses: actions/checkout@v7
         with:
           ref: Enhanced_Agents

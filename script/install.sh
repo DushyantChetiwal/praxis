@@ -79,16 +79,28 @@ main() {
 }
 
 linux() {
-    if [ -n "${ZED_BUNDLE_PATH:-}" ]; then
-        cp "$ZED_BUNDLE_PATH" "$temp/zed-linux-$arch.tar.gz"
-    else
-        echo "Downloading Zed version: $ZED_VERSION"
-        curl "https://cloud.zed.dev/releases/$channel/$ZED_VERSION/download?asset=zed&arch=$arch&os=linux&source=install.sh" > "$temp/zed-linux-$arch.tar.gz"
-    fi
-
     suffix=""
+    app_slug="zed"
+    cli_name="zed"
+    app_name="Zed"
     if [ "$channel" != "stable" ]; then
         suffix="-$channel"
+    fi
+    if [ "$channel" = "dev" ]; then
+        app_slug="praxis"
+        cli_name="praxis"
+        app_name="Praxis"
+    fi
+    archive="$temp/${app_slug}-linux-$arch.tar.gz"
+
+    if [ -n "${ZED_BUNDLE_PATH:-}" ]; then
+        cp "$ZED_BUNDLE_PATH" "$archive"
+    elif [ "$channel" = "dev" ]; then
+        echo "Praxis Linux installation requires ZED_BUNDLE_PATH."
+        exit 1
+    else
+        echo "Downloading Zed version: $ZED_VERSION"
+        curl "https://cloud.zed.dev/releases/$channel/$ZED_VERSION/download?asset=zed&arch=$arch&os=linux&source=install.sh" > "$archive"
     fi
 
     appid=""
@@ -103,7 +115,7 @@ linux() {
         appid="dev.zed.Zed-Preview"
         ;;
       dev)
-        appid="dev.zed.Zed-Dev"
+        appid="io.github.dushyantchetiwal.Praxis-Dev"
         ;;
       *)
         echo "Unknown release channel: ${channel}. Using stable app ID."
@@ -112,17 +124,17 @@ linux() {
     esac
 
     # Unpack
-    rm -rf "$HOME/.local/zed$suffix.app"
-    mkdir -p "$HOME/.local/zed$suffix.app"
-    tar -xzf "$temp/zed-linux-$arch.tar.gz" -C "$HOME/.local/"
+    rm -rf "$HOME/.local/${app_slug}${suffix}.app"
+    mkdir -p "$HOME/.local/${app_slug}${suffix}.app"
+    tar -xzf "$archive" -C "$HOME/.local/"
 
-    zed_editor="$HOME/.local/zed$suffix.app/libexec/zed-editor"
+    zed_editor="$HOME/.local/${app_slug}${suffix}.app/libexec/zed-editor"
     if [ -f "$zed_editor" ] && command -v ldd >/dev/null 2>&1; then
         missing="$(ldd "$zed_editor" 2>/dev/null | sed -n 's/^[[:space:]]*\(.*\) => not found$/\1/p')"
         if [ -n "$missing" ]; then
-            echo "Warning: your system is missing libraries that Zed needs:"
+            echo "Warning: your system is missing libraries that $app_name needs:"
             echo "$missing" | sed 's/^/    /'
-            echo "Install them with your package manager, or Zed will fail to start."
+            echo "Install them with your package manager, or $app_name will fail to start."
         fi
     fi
 
@@ -130,30 +142,39 @@ linux() {
     mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
 
     # Link the binary
-    if [ -f "$HOME/.local/zed$suffix.app/bin/zed" ]; then
-        ln -sf "$HOME/.local/zed$suffix.app/bin/zed" "$HOME/.local/bin/zed"
+    if [ -f "$HOME/.local/${app_slug}${suffix}.app/bin/${cli_name}" ]; then
+        ln -sf "$HOME/.local/${app_slug}${suffix}.app/bin/${cli_name}" "$HOME/.local/bin/${cli_name}"
     else
         # support for versions before 0.139.x.
-        ln -sf "$HOME/.local/zed$suffix.app/bin/cli" "$HOME/.local/bin/zed"
+        ln -sf "$HOME/.local/${app_slug}${suffix}.app/bin/cli" "$HOME/.local/bin/${cli_name}"
     fi
 
     # Copy .desktop file
     desktop_file_path="$HOME/.local/share/applications/${appid}.desktop"
-    src_dir="$HOME/.local/zed$suffix.app/share/applications"
+    src_dir="$HOME/.local/${app_slug}${suffix}.app/share/applications"
     if [ -f "$src_dir/${appid}.desktop" ]; then
         cp "$src_dir/${appid}.desktop" "${desktop_file_path}"
     else
         # Fallback for older tarballs
-        cp "$src_dir/zed$suffix.desktop" "${desktop_file_path}"
+        cp "$src_dir/${app_slug}${suffix}.desktop" "${desktop_file_path}"
     fi
-    sed -i "s|Icon=zed|Icon=$HOME/.local/zed$suffix.app/share/icons/hicolor/512x512/apps/zed.png|g" "${desktop_file_path}"
-    sed -i "s|Exec=zed|Exec=$HOME/.local/zed$suffix.app/bin/zed|g" "${desktop_file_path}"
+    sed -i "s|Icon=${app_slug}|Icon=$HOME/.local/${app_slug}${suffix}.app/share/icons/hicolor/512x512/apps/${app_slug}.png|g" "${desktop_file_path}"
+    sed -i "s|Exec=${cli_name}|Exec=$HOME/.local/${app_slug}${suffix}.app/bin/${cli_name}|g" "${desktop_file_path}"
 }
 
 macos() {
-    echo "Downloading Zed version: $ZED_VERSION"
-    curl "https://cloud.zed.dev/releases/$channel/$ZED_VERSION/download?asset=zed&os=macos&arch=$arch&source=install.sh" > "$temp/Zed-$arch.dmg"
-    hdiutil attach -quiet "$temp/Zed-$arch.dmg" -mountpoint "$temp/mount"
+    cli_name="zed"
+    if [ "$channel" = "dev" ]; then
+        echo "Downloading the latest Praxis Dev release"
+        cli_name="praxis"
+        disk_image="$temp/Praxis-$arch.dmg"
+        curl -L "https://github.com/DushyantChetiwal/praxis/releases/latest/download/Praxis-$arch.dmg" > "$disk_image"
+    else
+        echo "Downloading Zed version: $ZED_VERSION"
+        disk_image="$temp/Zed-$arch.dmg"
+        curl "https://cloud.zed.dev/releases/$channel/$ZED_VERSION/download?asset=zed&os=macos&arch=$arch&source=install.sh" > "$disk_image"
+    fi
+    hdiutil attach -quiet "$disk_image" -mountpoint "$temp/mount"
     app="$(cd "$temp/mount/"; echo *.app)"
     echo "Installing $app"
     if [ -d "/Applications/$app" ]; then
@@ -165,7 +186,7 @@ macos() {
 
     mkdir -p "$HOME/.local/bin"
     # Link the binary
-    ln -sf "/Applications/$app/Contents/MacOS/cli" "$HOME/.local/bin/zed"
+    ln -sf "/Applications/$app/Contents/MacOS/cli" "$HOME/.local/bin/${cli_name}"
 }
 
 main "$@"

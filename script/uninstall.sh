@@ -45,7 +45,11 @@ main() {
 
     "$platform"
 
-    echo "Zed has been uninstalled"
+    if [ "$channel" = "dev" ]; then
+        echo "Praxis has been uninstalled; user data was preserved"
+    else
+        echo "Zed has been uninstalled"
+    fi
 }
 
 linux() {
@@ -55,7 +59,10 @@ linux() {
     fi
 
     appid=""
+    app_slug="zed"
+    cli_name="zed"
     db_suffix="stable"
+    preserve_user_data=false
     case "$channel" in
       stable)
         appid="dev.zed.Zed"
@@ -70,8 +77,11 @@ linux() {
         db_suffix="preview"
         ;;
       dev)
-        appid="dev.zed.Zed-Dev"
+        appid="io.github.dushyantchetiwal.Praxis-Dev"
+        app_slug="praxis"
+        cli_name="praxis"
         db_suffix="dev"
+        preserve_user_data=true
         ;;
       *)
         echo "Unknown release channel: ${channel}. Using stable app ID."
@@ -81,33 +91,37 @@ linux() {
     esac
 
     # Remove the app directory
-    rm -rf "$HOME/.local/zed$suffix.app"
+    rm -rf "$HOME/.local/${app_slug}${suffix}.app"
 
     # Remove the binary symlink
-    rm -f "$HOME/.local/bin/zed"
+    rm -f "$HOME/.local/bin/${cli_name}"
 
     # Remove the .desktop file
     rm -f "$HOME/.local/share/applications/${appid}.desktop"
 
-    # Remove the database directory for this channel
-    rm -rf "$HOME/.local/share/zed/db/0-$db_suffix"
+    if [ "$preserve_user_data" = false ]; then
+        # Remove the database directory for this channel
+        rm -rf "$HOME/.local/share/zed/db/0-$db_suffix"
 
-    # Remove socket file
-    rm -f "$HOME/.local/share/zed/zed-$db_suffix.sock"
+        # Remove socket file
+        rm -f "$HOME/.local/share/zed/zed-$db_suffix.sock"
 
-    # Remove the entire Zed directory if no installations remain
-    if check_remaining_installations; then
-        rm -rf "$HOME/.local/share/zed"
-        prompt_remove_preferences
+        # Remove the entire Zed directory if no installations remain
+        if check_remaining_installations; then
+            rm -rf "$HOME/.local/share/zed"
+            prompt_remove_preferences
+        fi
+
+        rm -rf "$HOME/.zed_server"
     fi
-
-    rm -rf $HOME/.zed_server
 }
 
 macos() {
     app="Zed.app"
+    cli_name="zed"
     db_suffix="stable"
     app_id="dev.zed.Zed"
+    preserve_user_data=false
     case "$channel" in
       nightly)
         app="Zed Nightly.app"
@@ -120,9 +134,11 @@ macos() {
         app_id="dev.zed.Zed-Preview"
         ;;
       dev)
-        app="Zed Dev.app"
+        app="Praxis Dev.app"
+        cli_name="praxis"
         db_suffix="dev"
-        app_id="dev.zed.Zed-Dev"
+        app_id="io.github.dushyantchetiwal.Praxis-Dev"
+        preserve_user_data=true
         ;;
     esac
 
@@ -132,27 +148,29 @@ macos() {
     fi
 
     # Remove the binary symlink
-    rm -f "$HOME/.local/bin/zed"
+    rm -f "$HOME/.local/bin/${cli_name}"
 
-    # Remove the database directory for this channel
-    rm -rf "$HOME/Library/Application Support/Zed/db/0-$db_suffix"
+    if [ "$preserve_user_data" = false ]; then
+        # Remove the database directory for this channel
+        rm -rf "$HOME/Library/Application Support/Zed/db/0-$db_suffix"
 
-    # Remove app-specific files and directories
-    rm -rf "$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments/$app_id.sfl"*
-    rm -rf "$HOME/Library/Caches/$app_id"
-    rm -rf "$HOME/Library/HTTPStorages/$app_id"
-    rm -rf "$HOME/Library/Preferences/$app_id.plist"
-    rm -rf "$HOME/Library/Saved Application State/$app_id.savedState"
+        # Remove app-specific files and directories
+        rm -rf "$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments/$app_id.sfl"*
+        rm -rf "$HOME/Library/Caches/$app_id"
+        rm -rf "$HOME/Library/HTTPStorages/$app_id"
+        rm -rf "$HOME/Library/Preferences/$app_id.plist"
+        rm -rf "$HOME/Library/Saved Application State/$app_id.savedState"
 
-    # Remove the entire Zed directory if no installations remain
-    if check_remaining_installations; then
-        rm -rf "$HOME/Library/Application Support/Zed"
-        rm -rf "$HOME/Library/Logs/Zed"
+        # Remove the entire Zed directory if no installations remain
+        if check_remaining_installations; then
+            rm -rf "$HOME/Library/Application Support/Zed"
+            rm -rf "$HOME/Library/Logs/Zed"
 
-        prompt_remove_preferences
+            prompt_remove_preferences
+        fi
+
+        rm -rf "$HOME/.zed_server"
     fi
-
-    rm -rf $HOME/.zed_server
 }
 
 main "$@"

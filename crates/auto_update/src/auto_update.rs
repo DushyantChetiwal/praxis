@@ -34,10 +34,11 @@ use util::command::new_command;
 use workspace::Workspace;
 
 const SHOULD_SHOW_UPDATE_NOTIFICATION_KEY: &str = "auto-updater-should-show-updated-notification";
-const DEV_UPDATE_MANIFEST_BASE_URL: Option<&str> = option_env!("ZED_DEV_UPDATE_MANIFEST_BASE_URL");
+const PRAXIS_UPDATE_MANIFEST_BASE_URL: Option<&str> =
+    option_env!("PRAXIS_UPDATE_MANIFEST_BASE_URL");
 
 fn dev_update_manifest_base_url() -> Option<&'static str> {
-    DEV_UPDATE_MANIFEST_BASE_URL
+    PRAXIS_UPDATE_MANIFEST_BASE_URL
         .map(str::trim)
         .map(|url| url.trim_end_matches('/'))
         .filter(|url| !url.is_empty())
@@ -53,7 +54,7 @@ fn should_poll_for_updates(release_channel: ReleaseChannel) -> bool {
 
 fn dev_update_manifest_url(os: &str, arch: &str) -> Option<String> {
     dev_update_manifest_base_url()
-        .map(|base_url| format!("{base_url}/zed-dev-update-{os}-{arch}.json"))
+        .map(|base_url| format!("{base_url}/praxis-update-{os}-{arch}.json"))
 }
 
 #[derive(Debug)]
@@ -338,7 +339,7 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     {
         drop(window.prompt(
             gpui::PromptLevel::Info,
-            "Zed was installed via a package manager.",
+            "Praxis was installed via a package manager.",
             Some(&message),
             &["OK"],
             cx,

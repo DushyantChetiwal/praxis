@@ -931,12 +931,8 @@ mod linux {
     impl InstalledApp for App {
         fn zed_version_string(&self) -> String {
             format!(
-                "Zed {}{}{} – {}",
-                if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
-                    "".to_string()
-                } else {
-                    format!("{} ", *release_channel::RELEASE_CHANNEL_NAME)
-                },
+                "{} {}{} – {}",
+                release_channel::RELEASE_CHANNEL.display_name(),
                 option_env!("RELEASE_VERSION").unwrap_or_default(),
                 match option_env!("ZED_COMMIT_SHA") {
                     Some(commit_sha) => format!(" {commit_sha} "),
@@ -1208,12 +1204,8 @@ mod windows {
     impl InstalledApp for App {
         fn zed_version_string(&self) -> String {
             format!(
-                "Zed {}{}{} – {}",
-                if *release_channel::RELEASE_CHANNEL_NAME == "stable" {
-                    "".to_string()
-                } else {
-                    format!("{} ", *release_channel::RELEASE_CHANNEL_NAME)
-                },
+                "{} {}{} – {}",
+                release_channel::RELEASE_CHANNEL.display_name(),
                 option_env!("RELEASE_VERSION").unwrap_or_default(),
                 match option_env!("ZED_COMMIT_SHA") {
                     Some(commit_sha) => format!(" {commit_sha} "),
@@ -1280,9 +1272,14 @@ mod windows {
                 let cli = std::env::current_exe()?;
                 let dir = cli.parent().context("no parent path for cli")?;
 
-                // ../Zed.exe is the standard, lib/zed is for MSYS2, ./zed.exe is for the target
-                // directory in development builds.
-                let possible_locations = ["../Zed.exe", "../lib/zed/zed-editor.exe", "./zed.exe"];
+                // Praxis.exe is installed by this fork. The Zed paths remain for
+                // upstream-compatible development and MSYS2 layouts.
+                let possible_locations = [
+                    "../Praxis.exe",
+                    "../Zed.exe",
+                    "../lib/zed/zed-editor.exe",
+                    "./zed.exe",
+                ];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -1381,7 +1378,12 @@ mod mac_os {
 
     impl InstalledApp for Bundle {
         fn zed_version_string(&self) -> String {
-            format!("Zed {} – {}", self.version(), self.path().display(),)
+            format!(
+                "{} {} – {}",
+                release_channel::RELEASE_CHANNEL.display_name(),
+                self.version(),
+                self.path().display(),
+            )
         }
 
         fn launch(&self, url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
