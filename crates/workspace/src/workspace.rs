@@ -1590,6 +1590,7 @@ pub struct Workspace {
     right_dock: Entity<Dock>,
     panes: Vec<Entity<Pane>>,
     panes_by_item: HashMap<EntityId, WeakEntity<Pane>>,
+    panel_position_overrides: HashMap<EntityId, DockPosition>,
     active_pane: Entity<Pane>,
     last_active_center_pane: Option<WeakEntity<Pane>>,
     last_active_view_id: Option<proto::ViewId>,
@@ -2095,6 +2096,7 @@ impl Workspace {
             center,
             panes: vec![center_pane.clone()],
             panes_by_item: Default::default(),
+            panel_position_overrides: Default::default(),
             active_pane: center_pane.clone(),
             last_active_center_pane: Some(center_pane.downgrade()),
             last_active_view_id: None,
@@ -2835,7 +2837,12 @@ impl Workspace {
         cx.on_focus_in(&focus_handle, window, Self::handle_panel_focused)
             .detach();
 
-        let dock_position = panel.position(window, cx);
+        let panel_id = panel.entity_id();
+        let dock_position = self
+            .panel_position_overrides
+            .get(&panel_id)
+            .copied()
+            .unwrap_or_else(|| panel.position(window, cx));
         let dock = self.dock_at_position(dock_position);
         let any_panel = panel.to_any();
         let persisted_size_state =
@@ -2868,9 +2875,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.panel_position_overrides.remove(&panel.entity_id());
         for dock in [&self.left_dock, &self.bottom_dock, &self.right_dock] {
             dock.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
         }
+    }
+
+    pub(crate) fn panel_position_override(&self, panel_id: EntityId) -> Option<DockPosition> {
+        self.panel_position_overrides.get(&panel_id).copied()
+    }
+
+    pub(crate) fn clear_panel_position_override(&mut self, panel_id: EntityId) {
+        self.panel_position_overrides.remove(&panel_id);
     }
 
     /// Moves a live panel entity for this workspace without changing the user's
@@ -2892,6 +2908,7 @@ impl Workspace {
         };
         let source_position = source.read(cx).position();
         if source_position == position {
+            self.panel_position_overrides.insert(panel_id, position);
             return false;
         }
 
@@ -2915,9 +2932,11 @@ impl Workspace {
         } else {
             dock::PanelSizeState::default()
         };
+        self.panel_position_overrides.insert(panel_id, position);
 
         let removed = source.update(cx, |dock, cx| dock.remove_panel(panel, window, cx));
         if !removed {
+            self.panel_position_overrides.remove(&panel_id);
             return false;
         }
 
@@ -3675,15 +3694,15 @@ impl Workspace {
             .find(|dock| dock.focus_handle(cx).contains_focused(window, cx));
 
         if let Some(dock) = active_dock {
-            dock.update(cx, |dock, cx| {
-                let active_panel = dock
-                    .active_panel()
-                    .filter(|panel| panel.panel_focus_handle(cx).contains_focused(window, cx));
-
-                if let Some(panel) = active_panel {
-                    panel.move_to_next_position(window, cx);
-                }
-            })
+            let active_panel = dock
+                .read(cx)
+                .active_panel()
+                .filter(|panel| panel.panel_focus_handle(cx).contains_focused(window, cx))
+                .cloned();
+            if let Some(panel) = active_panel {
+                self.clear_panel_position_override(panel.panel_id());
+                panel.move_to_next_position(window, cx);
+            }
         }
     }
 
@@ -14660,6 +14679,33 @@ mod tests {
                 panel.read(cx).position(window, cx),
                 DockPosition::Right,
                 "workspace relocation must not rewrite the panel's global setting"
+            );
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_position(DockPosition::Bottom, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.left_dock().read(cx).panel::<TestPanel>(),
+                Some(panel.clone()),
+                "settings notifications must respect the workspace override"
+            );
+        });
+
+        workspace.update(cx, |workspace, _| {
+            workspace.clear_panel_position_override(panel.entity_id());
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_position(DockPosition::Right, window, cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.right_dock().read(cx).panel::<TestPanel>(),
+                Some(panel.clone()),
+                "clearing the override must restore normal panel movement"
             );
         });
     }

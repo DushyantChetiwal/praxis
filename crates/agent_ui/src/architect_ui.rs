@@ -86,10 +86,46 @@ impl Interaction {
 /// than stacking up behind it.
 struct ArchitectNotice;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArchitectWorkspaceMode {
     Architect,
     Code,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+struct ArchitectWorkspaceState {
+    version: u8,
+    mode: ArchitectWorkspaceMode,
+    outline_width: f32,
+    inspector_width: f32,
+}
+
+impl Default for ArchitectWorkspaceState {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            mode: ArchitectWorkspaceMode::Architect,
+            outline_width: 226.0,
+            inspector_width: 348.0,
+        }
+    }
+}
+
+impl ArchitectWorkspaceState {
+    fn sanitize(mut self) -> Self {
+        self.version = 1;
+        if !self.outline_width.is_finite() {
+            self.outline_width = Self::default().outline_width;
+        }
+        if !self.inspector_width.is_finite() {
+            self.inspector_width = Self::default().inspector_width;
+        }
+        self.outline_width = self.outline_width.clamp(184.0, 320.0);
+        self.inspector_width = self.inspector_width.clamp(288.0, 480.0);
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +133,7 @@ struct DockSnapshot {
     position: DockPosition,
     open: bool,
     active_panel_index: Option<usize>,
+    active_panel_name: Option<&'static str>,
 }
 
 pub struct ArchitectPane {
@@ -144,6 +181,8 @@ impl ArchitectPane {
         workspace: WeakEntity<Workspace>,
         previous_code_item: Option<Box<dyn WeakItemHandle>>,
         code_docks: Vec<DockSnapshot>,
+        outline_width: Pixels,
+        inspector_width: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -174,8 +213,8 @@ impl ArchitectPane {
             inspector_tab: InspectorTab::Details,
             outline_drawer_open: false,
             inspector_drawer_open: false,
-            outline_width: px(226.0),
-            inspector_width: px(348.0),
+            outline_width,
+            inspector_width,
             search_editor,
             run_starting: Cell::new(false),
             _thread_subscription: subscription,
@@ -199,36 +238,88 @@ impl ArchitectPane {
             .map(|id| format!("{WORKSPACE_MODE_KEY_PREFIX}:{id}"))
     }
 
-    pub fn persisted_mode(workspace: &Workspace, cx: &gpui::App) -> ArchitectWorkspaceMode {
+    fn persisted_state(workspace: &Workspace, cx: &gpui::App) -> ArchitectWorkspaceState {
         let Some(key) = Self::workspace_mode_key(workspace) else {
-            return ArchitectWorkspaceMode::Architect;
+            return ArchitectWorkspaceState::default();
         };
         match db::kvp::KeyValueStore::global(cx).read_kvp(&key) {
-            Ok(Some(value)) if value == "code" => ArchitectWorkspaceMode::Code,
-            Ok(Some(value)) if value == "architect" => ArchitectWorkspaceMode::Architect,
-            Ok(Some(value)) => {
-                log::warn!("Ignoring unknown Architect workspace mode `{value}` for {key}");
-                ArchitectWorkspaceMode::Architect
-            }
-            Ok(None) => ArchitectWorkspaceMode::Architect,
+            Ok(Some(value)) if value == "code" => ArchitectWorkspaceState {
+                mode: ArchitectWorkspaceMode::Code,
+                ..ArchitectWorkspaceState::default()
+            },
+            Ok(Some(value)) if value == "architect" => ArchitectWorkspaceState::default(),
+            Ok(Some(value)) => match serde_json::from_str::<ArchitectWorkspaceState>(&value) {
+                Ok(state) => state.sanitize(),
+                Err(error) => {
+                    log::warn!("Ignoring invalid Architect workspace state for {key}: {error:#}");
+                    ArchitectWorkspaceState::default()
+                }
+            },
+            Ok(None) => ArchitectWorkspaceState::default(),
             Err(error) => {
-                log::error!("Could not read Architect workspace mode for {key}: {error:#}");
-                ArchitectWorkspaceMode::Architect
+                log::error!("Could not read Architect workspace state for {key}: {error:#}");
+                ArchitectWorkspaceState::default()
             }
         }
     }
 
-    fn persist_mode(workspace: &Workspace, mode: ArchitectWorkspaceMode, cx: &mut gpui::App) {
-        let Some(key) = Self::workspace_mode_key(workspace) else {
+    pub fn persisted_mode(workspace: &Workspace, cx: &gpui::App) -> ArchitectWorkspaceMode {
+        Self::persisted_state(workspace, cx).mode
+    }
+
+    fn persist_state(workspace: &Workspace, state: ArchitectWorkspaceState, cx: &mut gpui::App) {
+        Self::persist_state_for_key(Self::workspace_mode_key(workspace), state, cx);
+    }
+
+    fn persist_state_for_key(
+        key: Option<String>,
+        state: ArchitectWorkspaceState,
+        cx: &mut gpui::App,
+    ) {
+        let Some(key) = key else {
             return;
         };
-        let value = match mode {
-            ArchitectWorkspaceMode::Architect => "architect",
-            ArchitectWorkspaceMode::Code => "code",
-        }
-        .to_string();
+        let value = match serde_json::to_string(&state.sanitize()) {
+            Ok(value) => value,
+            Err(error) => {
+                log::error!("Could not serialize Architect workspace state: {error:#}");
+                return;
+            }
+        };
         let store = db::kvp::KeyValueStore::global(cx);
         db::write_and_log(cx, move || async move { store.write_kvp(key, value).await });
+    }
+
+    fn persist_mode(workspace: &Workspace, mode: ArchitectWorkspaceMode, cx: &mut gpui::App) {
+        let mut state = Self::persisted_state(workspace, cx);
+        state.mode = mode;
+        Self::persist_state(workspace, state, cx);
+    }
+
+    fn persist_layout(&self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let state = ArchitectWorkspaceState {
+            version: 1,
+            mode: self.mode,
+            outline_width: f32::from(self.outline_width),
+            inspector_width: f32::from(self.inspector_width),
+        };
+        let key = Self::workspace_mode_key(workspace.read(cx));
+        Self::persist_state_for_key(key, state, cx);
+    }
+
+    fn resize_outline(&mut self, delta: f32, cx: &mut Context<Self>) {
+        self.outline_width = px((f32::from(self.outline_width) + delta).clamp(184.0, 320.0));
+        self.persist_layout(cx);
+        cx.notify();
+    }
+
+    fn resize_inspector(&mut self, delta: f32, cx: &mut Context<Self>) {
+        self.inspector_width = px((f32::from(self.inspector_width) + delta).clamp(288.0, 480.0));
+        self.persist_layout(cx);
+        cx.notify();
     }
 
     fn capture_docks(workspace: &Workspace, cx: &Context<Workspace>) -> Vec<DockSnapshot> {
@@ -241,6 +332,7 @@ impl ArchitectPane {
                     position: dock.position(),
                     open: dock.is_open(),
                     active_panel_index: dock.active_panel_index(),
+                    active_panel_name: dock.active_panel().map(|panel| panel.persistent_name()),
                 }
             })
             .collect()
@@ -265,9 +357,12 @@ impl ArchitectPane {
         for snapshot in snapshots {
             let dock = workspace.dock_at_position(snapshot.position);
             dock.update(cx, |dock, cx| {
-                if let Some(index) = snapshot.active_panel_index
-                    && index < dock.panels_len()
-                {
+                let active_index = snapshot
+                    .active_panel_name
+                    .and_then(|name| dock.panel_index_for_persistent_name(name, cx))
+                    .or(snapshot.active_panel_index)
+                    .filter(|index| *index < dock.panels_len());
+                if let Some(index) = active_index {
                     dock.activate_panel(index, window, cx);
                 }
                 dock.set_open(snapshot.open, window, cx);
@@ -305,6 +400,7 @@ impl ArchitectPane {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
+        let persisted_state = Self::persisted_state(workspace, cx);
         let existing = workspace.item_of_type::<ArchitectPane>(cx);
         let already_active = workspace
             .active_item_as::<ArchitectPane>(cx)
@@ -339,6 +435,8 @@ impl ArchitectPane {
                     workspace_handle,
                     previous_code_item,
                     code_docks.unwrap_or_default(),
+                    px(persisted_state.outline_width),
+                    px(persisted_state.inspector_width),
                     window,
                     cx,
                 )
@@ -690,19 +788,36 @@ impl ArchitectPane {
             return;
         };
 
-        let positions: Vec<Position> = graph
+        let node_bounds: Vec<(Position, f32, f32)> = graph
             .nodes
             .iter()
-            .filter_map(|node| node.position)
+            .filter_map(|node| {
+                node.position.map(|position| {
+                    let (width, height) = self.node_size(node);
+                    (position, width, height)
+                })
+            })
             .collect();
-        if positions.is_empty() {
+        if node_bounds.is_empty() {
             return;
         }
 
-        let min_x = positions.iter().map(|p| p.x).fold(f32::MAX, f32::min) - NODE_WIDTH / 2.0;
-        let max_x = positions.iter().map(|p| p.x).fold(f32::MIN, f32::max) + NODE_WIDTH / 2.0;
-        let min_y = positions.iter().map(|p| p.y).fold(f32::MAX, f32::min) - NODE_HEIGHT / 2.0;
-        let max_y = positions.iter().map(|p| p.y).fold(f32::MIN, f32::max) + NODE_HEIGHT / 2.0;
+        let min_x = node_bounds
+            .iter()
+            .map(|(position, width, _)| position.x - width / 2.0)
+            .fold(f32::MAX, f32::min);
+        let max_x = node_bounds
+            .iter()
+            .map(|(position, width, _)| position.x + width / 2.0)
+            .fold(f32::MIN, f32::max);
+        let min_y = node_bounds
+            .iter()
+            .map(|(position, _, height)| position.y - height / 2.0)
+            .fold(f32::MAX, f32::min);
+        let max_y = node_bounds
+            .iter()
+            .map(|(position, _, height)| position.y + height / 2.0)
+            .fold(f32::MIN, f32::max);
 
         const MARGIN: f32 = 64.0;
         let width = (max_x - min_x).max(1.0);
@@ -1024,6 +1139,30 @@ mod tests {
     use super::*;
     use crate::conversation_view::tests::init_test;
 
+    #[test]
+    fn architect_workspace_state_is_backward_compatible_and_bounded() {
+        let state = ArchitectWorkspaceState {
+            version: 1,
+            mode: ArchitectWorkspaceMode::Code,
+            outline_width: 20.0,
+            inspector_width: f32::INFINITY,
+        }
+        .sanitize();
+        assert_eq!(state.mode, ArchitectWorkspaceMode::Code);
+        assert_eq!(state.outline_width, 184.0);
+        assert_eq!(state.inspector_width, 348.0);
+
+        let serialized = serde_json::to_string(&state).expect("state should serialize");
+        let restored: ArchitectWorkspaceState =
+            serde_json::from_str(&serialized).expect("state should deserialize");
+        assert_eq!(restored.mode, ArchitectWorkspaceMode::Code);
+
+        let partial: ArchitectWorkspaceState = serde_json::from_str(r#"{"mode":"code"}"#)
+            .expect("older partial state should use safe defaults");
+        assert_eq!(partial.outline_width, 226.0);
+        assert_eq!(partial.inspector_width, 348.0);
+    }
+
     #[gpui::test]
     async fn canvas_edits_nested_navigation_and_locking_follow_graph_rules(
         cx: &mut TestAppContext,
@@ -1079,7 +1218,18 @@ mod tests {
         let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
         let pane = workspace.update_in(cx, |_workspace, window, cx| {
             let workspace = cx.weak_entity();
-            cx.new(|cx| ArchitectPane::new(thread.clone(), workspace, None, Vec::new(), window, cx))
+            cx.new(|cx| {
+                ArchitectPane::new(
+                    thread.clone(),
+                    workspace,
+                    None,
+                    Vec::new(),
+                    px(226.0),
+                    px(348.0),
+                    window,
+                    cx,
+                )
+            })
         });
 
         pane.update_in(cx, |pane, window, cx| {
@@ -1175,7 +1325,18 @@ mod tests {
 
         let reopened = workspace.update_in(cx, |_workspace, window, cx| {
             let workspace = cx.weak_entity();
-            cx.new(|cx| ArchitectPane::new(thread.clone(), workspace, None, Vec::new(), window, cx))
+            cx.new(|cx| {
+                ArchitectPane::new(
+                    thread.clone(),
+                    workspace,
+                    None,
+                    Vec::new(),
+                    px(226.0),
+                    px(348.0),
+                    window,
+                    cx,
+                )
+            })
         });
         reopened.read_with(cx, |pane, cx| {
             assert!(

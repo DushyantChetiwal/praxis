@@ -449,6 +449,18 @@ impl ArchitectGraph {
         self.nodes.is_empty()
     }
 
+    pub fn step_count_deeply(&self) -> usize {
+        self.nodes
+            .iter()
+            .map(|node| {
+                1 + node
+                    .subplan()
+                    .map(ArchitectGraph::step_count_deeply)
+                    .unwrap_or_default()
+            })
+            .sum()
+    }
+
     /// Clears results from this plan and every nested plan before a new run.
     pub fn clear_results(&mut self) {
         for node in &mut self.nodes {
@@ -1426,6 +1438,20 @@ mod tests {
     fn a_loop_does_not_make_a_reachable_graph_look_unreachable() {
         let graph = looping_graph();
         assert_eq!(graph.problems(), vec![]);
+    }
+
+    #[test]
+    fn deep_step_count_includes_nested_plans() {
+        let mut nested = ArchitectGraph::default();
+        nested.add_node(ArchitectNode::new("child-a", "Child A"));
+        nested.add_node(ArchitectNode::new("child-b", "Child B"));
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.subplan = Some(Box::new(nested));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(parent);
+        graph.add_node(ArchitectNode::new("sibling", "Sibling"));
+
+        assert_eq!(graph.step_count_deeply(), 4);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use architect::{
     ArchitectGraph, ArchitectNode, EdgeCondition, GraphProblem, NodeId, NodePath, Position,
+    RunOutcome,
 };
 use gpui::{
     App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
@@ -121,7 +122,7 @@ impl ArchitectPane {
             .into_any()
     }
 
-    fn render_plan_header(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_plan_header(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let graph = self.graph(cx);
         let step_count = graph.map_or(0, |graph| graph.nodes.len());
         let locked_count = graph.map_or(0, |graph| {
@@ -130,6 +131,7 @@ impl ArchitectPane {
         // Readiness is a property of the whole plan, not of the level on
         // screen: a run started from inside a sub-plan still runs everything.
         let root = self.root_graph(cx);
+        let run_step_count = root.map_or(0, ArchitectGraph::step_count_deeply);
         let problems: Vec<GraphProblem> = root
             .map(ArchitectGraph::blocking_problems)
             .unwrap_or_default();
@@ -156,7 +158,7 @@ impl ArchitectPane {
                     None => Some(
                         format!(
                             "Step {} of {} · {}",
-                            run.step_number, step_count, run.current_title
+                            run.step_number, run_step_count, run.current_title
                         )
                         .into(),
                     ),
@@ -250,12 +252,14 @@ impl ArchitectPane {
                                 },
                             )),
                     )
-                    .child(
-                        Label::new(format!("{summary} · live workspace state"))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted)
-                            .truncate(),
-                    ),
+                    .when(!compact, |this| {
+                        this.child(
+                            Label::new(format!("{summary} · live workspace state"))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                    }),
             )
             .child(
                 h_flex()
@@ -264,68 +268,96 @@ impl ArchitectPane {
                     // The state of the run sits next to the control for it, so
                     // reading what is happening and stopping it are one glance
                     // and one reach apart.
-                    .when_some(run_status, |this, status| {
-                        this.child(
-                            h_flex()
-                                .id("architect-run-status")
-                                .gap_1()
-                                .px_2()
-                                .py_0p5()
-                                .mr_1()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(if running {
-                                    cx.theme().status().info_border
-                                } else {
-                                    cx.theme().colors().border
-                                })
-                                .bg(if running {
-                                    cx.theme().status().info_background
-                                } else {
-                                    cx.theme().colors().element_background
-                                })
-                                .child(
-                                    Icon::new(if running {
-                                        IconName::PlayFilled
+                    .when_some(
+                        (!compact).then_some(run_status).flatten(),
+                        |this, status| {
+                            this.child(
+                                h_flex()
+                                    .id("architect-run-status")
+                                    .gap_1()
+                                    .px_2()
+                                    .py_0p5()
+                                    .mr_1()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(if running {
+                                        cx.theme().status().info_border
                                     } else {
-                                        IconName::Check
+                                        cx.theme().colors().border
                                     })
-                                    .size(IconSize::XSmall)
-                                    .color(if running {
-                                        Color::Info
+                                    .bg(if running {
+                                        cx.theme().status().info_background
                                     } else {
-                                        Color::Muted
-                                    }),
-                                )
-                                .child(
-                                    Label::new(truncate(&status, 34))
-                                        .size(LabelSize::Small)
+                                        cx.theme().colors().element_background
+                                    })
+                                    .child(
+                                        Icon::new(if running {
+                                            IconName::PlayFilled
+                                        } else {
+                                            IconName::Check
+                                        })
+                                        .size(IconSize::XSmall)
                                         .color(if running { Color::Info } else { Color::Muted }),
+                                    )
+                                    .child(
+                                        Label::new(truncate(&status, 34))
+                                            .size(LabelSize::Small)
+                                            .color(if running {
+                                                Color::Info
+                                            } else {
+                                                Color::Muted
+                                            }),
+                                    )
+                                    .tooltip(Tooltip::text(status)),
+                            )
+                        },
+                    )
+                    .when(!compact, |this| {
+                        this.child(
+                            Button::new("architect-share", "Share")
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Subtle)
+                                .start_icon(
+                                    Icon::new(IconName::ArrowUpRight).size(IconSize::XSmall),
                                 )
-                                .tooltip(Tooltip::text(status)),
+                                .tooltip(Tooltip::text("Share this project with collaborators"))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(ShareProject), cx);
+                                }),
                         )
                     })
-                    .child(
-                        Button::new("architect-share", "Share")
-                            .label_size(LabelSize::Small)
-                            .style(ButtonStyle::Subtle)
-                            .start_icon(Icon::new(IconName::ArrowUpRight).size(IconSize::XSmall))
-                            .tooltip(Tooltip::text("Share this project with collaborators"))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ShareProject), cx);
-                            }),
-                    )
-                    .child(
-                        Button::new("architect-review", "Review Plan")
-                            .label_size(LabelSize::Small)
-                            .style(ButtonStyle::Subtle)
-                            .start_icon(Icon::new(IconName::ListTodo).size(IconSize::XSmall))
-                            .disabled(step_count == 0)
-                            .tooltip(Tooltip::text("Focus the first step that needs attention"))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.review_plan(window, cx)),
-                            ),
-                    )
+                    .when(!compact, |this| {
+                        this.child(
+                            Button::new("architect-review", "Review Plan")
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Subtle)
+                                .start_icon(Icon::new(IconName::ListTodo).size(IconSize::XSmall))
+                                .disabled(step_count == 0)
+                                .tooltip(Tooltip::text("Focus the first step that needs attention"))
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.review_plan(window, cx)),
+                                ),
+                        )
+                    })
+                    .when(compact, |this| {
+                        this.child(
+                            IconButton::new("architect-share-compact", IconName::ArrowUpRight)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text("Share this project with collaborators"))
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(ShareProject), cx);
+                                }),
+                        )
+                        .child(
+                            IconButton::new("architect-review-compact", IconName::ListTodo)
+                                .icon_size(IconSize::Small)
+                                .disabled(step_count == 0)
+                                .tooltip(Tooltip::text("Focus the first step that needs attention"))
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.review_plan(window, cx)),
+                                ),
+                        )
+                    })
                     .child(if running {
                         Button::new("architect-stop", "Stop")
                             .label_size(LabelSize::Small)
@@ -397,39 +429,74 @@ impl ArchitectPane {
                 h_flex()
                     .gap_1()
                     .flex_none()
-                    .child(
-                        Button::new("architect-search", "Search")
-                            .label_size(LabelSize::Small)
-                            .style(ButtonStyle::Subtle)
-                            .start_icon(Icon::new(IconName::MagnifyingGlass).size(IconSize::XSmall))
-                            .disabled(self.graph(cx).is_none_or(ArchitectGraph::is_empty))
-                            .tooltip(Tooltip::text(
-                                "Open the ordered plan navigator to find a step",
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.outline_drawer_open = true;
-                                this.search_editor.focus_handle(cx).focus(window, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("architect-tidy", "Tidy")
-                            .label_size(LabelSize::Small)
-                            .style(ButtonStyle::Subtle)
-                            .start_icon(Icon::new(IconName::RotateCw).size(IconSize::XSmall))
-                            .disabled(running)
-                            .tooltip(Tooltip::text("Tidy up the graph layout"))
-                            .on_click(cx.listener(|this, _, _, cx| this.tidy_up(cx))),
-                    )
-                    .child(
-                        Button::new("architect-add-step", "Add Step")
-                            .label_size(LabelSize::Small)
-                            .style(ButtonStyle::Subtle)
-                            .start_icon(Icon::new(IconName::Plus).size(IconSize::XSmall))
-                            .disabled(running)
-                            .tooltip(Tooltip::text("Add a step to this plan"))
-                            .on_click(cx.listener(|this, _, window, cx| this.add_step(window, cx))),
-                    ),
+                    .when(!show_navigation, |this| {
+                        this.child(
+                            Button::new("architect-search", "Search")
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Subtle)
+                                .start_icon(
+                                    Icon::new(IconName::MagnifyingGlass).size(IconSize::XSmall),
+                                )
+                                .disabled(self.graph(cx).is_none_or(ArchitectGraph::is_empty))
+                                .tooltip(Tooltip::text(
+                                    "Open the ordered plan navigator to find a step",
+                                ))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.outline_drawer_open = true;
+                                    this.search_editor.focus_handle(cx).focus(window, cx);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("architect-tidy", "Tidy")
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Subtle)
+                                .start_icon(Icon::new(IconName::RotateCw).size(IconSize::XSmall))
+                                .disabled(running)
+                                .tooltip(Tooltip::text("Tidy up the graph layout"))
+                                .on_click(cx.listener(|this, _, _, cx| this.tidy_up(cx))),
+                        )
+                        .child(
+                            Button::new("architect-add-step", "Add Step")
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Subtle)
+                                .start_icon(Icon::new(IconName::Plus).size(IconSize::XSmall))
+                                .disabled(running)
+                                .tooltip(Tooltip::text("Add a step to this plan"))
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.add_step(window, cx)),
+                                ),
+                        )
+                    })
+                    .when(show_navigation, |this| {
+                        this.child(
+                            IconButton::new("architect-search-compact", IconName::MagnifyingGlass)
+                                .icon_size(IconSize::Small)
+                                .disabled(self.graph(cx).is_none_or(ArchitectGraph::is_empty))
+                                .tooltip(Tooltip::text("Search plan steps"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.outline_drawer_open = true;
+                                    this.search_editor.focus_handle(cx).focus(window, cx);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            IconButton::new("architect-tidy-compact", IconName::RotateCw)
+                                .icon_size(IconSize::Small)
+                                .disabled(running)
+                                .tooltip(Tooltip::text("Tidy up the graph layout"))
+                                .on_click(cx.listener(|this, _, _, cx| this.tidy_up(cx))),
+                        )
+                        .child(
+                            IconButton::new("architect-add-step-compact", IconName::Plus)
+                                .icon_size(IconSize::Small)
+                                .disabled(running)
+                                .tooltip(Tooltip::text("Add a step to this plan"))
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.add_step(window, cx)),
+                                ),
+                        )
+                    }),
             )
             .into_any()
     }
@@ -456,6 +523,7 @@ impl ArchitectPane {
             })
             .cloned()
             .collect();
+        let no_search_results = !query.is_empty() && ordered_nodes.is_empty();
         let blocking_problems = graph
             .map(ArchitectGraph::blocking_problems)
             .unwrap_or_default();
@@ -467,7 +535,14 @@ impl ArchitectPane {
             _ => None,
         };
         let running = self.running_node(cx);
+        let run = self.thread.read(cx).architect_run();
         let run_active = self.is_running(cx);
+        let failed_node = run.and_then(|run| match run.outcome.as_ref() {
+            Some(RunOutcome::NodeLimit { node, .. } | RunOutcome::DepthLimit { node }) => {
+                Some(node)
+            }
+            _ => None,
+        });
         let settled = all_ordered_nodes.iter().filter(|node| node.locked).count();
         let completed = all_ordered_nodes
             .iter()
@@ -503,29 +578,54 @@ impl ArchitectPane {
                                     .size(LabelSize::XSmall)
                                     .color(Color::Muted),
                             )
-                            .child(chip(
-                                if ready { "Ready" } else { "Review" },
-                                Some(if ready {
-                                    IconName::Check
-                                } else {
-                                    IconName::Warning
-                                }),
-                                if ready {
-                                    Color::Success
-                                } else {
-                                    Color::Warning
-                                },
-                                if ready {
-                                    cx.theme().status().success_border
-                                } else {
-                                    cx.theme().status().warning_border
-                                },
-                                if ready {
-                                    cx.theme().status().success_background
-                                } else {
-                                    cx.theme().status().warning_background
-                                },
-                            )),
+                            .child(
+                                h_flex()
+                                    .gap_0p5()
+                                    .child(chip(
+                                        if ready { "Ready" } else { "Review" },
+                                        Some(if ready {
+                                            IconName::Check
+                                        } else {
+                                            IconName::Warning
+                                        }),
+                                        if ready {
+                                            Color::Success
+                                        } else {
+                                            Color::Warning
+                                        },
+                                        if ready {
+                                            cx.theme().status().success_border
+                                        } else {
+                                            cx.theme().status().warning_border
+                                        },
+                                        if ready {
+                                            cx.theme().status().success_background
+                                        } else {
+                                            cx.theme().status().warning_background
+                                        },
+                                    ))
+                                    .child(
+                                        IconButton::new(
+                                            "architect-outline-narrower",
+                                            IconName::Dash,
+                                        )
+                                        .icon_size(IconSize::XSmall)
+                                        .tooltip(Tooltip::text("Make the plan outline narrower"))
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.resize_outline(-16.0, cx)
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        IconButton::new("architect-outline-wider", IconName::Plus)
+                                            .icon_size(IconSize::XSmall)
+                                            .tooltip(Tooltip::text("Make the plan outline wider"))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.resize_outline(16.0, cx)
+                                            })),
+                                    ),
+                            ),
                     )
                     .child(
                         h_flex()
@@ -659,17 +759,27 @@ impl ArchitectPane {
                                     .size(LabelSize::XSmall)
                                     .color(Color::Muted),
                             )
+                            .when(no_search_results, |this| {
+                                this.child(
+                                    Label::new("No steps match this search.")
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                )
+                            })
                             .children(ordered_nodes.into_iter().enumerate().map(
                                 |(index, node)| {
                                     let id = node.id.clone();
                                     let is_selected = selected == Some(&node.id);
                                     let is_running = running == Some(&node.id);
+                                    let is_failed = failed_node == Some(&node.id);
                                     let is_complete = node
                                         .result
                                         .as_ref()
                                         .is_some_and(|result| !result.summary.trim().is_empty());
                                     let (state, state_color) = if is_running {
                                         ("running", Color::Info)
+                                    } else if is_failed {
+                                        ("failed", Color::Error)
                                     } else if is_complete {
                                         ("completed", Color::Success)
                                     } else if node.locked {
@@ -755,7 +865,7 @@ impl ArchitectPane {
         let run = thread.architect_run()?;
         let total = self
             .root_graph(cx)
-            .map(|graph| graph.execution_order().len())
+            .map(ArchitectGraph::step_count_deeply)
             .unwrap_or_default()
             .max(1);
         let completed = run
@@ -776,6 +886,37 @@ impl ArchitectPane {
                 .unwrap_or_else(|| SharedString::from("Run finished")),
             None => format!("Running {}", run.current_title).into(),
         };
+        let succeeded = run
+            .outcome
+            .as_ref()
+            .is_some_and(RunOutcome::is_success);
+        let cancelled = matches!(run.outcome.as_ref(), Some(RunOutcome::Cancelled));
+        let failed = run.outcome.is_some() && !succeeded && !cancelled;
+        let (border, background, color) = if failed {
+            (
+                cx.theme().status().error_border,
+                cx.theme().status().error_background,
+                Color::Error,
+            )
+        } else if cancelled {
+            (
+                cx.theme().status().warning_border,
+                cx.theme().status().warning_background,
+                Color::Warning,
+            )
+        } else if succeeded {
+            (
+                cx.theme().status().success_border,
+                cx.theme().status().success_background,
+                Color::Success,
+            )
+        } else {
+            (
+                cx.theme().status().info_border,
+                cx.theme().status().info_background,
+                Color::Info,
+            )
+        };
 
         Some(
             h_flex()
@@ -785,20 +926,18 @@ impl ArchitectPane {
                 .py_1p5()
                 .gap_3()
                 .border_b_1()
-                .border_color(cx.theme().status().info_border)
-                .bg(cx.theme().status().info_background)
+                .border_color(border)
+                .bg(background)
                 .child(
                     Icon::new(if run.is_running() {
                         IconName::PlayFilled
-                    } else {
+                    } else if succeeded {
                         IconName::Check
+                    } else {
+                        IconName::Warning
                     })
                     .size(IconSize::Small)
-                    .color(if run.is_running() {
-                        Color::Info
-                    } else {
-                        Color::Success
-                    }),
+                    .color(color),
                 )
                 .child(
                     v_flex()
@@ -816,7 +955,15 @@ impl ArchitectPane {
                                         .w(px(220.0 * progress))
                                         .h_full()
                                         .rounded_full()
-                                        .bg(cx.theme().status().info),
+                                        .bg(if succeeded {
+                                            cx.theme().status().success
+                                        } else if failed {
+                                            cx.theme().status().error
+                                        } else if cancelled {
+                                            cx.theme().status().warning
+                                        } else {
+                                            cx.theme().status().info
+                                        }),
                                 ),
                         ),
                 )
@@ -1044,11 +1191,14 @@ impl ArchitectPane {
         let theme = cx.theme().colors();
         let edge_color = theme.text_muted.opacity(0.55);
         let selected_color = theme.text_accent;
+        let active_color = cx.theme().status().info;
+        let completed_color = cx.theme().status().success.opacity(0.7);
         let pending_color = theme.text_accent.opacity(0.7);
         // A loop is the one part of a plan that is not obvious from the shape
         // alone, so it is the one part given a colour of its own.
         let loop_color = cx.theme().status().warning.opacity(0.85);
 
+        let running = self.running_node(cx);
         let mut curves = Vec::new();
         for edge in &graph.edges {
             let (Some(from), Some(to)) = (
@@ -1058,15 +1208,28 @@ impl ArchitectPane {
                 continue;
             };
             let selected = self.selection == Some(Selection::Edge(edge.id.clone()));
+            let active = running == Some(&edge.to);
+            let completed = graph
+                .node(&edge.from)
+                .and_then(|node| node.result.as_ref())
+                .is_some_and(|result| !result.summary.trim().is_empty())
+                && graph
+                    .node(&edge.to)
+                    .and_then(|node| node.result.as_ref())
+                    .is_some_and(|result| !result.summary.trim().is_empty());
             let curve = EdgeCurve::between(from, to);
             let color = if selected {
                 selected_color
+            } else if active {
+                active_color
+            } else if completed {
+                completed_color
             } else if curve.backwards {
                 loop_color
             } else {
                 edge_color
             };
-            curves.push((curve, color, selected));
+            curves.push((curve, color, selected || active));
         }
 
         let pending = match &self.interaction {
@@ -1430,6 +1593,15 @@ impl ArchitectPane {
         let hovered = self.hovered_node.as_ref() == Some(&node.id);
         let detailed = self.zoom >= DETAIL_ZOOM_THRESHOLD;
         let running = self.running_node(cx) == Some(&node.id);
+        let run = self.thread.read(cx).architect_run();
+        let run_active = run.is_some_and(agent::ArchitectRun::is_running);
+        let failed = run
+            .and_then(|run| run.outcome.as_ref())
+            .is_some_and(|outcome| match outcome {
+                RunOutcome::NodeLimit { node: failed, .. }
+                | RunOutcome::DepthLimit { node: failed } => failed == &node.id,
+                _ => false,
+            });
         let subplan_steps = node.subplan().map_or(0, |subplan| subplan.nodes.len());
         // Naming the steps inside without opening it: enough to tell two
         // sub-plans apart at a glance, without the canvas drawing a graph
@@ -1465,7 +1637,7 @@ impl ArchitectPane {
 
         // The step being carried out outranks selection, because during a run
         // where the agent is now is the thing worth being able to find.
-        let border_color = if invalid {
+        let border_color = if invalid || failed {
             error_border
         } else if running {
             cx.theme().status().info_border
@@ -1490,6 +1662,7 @@ impl ArchitectPane {
         // A step that has finished is worth reading as finished before anything
         // else about it, so it is marked in the title rather than in the chips.
         let done = has_summary && !running;
+        let queued = run_active && !running && !done && !failed;
 
         div()
             .id(("architect-node", ix))
@@ -1627,21 +1800,27 @@ impl ArchitectPane {
                                     .child(
                                         Label::new(if running {
                                             "running"
+                                        } else if failed {
+                                            "failed"
                                         } else if done {
                                             "completed"
+                                        } else if queued {
+                                            "queued"
                                         } else if node.locked {
                                             "settled"
                                         } else {
                                             "draft"
                                         })
                                         .size(LabelSize::XSmall)
-                                        .color(
-                                            if running {
-                                                Color::Info
-                                            } else if done || node.locked {
-                                                Color::Success
-                                            } else {
-                                                Color::Muted
+                                        .color(if running {
+                                            Color::Info
+                                        } else if failed {
+                                            Color::Error
+                                        } else if done || node.locked {
+                                            Color::Success
+                                        } else {
+                                            Color::Muted
+                                        }),
                                             },
                                         ),
                                     ),
@@ -1896,7 +2075,7 @@ impl Render for ArchitectPane {
             ArchitectLayout::Narrow => px(348.0),
             ArchitectLayout::Compact => px((f32::from(viewport_width) - 24.0).clamp(280.0, 348.0)),
         };
-        let header = self.render_plan_header(cx);
+        let header = self.render_plan_header(matches!(layout, ArchitectLayout::Compact), cx);
         let run_bar = self.render_run_bar(cx);
         let graph =
             self.render_graph_workspace(has_plan, matches!(layout, ArchitectLayout::Compact), cx);
@@ -2027,5 +2206,30 @@ impl Item for ArchitectPane {
 
     fn to_item_events(event: &Self::Event, f: &mut dyn FnMut(ItemEvent)) {
         f(*event)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn responsive_layout_uses_all_four_shell_states() {
+        assert_eq!(
+            ArchitectLayout::for_width(px(1500.0)),
+            ArchitectLayout::Wide
+        );
+        assert_eq!(
+            ArchitectLayout::for_width(px(1200.0)),
+            ArchitectLayout::Medium
+        );
+        assert_eq!(
+            ArchitectLayout::for_width(px(900.0)),
+            ArchitectLayout::Narrow
+        );
+        assert_eq!(
+            ArchitectLayout::for_width(px(600.0)),
+            ArchitectLayout::Compact
+        );
     }
 }

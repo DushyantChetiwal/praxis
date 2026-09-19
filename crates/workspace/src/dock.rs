@@ -640,7 +640,14 @@ impl Dock {
                 let panel = panel.clone();
 
                 move |this, window, cx| {
-                    let new_position = panel.read(cx).position(window, cx);
+                    let configured_position = panel.read(cx).position(window, cx);
+                    let Ok(new_position) = workspace.read_with(cx, |workspace, _| {
+                        workspace
+                            .panel_position_override(panel.entity_id())
+                            .unwrap_or(configured_position)
+                    }) else {
+                        return;
+                    };
                     if new_position == this.position {
                         return;
                     }
@@ -1454,6 +1461,7 @@ impl Render for PanelButtons {
                                     if panel.position_is_valid(position, cx) {
                                         let is_current = position == dock_position;
                                         let panel = panel.clone();
+                                        let workspace_for_position = workspace_for_menu.clone();
                                         menu = menu.toggleable_entry(
                                             format!("Dock {}", position.label()),
                                             is_current,
@@ -1461,6 +1469,22 @@ impl Render for PanelButtons {
                                             None,
                                             move |window, cx| {
                                                 if !is_current {
+                                                    if let Some(workspace) =
+                                                        workspace_for_position.upgrade()
+                                                        && let Err(error) = workspace.update(
+                                                            cx,
+                                                            |workspace, _| {
+                                                                workspace
+                                                                    .clear_panel_position_override(
+                                                                        panel.panel_id(),
+                                                                    );
+                                                            },
+                                                        )
+                                                    {
+                                                        log::error!(
+                                                            "Could not clear a workspace panel override: {error:#}"
+                                                        );
+                                                    }
                                                     panel.set_position(position, window, cx);
                                                 }
                                             },

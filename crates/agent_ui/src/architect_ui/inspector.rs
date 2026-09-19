@@ -478,6 +478,24 @@ impl ArchitectPane {
         cx.notify();
     }
 
+    fn render_inspector_resize_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .gap_0p5()
+            .child(
+                IconButton::new("architect-inspector-narrower", IconName::Dash)
+                    .icon_size(IconSize::XSmall)
+                    .tooltip(Tooltip::text("Make the inspector narrower"))
+                    .on_click(cx.listener(|this, _, _, cx| this.resize_inspector(-16.0, cx))),
+            )
+            .child(
+                IconButton::new("architect-inspector-wider", IconName::Plus)
+                    .icon_size(IconSize::XSmall)
+                    .tooltip(Tooltip::text("Make the inspector wider"))
+                    .on_click(cx.listener(|this, _, _, cx| this.resize_inspector(16.0, cx))),
+            )
+            .into_any()
+    }
+
     fn render_overview_inspector(&self, width: gpui::Pixels, cx: &mut Context<Self>) -> AnyElement {
         let graph = self.graph(cx);
         let step_count = graph.map_or(0, |graph| graph.nodes.len());
@@ -524,7 +542,13 @@ impl ArchitectPane {
                             .py_2()
                             .border_b_1()
                             .border_color(cx.theme().colors().border)
-                            .child(Label::new("Plan Overview").size(LabelSize::Default))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .justify_between()
+                                    .child(Label::new("Plan Overview").size(LabelSize::Default))
+                                    .child(self.render_inspector_resize_controls(cx)),
+                            )
                             .child(
                                 Label::new(if ready {
                                     "Ready for execution"
@@ -681,7 +705,13 @@ impl ArchitectPane {
                             .py_2()
                             .border_b_1()
                             .border_color(cx.theme().colors().border)
-                            .child(Label::new("Connection").size(LabelSize::Default))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .justify_between()
+                                    .child(Label::new("Connection").size(LabelSize::Default))
+                                    .child(self.render_inspector_resize_controls(cx)),
+                            )
                             .child(
                                 Label::new(format!("{source} → {target}"))
                                     .size(LabelSize::Small)
@@ -997,7 +1027,8 @@ impl ArchitectPane {
                                         } else {
                                             Color::Muted
                                         }),
-                                ),
+                                )
+                                .child(self.render_inspector_resize_controls(cx)),
                         ),
                 )
                 .child(
