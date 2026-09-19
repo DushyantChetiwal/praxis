@@ -1471,19 +1471,13 @@ impl Render for PanelButtons {
                                                 if !is_current {
                                                     if let Some(workspace) =
                                                         workspace_for_position.upgrade()
-                                                        && let Err(error) = workspace.update(
-                                                            cx,
-                                                            |workspace, _| {
-                                                                workspace
-                                                                    .clear_panel_position_override(
-                                                                        panel.panel_id(),
-                                                                    );
-                                                            },
-                                                        )
                                                     {
-                                                        log::error!(
-                                                            "Could not clear a workspace panel override: {error:#}"
-                                                        );
+                                                        workspace.update(cx, |workspace, _| {
+                                                            workspace
+                                                                .clear_panel_position_override(
+                                                                    panel.panel_id(),
+                                                                );
+                                                        });
                                                     }
                                                     panel.set_position(position, window, cx);
                                                 }

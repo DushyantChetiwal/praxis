@@ -2913,6 +2913,7 @@ impl Workspace {
             .all_docks()
             .into_iter()
             .find(|dock| dock.read(cx).panel_for_id(panel_id).is_some())
+            .cloned()
         else {
             return false;
         };
