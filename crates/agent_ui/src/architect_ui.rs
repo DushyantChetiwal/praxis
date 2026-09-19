@@ -1444,15 +1444,12 @@ mod tests {
 
         let (workspace, cx) =
             cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
-        let (weak_workspace, async_window_context) = cx.update(|window, cx| {
-            (workspace.downgrade(), window.to_async(cx))
-        });
-        let project_panel = ProjectPanel::load(
-            weak_workspace.clone(),
-            async_window_context.clone(),
-        )
-        .await
-        .expect("the native Project panel should load");
+        let (weak_workspace, async_window_context) =
+            cx.update(|window, cx| (workspace.downgrade(), window.to_async(cx)));
+        let project_panel =
+            ProjectPanel::load(weak_workspace.clone(), async_window_context.clone())
+                .await
+                .expect("the native Project panel should load");
         let git_panel = GitPanel::load(weak_workspace.clone(), async_window_context.clone())
             .await
             .expect("the native Git panel should load");
@@ -1636,7 +1633,13 @@ mod tests {
             .expect("the native Agent panel should exist")
             .clone();
         agent_panel_entity.update_in(cx, |agent_panel, window, cx| {
-            agent_panel.activate_draft(false, crate::AgentThreadSource::AgentPanel, window, cx);
+            agent_panel.open_thread(
+                session_id.clone(),
+                Some(PathList::new(&[Path::new("/a")])),
+                None,
+                window,
+                cx,
+            );
         });
         cx.run_until_parked();
         let agent_conversation = agent_panel_entity.read_with(cx, |agent_panel, _| {
