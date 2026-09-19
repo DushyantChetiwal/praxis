@@ -1322,7 +1322,7 @@ mod tests {
 
     use acp_thread::AgentConnection as _;
     use fs::Fs as _;
-    use gpui::{Modifiers, MouseMoveEvent, Task, TestAppContext, VisualTestContext, size};
+    use gpui::{Modifiers, MouseMoveEvent, Task, TestAppContext, size};
     use project::{FakeFs, Project};
     use serde_json::json;
     use util::path_list::PathList;
@@ -1442,14 +1442,11 @@ mod tests {
         graph.add_node(target_node);
         thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
 
-        let multi_workspace =
-            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-        let workspace = multi_workspace
-            .read_with(cx, |multi_workspace, _cx| {
-                multi_workspace.workspace().clone()
-            })
-            .unwrap();
-        let cx = &mut VisualTestContext::from_window(multi_workspace.into(), cx);
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |multi_workspace, _cx| {
+            multi_workspace.workspace().clone()
+        });
         workspace.update_in(cx, |workspace, window, cx| {
             let agent_panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
             workspace.add_panel(agent_panel, window, cx);
