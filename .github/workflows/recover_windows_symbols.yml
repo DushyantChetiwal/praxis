@@ -26,6 +26,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: bundle-windows-x86_64
+          add-job-id-key: false
           save-if: false
 
       - name: Stage the debug-symbol archive
