@@ -1322,7 +1322,7 @@ mod tests {
     use project::{FakeFs, Project};
     use serde_json::json;
     use util::path_list::PathList;
-    use workspace::{Panel as _, Workspace, item::test::TestItem};
+    use workspace::{Workspace, item::test::TestItem};
 
     use super::*;
     use crate::conversation_view::tests::init_test;
@@ -1802,18 +1802,25 @@ mod tests {
                 "Git should replace Project as the active native left-dock tab"
             );
         });
-        let git_panel_focus = workspace.update_in(cx, |workspace, window, cx| {
+        workspace.update_in(cx, |workspace, window, cx| {
             assert!(
                 workspace.focus_panel::<GitPanel>(window, cx).is_some(),
                 "the native Git panel should accept focus"
             );
-            window
-                .focused(cx)
-                .expect("the native Git panel should own focus before switching")
         });
         cx.run_until_parked();
-        cx.update(|window, _| {
-            assert!(git_panel_focus.is_focused(window));
+        let git_panel_focus = cx.update(|window, cx| {
+            let panel_focus = git_panel
+                .as_ref()
+                .expect("the native Git panel should exist")
+                .read_with(cx, |git_panel, cx| git_panel.focus_handle(cx));
+            assert!(
+                panel_focus.contains_focused(window, cx),
+                "the native Git panel should own focus before switching"
+            );
+            window
+                .focused(cx)
+                .expect("the Git panel should have a focused descendant")
         });
         workspace.update_in(cx, |workspace, window, cx| {
             ArchitectPane::open(thread.clone(), workspace, window, cx);
