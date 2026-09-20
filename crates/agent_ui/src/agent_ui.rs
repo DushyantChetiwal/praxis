@@ -471,7 +471,7 @@ impl Agent {
 
     pub fn label(&self) -> SharedString {
         match self {
-            Self::NativeAgent => "Zed Agent".into(),
+            Self::NativeAgent => "Praxis Agent".into(),
             Self::Custom { id, .. } => id.0.clone(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Stub => "Stub Agent".into(),
@@ -674,7 +674,7 @@ pub fn init(
                     workspace.show_toast(
                         workspace::Toast::new(
                             workspace::notifications::NotificationId::unique::<OpenArchitect>(),
-                            "Architect needs an open Zed Agent thread. Open the agent panel and \
+                            "Architect needs an open Praxis Agent thread. Open the agent panel and \
                              start a thread, then try again.",
                         ),
                         cx,
@@ -718,7 +718,7 @@ pub fn init(
                             workspace::notifications::NotificationId::unique::<
                                 ToggleArchitectWorkspace,
                             >(),
-                            "Architect needs an open Zed Agent thread. Open the agent panel and \
+                            "Architect needs an open Praxis Agent thread. Open the agent panel and \
                              start a thread, then try again.",
                         ),
                         cx,

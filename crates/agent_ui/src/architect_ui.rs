@@ -28,8 +28,13 @@ use gpui::{
     Subscription, WeakEntity, Window, point, px,
 };
 use project_panel::ProjectPanel;
+use settings::Settings as _;
 use terminal_view::terminal_panel::TerminalPanel;
-use workspace::{Workspace, ZoomIn, ZoomOut, dock::DockPosition, item::WeakItemHandle};
+use workspace::{
+    TabBarSettings, Workspace, ZoomIn, ZoomOut,
+    dock::{Dock, DockPosition},
+    item::WeakItemHandle,
+};
 
 use crate::AgentPanel;
 use geometry::{
@@ -184,6 +189,7 @@ pub struct ArchitectPane {
 
     _thread_subscription: Subscription,
     _search_subscription: Subscription,
+    _dock_subscriptions: Vec<Subscription>,
 }
 
 impl ArchitectPane {
@@ -239,6 +245,7 @@ impl ArchitectPane {
             run_starting: Cell::new(false),
             _thread_subscription: subscription,
             _search_subscription: search_subscription,
+            _dock_subscriptions: Vec::new(),
         }
     }
 
@@ -391,6 +398,55 @@ impl ArchitectPane {
         }
     }
 
+    fn observe_docks(&mut self, docks: Vec<Entity<Dock>>, cx: &mut Context<Self>) {
+        self._dock_subscriptions = docks
+            .into_iter()
+            .map(|dock| cx.observe(&dock, |_, _, cx| cx.notify()))
+            .collect();
+    }
+
+    fn enforce_exclusive_architect_surface(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mode != ArchitectWorkspaceMode::Architect {
+            return;
+        }
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let any_dock_open = workspace
+            .read(cx)
+            .all_docks()
+            .into_iter()
+            .any(|dock| dock.read(cx).is_open());
+        if !any_dock_open {
+            return;
+        }
+
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |window, cx| {
+            let Some(workspace) = workspace.upgrade() else {
+                return;
+            };
+            workspace.update(cx, |workspace, cx| {
+                let active_architect = workspace.active_item_as::<ArchitectPane>(cx);
+                let architect_mode_active = active_architect.as_ref().is_some_and(|architect| {
+                    architect.read(cx).mode() == ArchitectWorkspaceMode::Architect
+                });
+                if !architect_mode_active {
+                    return;
+                }
+
+                Self::hide_code_docks(workspace, window, cx);
+                if let Some(architect) = active_architect {
+                    architect.read(cx).focus_handle.focus(window, cx);
+                }
+            });
+        });
+    }
+
     fn replace_thread(&mut self, thread: Entity<Thread>, cx: &mut Context<Self>) {
         if self.thread == thread {
             return;
@@ -456,7 +512,7 @@ impl ArchitectPane {
             });
         }
 
-        if let Some(existing) = existing {
+        let architect = if let Some(existing) = existing {
             existing.update(cx, |architect, cx| {
                 architect.replace_thread(thread, cx);
                 architect.mode = ArchitectWorkspaceMode::Architect;
@@ -477,6 +533,7 @@ impl ArchitectPane {
                 .clone()
                 .unwrap_or_else(|| existing.read(cx).focus_handle.clone());
             focus.focus(window, cx);
+            existing
         } else {
             let workspace_handle = cx.weak_entity();
             let architect = cx.new(|cx| {
@@ -492,12 +549,23 @@ impl ArchitectPane {
                     cx,
                 )
             });
-            workspace.add_item_to_active_pane(Box::new(architect), None, true, window, cx);
-        }
+            workspace.add_item_to_active_pane(
+                Box::new(architect.clone()),
+                None,
+                true,
+                window,
+                cx,
+            );
+            architect
+        };
 
-        workspace
-            .active_pane()
-            .update(cx, |pane, cx| pane.zoom_in(&ZoomIn, window, cx));
+        let docks = workspace.all_docks();
+        architect.update(cx, |architect, cx| architect.observe_docks(docks, cx));
+        workspace.active_pane().update(cx, |pane, cx| {
+            pane.set_should_display_tab_bar(|_, _| false);
+            pane.zoom_in(&ZoomIn, window, cx);
+            cx.notify();
+        });
         Self::persist_mode(workspace, ArchitectWorkspaceMode::Architect, cx);
     }
 
@@ -535,9 +603,11 @@ impl ArchitectPane {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        workspace
-            .active_pane()
-            .update(cx, |pane, cx| pane.zoom_out(&ZoomOut, window, cx));
+        workspace.active_pane().update(cx, |pane, cx| {
+            pane.set_should_display_tab_bar(|_, cx| TabBarSettings::get_global(cx).show);
+            pane.zoom_out(&ZoomOut, window, cx);
+            cx.notify();
+        });
         Self::arrange_code_panels(workspace, window, cx);
 
         let code_item = previous_code_item.or_else(|| {
@@ -1697,6 +1767,20 @@ mod tests {
                 workspace.active_item_as::<ArchitectPane>(cx),
                 Some(architect.clone()),
                 "the Architect surface should own the active workspace item"
+            );
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_panel::<ProjectPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            assert!(
+                workspace
+                    .all_docks()
+                    .into_iter()
+                    .all(|dock| !dock.read(cx).is_open()),
+                "Architect should remain exclusive when a Code panel tries to reopen"
             );
         });
 

@@ -2254,6 +2254,7 @@ pub(super) fn truncate(text: &str, limit: usize) -> String {
 
 impl Render for ArchitectPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.enforce_exclusive_architect_surface(window, cx);
         let has_plan = self.graph(cx).is_some_and(|graph| !graph.is_empty());
         let viewport_width = window.viewport_size().width;
         let layout = ArchitectLayout::for_width(viewport_width);
