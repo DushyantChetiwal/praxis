@@ -5889,17 +5889,7 @@ impl AgentPanel {
         let running = run.is_some_and(agent::ArchitectRun::is_running);
 
         fn open_canvas(this: &mut AgentPanel, window: &mut Window, cx: &mut Context<AgentPanel>) {
-            let Some(thread) = this
-                .active_thread_view(cx)
-                .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))
-            else {
-                return;
-            };
-            this.workspace
-                .update(cx, |workspace, cx| {
-                    crate::architect_ui::ArchitectPane::open(thread, workspace, window, cx);
-                })
-                .ok();
+            this.defer_open_architect_workspace(window, cx);
         }
 
         /// The names of the steps leading to the one running, so a step inside a
@@ -6301,6 +6291,27 @@ impl AgentPanel {
         });
     }
 
+    pub(super) fn defer_open_architect_workspace(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(thread) = self
+            .active_thread_view(cx)
+            .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))
+        else {
+            return;
+        };
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |window, cx| {
+            if let Err(error) = workspace.update(cx, |workspace, cx| {
+                crate::architect_ui::ArchitectPane::open(thread, workspace, window, cx);
+            }) {
+                log::error!("Could not open the Architect workspace: {error:#}");
+            }
+        });
+    }
+
     fn render_architect_button(
         &self,
         window: &mut Window,
@@ -6323,22 +6334,13 @@ impl AgentPanel {
         };
 
         Some(
-            IconButton::new("open-architect-canvas", IconName::GitBranch)
-                .icon_size(IconSize::Small)
-                .toggle_state(step_count > 0)
+            Button::new("open-architect-canvas", "Architect")
+                .label_size(LabelSize::Small)
+                .style(ButtonStyle::Subtle)
+                .start_icon(Icon::new(IconName::GitBranch).size(IconSize::Small))
                 .tooltip(Tooltip::text(tooltip))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    let Some(thread) = this
-                        .active_thread_view(cx)
-                        .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))
-                    else {
-                        return;
-                    };
-                    if let Err(error) = this.workspace.update(cx, |workspace, cx| {
-                        crate::architect_ui::ArchitectPane::open(thread, workspace, window, cx);
-                    }) {
-                        log::error!("Could not open the Architect workspace: {error:#}");
-                    }
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.defer_open_architect_workspace(window, cx);
                 }))
                 .into_any_element(),
         )

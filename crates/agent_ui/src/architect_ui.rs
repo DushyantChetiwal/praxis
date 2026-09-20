@@ -1904,8 +1904,23 @@ mod tests {
                 "Git should replace Project as the active native left-dock tab"
             );
         });
-        workspace.update_in(cx, |workspace, window, cx| {
-            ArchitectPane::open(thread.clone(), workspace, window, cx);
+        agent_panel_entity.update_in(cx, |agent_panel, window, cx| {
+            agent_panel.defer_open_architect_workspace(window, cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, cx| {
+            assert_eq!(
+                workspace.active_item_as::<ArchitectPane>(cx),
+                Some(architect.clone()),
+                "the Agent-panel button should defer Architect activation without re-entering the panel"
+            );
+            assert!(
+                workspace
+                    .all_docks()
+                    .into_iter()
+                    .all(|dock| !dock.read(cx).is_open()),
+                "deferred Architect activation should hide every Code dock"
+            );
         });
         workspace.update_in(cx, |workspace, window, cx| {
             ArchitectPane::activate_code(workspace, window, cx);
