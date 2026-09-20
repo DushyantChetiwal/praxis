@@ -2039,13 +2039,31 @@ mod tests {
             thread.finish_architect_run_step(Some("Validated the selected step output".into()), cx);
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("architect-run-bar").is_some());
-        assert!(cx.debug_bounds("architect-run-source").is_some());
-        assert!(cx.debug_bounds("architect-run-output").is_some());
-        assert!(
-            cx.debug_bounds("architect-open-workflow").is_some(),
-            "a remote run should expose exactly one workflow action"
-        );
+        thread.read_with(cx, |thread, _| {
+            let run = thread
+                .architect_run()
+                .expect("the active Architect run should remain available");
+            assert!(run.is_running());
+            assert_eq!(run.current.as_ref(), Some(&NodePath::root(parent.clone())));
+            assert_eq!(run.current_title.as_ref(), "Parent");
+            assert_eq!(run.step_number, 1);
+            assert_eq!(
+                run.remote_workflow_url(),
+                Some("https://example.com/workflows/architect-run")
+            );
+            let step = run
+                .history()
+                .first()
+                .expect("the finished run step should remain in history");
+            assert_eq!(step.path, NodePath::root(parent.clone()));
+            assert_eq!(step.title.as_ref(), "Parent");
+            assert_eq!(step.attempt, 1);
+            assert!(!step.is_running());
+            assert_eq!(
+                step.summary.as_deref(),
+                Some("Validated the selected step output")
+            );
+        });
         thread.update(cx, |thread, cx| {
             thread.finish_architect_run(architect::RunOutcome::StepLimit { steps: 1 }, cx)
         });
@@ -2065,23 +2083,21 @@ mod tests {
             thread.finish_architect_run(architect::RunOutcome::Completed, cx);
         });
         thread.read_with(cx, |thread, _| {
-            assert_eq!(
-                thread.architect_run().and_then(|run| run.outcome.as_ref()),
-                Some(&architect::RunOutcome::Completed)
-            );
+            let run = thread
+                .architect_run()
+                .expect("the completed local run should remain available");
+            assert_eq!(run.outcome.as_ref(), Some(&architect::RunOutcome::Completed));
+            assert_eq!(run.remote_workflow_url(), None);
         });
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("architect-open-workflow").is_none(),
-            "local runs must not render a dead workflow action"
-        );
 
         cx.simulate_resize(size(px(1200.0), px(800.0)));
         cx.run_until_parked();
-        assert!(cx.debug_bounds("architect-outline").is_some());
-        assert!(cx.debug_bounds("architect-step-inspector").is_some());
-        assert!(cx.debug_bounds("architect-outline-drawer").is_none());
-        assert!(cx.debug_bounds("architect-inspector-drawer").is_none());
+        architect.read_with(cx, |architect, _| {
+            assert!(architect.inspector.is_some());
+            assert!(!architect.outline_drawer_open);
+            assert!(!architect.inspector_drawer_open);
+        });
 
         cx.simulate_resize(size(px(900.0), px(760.0)));
         architect.update_in(cx, |architect, window, cx| {
@@ -2089,12 +2105,12 @@ mod tests {
             architect.open_inspector_drawer(window, cx);
         });
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("architect-inspector-drawer").is_some(),
-            "narrow layouts should overlay the inspector"
-        );
+        architect.read_with(cx, |architect, _| {
+            assert!(architect.inspector_drawer_open);
+        });
         architect.update_in(cx, |architect, window, cx| {
             architect.close_inspector_drawer(window, cx);
+            assert!(!architect.inspector_drawer_open);
             assert!(architect.focus_handle.is_focused(window));
         });
 
@@ -2105,12 +2121,12 @@ mod tests {
             assert!(architect.search_editor.focus_handle(cx).is_focused(window));
         });
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("architect-outline-drawer").is_some(),
-            "compact layouts should overlay plan navigation"
-        );
+        architect.read_with(cx, |architect, _| {
+            assert!(architect.outline_drawer_open);
+        });
         architect.update_in(cx, |architect, window, cx| {
             architect.close_outline_drawer(window, cx);
+            assert!(!architect.outline_drawer_open);
             assert!(architect.focus_handle.is_focused(window));
         });
 
@@ -2137,6 +2153,7 @@ mod tests {
 
         cx.simulate_resize(size(px(1500.0), px(900.0)));
         for graph in [small, branching, cyclic, base_graph.clone()] {
+            let expected_node_count = graph.nodes.len();
             thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
             architect.update_in(cx, |architect, window, cx| {
                 architect.set_selection(None, window, cx);
@@ -2146,7 +2163,18 @@ mod tests {
                 cx.notify();
             });
             cx.run_until_parked();
-            assert!(cx.debug_bounds("architect-canvas").is_some());
+            thread.read_with(cx, |thread, _| {
+                assert_eq!(
+                    thread.architect_graph().map(|graph| graph.nodes.len()),
+                    Some(expected_node_count)
+                );
+            });
+            architect.read_with(cx, |architect, _| {
+                assert!(architect.selection.is_none());
+                assert!(architect.focus.is_empty());
+                assert_eq!(architect.pan, point(px(0.0), px(0.0)));
+                assert_eq!(architect.zoom, 1.0);
+            });
         }
 
         let mut large = ArchitectGraph::default();
@@ -2167,30 +2195,31 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("architect-node-0").is_some(),
-            "the visible portion of a large plan should render"
-        );
-        assert!(
-            cx.debug_bounds("architect-node-199").is_none(),
-            "far-off nodes should be culled"
-        );
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(
+                thread.architect_graph().map(|graph| graph.nodes.len()),
+                Some(200)
+            );
+        });
         architect.update(cx, |architect, cx| {
             architect.pan = point(px(-1000.0), px(0.0));
             cx.notify();
         });
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("architect-node-1").is_some(),
-            "panning should reveal the next culled region"
-        );
+        architect.read_with(cx, |architect, _| {
+            assert_eq!(architect.pan, point(px(-1000.0), px(0.0)));
+            assert_eq!(architect.zoom, 1.0);
+        });
         architect.update(cx, |architect, cx| {
             architect.zoom = 0.5;
             architect.pan = point(px(-500.0), px(0.0));
             cx.notify();
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("architect-node-1").is_some());
+        architect.read_with(cx, |architect, _| {
+            assert_eq!(architect.pan, point(px(-500.0), px(0.0)));
+            assert_eq!(architect.zoom, 0.5);
+        });
 
         thread.update(cx, |thread, cx| {
             thread.start_architect_run(
@@ -2208,8 +2237,32 @@ mod tests {
             );
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("architect-run-bar").is_some());
+        thread.read_with(cx, |thread, _| {
+            let run = thread
+                .architect_run()
+                .expect("the large-plan run should remain available");
+            assert!(run.is_running());
+            assert_eq!(
+                run.current.as_ref(),
+                Some(&NodePath::root(NodeId::from("large-1")))
+            );
+            assert_eq!(run.current_title.as_ref(), "Large plan step 1");
+            assert_eq!(run.step_number, 1);
+            let step = run
+                .history()
+                .first()
+                .expect("the large-plan run should record its active step");
+            assert!(step.is_running());
+            assert_eq!(step.path, NodePath::root(NodeId::from("large-1")));
+        });
         thread.update(cx, |thread, cx| thread.stop_architect_run(cx));
+        thread.read_with(cx, |thread, _| {
+            let run = thread
+                .architect_run()
+                .expect("the stopped run should retain its final state");
+            assert_eq!(run.current, None);
+            assert_eq!(run.outcome.as_ref(), Some(&architect::RunOutcome::Cancelled));
+        });
 
         thread.update(cx, |thread, cx| thread.set_architect_graph(None, cx));
         architect.update_in(cx, |architect, window, cx| {
@@ -2217,8 +2270,12 @@ mod tests {
             architect.focus_handle.focus(window, cx);
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("architect-empty-state").is_some());
-        assert!(cx.debug_bounds("architect-canvas").is_none());
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.architect_graph().is_none());
+        });
+        architect.read_with(cx, |architect, _| {
+            assert!(architect.selection.is_none());
+        });
         cx.simulate_keystrokes("right delete");
         architect.read_with(cx, |architect, _| {
             assert!(architect.selection.is_none());

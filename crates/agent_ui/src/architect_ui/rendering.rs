@@ -44,6 +44,22 @@ impl ArchitectLayout {
     }
 }
 
+fn node_intersects_viewport(
+    left: Pixels,
+    top: Pixels,
+    width: Pixels,
+    height: Pixels,
+    viewport_width: Pixels,
+    viewport_height: Pixels,
+) -> bool {
+    const VIEWPORT_OVERSCAN: f32 = 96.0;
+    let overscan = px(VIEWPORT_OVERSCAN);
+    left + width >= -overscan
+        && top + height >= -overscan
+        && left <= viewport_width + overscan
+        && top <= viewport_height + overscan
+}
+
 #[derive(Default)]
 pub(super) struct ArchitectStatusItem {
     active: Option<WeakEntity<ArchitectPane>>,
@@ -1606,13 +1622,14 @@ impl ArchitectPane {
                 let height = px(node_height * self.zoom);
                 let left = screen.x - bounds.origin.x - width / 2.0;
                 let top = screen.y - bounds.origin.y - height / 2.0;
-                const VIEWPORT_OVERSCAN: f32 = 96.0;
-                let overscan = px(VIEWPORT_OVERSCAN);
-                if left + width < -overscan
-                    || top + height < -overscan
-                    || left > bounds.size.width + overscan
-                    || top > bounds.size.height + overscan
-                {
+                if !node_intersects_viewport(
+                    left,
+                    top,
+                    width,
+                    height,
+                    bounds.size.width,
+                    bounds.size.height,
+                ) {
                     return None;
                 }
                 let is_invalid = invalid.contains(&node.id);
@@ -2447,6 +2464,55 @@ mod tests {
             ArchitectLayout::for_width(px(600.0)),
             ArchitectLayout::Compact
         );
+    }
+
+    #[test]
+    fn node_culling_keeps_overscan_and_rejects_far_off_nodes() {
+        let viewport_width = px(1500.0);
+        let viewport_height = px(900.0);
+        let node_width = px(240.0);
+        let node_height = px(160.0);
+
+        assert!(node_intersects_viewport(
+            px(0.0),
+            px(0.0),
+            node_width,
+            node_height,
+            viewport_width,
+            viewport_height,
+        ));
+        assert!(node_intersects_viewport(
+            px(-300.0),
+            px(0.0),
+            node_width,
+            node_height,
+            viewport_width,
+            viewport_height,
+        ));
+        assert!(!node_intersects_viewport(
+            px(-400.0),
+            px(0.0),
+            node_width,
+            node_height,
+            viewport_width,
+            viewport_height,
+        ));
+        assert!(!node_intersects_viewport(
+            px(1600.0),
+            px(0.0),
+            node_width,
+            node_height,
+            viewport_width,
+            viewport_height,
+        ));
+        assert!(!node_intersects_viewport(
+            px(0.0),
+            px(1000.0),
+            node_width,
+            node_height,
+            viewport_width,
+            viewport_height,
+        ));
     }
 
     #[test]
