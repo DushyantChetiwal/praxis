@@ -1781,7 +1781,7 @@ mod tests {
             let left_dock = workspace.dock_at_position(DockPosition::Left).read(cx);
             assert!(left_dock.is_open(), "Code should open the native left dock");
             assert_eq!(
-                left_dock.active_panel().map(|panel| panel.entity_id()),
+                left_dock.active_panel().map(|panel| panel.panel_id()),
                 project_panel.as_ref().map(|panel| panel.entity_id()),
                 "Project should be the active native left-dock panel"
             );
@@ -1792,9 +1792,12 @@ mod tests {
         cx.run_until_parked();
         workspace.read_with(cx, |workspace, cx| {
             let left_dock = workspace.dock_at_position(DockPosition::Left).read(cx);
-            assert!(left_dock.is_open(), "Code should keep the native left dock open");
+            assert!(
+                left_dock.is_open(),
+                "Code should keep the native left dock open"
+            );
             assert_eq!(
-                left_dock.active_panel().map(|panel| panel.entity_id()),
+                left_dock.active_panel().map(|panel| panel.panel_id()),
                 git_panel.as_ref().map(|panel| panel.entity_id()),
                 "Git should replace Project as the active native left-dock tab"
             );
