@@ -1,0 +1,48 @@
+name: Recover Praxis Windows symbols
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact source revision whose cached symbols should be recovered
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    name: Recover cached Windows PDBs
+    runs-on: windows-2022
+    steps:
+      - name: Check out the built source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+
+      - name: Restore the Windows bundle cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bundle-windows-x86_64
+          save-if: false
+
+      - name: Stage the debug-symbol archive
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem target/x86_64-pc-windows-msvc/release -Filter "zed-*-dev.dbg.zip" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $archive) {
+            throw "The Windows bundle cache did not contain a debug-symbol archive"
+          }
+          Copy-Item $archive.FullName target/Praxis-windows-x86_64.dbg.zip
+          tar -tf target/Praxis-windows-x86_64.dbg.zip
+
+      - name: Upload the recovered symbols
+        uses: actions/upload-artifact@v7
+        with:
+          name: praxis-windows-x86_64-symbols
+          path: target/Praxis-windows-x86_64.dbg.zip
+          if-no-files-found: error
