@@ -1314,18 +1314,37 @@ impl ArchitectPane {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, rc::Rc};
+    use std::{cell::RefCell, path::Path, rc::Rc};
 
     use acp_thread::AgentConnection as _;
     use fs::Fs as _;
-    use gpui::{Modifiers, MouseMoveEvent, Task, TestAppContext, size};
+    use gpui::{Modifiers, MouseMoveEvent, Render, Task, TestAppContext, size};
     use project::{FakeFs, Project};
     use serde_json::json;
+    use ui::prelude::*;
     use util::path_list::PathList;
     use workspace::{Workspace, item::test::TestItem};
 
     use super::*;
     use crate::conversation_view::tests::init_test;
+
+    struct ArchitectIntegrationRoot {
+        workspace: Entity<Workspace>,
+        architect: Rc<RefCell<Option<Entity<ArchitectPane>>>>,
+    }
+
+    impl Render for ArchitectIntegrationRoot {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            if let Some(architect) = self.architect.borrow().clone() {
+                div().size_full().child(architect).into_any_element()
+            } else {
+                div()
+                    .size_full()
+                    .child(self.workspace.clone())
+                    .into_any_element()
+            }
+        }
+    }
 
     #[test]
     fn architect_workspace_state_is_backward_compatible_and_bounded() {
@@ -1438,8 +1457,16 @@ mod tests {
         graph.add_node(target_node);
         thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
 
-        let (workspace, cx) =
-            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let direct_architect = Rc::new(RefCell::new(None));
+        let direct_architect_for_root = direct_architect.clone();
+        let (test_root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::test_new(project.clone(), window, cx));
+            ArchitectIntegrationRoot {
+                workspace,
+                architect: direct_architect_for_root,
+            }
+        });
+        let workspace = test_root.read_with(cx, |root, _cx| root.workspace.clone());
         let (weak_workspace, async_window_context) =
             cx.update(|window, cx| (workspace.downgrade(), window.to_async(cx)));
         let project_panel =
@@ -1816,6 +1843,10 @@ mod tests {
             ArchitectPane::open(thread.clone(), workspace, window, cx);
         });
 
+        *direct_architect.borrow_mut() = Some(architect.clone());
+        test_root.update(cx, |_root, cx| cx.notify());
+        cx.run_until_parked();
+
         let base_graph = thread
             .read_with(cx, |thread, _| thread.architect_graph().cloned())
             .expect("the nested test graph should remain available");
@@ -1824,10 +1855,12 @@ mod tests {
             architect.set_selection(Some(Selection::Node(parent.clone())), window, cx);
         });
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("architect-step-inspector").is_some(),
-            "selecting a step should render the contextual inspector"
-        );
+        architect.read_with(cx, |architect, _| {
+            assert!(
+                architect.inspector.is_some(),
+                "selecting a step should create the contextual inspector"
+            );
+        });
         let locked_title_editor = architect.read_with(cx, |architect, _| {
             architect
                 .inspector
