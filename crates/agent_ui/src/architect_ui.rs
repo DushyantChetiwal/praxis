@@ -2086,7 +2086,10 @@ mod tests {
             let run = thread
                 .architect_run()
                 .expect("the completed local run should remain available");
-            assert_eq!(run.outcome.as_ref(), Some(&architect::RunOutcome::Completed));
+            assert_eq!(
+                run.outcome.as_ref(),
+                Some(&architect::RunOutcome::Completed)
+            );
             assert_eq!(run.remote_workflow_url(), None);
         });
         cx.run_until_parked();
@@ -2261,7 +2264,10 @@ mod tests {
                 .architect_run()
                 .expect("the stopped run should retain its final state");
             assert_eq!(run.current, None);
-            assert_eq!(run.outcome.as_ref(), Some(&architect::RunOutcome::Cancelled));
+            assert_eq!(
+                run.outcome.as_ref(),
+                Some(&architect::RunOutcome::Cancelled)
+            );
         });
 
         thread.update(cx, |thread, cx| thread.set_architect_graph(None, cx));
