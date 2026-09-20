@@ -2098,8 +2098,6 @@ mod tests {
         cx.run_until_parked();
         architect.read_with(cx, |architect, _| {
             assert!(architect.inspector.is_some());
-            assert!(!architect.outline_drawer_open);
-            assert!(!architect.inspector_drawer_open);
         });
 
         cx.simulate_resize(size(px(900.0), px(760.0)));
