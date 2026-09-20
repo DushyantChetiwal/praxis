@@ -405,11 +405,7 @@ impl ArchitectPane {
             .collect();
     }
 
-    fn enforce_exclusive_architect_surface(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn enforce_exclusive_architect_surface(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode != ArchitectWorkspaceMode::Architect {
             return;
         }
@@ -441,7 +437,8 @@ impl ArchitectPane {
 
                 Self::hide_code_docks(workspace, window, cx);
                 if let Some(architect) = active_architect {
-                    architect.read(cx).focus_handle.focus(window, cx);
+                    let focus_handle = architect.read(cx).focus_handle.clone();
+                    focus_handle.focus(window, cx);
                 }
             });
         });
@@ -549,17 +546,11 @@ impl ArchitectPane {
                     cx,
                 )
             });
-            workspace.add_item_to_active_pane(
-                Box::new(architect.clone()),
-                None,
-                true,
-                window,
-                cx,
-            );
+            workspace.add_item_to_active_pane(Box::new(architect.clone()), None, true, window, cx);
             architect
         };
 
-        let docks = workspace.all_docks();
+        let docks = workspace.all_docks().into_iter().cloned().collect();
         architect.update(cx, |architect, cx| architect.observe_docks(docks, cx));
         workspace.active_pane().update(cx, |pane, cx| {
             pane.set_should_display_tab_bar(|_, _| false);
