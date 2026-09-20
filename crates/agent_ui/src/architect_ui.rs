@@ -1802,11 +1802,17 @@ mod tests {
                 "Git should replace Project as the active native left-dock tab"
             );
         });
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(
+                workspace.focus_panel::<GitPanel>(window, cx).is_some(),
+                "the native Git panel should accept focus"
+            );
+        });
+        cx.run_until_parked();
         let git_panel_focus = git_panel
             .as_ref()
             .expect("the native Git panel should exist")
             .read_with(cx, |git_panel, cx| git_panel.activation_focus_handle(cx));
-        cx.update(|window, cx| git_panel_focus.focus(window, cx));
         cx.update(|window, _| {
             assert!(
                 git_panel_focus.is_focused(window),
