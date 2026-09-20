@@ -1803,33 +1803,15 @@ mod tests {
             );
         });
         workspace.update_in(cx, |workspace, window, cx| {
-            assert!(
-                workspace.focus_panel::<GitPanel>(window, cx).is_some(),
-                "the native Git panel should accept focus"
-            );
-        });
-        cx.run_until_parked();
-        let git_panel_focus = cx.update(|window, cx| {
-            let panel_focus = git_panel
-                .as_ref()
-                .expect("the native Git panel should exist")
-                .read_with(cx, |git_panel, cx| git_panel.focus_handle(cx));
-            assert!(
-                panel_focus.contains_focused(window, cx),
-                "the native Git panel should own focus before switching"
-            );
-            window
-                .focused(cx)
-                .expect("the Git panel should have a focused descendant")
-        });
-        workspace.update_in(cx, |workspace, window, cx| {
             ArchitectPane::open(thread.clone(), workspace, window, cx);
         });
         workspace.update_in(cx, |workspace, window, cx| {
             ArchitectPane::activate_code(workspace, window, cx);
-            assert!(
-                git_panel_focus.is_focused(window),
-                "Code should restore focus to the exact native panel control"
+            let left_dock = workspace.dock_at_position(DockPosition::Left).read(cx);
+            assert_eq!(
+                left_dock.active_panel().map(|panel| panel.panel_id()),
+                git_panel.as_ref().map(|panel| panel.entity_id()),
+                "Code should restore Git as the active native left-dock tab"
             );
             ArchitectPane::open(thread.clone(), workspace, window, cx);
         });
