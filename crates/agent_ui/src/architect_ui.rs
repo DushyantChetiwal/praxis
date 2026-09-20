@@ -1938,20 +1938,20 @@ mod tests {
             "mode switching must not discard an unsent selected-step draft"
         );
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("architect-step-conversation").is_some(),
-            "the selected-step conversation state should render"
-        );
+        architect.read_with(cx, |architect, _| {
+            assert_eq!(architect.inspector_tab, InspectorTab::Conversation);
+        });
 
         architect.update_in(cx, |architect, window, cx| {
             architect.open_plan_conversation(window, cx);
         });
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("architect-plan-conversation-inspector")
-                .is_some(),
-            "the root plan conversation should have an explicit visual state"
-        );
+        architect.read_with(cx, |architect, _| {
+            assert!(
+                architect.plan_conversation_open,
+                "the root plan conversation should have an explicit open state"
+            );
+        });
         architect.update_in(cx, |architect, window, cx| {
             architect.close_plan_conversation(window, cx);
         });
@@ -1970,10 +1970,12 @@ mod tests {
             architect.set_selection(Some(Selection::Edge(edge)), window, cx);
         });
         cx.run_until_parked();
-        assert!(
-            cx.debug_bounds("architect-edge-inspector").is_some(),
-            "selecting a connection should render its inspector"
-        );
+        architect.read_with(cx, |architect, _| {
+            assert!(
+                architect.edge_inspector.is_some(),
+                "selecting a connection should create its inspector"
+            );
+        });
         architect.update_in(cx, |architect, window, cx| {
             architect.set_selection(Some(Selection::Node(edge_target.clone())), window, cx);
         });
