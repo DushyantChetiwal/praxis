@@ -15,6 +15,10 @@ jobs:
   windows:
     name: Recover cached Windows PDBs
     runs-on: windows-2022
+    env:
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+      PRAXIS_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
     steps:
       - name: Check out the built source
         uses: actions/checkout@v7
@@ -26,7 +30,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: bundle-windows-x86_64
-          add-job-id-key: false
           save-if: false
 
       - name: Stage the debug-symbol archive
