@@ -1813,9 +1813,9 @@ mod tests {
             .as_ref()
             .expect("the native Git panel should exist")
             .read_with(cx, |git_panel, cx| git_panel.activation_focus_handle(cx));
-        cx.update(|window, _| {
+        cx.update(|window, cx| {
             assert!(
-                git_panel_focus.is_focused(window),
+                git_panel_focus.contains_focused(window, cx),
                 "the native Git panel should own focus before switching"
             );
         });
@@ -1825,7 +1825,7 @@ mod tests {
         workspace.update_in(cx, |workspace, window, cx| {
             ArchitectPane::activate_code(workspace, window, cx);
             assert!(
-                git_panel_focus.is_focused(window),
+                git_panel_focus.contains_focused(window, cx),
                 "Code should restore focus to the exact native panel control"
             );
             ArchitectPane::open(thread.clone(), workspace, window, cx);
