@@ -32,19 +32,23 @@ jobs:
           shared-key: bundle-windows-x86_64
           save-if: false
 
-      - name: Stage the debug-symbol archive
+      - name: Relink Praxis with its PDB
         shell: pwsh
         run: |
-          $symbols = Get-ChildItem target -Recurse -File -Filter "*.pdb"
-          $symbols |
-            Sort-Object Length -Descending |
-            Select-Object -First 100 FullName, Length |
+          . ./script/lib/workspace.ps1
+          ParseZedWorkspace
+          $env:ZED_RELEASE_CHANNEL = Get-Content crates/zed/RELEASE_CHANNEL
+          $env:RELEASE_CHANNEL = $env:ZED_RELEASE_CHANNEL
+          $env:GITHUB_RUN_NUMBER = "16"
+          rustup target add x86_64-pc-windows-msvc
+          cargo --config .cargo/bundle-config.toml build --release --package zed --target x86_64-pc-windows-msvc
+
+          $output = "target/x86_64-pc-windows-msvc/release"
+          Get-Item "$output/zed.exe", "$output/zed.pdb" |
+            Select-Object FullName, Length |
             Format-Table -AutoSize
-          $zedPdb = $symbols | Where-Object Name -EQ "zed.pdb" | Select-Object -First 1
-          if (-not $zedPdb) {
-            throw "The restored Windows bundle cache did not contain zed.pdb"
-          }
-          Compress-Archive $zedPdb.FullName target/Praxis-windows-x86_64.dbg.zip -Force
+          Get-FileHash "$output/zed.exe" -Algorithm SHA256
+          Compress-Archive "$output/zed.exe", "$output/zed.pdb" target/Praxis-windows-x86_64.dbg.zip -Force
 
       - name: Upload the recovered symbols
         uses: actions/upload-artifact@v7
