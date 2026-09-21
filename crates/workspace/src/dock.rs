@@ -285,6 +285,7 @@ pub struct Dock {
     panel_entries: Vec<PanelEntry>,
     workspace: WeakEntity<Workspace>,
     is_open: bool,
+    opening_enabled: bool,
     active_panel_index: Option<usize>,
     focus_handle: FocusHandle,
     focus_follows_mouse: FocusFollowsMouse,
@@ -453,6 +454,7 @@ impl Dock {
                 panel_entries: Default::default(),
                 active_panel_index: None,
                 is_open: false,
+                opening_enabled: true,
                 focus_handle: focus_handle.clone(),
                 focus_follows_mouse: WorkspaceSettings::get_global(cx).focus_follows_mouse,
                 _subscriptions: [focus_subscription, zoom_subscription],
@@ -576,13 +578,27 @@ impl Dock {
     }
 
     pub fn set_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let open = open && self.opening_enabled;
         if open != self.is_open {
             self.restoration.discard_pending();
         }
         self.set_open_internal(open, window, cx);
     }
 
+    pub fn set_opening_enabled(
+        &mut self,
+        opening_enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.opening_enabled = opening_enabled;
+        if !opening_enabled {
+            self.set_open_internal(false, window, cx);
+        }
+    }
+
     fn set_open_internal(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let open = open && self.opening_enabled;
         if open != self.is_open {
             self.is_open = open;
             if let Some(active_panel) = self.active_panel_entry() {
@@ -1408,6 +1424,12 @@ impl Render for PanelButtons {
 
         let dock_entity = self.dock.clone();
         let workspace = dock.workspace.clone();
+        if workspace
+            .upgrade()
+            .is_some_and(|workspace| !workspace.read(cx).active_item_allows_docks(cx))
+        {
+            return h_flex();
+        }
         let mut buttons: Vec<_> = dock
             .panel_entries
             .iter()
@@ -1607,9 +1629,9 @@ impl StatusItemView for PanelButtons {
         &mut self,
         _active_pane_item: Option<&dyn crate::ItemHandle>,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        // Nothing to do, panel buttons don't depend on the active center item
+        cx.notify();
     }
 
     fn hide_setting(&self, _: &App) -> Option<HideStatusItem> {

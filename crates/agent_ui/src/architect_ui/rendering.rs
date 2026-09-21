@@ -17,8 +17,8 @@ use workspace::{
 
 use super::geometry::{EdgeCurve, NODE_WIDTH, paint_curve};
 use super::{
-    ArchitectPane, DETAIL_ZOOM_THRESHOLD, EXPANDED_CHILD_LIMIT, Interaction, MAX_ZOOM, MIN_ZOOM,
-    Selection,
+    ArchitectPane, ArchitectWorkspaceMode, DETAIL_ZOOM_THRESHOLD, EXPANDED_CHILD_LIMIT,
+    Interaction, MAX_ZOOM, MIN_ZOOM, Selection,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +72,9 @@ impl Render for ArchitectStatusItem {
             return div().into_any();
         };
         let pane = pane.read(cx);
+        if pane.mode != ArchitectWorkspaceMode::Architect {
+            return div().into_any();
+        }
         let thread = pane.thread.read(cx);
         let title = thread
             .title()
@@ -2254,7 +2257,10 @@ pub(super) fn truncate(text: &str, limit: usize) -> String {
 
 impl Render for ArchitectPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.enforce_exclusive_architect_surface(window, cx);
+        if self.mode != ArchitectWorkspaceMode::Architect {
+            return div().size_full().into_any_element();
+        }
+
         let has_plan = self.graph(cx).is_some_and(|graph| !graph.is_empty());
         let viewport_width = window.viewport_size().width;
         let layout = ArchitectLayout::for_width(viewport_width);
@@ -2355,6 +2361,7 @@ impl Render for ArchitectPane {
                     .children(outline_drawer)
                     .children(inspector_drawer),
             )
+            .into_any_element()
     }
 }
 
@@ -2386,6 +2393,14 @@ impl Item for ArchitectPane {
 
     fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
         Some(Icon::new(IconName::GitBranch))
+    }
+
+    fn show_in_tab_bar(&self, _cx: &App) -> bool {
+        false
+    }
+
+    fn allows_workspace_docks(&self, _cx: &App) -> bool {
+        self.mode == ArchitectWorkspaceMode::Code
     }
 
     fn telemetry_event_text(&self) -> Option<&'static str> {

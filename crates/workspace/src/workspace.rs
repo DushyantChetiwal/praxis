@@ -4400,6 +4400,11 @@ impl Workspace {
         self.active_pane().read(cx).active_item()
     }
 
+    pub(crate) fn active_item_allows_docks(&self, cx: &App) -> bool {
+        self.active_item(cx)
+            .is_none_or(|item| item.allows_workspace_docks(cx))
+    }
+
     pub fn active_item_as<I: 'static>(&self, cx: &App) -> Option<Entity<I>> {
         let item = self.active_item(cx)?;
         // Prefer an exact downcast so that we return the active item itself when
@@ -4615,6 +4620,15 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.active_item_allows_docks(cx) {
+            let dock = self.dock_at_position(dock_side);
+            if dock.read(cx).is_open() {
+                dock.update(cx, |dock, cx| dock.set_open(false, window, cx));
+                cx.notify();
+            }
+            return;
+        }
+
         let mut focus_center = false;
         let mut reveal_dock = false;
 
@@ -4744,7 +4758,7 @@ impl Workspace {
 
         if !open_dock_positions.is_empty() {
             self.close_all_docks(window, cx);
-        } else if !self.last_open_dock_positions.is_empty() {
+        } else if self.active_item_allows_docks(cx) && !self.last_open_dock_positions.is_empty() {
             self.restore_last_open_docks(window, cx);
         }
     }
@@ -4754,6 +4768,10 @@ impl Workspace {
     /// Opens all docks whose positions are stored in `last_open_dock_positions`
     /// and clears the stored positions.
     fn restore_last_open_docks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.active_item_allows_docks(cx) {
+            return;
+        }
+
         let positions_to_open = std::mem::take(&mut self.last_open_dock_positions);
 
         for position in positions_to_open {
@@ -4818,6 +4836,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Arc<dyn PanelHandle>> {
+        if !self.active_item_allows_docks(cx) {
+            return None;
+        }
+
         let mut panel = None;
         for dock in self.all_docks() {
             if let Some(panel_index) = dock.read(cx).panel_index_for_proto_id(panel_id) {
@@ -4845,6 +4867,10 @@ impl Workspace {
         cx: &mut Context<Self>,
         should_focus: &mut dyn FnMut(&dyn PanelHandle, &mut Window, &mut Context<Dock>) -> bool,
     ) -> Option<Arc<dyn PanelHandle>> {
+        if !self.active_item_allows_docks(cx) {
+            return None;
+        }
+
         let mut result_panel = None;
         let mut serialize = false;
         for dock in self.all_docks() {
@@ -4886,6 +4912,10 @@ impl Workspace {
 
     /// Open the panel of the given type
     pub fn open_panel<T: Panel>(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.active_item_allows_docks(cx) {
+            return;
+        }
+
         for dock in self.all_docks() {
             if let Some(panel_index) = dock.read(cx).panel_index_for_type::<T>() {
                 dock.update(cx, |dock, cx| {
@@ -4899,6 +4929,10 @@ impl Workspace {
     /// Open the panel of the given type, dismissing any zoomed items that
     /// would obscure it (e.g. a zoomed terminal).
     pub fn reveal_panel<T: Panel>(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.active_item_allows_docks(cx) {
+            return;
+        }
+
         let dock_position = self.all_docks().iter().find_map(|dock| {
             let dock = dock.read(cx);
             dock.panel_index_for_type::<T>().map(|_| dock.position())

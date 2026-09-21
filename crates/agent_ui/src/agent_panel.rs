@@ -1189,6 +1189,7 @@ pub struct AgentPanel {
     _thread_metadata_store_subscription: Subscription,
     last_context_source: Option<AgentContextSource>,
     architect_timeline_expanded: bool,
+    retained_architect_pane: Option<Entity<crate::architect_ui::ArchitectPane>>,
 
     is_active: bool,
 }
@@ -1606,6 +1607,7 @@ impl AgentPanel {
             _thread_metadata_store_subscription,
             last_context_source: None,
             architect_timeline_expanded: true,
+            retained_architect_pane: None,
             is_active: false,
         };
 
@@ -6289,6 +6291,19 @@ impl AgentPanel {
                 log::error!("Could not restore the Architect workspace: {error:#}");
             }
         });
+    }
+
+    pub(crate) fn retained_architect_pane(
+        &self,
+    ) -> Option<Entity<crate::architect_ui::ArchitectPane>> {
+        self.retained_architect_pane.clone()
+    }
+
+    pub(crate) fn retain_architect_pane(
+        &mut self,
+        architect: Entity<crate::architect_ui::ArchitectPane>,
+    ) {
+        self.retained_architect_pane = Some(architect);
     }
 
     pub(super) fn defer_open_architect_workspace(

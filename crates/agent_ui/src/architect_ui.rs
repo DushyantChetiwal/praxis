@@ -31,9 +31,7 @@ use project_panel::ProjectPanel;
 use settings::Settings as _;
 use terminal_view::terminal_panel::TerminalPanel;
 use workspace::{
-    TabBarSettings, Workspace, ZoomIn, ZoomOut,
-    dock::{Dock, DockPosition},
-    item::WeakItemHandle,
+    TabBarSettings, Workspace, ZoomIn, ZoomOut, dock::DockPosition, item::WeakItemHandle,
 };
 
 use crate::AgentPanel;
@@ -189,7 +187,6 @@ pub struct ArchitectPane {
 
     _thread_subscription: Subscription,
     _search_subscription: Subscription,
-    _dock_subscriptions: Vec<Subscription>,
 }
 
 impl ArchitectPane {
@@ -245,7 +242,6 @@ impl ArchitectPane {
             run_starting: Cell::new(false),
             _thread_subscription: subscription,
             _search_subscription: search_subscription,
-            _dock_subscriptions: Vec::new(),
         }
     }
 
@@ -372,7 +368,9 @@ impl ArchitectPane {
         cx: &mut Context<Workspace>,
     ) {
         for dock in workspace.all_docks() {
-            dock.update(cx, |dock, cx| dock.set_open(false, window, cx));
+            dock.update(cx, |dock, cx| {
+                dock.set_opening_enabled(false, window, cx);
+            });
         }
     }
 
@@ -382,6 +380,11 @@ impl ArchitectPane {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
+        for dock in workspace.all_docks() {
+            dock.update(cx, |dock, cx| {
+                dock.set_opening_enabled(true, window, cx);
+            });
+        }
         for snapshot in snapshots {
             let dock = workspace.dock_at_position(snapshot.position);
             dock.update(cx, |dock, cx| {
@@ -396,52 +399,6 @@ impl ArchitectPane {
                 dock.set_open(snapshot.open, window, cx);
             });
         }
-    }
-
-    fn observe_docks(&mut self, docks: Vec<Entity<Dock>>, cx: &mut Context<Self>) {
-        self._dock_subscriptions = docks
-            .into_iter()
-            .map(|dock| cx.observe(&dock, |_, _, cx| cx.notify()))
-            .collect();
-    }
-
-    fn enforce_exclusive_architect_surface(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.mode != ArchitectWorkspaceMode::Architect {
-            return;
-        }
-        let Some(workspace) = self.workspace.upgrade() else {
-            return;
-        };
-        let any_dock_open = workspace
-            .read(cx)
-            .all_docks()
-            .into_iter()
-            .any(|dock| dock.read(cx).is_open());
-        if !any_dock_open {
-            return;
-        }
-
-        let workspace = self.workspace.clone();
-        window.defer(cx, move |window, cx| {
-            let Some(workspace) = workspace.upgrade() else {
-                return;
-            };
-            workspace.update(cx, |workspace, cx| {
-                let active_architect = workspace.active_item_as::<ArchitectPane>(cx);
-                let architect_mode_active = active_architect.as_ref().is_some_and(|architect| {
-                    architect.read(cx).mode() == ArchitectWorkspaceMode::Architect
-                });
-                if !architect_mode_active {
-                    return;
-                }
-
-                Self::hide_code_docks(workspace, window, cx);
-                if let Some(architect) = active_architect {
-                    let focus_handle = architect.read(cx).focus_handle.clone();
-                    focus_handle.focus(window, cx);
-                }
-            });
-        });
     }
 
     fn replace_thread(&mut self, thread: Entity<Thread>, cx: &mut Context<Self>) {
@@ -482,10 +439,24 @@ impl ArchitectPane {
         cx: &mut Context<Workspace>,
     ) {
         let persisted_state = Self::persisted_state(workspace, cx);
-        let existing = workspace.item_of_type::<ArchitectPane>(cx);
+        let agent_panel = workspace.panel::<AgentPanel>(cx);
+        let attached_architect = workspace.item_of_type::<ArchitectPane>(cx);
+        let existing = attached_architect.clone().or_else(|| {
+            agent_panel
+                .as_ref()
+                .and_then(|panel| panel.read(cx).retained_architect_pane())
+        });
+        let existing_is_attached = existing.as_ref().is_some_and(|existing| {
+            workspace
+                .items(cx)
+                .any(|item| item.item_id() == existing.entity_id())
+        });
         let already_active = workspace
             .active_item_as::<ArchitectPane>(cx)
-            .is_some_and(|active| existing.as_ref() == Some(&active));
+            .is_some_and(|active| {
+                existing.as_ref() == Some(&active)
+                    && active.read(cx).mode() == ArchitectWorkspaceMode::Architect
+            });
 
         let previous_code_item = (!already_active)
             .then(|| workspace.active_item(cx))
@@ -512,7 +483,10 @@ impl ArchitectPane {
         let architect = if let Some(existing) = existing {
             existing.update(cx, |architect, cx| {
                 architect.replace_thread(thread, cx);
-                architect.mode = ArchitectWorkspaceMode::Architect;
+                if architect.mode != ArchitectWorkspaceMode::Architect {
+                    architect.mode = ArchitectWorkspaceMode::Architect;
+                    cx.notify();
+                }
                 if let Some(previous_code_item) = previous_code_item {
                     architect.previous_code_item = Some(previous_code_item);
                 }
@@ -523,7 +497,17 @@ impl ArchitectPane {
                     architect.last_code_focus = Some(last_code_focus);
                 }
             });
-            workspace.activate_item(&existing, true, true, window, cx);
+            if existing_is_attached {
+                workspace.activate_item(&existing, true, true, window, cx);
+            } else {
+                workspace.add_item_to_active_pane(
+                    Box::new(existing.clone()),
+                    None,
+                    true,
+                    window,
+                    cx,
+                );
+            }
             let focus = existing
                 .read(cx)
                 .last_architect_focus
@@ -550,8 +534,12 @@ impl ArchitectPane {
             architect
         };
 
-        let docks = workspace.all_docks().into_iter().cloned().collect();
-        architect.update(cx, |architect, cx| architect.observe_docks(docks, cx));
+        if let Some(agent_panel) = agent_panel {
+            agent_panel.update(cx, |agent_panel, _| {
+                agent_panel.retain_architect_pane(architect.clone());
+            });
+        }
+
         workspace.active_pane().update(cx, |pane, cx| {
             pane.set_should_display_tab_bar(|_, _| false);
             pane.zoom_in(&ZoomIn, window, cx);
@@ -626,10 +614,20 @@ impl ArchitectPane {
         let Some(architect) = workspace.item_of_type::<ArchitectPane>(cx) else {
             return;
         };
+        let architect_pane = workspace
+            .panes()
+            .iter()
+            .find(|pane| pane.read(cx).index_for_item(&architect).is_some())
+            .cloned();
+        let architect_is_retained = workspace.panel::<AgentPanel>(cx).is_some_and(|panel| {
+            panel.read(cx).retained_architect_pane().as_ref() == Some(&architect)
+        });
         let (previous_code_item, code_docks, last_code_focus) =
             architect.update(cx, |architect, cx| {
-                architect.mode = ArchitectWorkspaceMode::Code;
-                cx.notify();
+                if architect.mode != ArchitectWorkspaceMode::Code {
+                    architect.mode = ArchitectWorkspaceMode::Code;
+                    cx.notify();
+                }
                 (
                     architect
                         .previous_code_item
@@ -647,6 +645,11 @@ impl ArchitectPane {
             window,
             cx,
         );
+        if architect_is_retained && let Some(architect_pane) = architect_pane {
+            architect_pane.update(cx, |pane, cx| {
+                pane.remove_item(architect.entity_id(), false, false, window, cx);
+            });
+        }
     }
 
     fn remember_transient_focus(&mut self, window: &Window, cx: &Context<Self>) {
@@ -1384,7 +1387,10 @@ mod tests {
     use serde_json::json;
     use ui::prelude::*;
     use util::path_list::PathList;
-    use workspace::{Workspace, item::test::TestItem};
+    use workspace::{
+        Workspace,
+        item::{Item, test::TestItem},
+    };
 
     use super::*;
     use crate::conversation_view::tests::init_test;
@@ -1759,19 +1765,40 @@ mod tests {
                 Some(architect.clone()),
                 "the Architect surface should own the active workspace item"
             );
+            assert!(
+                !architect.read(cx).show_in_tab_bar(cx),
+                "Architect must never leak into the native Code tab strip"
+            );
+            assert!(
+                !architect.read(cx).allows_workspace_docks(cx),
+                "Architect must reject native dock actions before they mutate layout"
+            );
         });
 
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.open_panel::<ProjectPanel>(window, cx);
-        });
-        cx.run_until_parked();
-        workspace.read_with(cx, |workspace, cx| {
             assert!(
                 workspace
                     .all_docks()
                     .into_iter()
                     .all(|dock| !dock.read(cx).is_open()),
-                "Architect should remain exclusive when a Code panel tries to reopen"
+                "Architect should reject direct panel opens without a deferred close"
+            );
+            assert!(
+                !workspace.toggle_panel_focus::<ProjectPanel>(window, cx),
+                "Architect should reject panel focus actions"
+            );
+            workspace.toggle_dock(DockPosition::Left, window, cx);
+            workspace.reveal_panel::<ProjectPanel>(window, cx);
+            workspace.left_dock().update(cx, |dock, cx| {
+                dock.set_open(true, window, cx);
+            });
+            assert!(
+                workspace
+                    .all_docks()
+                    .into_iter()
+                    .all(|dock| !dock.read(cx).is_open()),
+                "Architect should reject actions and direct dock-open attempts"
             );
         });
 
@@ -1816,8 +1843,21 @@ mod tests {
                 code_focus.is_focused(window),
                 "Code should restore the native item's focus"
             );
+            assert!(
+                workspace
+                    .active_pane()
+                    .read(cx)
+                    .items()
+                    .filter(|item| item.show_in_tab_bar(cx))
+                    .all(|item| item.item_id() != architect.entity_id()),
+                "the retained Architect entity must stay out of Code tabs"
+            );
         });
-        architect.read_with(cx, |architect, _| {
+        architect.read_with(cx, |architect, cx| {
+            assert!(
+                architect.allows_workspace_docks(cx),
+                "Code should re-enable native dock actions"
+            );
             assert_eq!(architect.mode(), ArchitectWorkspaceMode::Code);
             assert_eq!(architect.selection, Some(Selection::Node(parent.clone())));
             assert_eq!(architect.pan, point(px(72.0), px(-24.0)));
@@ -1929,6 +1969,30 @@ mod tests {
                 left_dock.active_panel().map(|panel| panel.panel_id()),
                 git_panel.as_ref().map(|panel| panel.entity_id()),
                 "Code should restore Git as the active native left-dock tab"
+            );
+            ArchitectPane::open(thread.clone(), workspace, window, cx);
+
+            workspace.active_pane().update(cx, |pane, cx| {
+                pane.remove_item(code_item.entity_id(), false, false, window, cx);
+            });
+            ArchitectPane::activate_code(workspace, window, cx);
+            assert_eq!(
+                workspace.item_of_type::<ArchitectPane>(cx),
+                None,
+                "Code should detach Architect from the native pane"
+            );
+            assert!(
+                workspace.active_item(cx).is_none(),
+                "Code without editors should restore a genuinely empty pane"
+            );
+            assert_eq!(
+                agent_panel_entity.read(cx).retained_architect_pane(),
+                Some(architect.clone()),
+                "the Agent panel should retain Architect state outside the Code pane"
+            );
+            assert!(
+                workspace.active_pane().read(cx).items().next().is_none(),
+                "an empty Code workspace must not contain an Architect tab"
             );
             ArchitectPane::open(thread.clone(), workspace, window, cx);
         });
@@ -2449,6 +2513,10 @@ mod tests {
                 .item_of_type::<ArchitectPane>(cx)
                 .expect("Architect should reopen after being closed")
         });
-        assert_ne!(reopened_architect.entity_id(), architect.entity_id());
+        assert_eq!(
+            reopened_architect.entity_id(),
+            architect.entity_id(),
+            "reopening Architect should reattach the retained workspace surface"
+        );
     }
 }

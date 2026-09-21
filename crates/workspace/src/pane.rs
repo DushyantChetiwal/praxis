@@ -3517,29 +3517,38 @@ impl Pane {
                 }
             });
 
-        let mut tab_items = self
-            .items
-            .iter()
-            .enumerate()
-            .zip(tab_details(&self.items, window, cx))
-            .map(|((ix, item), detail)| {
-                self.render_tab(ix, &**item, detail, &focus_handle, window, cx)
-                    .into_any_element()
-            })
-            .collect::<Vec<_>>();
-        let tab_count = tab_items.len();
-        if self.is_tab_pinned(tab_count) {
+        if self.pinned_tab_count > self.items.len() {
             log::warn!(
                 "Pinned tab count ({}) exceeds actual tab count ({}). \
-                This should not happen. If possible, add reproduction steps, \
-                in a comment, to https://github.com/zed-industries/zed/issues/33342",
+                 This should not happen. If possible, add reproduction steps, \
+                 in a comment, to https://github.com/zed-industries/zed/issues/33342",
                 self.pinned_tab_count,
-                tab_count
+                self.items.len()
             );
-            self.pinned_tab_count = tab_count;
+            self.pinned_tab_count = self.items.len();
         }
-        let unpinned_tabs = tab_items.split_off(self.pinned_tab_count);
-        let pinned_tabs = tab_items;
+
+        let mut pinned_tabs = Vec::new();
+        let mut unpinned_tabs = Vec::new();
+        for ((ix, item), detail) in
+            self.items
+                .iter()
+                .enumerate()
+                .zip(tab_details(&self.items, window, cx))
+        {
+            if !item.show_in_tab_bar(cx) {
+                continue;
+            }
+            let tab = self
+                .render_tab(ix, &**item, detail, &focus_handle, window, cx)
+                .into_any_element();
+            if self.is_tab_pinned(ix) {
+                pinned_tabs.push(tab);
+            } else {
+                unpinned_tabs.push(tab);
+            }
+        }
+        let tab_count = pinned_tabs.len() + unpinned_tabs.len();
 
         let tab_bar_settings = TabBarSettings::get_global(cx);
         let use_separate_rows = tab_bar_settings.show_pinned_tabs_in_separate_row;
@@ -4420,6 +4429,7 @@ impl Render for Pane {
 
         let should_display_tab_bar = self.should_display_tab_bar.clone();
         let display_tab_bar = should_display_tab_bar(window, cx);
+        let has_visible_tabs = self.items.iter().any(|item| item.show_in_tab_bar(cx));
         let Some(project) = self.project.upgrade() else {
             return div().track_focus(&self.focus_handle(cx));
         };
@@ -4591,7 +4601,7 @@ impl Render for Pane {
                     cx.propagate();
                 }
             }))
-            .when(self.active_item().is_some() && display_tab_bar, |pane| {
+            .when(has_visible_tabs && display_tab_bar, |pane| {
                 pane.child((self.render_tab_bar.clone())(self, window, cx))
             })
             .child({
