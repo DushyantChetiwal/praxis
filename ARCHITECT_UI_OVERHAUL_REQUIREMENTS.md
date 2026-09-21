@@ -1,13 +1,13 @@
 # Praxis Architect Application Shell Requirements
 
-Status: Complete; exact SHA green, bundled, installed, and update-safe
+Status: Complete; exact SHA green on all platforms, installed, update-safe, and runtime-verified on Windows
 Mockup: [`docs/architect-ui-overhaul.html`](docs/architect-ui-overhaul.html)
 Product branch: `Enhanced_Agents`
-Release candidate source: `58ed3b90f88ae249378ef4557ce34a061544b730`
-Quality workflow: [run 35495121882](https://github.com/DushyantChetiwal/praxis/actions/runs/35495121882) (successful)
-Bundle workflow: [run 35496089528](https://github.com/DushyantChetiwal/praxis/actions/runs/35496089528) (successful)
-Release: [`praxis-dev-16-1`](https://github.com/DushyantChetiwal/praxis/releases/tag/praxis-dev-16-1)
-Last reviewed: 2026-09-20
+Release candidate source: `32f4463549da3675dd7fe64299f8b4f1d41f7553`
+Quality workflow: [run 35536400258](https://github.com/DushyantChetiwal/praxis/actions/runs/35536400258) (successful)
+Bundle workflow: [run 35537028206, attempt 2](https://github.com/DushyantChetiwal/praxis/actions/runs/35537028206/attempts/2) (successful)
+Release: [`praxis-dev-17-2`](https://github.com/DushyantChetiwal/praxis/releases/tag/praxis-dev-17-2)
+Last reviewed: 2026-09-21
 
 Installation baseline (captured before release installation):
 
@@ -20,15 +20,34 @@ Installation baseline (captured before release installation):
 Installation and update verification:
 
 - Replaced only legacy Zed Dev; its `Local\Zed Dev` data remained at 25,910 entries.
-- Installed Praxis Dev `1.22.0+dev.16.58ed3b90f88ae249378ef4557ce34a061544b730`
+- Installed Praxis Dev `1.22.0+dev.17.32f4463549da3675dd7fe64299f8b4f1d41f7553`
   at `C:\Users\dushy\AppData\Local\Programs\Praxis Dev\`.
-- The published Windows update manifest SHA-256 matched the downloaded installer.
+- The published Windows update manifest and downloaded installer SHA-256 both
+  equal `47092a6bc70e7c396d15ebba51b7f3afe89e080d178f7b6f95a18093c90fb71a`.
 - In-place update preserved the Praxis settings hash, all six workspace database
   hashes, and the complete 66-file `Local\Praxis Dev` data set.
 - Stable Zed remained installed and running; its settings SHA-256 stayed
   `11ADCEFA92CDCEE5165AC23EBD87BD746A1AED4D3645F928E56A7D38C0CCF394`.
-- The installed `praxis` CLI reports source SHA
-  `58ed3b90f88ae249378ef4557ce34a061544b730`.
+- The installed `praxis` CLI and application log report source SHA
+  `32f4463549da3675dd7fe64299f8b4f1d41f7553`.
+
+Installed Windows crash regression verification:
+
+- WinDbg traced the pre-fix `0xc0000409` failure to synchronous Architect
+  activation re-entering `AgentPanel` through `Dock::set_active(false)` while the
+  panel entity was already leased.
+- AgentPanel-originated Architect activation is now deferred, and quality run
+  35536400258 includes an integration regression that invokes the helper during
+  an active `AgentPanel` update.
+- The GitHub-built release restored `ERP Bench` and visibly showed the labeled
+  **Architect** entry point and **Praxis Agent** composer placeholder.
+- Four installed-app AgentPanel Architect-to-Code round trips completed on
+  Windows. Architect replaced the editor and hid its tab strip and every Code
+  dock; Code restored the native tab strip and saved Project, Terminal, and
+  Agent docks, with Git retained in the shared left dock.
+- Praxis remained responsive under the same process throughout. No new crash
+  dump, Application Error or Windows Error Reporting event, panic, double-lease
+  log entry, or fatal log entry was produced.
 
 ## Delivery commitment
 
@@ -91,8 +110,8 @@ The mockup is illustrative rather than a literal implementation specification:
   including migration coverage for the older plain-string mode values.
 - Graph editing, nested plans, node and edge selection, scoped conversations,
   minimap behavior, and run orchestration remain integrated with live state.
-- Source-level implementation and review are complete. Exact-SHA quality,
-  bundle, and installation/update verification remain pending.
+- Source implementation, exact-SHA quality, all-platform bundling, installation,
+  update safety, and installed Windows runtime verification are complete.
 - Public application, installer, executable, CLI, updater, repository, and
   platform identities are renamed to Praxis while upstream crate names and the
   legacy `zed://` compatibility protocol remain unchanged.
@@ -442,9 +461,9 @@ The mockup is illustrative rather than a literal implementation specification:
       to act on them.
 - [x] **AUI-1012** No new production `unwrap`, unchecked indexing, or silently
       discarded fallible results are introduced.
-- [ ] **AUI-1013** Stable Zed, legacy Zed Dev, and Praxis Dev data directories
+- [x] **AUI-1013** Stable Zed, legacy Zed Dev, and Praxis Dev data directories
       remain untouched by installation, state migration, and testing.
-- [ ] **Phase 10 exit gate:** Compatibility tests pass and repeated use does not
+- [x] **Phase 10 exit gate:** Compatibility tests pass and repeated use does not
       lose state, leak entities, or panic.
 
 ## Phase 11: Test and review requirements
