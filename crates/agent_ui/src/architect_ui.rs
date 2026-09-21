@@ -441,7 +441,7 @@ impl ArchitectPane {
         let persisted_state = Self::persisted_state(workspace, cx);
         let agent_panel = workspace.panel::<AgentPanel>(cx);
         let attached_architect = workspace.item_of_type::<ArchitectPane>(cx);
-        let existing = attached_architect.clone().or_else(|| {
+        let existing = attached_architect.or_else(|| {
             agent_panel
                 .as_ref()
                 .and_then(|panel| panel.read(cx).retained_architect_pane())

@@ -6233,8 +6233,14 @@ impl AgentPanel {
             })
         }
 
+        let retained_mode = self
+            .retained_architect_pane
+            .as_ref()
+            .map(|architect| architect.read(cx).mode());
         let restoration = match self.workspace.read_with(cx, |workspace, cx| {
-            let mode = crate::architect_ui::ArchitectPane::persisted_mode(workspace, cx);
+            let mode = retained_mode.unwrap_or_else(|| {
+                crate::architect_ui::ArchitectPane::persisted_mode(workspace, cx)
+            });
             // Rendering another Agent-panel thread must not silently retarget a
             // live Architect workspace. The user can explicitly open that
             // thread in Architect; automatic restoration only fills a missing
