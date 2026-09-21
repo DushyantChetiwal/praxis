@@ -1994,6 +1994,7 @@ mod tests {
                 workspace.active_pane().read(cx).items().next().is_none(),
                 "an empty Code workspace must not contain an Architect tab"
             );
+            workspace.add_item_to_active_pane(Box::new(code_item.clone()), None, true, window, cx);
             ArchitectPane::open(thread.clone(), workspace, window, cx);
         });
 
