@@ -6192,7 +6192,7 @@ impl AgentPanel {
                     DockPosition::Left,
                     window,
                     cx,
-                ) || panel_needs_position::<TerminalPanel>(
+                ) || panel_needs_position::<terminal_view::terminal_panel::TerminalPanel>(
                     workspace,
                     DockPosition::Bottom,
                     window,
