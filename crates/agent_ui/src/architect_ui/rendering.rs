@@ -337,7 +337,7 @@ impl ArchitectPane {
             graph.nodes.iter().filter(|node| node.has_subplan()).count()
         });
         let mut summary = match step_count {
-            0 => "no steps yet".to_string(),
+            0 => "No steps yet".to_string(),
             1 => "1 step".to_string(),
             count => format!("{count} steps"),
         };
@@ -358,12 +358,13 @@ impl ArchitectPane {
             .read(cx)
             .title()
             .unwrap_or_else(|| SharedString::from("Untitled plan"));
+        let empty = step_count == 0 && !running;
         let readiness = if running {
             "Running"
         } else if ready_to_run {
             "Ready to run"
-        } else if step_count == 0 {
-            "Waiting for a plan"
+        } else if empty {
+            "Not started"
         } else {
             "Needs review"
         };
@@ -394,6 +395,8 @@ impl ArchitectPane {
                                     IconName::PlayFilled
                                 } else if ready_to_run {
                                     IconName::Check
+                                } else if empty {
+                                    IconName::Circle
                                 } else {
                                     IconName::Warning
                                 }),
@@ -401,6 +404,8 @@ impl ArchitectPane {
                                     Color::Info
                                 } else if ready_to_run {
                                     Color::Success
+                                } else if empty {
+                                    Color::Muted
                                 } else {
                                     Color::Warning
                                 },
@@ -408,6 +413,8 @@ impl ArchitectPane {
                                     cx.theme().status().info_border
                                 } else if ready_to_run {
                                     cx.theme().status().success_border
+                                } else if empty {
+                                    cx.theme().colors().border
                                 } else {
                                     cx.theme().status().warning_border
                                 },
@@ -415,14 +422,16 @@ impl ArchitectPane {
                                     cx.theme().status().info_background
                                 } else if ready_to_run {
                                     cx.theme().status().success_background
+                                } else if empty {
+                                    cx.theme().colors().element_background
                                 } else {
                                     cx.theme().status().warning_background
                                 },
                             )),
                     )
-                    .when(!compact, |this| {
+                    .when(!compact && !empty, |this| {
                         this.child(
-                            Label::new(format!("{summary} · live workspace state"))
+                            Label::new(summary)
                                 .size(LabelSize::Small)
                                 .color(Color::Muted)
                                 .truncate(),
@@ -730,7 +739,8 @@ impl ArchitectPane {
             })
             .count();
         let draft = all_ordered_nodes.len().saturating_sub(settled);
-        let ready = !all_ordered_nodes.is_empty() && blocking_problems.is_empty();
+        let has_steps = !all_ordered_nodes.is_empty();
+        let ready = has_steps && blocking_problems.is_empty();
 
         v_flex()
             .id("architect-outline")
@@ -756,66 +766,70 @@ impl ArchitectPane {
                                     .size(LabelSize::XSmall)
                                     .color(Color::Muted),
                             )
-                            .child(h_flex().gap_0p5().child(chip(
-                                if ready { "Ready" } else { "Review" },
-                                Some(if ready {
-                                    IconName::Check
-                                } else {
-                                    IconName::Warning
-                                }),
-                                if ready {
-                                    Color::Success
-                                } else {
-                                    Color::Warning
-                                },
-                                if ready {
-                                    cx.theme().status().success_border
-                                } else {
-                                    cx.theme().status().warning_border
-                                },
-                                if ready {
-                                    cx.theme().status().success_background
-                                } else {
-                                    cx.theme().status().warning_background
-                                },
-                            ))),
+                            .when(has_steps, |this| {
+                                this.child(chip(
+                                    if ready { "Ready" } else { "Review" },
+                                    Some(if ready {
+                                        IconName::Check
+                                    } else {
+                                        IconName::Warning
+                                    }),
+                                    if ready {
+                                        Color::Success
+                                    } else {
+                                        Color::Warning
+                                    },
+                                    if ready {
+                                        cx.theme().status().success_border
+                                    } else {
+                                        cx.theme().status().warning_border
+                                    },
+                                    if ready {
+                                        cx.theme().status().success_background
+                                    } else {
+                                        cx.theme().status().warning_background
+                                    },
+                                ))
+                            }),
                     )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Label::new(format!("{} settled", settled))
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .child(
-                                Label::new(format!("{draft} draft"))
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .child(
-                                Label::new(format!("{completed} complete"))
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap_1()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(cx.theme().colors().border)
-                            .bg(cx.theme().colors().editor_background)
-                            .child(
-                                Icon::new(IconName::MagnifyingGlass)
-                                    .size(IconSize::XSmall)
-                                    .color(Color::Muted),
-                            )
-                            .child(self.search_editor.clone()),
-                    )
+                    .when(has_steps, |this| {
+                        this.child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Label::new(format!("{settled} settled"))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                                .child(
+                                    Label::new(format!("{draft} draft"))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                                .child(
+                                    Label::new(format!("{completed} complete"))
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_1()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(cx.theme().colors().border)
+                                .bg(cx.theme().colors().editor_background)
+                                .child(
+                                    Icon::new(IconName::MagnifyingGlass)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                                .child(self.search_editor.clone()),
+                        )
+                    })
                     .child(
                         Button::new("architect-plan-conversation", "Plan Conversation")
                             .tab_index(0isize)
@@ -1396,28 +1410,26 @@ impl ArchitectPane {
                 ),
             )
             // Plans are only drafted in Plan mode, and the mode pill beside the
-            // composer is easy to miss. Offering the switch on the empty canvas
-            // means the canvas explains what it needs to fill itself.
-            .child(if planning {
-                Label::new("Plan mode is on — the agent will draft before it builds.")
-                    .size(LabelSize::Small)
-                    .color(Color::Accent)
-                    .into_any_element()
-            } else {
-                Button::new("architect-switch-to-plan", "Switch to Plan mode")
+            // composer is easy to miss. One action switches the mode if needed
+            // and puts the cursor where the goal is typed.
+            .child(
+                Button::new("architect-start-planning", "Start planning")
                     .tab_index(0isize)
                     .style(ButtonStyle::Tinted(TintColor::Accent))
-                    .start_icon(Icon::new(IconName::ListTodo).size(IconSize::Small))
-                    .tooltip(Tooltip::text(
-                        "Withholds the tools that change the project, so the agent plans \
-                         instead of building.",
-                    ))
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.thread.update(cx, |thread, cx| {
-                            thread.set_session_mode(agent::SessionMode::Plan, cx)
-                        });
+                    .start_icon(Icon::new(IconName::Sparkle).size(IconSize::Small))
+                    .tooltip(Tooltip::text(if planning {
+                        "Open the plan conversation and describe the goal"
+                    } else {
+                        "Switch to Plan mode and describe the goal"
                     }))
-                    .into_any_element()
+                    .on_click(cx.listener(|this, _, window, cx| this.start_planning(window, cx))),
+            )
+            .when(planning, |this| {
+                this.child(
+                    Label::new("Plan mode is on — the agent will draft before it builds.")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
             })
             .bg(cx.theme().colors().editor_background)
             .into_any()

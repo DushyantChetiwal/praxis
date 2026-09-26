@@ -1163,6 +1163,22 @@ impl ArchitectPane {
         cx.notify();
     }
 
+    fn start_planning(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread.read(cx).session_mode() != agent::SessionMode::Plan {
+            self.thread.update(cx, |thread, cx| {
+                thread.set_session_mode(agent::SessionMode::Plan, cx);
+            });
+        }
+        self.open_plan_conversation(window, cx);
+        let composer = self
+            .plan_conversation_view(cx)
+            .and_then(|conversation| conversation.read(cx).root_thread_view())
+            .map(|thread_view| thread_view.read(cx).message_editor.clone());
+        if let Some(composer) = composer {
+            composer.focus_handle(cx).focus(window, cx);
+        }
+    }
+
     fn add_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // New steps land in the middle of the view rather than at the origin,
         // so one appears where the user is looking.

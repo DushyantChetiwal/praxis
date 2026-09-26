@@ -440,7 +440,7 @@ impl ArchitectPane {
     /// it. Holding an update lease instead is a trap: the composer reads the
     /// workspace when a message is put into it, and a read inside an update
     /// panics.
-    fn plan_conversation_view(
+    pub(super) fn plan_conversation_view(
         &self,
         cx: &App,
     ) -> Option<Entity<crate::conversation_view::ConversationView>> {
