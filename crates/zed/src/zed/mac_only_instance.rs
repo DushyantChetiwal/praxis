@@ -14,6 +14,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(10);
 const RECEIVE_TIMEOUT: Duration = Duration::from_millis(35);
 const SEND_TIMEOUT: Duration = Duration::from_millis(20);
 const USER_BLOCK: u16 = 100;
+const PRAXIS_BASE_PORT: u16 = 45737;
 
 fn address() -> SocketAddr {
     // These port numbers are offset by the user ID to avoid conflicts between
@@ -23,16 +24,19 @@ fn address() -> SocketAddr {
     // interleaving the ports between different users and different release channels.
     //
     // On macOS user IDs start at 501 and on Linux they start at 1000. The first user
-    // on a Mac with ID 501 running a dev channel build will use port 44238, and the
-    // second user with ID 502 will use port 44239, and so on. User 501 will use ports
-    // 44338, 44438, and 44538 for the preview, stable, and nightly channels,
-    // respectively. User 502 will use ports 44339, 44439, and 44539 for the preview,
+    // on a Mac with ID 501 running a dev channel build will use port 46238, and the
+    // second user with ID 502 will use port 46239, and so on. User 501 will use ports
+    // 46338, 46438, and 46538 for the preview, stable, and nightly channels,
+    // respectively. User 502 will use ports 46339, 46439, and 46539 for the preview,
     // stable, and nightly channels, respectively.
+    //
+    // Praxis uses its own base port, away from Zed's 43737, so a Praxis build is
+    // never mistaken for an already-running Zed on the same channel, or the reverse.
     let port = match *release_channel::RELEASE_CHANNEL {
-        ReleaseChannel::Dev => 43737,
-        ReleaseChannel::Preview => 43737 + USER_BLOCK,
-        ReleaseChannel::Stable => 43737 + (2 * USER_BLOCK),
-        ReleaseChannel::Nightly => 43737 + (3 * USER_BLOCK),
+        ReleaseChannel::Dev => PRAXIS_BASE_PORT,
+        ReleaseChannel::Preview => PRAXIS_BASE_PORT + USER_BLOCK,
+        ReleaseChannel::Stable => PRAXIS_BASE_PORT + (2 * USER_BLOCK),
+        ReleaseChannel::Nightly => PRAXIS_BASE_PORT + (3 * USER_BLOCK),
     };
     let mut user_port = port;
     let mut sys = System::new_all();
@@ -72,10 +76,10 @@ fn get_uid_as_u32(uid: &sysinfo::Uid) -> u32 {
 
 fn instance_handshake() -> &'static str {
     match *release_channel::RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed Editor Dev Instance Running",
-        ReleaseChannel::Nightly => "Zed Editor Nightly Instance Running",
-        ReleaseChannel::Preview => "Zed Editor Preview Instance Running",
-        ReleaseChannel::Stable => "Zed Editor Stable Instance Running",
+        ReleaseChannel::Dev => "Praxis Dev Instance Running",
+        ReleaseChannel::Nightly => "Praxis Nightly Instance Running",
+        ReleaseChannel::Preview => "Praxis Preview Instance Running",
+        ReleaseChannel::Stable => "Praxis Stable Instance Running",
     }
 }
 
