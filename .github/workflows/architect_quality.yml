@@ -155,6 +155,9 @@ jobs:
       - name: Test the updater
         run: cargo test --locked -p auto_update --lib
 
+      - name: Test MCP OAuth client registration
+        run: cargo test --locked -p context_server --lib oauth::
+
   clippy:
     name: Clippy package checks
     runs-on: ubuntu-24.04
@@ -176,4 +179,6 @@ jobs:
           cache-on-failure: true
 
       - name: Check the Architect packages with Clippy
-        run: ./script/clippy --locked -p architect -p agent -p agent_ui -p auto_update
+        run: >-
+          ./script/clippy --locked -p architect -p agent -p agent_ui -p auto_update
+          -p context_server -p feedback
