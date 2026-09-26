@@ -725,8 +725,23 @@ impl ArchitectPane {
         let blocking_problems = graph
             .map(ArchitectGraph::blocking_problems)
             .unwrap_or_default();
-        let incomplete_handoffs = graph
-            .map(ArchitectGraph::steps_without_capture)
+        // Named, because a list of identical "add a handoff" rows does not say
+        // which step each one is for.
+        let incomplete_handoffs: Vec<(NodeId, String)> = graph
+            .map(|graph| {
+                graph
+                    .steps_without_capture()
+                    .into_iter()
+                    .map(|id| {
+                        let title = graph
+                            .node(&id)
+                            .map(|node| node.title.trim().to_string())
+                            .filter(|title| !title.is_empty())
+                            .unwrap_or_else(|| "untitled step".to_string());
+                        (id, title)
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         let selected = match &self.selection {
             Some(Selection::Node(id)) => Some(id),
@@ -905,11 +920,11 @@ impl ArchitectPane {
                                         },
                                     ))
                                     .children(incomplete_handoffs.iter().enumerate().map(
-                                        |(index, id)| {
+                                        |(index, (id, title))| {
                                             let id = id.clone();
                                             Button::new(
                                                 ("architect-readiness-handoff", index),
-                                                "Add a handoff summary",
+                                                truncate(&format!("Add a handoff for {title}"), 42),
                                             )
                                             .tab_index(0isize)
                                             .full_width()
@@ -920,6 +935,10 @@ impl ArchitectPane {
                                                     .size(IconSize::XSmall)
                                                     .color(Color::Warning),
                                             )
+                                            .tooltip(Tooltip::text(format!(
+                                                "Say what \"{title}\" must pass on to the steps \
+                                                 after it"
+                                            )))
                                             .on_click(
                                                 cx.listener(move |this, _, window, cx| {
                                                     this.set_selection(
