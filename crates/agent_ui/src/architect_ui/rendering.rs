@@ -5,9 +5,9 @@ use architect::{
     RunOutcome,
 };
 use gpui::{
-    App, Bounds, Context, CursorStyle, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
-    MouseButton, MouseDownEvent, PathBuilder, Pixels, Render, SharedString, Subscription,
-    WeakEntity, Window, canvas, div, point, px,
+    App, Bounds, Context, CursorStyle, DragMoveEvent, Entity, EventEmitter, FocusHandle,
+    Focusable, Hsla, MouseButton, MouseDownEvent, MouseUpEvent, PathBuilder, Pixels, Render,
+    SharedString, Subscription, WeakEntity, Window, canvas, deferred, div, point, px,
 };
 use ui::{TintColor, Tooltip, prelude::*};
 use workspace::{
@@ -59,6 +59,23 @@ fn node_intersects_viewport(
         && left <= viewport_width + overscan
         && top <= viewport_height + overscan
 }
+
+/// The draggable boundaries between the Architect regions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ArchitectDivider {
+    Outline,
+    Inspector,
+}
+
+struct DraggedArchitectDivider(ArchitectDivider);
+
+impl Render for DraggedArchitectDivider {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+const DIVIDER_HIT_WIDTH: f32 = 6.0;
 
 #[derive(Default)]
 pub(super) struct ArchitectStatusItem {
@@ -127,6 +144,73 @@ impl StatusItemView for ArchitectStatusItem {
 
 impl ArchitectPane {
     // -- Rendering ------------------------------------------------------------
+
+    /// A zero-width boundary whose hit area straddles the seam, so dragging it
+    /// resizes the region without shifting the layout by the handle's width.
+    fn render_divider(&self, divider: ArchitectDivider, cx: &mut Context<Self>) -> AnyElement {
+        let (id, tooltip) = match divider {
+            ArchitectDivider::Outline => (
+                "architect-outline-resize",
+                "Drag to resize the plan outline",
+            ),
+            ArchitectDivider::Inspector => (
+                "architect-inspector-resize",
+                "Drag to resize the inspector",
+            ),
+        };
+        let hover = cx.theme().colors().border_focused;
+        div()
+            .relative()
+            .flex_none()
+            .w(px(0.0))
+            .h_full()
+            .child(deferred(
+                div()
+                    .id(id)
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(-DIVIDER_HIT_WIDTH / 2.0))
+                    .w(px(DIVIDER_HIT_WIDTH))
+                    .h_full()
+                    .cursor_col_resize()
+                    .hover(move |style| style.bg(hover))
+                    .tooltip(Tooltip::text(tooltip))
+                    .on_drag(DraggedArchitectDivider(divider), |dragged, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.new(|_| DraggedArchitectDivider(dragged.0))
+                    })
+                    .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseUpEvent, _, cx| {
+                            if event.click_count == 2 {
+                                this.reset_divider(divider, cx);
+                                cx.stop_propagation();
+                            }
+                        }),
+                    )
+                    .occlude(),
+            ))
+            .into_any_element()
+    }
+
+    fn handle_divider_drag(
+        &mut self,
+        event: &DragMoveEvent<DraggedArchitectDivider>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event.drag(cx).0 {
+            ArchitectDivider::Outline => {
+                self.set_outline_width(event.event.position.x - event.bounds.left(), cx);
+            }
+            ArchitectDivider::Inspector => {
+                self.set_inspector_width(event.bounds.right() - event.event.position.x, cx);
+            }
+        }
+    }
 
     /// The trail of steps opened to reach the plan on screen. It is the only
     /// way out of a nested plan that does not depend on remembering how you got
@@ -698,30 +782,7 @@ impl ArchitectPane {
                                         } else {
                                             cx.theme().status().warning_background
                                         },
-                                    ))
-                                    .child(
-                                        IconButton::new(
-                                            "architect-outline-narrower",
-                                            IconName::Dash,
-                                        )
-                                        .tab_index(0isize)
-                                        .icon_size(IconSize::XSmall)
-                                        .tooltip(Tooltip::text("Make the plan outline narrower"))
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.resize_outline(-16.0, cx)
-                                            }),
-                                        ),
-                                    )
-                                    .child(
-                                        IconButton::new("architect-outline-wider", IconName::Plus)
-                                            .tab_index(0isize)
-                                            .icon_size(IconSize::XSmall)
-                                            .tooltip(Tooltip::text("Make the plan outline wider"))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.resize_outline(16.0, cx)
-                                            })),
-                                    ),
+                                    )),
                             ),
                     )
                     .child(
@@ -2332,9 +2393,19 @@ impl Render for ArchitectPane {
                 .into_any()
         });
 
+        let resizable = matches!(layout, ArchitectLayout::Wide);
+        let outline_divider = (resizable && outline.is_some())
+            .then(|| self.render_divider(ArchitectDivider::Outline, cx));
+        let inspector_divider = (resizable && inspector.is_some())
+            .then(|| self.render_divider(ArchitectDivider::Inspector, cx));
+
         v_flex()
             .id("architect-pane")
             .key_context("ArchitectPane")
+            .on_drag_move(cx.listener(Self::handle_divider_drag))
+            .on_drop(cx.listener(|this, _: &DraggedArchitectDivider, _, cx| {
+                this.persist_layout(cx);
+            }))
             .tab_group()
             .track_focus(&self.focus_handle)
             .size_full()
@@ -2355,7 +2426,9 @@ impl Render for ArchitectPane {
                             .size_full()
                             .overflow_hidden()
                             .children(outline)
+                            .children(outline_divider)
                             .child(graph)
+                            .children(inspector_divider)
                             .children(inspector),
                     )
                     .children(outline_drawer)

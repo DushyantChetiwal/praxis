@@ -336,16 +336,33 @@ impl ArchitectPane {
         Self::persist_state_for_key(key, state, cx);
     }
 
-    fn resize_outline(&mut self, delta: f32, cx: &mut Context<Self>) {
-        self.outline_width = px((f32::from(self.outline_width) + delta).clamp(184.0, 320.0));
-        self.persist_layout(cx);
-        cx.notify();
+    fn set_outline_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        let width = px(f32::from(width).clamp(184.0, 320.0));
+        if width != self.outline_width {
+            self.outline_width = width;
+            cx.notify();
+        }
     }
 
-    fn resize_inspector(&mut self, delta: f32, cx: &mut Context<Self>) {
-        self.inspector_width = px((f32::from(self.inspector_width) + delta).clamp(288.0, 480.0));
+    fn set_inspector_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        let width = px(f32::from(width).clamp(288.0, 480.0));
+        if width != self.inspector_width {
+            self.inspector_width = width;
+            cx.notify();
+        }
+    }
+
+    fn reset_divider(&mut self, divider: rendering::ArchitectDivider, cx: &mut Context<Self>) {
+        let defaults = ArchitectWorkspaceState::default();
+        match divider {
+            rendering::ArchitectDivider::Outline => {
+                self.set_outline_width(px(defaults.outline_width), cx);
+            }
+            rendering::ArchitectDivider::Inspector => {
+                self.set_inspector_width(px(defaults.inspector_width), cx);
+            }
+        }
         self.persist_layout(cx);
-        cx.notify();
     }
 
     fn capture_docks(workspace: &Workspace, cx: &Context<Workspace>) -> Vec<DockSnapshot> {

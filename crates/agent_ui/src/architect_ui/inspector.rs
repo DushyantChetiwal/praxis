@@ -524,26 +524,6 @@ impl ArchitectPane {
         cx.notify();
     }
 
-    fn render_inspector_resize_controls(&self, cx: &mut Context<Self>) -> AnyElement {
-        h_flex()
-            .gap_0p5()
-            .child(
-                IconButton::new("architect-inspector-narrower", IconName::Dash)
-                    .tab_index(0isize)
-                    .icon_size(IconSize::XSmall)
-                    .tooltip(Tooltip::text("Make the inspector narrower"))
-                    .on_click(cx.listener(|this, _, _, cx| this.resize_inspector(-16.0, cx))),
-            )
-            .child(
-                IconButton::new("architect-inspector-wider", IconName::Plus)
-                    .tab_index(0isize)
-                    .icon_size(IconSize::XSmall)
-                    .tooltip(Tooltip::text("Make the inspector wider"))
-                    .on_click(cx.listener(|this, _, _, cx| this.resize_inspector(16.0, cx))),
-            )
-            .into_any()
-    }
-
     fn render_plan_conversation_inspector(
         &self,
         width: gpui::Pixels,
@@ -599,7 +579,6 @@ impl ArchitectPane {
                             .child(
                                 h_flex()
                                     .gap_0p5()
-                                    .child(self.render_inspector_resize_controls(cx))
                                     .child(
                                         IconButton::new(
                                             "architect-close-plan-conversation",
@@ -697,8 +676,7 @@ impl ArchitectPane {
                                 h_flex()
                                     .w_full()
                                     .justify_between()
-                                    .child(Label::new("Plan Overview").size(LabelSize::Default))
-                                    .child(self.render_inspector_resize_controls(cx)),
+                                    .child(Label::new("Plan Overview").size(LabelSize::Default)),
                             )
                             .child(
                                 Label::new(if ready {
@@ -862,8 +840,7 @@ impl ArchitectPane {
                                 h_flex()
                                     .w_full()
                                     .justify_between()
-                                    .child(Label::new("Connection").size(LabelSize::Default))
-                                    .child(self.render_inspector_resize_controls(cx)),
+                                    .child(Label::new("Connection").size(LabelSize::Default)),
                             )
                             .child(
                                 Label::new(format!("{source} → {target}"))
@@ -1218,8 +1195,7 @@ impl ArchitectPane {
                                         } else {
                                             Color::Muted
                                         }),
-                                )
-                                .child(self.render_inspector_resize_controls(cx)),
+                                ),
                         ),
                 )
                 .child(
