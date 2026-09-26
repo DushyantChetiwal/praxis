@@ -8160,7 +8160,7 @@ mod internal_tests {
         let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
         let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
         let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
-        let model = Arc::new(FakeLanguageModel::default());
+        let model = FakeLanguageModelProvider::default().model("fake");
         thread.update(cx, |thread, cx| {
             thread.set_model(model, cx);
             thread.set_session_mode(crate::SessionMode::Plan, cx);
@@ -8274,7 +8274,7 @@ mod internal_tests {
         let (connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
         let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
         let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
-        let model = Arc::new(FakeLanguageModel::default());
+        let model = FakeLanguageModelProvider::default().model("fake");
         thread.update(cx, |thread, cx| {
             thread.set_title("Persisted plan".into(), cx);
             thread.set_model(model.clone(), cx);
@@ -8322,7 +8322,7 @@ mod internal_tests {
         let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
         let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
         let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
-        let model = Arc::new(FakeLanguageModel::default());
+        let model = FakeLanguageModelProvider::default().model("fake");
         thread.update(cx, |thread, cx| thread.set_model(model, cx));
 
         thread.read_with(cx, |thread, cx| {
@@ -8472,7 +8472,7 @@ mod internal_tests {
                 .thread
                 .clone()
         });
-        let model = Arc::new(FakeLanguageModel::default());
+        let model = FakeLanguageModelProvider::default().model("fake");
         parent.update(cx, |thread, cx| thread.set_model(model.clone(), cx));
 
         let step_thread = cx

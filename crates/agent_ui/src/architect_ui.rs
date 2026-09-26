@@ -24,9 +24,8 @@ use editor::Editor;
 use git_ui::git_panel::GitPanel;
 use gpui::{
     AnyWindowHandle, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
-    KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent,
-    Subscription, WeakEntity, Window, point, px,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    ScrollDelta, ScrollWheelEvent, Subscription, WeakEntity, Window, point, px,
 };
 use project_panel::ProjectPanel;
 use settings::Settings as _;

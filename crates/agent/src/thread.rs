@@ -9202,8 +9202,8 @@ mod tests {
     /// exactly as it would not when stuck in a loop.
     #[gpui::test]
     async fn test_streaming_repetition_interrupts_and_steers_turn(cx: &mut TestAppContext) {
-        let (thread, _event_stream) = setup_thread_for_test(cx).await;
-        let model = Arc::new(FakeLanguageModel::default());
+        let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
+        let model = fake.model("fake");
 
         cx.update(|cx| {
             thread.update(cx, |thread, cx| thread.set_model(model.clone(), cx));
@@ -9218,16 +9218,17 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        let request = model.pending_completions().pop().expect("initial request");
+        let request = fake.pending_completions().pop().expect("initial request");
         for _ in 0..8 {
-            model.send_completion_stream_text_chunk(
+            fake.send_text(
+                &model,
                 &request,
                 "The build failed because of a missing module. ",
             );
         }
         cx.run_until_parked();
 
-        let steered = model
+        let steered = fake
             .pending_completions()
             .pop()
             .expect("the guard should start a new completion after interrupting the stream");
@@ -9293,8 +9294,8 @@ mod tests {
     /// on text that would otherwise trip it.
     #[gpui::test]
     async fn test_disabled_loop_guard_leaves_repetition_alone(cx: &mut TestAppContext) {
-        let (thread, _event_stream) = setup_thread_for_test(cx).await;
-        let model = Arc::new(FakeLanguageModel::default());
+        let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
+        let model = fake.model("fake");
 
         cx.update(|cx| {
             let mut settings = AgentSettings::get_global(cx).clone();
@@ -9312,9 +9313,10 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        let request = model.pending_completions().pop().expect("initial request");
+        let request = fake.pending_completions().pop().expect("initial request");
         for _ in 0..8 {
-            model.send_completion_stream_text_chunk(
+            fake.send_text(
+                &model,
                 &request,
                 "The build failed because of a missing module. ",
             );
@@ -9350,7 +9352,7 @@ mod tests {
     /// the file contents and command output it was working from survive.
     #[gpui::test]
     async fn test_compaction_retains_recent_tool_results(cx: &mut TestAppContext) {
-        let (thread, _event_stream) = setup_thread_for_test(cx).await;
+        let (thread, _event_stream, _fake) = setup_thread_for_test(cx).await;
         let tool_use_id = LanguageModelToolUseId::from("read_file_1");
 
         let request_messages = cx.update(|cx| {
