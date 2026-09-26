@@ -2,7 +2,7 @@
 description = "Praxis turns system plans into working software."
 edition.workspace = true
 name = "zed"
-version = "1.22.0"
+version = "1.23.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["Dushyant Chetiwal", "Zed Team <hi@zed.dev>"]
