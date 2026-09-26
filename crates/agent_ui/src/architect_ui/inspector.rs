@@ -779,8 +779,11 @@ impl ArchitectPane {
                                                 .color(Color::Muted),
                                         )
                                         .child(
-                                            Label::new(format!("{visits} visits · {state}"))
-                                                .size(LabelSize::Small),
+                                            Label::new(format!(
+                                                "{} · {state}",
+                                                count_label(visits, "visit", "visits")
+                                            ))
+                                            .size(LabelSize::Small),
                                         ),
                                 )
                             }),
@@ -1850,17 +1853,19 @@ impl ArchitectPane {
                                             .child(field("Nested Plan"))
                                             .child(
                                                 Label::new(match subplan_steps {
-                                                    0 => "none yet".to_string(),
+                                                    0 => "None yet".to_string(),
                                                     count => {
                                                         let locked_inside = subplan_titles
                                                             .iter()
                                                             .filter(|(_, locked)| *locked)
                                                             .count();
+                                                        let steps =
+                                                            count_label(count, "step", "steps");
                                                         if locked_inside == count {
-                                                            format!("{count} steps · all locked")
+                                                            format!("{steps} · all locked")
                                                         } else {
                                                             format!(
-                                                                "{count} steps · {} still open",
+                                                                "{steps} · {} still open",
                                                                 count - locked_inside
                                                             )
                                                         }
