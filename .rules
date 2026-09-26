@@ -1,3 +1,27 @@
+# Praxis working agreement
+
+These instructions come from the product owner and apply to every Praxis session until the product is finished.
+
+* Never idle while GitHub Actions runs. Check workflow status once, then spend the wait finding and fixing bugs; check again only when there is something to act on.
+* Iterate fast: make small, focused commits on `Enhanced_Agents`, push, and keep improving while validation runs. All permissions needed for this work are granted.
+* Actively monitor the standard Zed Agent upstream (`zed-industries/zed`, especially `crates/agent`, `crates/agent_ui`, `crates/acp_thread`) for new features and port the good ones into Praxis.
+* The UI must be pristine and the UX impeccable: no flicker, no leaked chrome between Architect and Code, no dead or duplicate controls, no user-facing "Zed Agent" branding.
+* Rust builds, tests, Clippy, and formatting run only in GitHub Actions; locally run only `git diff --check`. `main` stays workflow-only.
+* Never touch Stable Zed or the `Local\Zed` and `Local\Zed Dev` data directories.
+
+# Praxis UI guidelines
+
+* Architect and Code are exclusive workspace modes. Architect owns the whole workspace: no docks, no panel buttons, no editor tab strip, and no Code entry points except the single **Code** action. Code must never show an Architect tab or residue.
+* Enforce mode rules where the state changes (workspace actions, dock opening, pane membership), never by correcting state after render. Render-time fixes cause flicker.
+* Never mutate workspace or dock state synchronously from inside an updating panel or item listener; use `window.defer` or `cx.defer_in`. Entity re-entry aborts the process on Windows.
+* Keep one owner per action. No duplicate buttons for the same command within a surface.
+* Every control has a visible text label or an icon with a tooltip and accessible label. Primary mode switches (Architect, Code) are always labeled with text.
+* Use theme tokens and existing `ui` components (`Button`, `IconButton`, `Label`, `h_flex`/`v_flex`, `DynamicSpacing`). No hard-coded colors or pixel magic unless matching existing Zed layout constants.
+* User-facing copy says "Praxis" or "Praxis Agent", is short and actionable, and describes what failed and what to do next.
+* State changes that affect layout must be atomic: compute the target layout, then apply it once, so no intermediate frame is visible.
+* Preserve live entities across mode switches; hide or detach them rather than rebuilding.
+* Every UI bug fix ships with a GPUI regression test that fails without the fix.
+
 # Rust coding guidelines
 
 * Prioritize code correctness and clarity. Speed and efficiency are secondary priorities unless otherwise specified.
