@@ -8,7 +8,7 @@ use ui::{TintColor, Tooltip, prelude::*};
 use crate::AgentPanel;
 
 use super::rendering::truncate;
-use super::{ArchitectPane, Interaction, Selection, UndoGroup};
+use super::{ArchitectPane, Interaction, Selection, UNDO_SHORTCUT, UndoGroup};
 
 /// The inspector shows one step, either as fields or as the conversation about
 /// it. The conversation lives here rather than in the agent panel so that the
@@ -1059,6 +1059,9 @@ impl ArchitectPane {
                                     .style(ButtonStyle::Subtle)
                                     .start_icon(Icon::new(IconName::Trash).size(IconSize::XSmall))
                                     .disabled(source_locked)
+                                    .tooltip(Tooltip::text(format!(
+                                        "Remove this connection. {UNDO_SHORTCUT} undoes it."
+                                    )))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.set_selection(
                                             Some(Selection::Edge(delete_id.clone())),
@@ -1716,6 +1719,10 @@ impl ArchitectPane {
                                     .label_size(LabelSize::Small)
                                     .style(ButtonStyle::Subtle)
                                     .start_icon(Icon::new(IconName::Trash).size(IconSize::XSmall))
+                                    .tooltip(Tooltip::text(format!(
+                                        "Remove this step and any plan inside it. \
+                                         {UNDO_SHORTCUT} undoes it."
+                                    )))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.set_selection(
                                             Some(Selection::Node(id.clone())),
