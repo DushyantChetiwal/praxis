@@ -171,14 +171,13 @@ pub fn empty_draft_placeholder_label(
     agent_id: &AgentId,
     cx: &App,
 ) -> SharedString {
-    let agent_name = if agent_id.as_ref() == ZED_AGENT_ID.as_ref() {
-        SharedString::from(agent::NATIVE_AGENT_DISPLAY_NAME)
-    } else {
-        workspace
-            .map(|ws| ws.read(cx).project().read(cx).agent_server_store().clone())
-            .and_then(|store| store.read(cx).agent_display_name(agent_id))
-            .unwrap_or_else(|| SharedString::from(agent_id.to_string()))
-    };
+    if agent_id.as_ref() == ZED_AGENT_ID.as_ref() {
+        return SharedString::from("New Thread");
+    }
+    let agent_name = workspace
+        .map(|ws| ws.read(cx).project().read(cx).agent_server_store().clone())
+        .and_then(|store| store.read(cx).agent_display_name(agent_id))
+        .unwrap_or_else(|| SharedString::from(agent_id.to_string()));
 
     format!("New {} Thread", agent_name).into()
 }

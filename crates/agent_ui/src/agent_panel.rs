@@ -6603,7 +6603,14 @@ impl AgentPanel {
             .justify_between();
 
         let empty_thread_title = matches!(mode, ToolbarMode::EmptyThread).then(|| {
-            Label::new(format!("New {} Thread", selected_agent_label))
+            // The native agent is the default, so naming it only crowds the
+            // toolbar; other agents are named so it is clear who will answer.
+            let title = if !showing_terminal && matches!(self.selected_agent, Agent::NativeAgent) {
+                SharedString::from("New Thread")
+            } else {
+                SharedString::from(format!("New {selected_agent_label} Thread"))
+            };
+            Label::new(title)
                 .color(Color::Muted)
                 .truncate()
                 .into_any_element()
