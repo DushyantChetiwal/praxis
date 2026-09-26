@@ -96,21 +96,25 @@ impl Render for ArchitectStatusItem {
         let title = thread
             .title()
             .unwrap_or_else(|| SharedString::from("Untitled plan"));
+        // The same words as the plan header, so the two never disagree.
+        let graph = thread.architect_graph();
         let status = if pane.is_running(cx) {
             "running"
-        } else if thread.architect_graph().is_some_and(|graph| {
+        } else if graph.is_some_and(|graph| {
             graph.is_fully_locked_deeply() && graph.blocking_problems().is_empty()
         }) {
-            "ready"
+            "ready to run"
+        } else if graph.is_none_or(ArchitectGraph::is_empty) {
+            "not started"
         } else {
-            "planning"
+            "needs review"
         };
 
         h_flex()
             .id("architect-status-context")
             .gap_1()
             .child(
-                Icon::new(IconName::GitBranch)
+                Icon::new(IconName::ListTree)
                     .size(IconSize::XSmall)
                     .color(Color::Muted),
             )
