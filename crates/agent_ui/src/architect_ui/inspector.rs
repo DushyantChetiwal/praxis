@@ -809,11 +809,15 @@ impl ArchitectPane {
                                             "Architect turns a goal into a plan of explicit \
                                              steps. Start planning, refine and lock each step, \
                                              then run the plan."
+                                                .to_string()
                                         } else {
-                                            "Select a step in the outline or graph to edit its \
-                                             goal, constraints, handoff, conversation, and \
-                                             activity. Select a connection to inspect its \
-                                             routing condition."
+                                            format!(
+                                                "Select a step to edit its goal, rules, handoff, \
+                                                 and conversation. Drag from the dot on a \
+                                                 step's right edge to connect it to the next \
+                                                 step. Press Delete to remove the selection and \
+                                                 {UNDO_SHORTCUT} to undo."
+                                            )
                                         })
                                         .size(LabelSize::Small)
                                         .color(Color::Muted),
