@@ -563,7 +563,13 @@ impl ArchitectPane {
                             .label_size(LabelSize::Small)
                             .style(ButtonStyle::Subtle)
                             .start_icon(Icon::new(IconName::Code).size(IconSize::XSmall))
-                            .tooltip(Tooltip::text("Return to the Code workspace"))
+                            .tooltip(|_window, cx| {
+                                Tooltip::for_action(
+                                    "Return to the Code workspace",
+                                    &crate::ToggleArchitectWorkspace,
+                                    cx,
+                                )
+                            })
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.request_code_mode(window, cx)
                             })),

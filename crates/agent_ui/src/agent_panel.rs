@@ -6292,7 +6292,9 @@ impl AgentPanel {
                 .label_size(LabelSize::Small)
                 .style(ButtonStyle::Subtle)
                 .start_icon(Icon::new(IconName::GitBranch).size(IconSize::Small))
-                .tooltip(Tooltip::text(tooltip))
+                .tooltip(move |_window, cx| {
+                    Tooltip::for_action(tooltip.clone(), &crate::ToggleArchitectWorkspace, cx)
+                })
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.defer_open_architect_workspace(window, cx);
                 }))
