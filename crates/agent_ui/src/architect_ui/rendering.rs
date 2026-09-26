@@ -10,7 +10,10 @@ use gpui::{
     Subscription, WeakEntity, Window, canvas, deferred, div, point, px,
 };
 use ui::{TintColor, Tooltip, prelude::*};
-use workspace::{HideStatusItem, StatusItemView, item::{Item, ItemEvent, ItemHandle}};
+use workspace::{
+    HideStatusItem, StatusItemView,
+    item::{Item, ItemEvent, ItemHandle},
+};
 
 use super::geometry::{EdgeCurve, NODE_WIDTH, paint_curve};
 use super::{
