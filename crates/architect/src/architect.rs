@@ -461,6 +461,21 @@ impl ArchitectGraph {
             .sum()
     }
 
+    /// How many steps here and in every nested plan are locked, counted the
+    /// same way as `step_count_deeply`.
+    pub fn locked_step_count_deeply(&self) -> usize {
+        self.nodes
+            .iter()
+            .map(|node| {
+                let nested = node
+                    .subplan()
+                    .map(ArchitectGraph::locked_step_count_deeply)
+                    .unwrap_or_default();
+                usize::from(node.locked) + nested
+            })
+            .sum()
+    }
+
     /// Clears results from this plan and every nested plan before a new run.
     pub fn clear_results(&mut self) {
         for node in &mut self.nodes {
@@ -1443,15 +1458,20 @@ mod tests {
     #[test]
     fn deep_step_count_includes_nested_plans() {
         let mut nested = ArchitectGraph::default();
-        nested.add_node(ArchitectNode::new("child-a", "Child A"));
+        let mut locked_child = ArchitectNode::new("child-a", "Child A");
+        locked_child.locked = true;
+        nested.add_node(locked_child);
         nested.add_node(ArchitectNode::new("child-b", "Child B"));
         let mut parent = ArchitectNode::new("parent", "Parent");
         parent.subplan = Some(Box::new(nested));
         let mut graph = ArchitectGraph::default();
         graph.add_node(parent);
-        graph.add_node(ArchitectNode::new("sibling", "Sibling"));
+        let mut sibling = ArchitectNode::new("sibling", "Sibling");
+        sibling.locked = true;
+        graph.add_node(sibling);
 
         assert_eq!(graph.step_count_deeply(), 4);
+        assert_eq!(graph.locked_step_count_deeply(), 2);
     }
 
     #[test]

@@ -299,6 +299,7 @@ impl ArchitectPane {
         // screen: a run started from inside a sub-plan still runs everything.
         let root = self.root_graph(cx);
         let run_step_count = root.map_or(0, ArchitectGraph::step_count_deeply);
+        let run_locked_count = root.map_or(0, ArchitectGraph::locked_step_count_deeply);
         let problems: Vec<GraphProblem> = root
             .map(ArchitectGraph::blocking_problems)
             .unwrap_or_default();
@@ -307,7 +308,7 @@ impl ArchitectPane {
             && root.is_some_and(|root| root.blocking_problems().is_empty());
         let run_tooltip: SharedString = if ready_to_run {
             "Run the plan, one step at a time".into()
-        } else if step_count == 0 {
+        } else if run_step_count == 0 {
             "Nothing to run yet. Start planning to draft steps.".into()
         } else if !problems.is_empty() {
             match problems.len() {
@@ -315,7 +316,7 @@ impl ArchitectPane {
                 count => format!("Fix {count} problems first. Review Plan shows them.").into(),
             }
         } else {
-            match step_count.saturating_sub(locked_count) {
+            match run_step_count.saturating_sub(run_locked_count) {
                 1 => "Lock the last open step to run the plan.".into(),
                 open => format!("Lock the {open} open steps to run the plan.").into(),
             }
