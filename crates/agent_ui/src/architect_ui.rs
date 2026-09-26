@@ -23,7 +23,8 @@ use architect::{
 use editor::Editor;
 use git_ui::git_panel::GitPanel;
 use gpui::{
-    AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    AnyWindowHandle, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
+    KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent,
     Subscription, WeakEntity, Window, point, px,
 };
@@ -148,6 +149,7 @@ struct DockSnapshot {
 pub struct ArchitectPane {
     thread: Entity<Thread>,
     workspace: WeakEntity<Workspace>,
+    window_handle: AnyWindowHandle,
     mode: ArchitectWorkspaceMode,
     previous_code_item: Option<Box<dyn WeakItemHandle>>,
     code_docks: Vec<DockSnapshot>,
@@ -214,6 +216,7 @@ impl ArchitectPane {
         Self {
             thread,
             workspace,
+            window_handle: window.window_handle(),
             mode: ArchitectWorkspaceMode::Architect,
             previous_code_item,
             code_docks,
@@ -715,31 +718,46 @@ impl ArchitectPane {
         });
     }
 
-    fn restore_after_discard(&self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Closing Architect while it owns the workspace must hand the workspace
+    /// back to Code; otherwise the docks stay locked and the tab strip hidden.
+    fn restore_after_removal(&self, cx: &mut Context<Self>) {
         if self.mode != ArchitectWorkspaceMode::Architect {
             return;
         }
+        let architect = cx.weak_entity();
         let workspace = self.workspace.clone();
+        let window_handle = self.window_handle;
         let previous_code_item = self
             .previous_code_item
             .as_ref()
             .and_then(|item| item.upgrade());
         let code_docks = self.code_docks.clone();
         let last_code_focus = self.last_code_focus.clone();
-        window.defer(cx, move |window, cx| {
-            let Some(workspace) = workspace.upgrade() else {
-                return;
-            };
-            workspace.update(cx, |workspace, cx| {
-                Self::restore_code_surface(
-                    workspace,
-                    previous_code_item,
-                    code_docks,
-                    last_code_focus,
-                    window,
-                    cx,
-                );
+        cx.defer(move |cx| {
+            let result = window_handle.update(cx, |_, window, cx| {
+                if let Some(architect) = architect.upgrade() {
+                    architect.update(cx, |architect, cx| {
+                        architect.mode = ArchitectWorkspaceMode::Code;
+                        cx.notify();
+                    });
+                }
+                let Some(workspace) = workspace.upgrade() else {
+                    return;
+                };
+                workspace.update(cx, |workspace, cx| {
+                    Self::restore_code_surface(
+                        workspace,
+                        previous_code_item,
+                        code_docks,
+                        last_code_focus,
+                        window,
+                        cx,
+                    );
+                });
             });
+            if let Err(error) = result {
+                log::debug!("Skipped restoring Code after closing Architect: {error:#}");
+            }
         });
     }
 

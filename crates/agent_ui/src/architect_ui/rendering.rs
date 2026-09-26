@@ -2427,13 +2427,8 @@ impl Item for ArchitectPane {
         }
     }
 
-    fn discarded(
-        &self,
-        _project: Entity<project::Project>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.restore_after_discard(window, cx);
+    fn on_removed(&self, cx: &mut Context<Self>) {
+        self.restore_after_removal(cx);
     }
 
     fn include_in_nav_history() -> bool {
