@@ -469,12 +469,7 @@ async fn build_remote_server_from_source(
                     .context("locating the zed checkout to build remote_server from source")?,
             )
             .args(remote_build_mode.build_command())
-            .args([
-                "--package",
-                "remote_server",
-                "--features",
-                "debug-embed",
-            ])
+            .args(["--package", "remote_server", "--features", "debug-embed"])
             .arg("--target-dir")
             .arg(remote_server_target_dir())
             .args(["--target", &triple])

@@ -1630,7 +1630,7 @@ impl Thread {
         title: SharedString,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut thread = Self::new_subagent(parent_thread, cx);
+        let mut thread = Self::new_subagent(parent_thread, None, cx);
         // Messages are shared by `Arc`, so inheriting the whole conversation
         // costs a refcount rather than a copy.
         thread.messages = parent_thread.read(cx).messages.clone();

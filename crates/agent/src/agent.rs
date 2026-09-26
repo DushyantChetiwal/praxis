@@ -8341,7 +8341,7 @@ mod internal_tests {
         let project_id = agent.read_with(cx, |agent, _| {
             agent.sessions.get(&session_id).unwrap().project_id
         });
-        let background_thread = cx.new(|cx| Thread::new_subagent(&thread, cx));
+        let background_thread = cx.new(|cx| Thread::new_subagent(&thread, None, cx));
         let _background_acp_thread = agent.update(cx, |agent, cx| {
             agent.register_session(background_thread.clone(), project_id, cx)
         });
