@@ -18,18 +18,19 @@ actions!(
 
 const ZED_REPO_URL: &str = "https://github.com/zed-industries/zed";
 
-const REQUEST_FEATURE_URL: &str = "https://github.com/zed-industries/zed/discussions/new/choose";
+// Praxis reports go to the Praxis tracker. Zed's tracker and templates are for
+// Zed itself, and a Praxis bug filed there cannot be reproduced upstream.
+const REQUEST_FEATURE_URL: &str =
+    "https://github.com/DushyantChetiwal/praxis/issues/new?labels=enhancement";
 
 fn file_bug_report_url(specs: &SystemSpecs) -> String {
+    let body = format!(
+        "### What happened?\n\n\n### Steps to reproduce\n\n1. \n\n\
+         ### What did you expect?\n\n\n### Environment\n\n{specs}"
+    );
     format!(
-        concat!(
-            "https://github.com/zed-industries/zed/issues/new",
-            "?",
-            "template=10_bug_report.yml",
-            "&",
-            "environment={}"
-        ),
-        urlencoding::encode(&specs.to_string())
+        "https://github.com/DushyantChetiwal/praxis/issues/new?labels=bug&body={}",
+        urlencoding::encode(&body)
     )
 }
 
