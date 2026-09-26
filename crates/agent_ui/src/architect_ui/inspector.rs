@@ -681,12 +681,16 @@ impl ArchitectPane {
                             .child(
                                 Label::new(if ready {
                                     "Ready for execution"
+                                } else if step_count == 0 {
+                                    "Nothing to review yet"
                                 } else {
                                     "Review the plan before execution"
                                 })
                                 .size(LabelSize::Small)
                                 .color(if ready {
                                     Color::Success
+                                } else if step_count == 0 {
+                                    Color::Muted
                                 } else {
                                     Color::Warning
                                 }),
@@ -700,35 +704,48 @@ impl ArchitectPane {
                             .overflow_y_scroll()
                             .p_3()
                             .gap_3()
-                            .child(
-                                v_flex()
-                                    .gap_1()
-                                    .child(
-                                        Label::new("PLAN HEALTH")
-                                            .size(LabelSize::XSmall)
-                                            .color(Color::Muted),
-                                    )
-                                    .child(
-                                        Label::new(format!(
-                                            "{step_count} steps · {settled} settled · {} draft",
-                                            step_count.saturating_sub(settled)
-                                        ))
-                                        .size(LabelSize::Small),
-                                    )
-                                    .child(
-                                        Label::new(format!(
-                                            "{} blocking issues · {} incomplete handoffs",
-                                            issues.len(),
-                                            captures.len()
-                                        ))
-                                        .size(LabelSize::Small)
-                                        .color(if issues.is_empty() && captures.is_empty() {
-                                            Color::Muted
-                                        } else {
-                                            Color::Warning
-                                        }),
-                                    ),
-                            )
+                            .when(step_count > 0, |this| {
+                                this.child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(
+                                            Label::new("PLAN HEALTH")
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        )
+                                        .child(
+                                            Label::new(format!(
+                                                "{} · {settled} settled · {} draft",
+                                                count_label(step_count, "step", "steps"),
+                                                step_count.saturating_sub(settled)
+                                            ))
+                                            .size(LabelSize::Small),
+                                        )
+                                        .child(
+                                            Label::new(format!(
+                                                "{} · {}",
+                                                count_label(
+                                                    issues.len(),
+                                                    "blocking issue",
+                                                    "blocking issues"
+                                                ),
+                                                count_label(
+                                                    captures.len(),
+                                                    "incomplete handoff",
+                                                    "incomplete handoffs"
+                                                ),
+                                            ))
+                                            .size(LabelSize::Small)
+                                            .color(
+                                                if issues.is_empty() && captures.is_empty() {
+                                                    Color::Muted
+                                                } else {
+                                                    Color::Warning
+                                                },
+                                            ),
+                                        ),
+                                )
+                            })
                             .child(
                                 v_flex()
                                     .gap_1()
@@ -738,9 +755,16 @@ impl ArchitectPane {
                                             .color(Color::Muted),
                                     )
                                     .child(
-                                        Label::new(
-                                            "Select a step in the outline or graph to edit its goal, constraints, handoff, conversation, and activity. Select a connection to inspect its routing condition.",
-                                        )
+                                        Label::new(if step_count == 0 {
+                                            "Architect turns a goal into a plan of explicit \
+                                             steps. Start planning, refine and lock each step, \
+                                             then run the plan."
+                                        } else {
+                                            "Select a step in the outline or graph to edit its \
+                                             goal, constraints, handoff, conversation, and \
+                                             activity. Select a connection to inspect its \
+                                             routing condition."
+                                        })
                                         .size(LabelSize::Small)
                                         .color(Color::Muted),
                                     ),
@@ -2000,5 +2024,13 @@ impl ArchitectPane {
                 )
                 .into_any(),
         )
+    }
+}
+
+fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
     }
 }
