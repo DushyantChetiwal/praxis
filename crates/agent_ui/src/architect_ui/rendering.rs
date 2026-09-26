@@ -2110,7 +2110,11 @@ impl ArchitectPane {
                                 node.responsibility.clone()
                             })
                             .size(LabelSize::XSmall)
-                            .color(Color::Accent)
+                            .color(if node.responsibility.trim().is_empty() {
+                                Color::Placeholder
+                            } else {
+                                Color::Accent
+                            })
                             .truncate(),
                         )
                         .child(

@@ -1238,6 +1238,12 @@ impl ArchitectPane {
         let Some(selection) = self.selection.clone() else {
             return;
         };
+        // The run writes each step's result back into the plan, so the plan's
+        // shape stays fixed until it finishes, as Add Step and Tidy already do.
+        if self.is_running(cx) {
+            self.report("Stop the run before deleting from the plan.".to_string(), cx);
+            return;
+        }
         match selection {
             Selection::Node(id) => {
                 let title = self
@@ -1508,9 +1514,10 @@ impl ArchitectPane {
     fn handle_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         if let Interaction::Connecting { from, .. } = &self.interaction {
             let from = from.clone();
-            if let Some(to) = self.node_at(event.position, cx)
-                && to != from
-            {
+            let target = self.node_at(event.position, cx).filter(|to| *to != from);
+            if target.is_some() && self.is_running(cx) {
+                self.report("Stop the run before connecting steps.".to_string(), cx);
+            } else if let Some(to) = target {
                 let from_path = self.focus.child(from);
                 let activity_path = self.focus.child(to.clone());
                 if self.edit_checked(
