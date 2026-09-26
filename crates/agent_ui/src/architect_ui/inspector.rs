@@ -563,13 +563,13 @@ impl ArchitectPane {
                                     .min_w_0()
                                     .gap_0p5()
                                     .child(
-                                        Label::new("Overall Plan Conversation")
+                                        Label::new("Plan Conversation")
                                             .size(LabelSize::Default)
                                             .truncate(),
                                     )
                                     .child(
                                         Label::new(
-                                            "Inherited: root plan + project · editor selections and terminal output only when attached",
+                                            "Describe the goal or ask for changes to the plan.",
                                         )
                                         .size(LabelSize::XSmall)
                                         .color(Color::Muted)
@@ -1298,17 +1298,14 @@ impl ArchitectPane {
                                     .border_b_1()
                                     .border_color(cx.theme().colors().border)
                                     .bg(cx.theme().colors().editor_background)
-                                    .child(
-                                        Label::new("Selected Step Conversation")
-                                            .size(LabelSize::Small),
-                                    )
+                                    .child(Label::new("Step Conversation").size(LabelSize::Small))
                                     .child(
                                         Label::new(
-                                            "Inherited: root plan + project · scoped to this step · editor selections and terminal output only when attached",
+                                            "Knows the plan and project. What is said here stays \
+                                             with this step.",
                                         )
                                         .size(LabelSize::XSmall)
-                                        .color(Color::Muted)
-                                        .truncate(),
+                                        .color(Color::Muted),
                                     ),
                             )
                             .child(match step_chat {
