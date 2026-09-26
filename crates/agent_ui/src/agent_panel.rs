@@ -1149,6 +1149,8 @@ pub struct AgentPanel {
     last_context_source: Option<AgentContextSource>,
     architect_timeline_expanded: bool,
     retained_architect_pane: Option<Entity<crate::architect_ui::ArchitectPane>>,
+    /// Avoids a database read on every render before Architect has been opened.
+    persisted_architect_mode: std::cell::Cell<Option<crate::architect_ui::ArchitectWorkspaceMode>>,
 
     is_active: bool,
 }
@@ -1567,6 +1569,7 @@ impl AgentPanel {
             last_context_source: None,
             architect_timeline_expanded: true,
             retained_architect_pane: None,
+            persisted_architect_mode: std::cell::Cell::new(None),
             is_active: false,
         };
 
@@ -6164,9 +6167,13 @@ impl AgentPanel {
             .as_ref()
             .map(|architect| architect.read(cx).mode());
         let restoration = match self.workspace.read_with(cx, |workspace, cx| {
-            let mode = retained_mode.unwrap_or_else(|| {
-                crate::architect_ui::ArchitectPane::persisted_mode(workspace, cx)
-            });
+            let mode = retained_mode
+                .or_else(|| self.persisted_architect_mode.get())
+                .unwrap_or_else(|| {
+                    let mode = crate::architect_ui::ArchitectPane::persisted_mode(workspace, cx);
+                    self.persisted_architect_mode.set(Some(mode));
+                    mode
+                });
             // Rendering another Agent-panel thread must not silently retarget a
             // live Architect workspace. The user can explicitly open that
             // thread in Architect; automatic restoration only fills a missing
