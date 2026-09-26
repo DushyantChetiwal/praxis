@@ -1115,15 +1115,7 @@ impl ArchitectPane {
                 .as_ref()
                 .map(|summary| format!("{}: {}", step.title, truncate(summary, 96)).into())
         });
-        let output_source: SharedString = format!(
-            "Source · overall plan conversation · {}",
-            if run.current_title.as_ref().is_empty() {
-                "run coordinator"
-            } else {
-                run.current_title.as_ref()
-            }
-        )
-        .into();
+        let finished = !run.is_running();
         let remote_workflow_url = run.remote_workflow_url().map(str::to_owned);
         let (border, background, color) = if failed {
             (
@@ -1178,14 +1170,13 @@ impl ArchitectPane {
                         .flex_1()
                         .min_w_0()
                         .gap_0p5()
-                        .child(Label::new(status).size(LabelSize::Small).truncate())
                         .child(
-                            div().id("architect-run-source").child(
-                                Label::new(output_source)
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted)
-                                    .truncate(),
-                            ),
+                            div()
+                                .id("architect-run-status")
+                                .tooltip(Tooltip::text(
+                                    "Each step's full output is in the Plan Conversation",
+                                ))
+                                .child(Label::new(status).size(LabelSize::Small).truncate()),
                         )
                         .when_some(latest_output, |this, output| {
                             this.child(
@@ -1218,10 +1209,10 @@ impl ArchitectPane {
                 )
                 .child(
                     Label::new(format!(
-                        "{} of {} · {}s",
+                        "{} of {} · {}",
                         completed.min(total),
                         total,
-                        elapsed.as_secs()
+                        format_elapsed(elapsed)
                     ))
                     .size(LabelSize::Small)
                     .color(Color::Muted),
@@ -1235,6 +1226,19 @@ impl ArchitectPane {
                             .start_icon(Icon::new(IconName::ArrowUpRight).size(IconSize::XSmall))
                             .tooltip(Tooltip::text("Open this run's remote workflow"))
                             .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                })
+                .when(finished, |this| {
+                    this.child(
+                        IconButton::new("architect-dismiss-run", IconName::Close)
+                            .tab_index(0isize)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Dismiss this run's result"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.thread.update(cx, |thread, cx| {
+                                    thread.dismiss_architect_run(cx);
+                                });
+                            })),
                     )
                 })
                 .into_any(),
@@ -2338,6 +2342,17 @@ pub(super) fn truncate(text: &str, limit: usize) -> String {
     truncated
 }
 
+/// Short enough for the run bar, precise enough to tell a slow run from a
+/// stuck one.
+fn format_elapsed(elapsed: std::time::Duration) -> String {
+    let seconds = elapsed.as_secs();
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m {:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {:02}m", seconds / 3600, seconds % 3600 / 60),
+    }
+}
+
 impl Render for ArchitectPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.mode != ArchitectWorkspaceMode::Architect {
@@ -2626,5 +2641,14 @@ mod tests {
         assert_eq!(truncate("Short plan", 20), "Short plan");
         assert_eq!(truncate("架構設計與驗證流程", 6), "架構設計與…");
         assert_eq!(truncate("🙂🙂🙂🙂", 3), "🙂🙂…");
+    }
+
+    #[test]
+    fn elapsed_time_reads_naturally_at_every_scale() {
+        use std::time::Duration;
+        assert_eq!(format_elapsed(Duration::from_millis(900)), "0s");
+        assert_eq!(format_elapsed(Duration::from_secs(59)), "59s");
+        assert_eq!(format_elapsed(Duration::from_secs(754)), "12m 34s");
+        assert_eq!(format_elapsed(Duration::from_secs(3_725)), "1h 02m");
     }
 }

@@ -2399,6 +2399,19 @@ impl Thread {
         cx.notify();
     }
 
+    /// Forgets a finished run once the user has read its outcome. A run still
+    /// in progress is kept, since dropping it would cancel it unannounced.
+    pub fn dismiss_architect_run(&mut self, cx: &mut Context<Self>) {
+        if self
+            .architect_run
+            .as_ref()
+            .is_some_and(|run| run.outcome.is_some())
+        {
+            self.architect_run = None;
+            cx.notify();
+        }
+    }
+
     /// Cancels a run by dropping the task driving it while retaining its final
     /// state and history for the workspace-wide run bar and Activity view.
     pub fn stop_architect_run(&mut self, cx: &mut Context<Self>) {
