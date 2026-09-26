@@ -800,14 +800,19 @@ impl MessageEditor {
                     });
 
                 if !direct_match && !scope_match {
+                    let agent_name = if agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref() {
+                        agent::NATIVE_AGENT_DISPLAY_NAME
+                    } else {
+                        agent_id.as_ref()
+                    };
                     return Err(anyhow!(indoc::formatdoc!(
-                        "/{command_name} is not a recognized command in {agent_id}. \
+                        "/{command_name} is not a recognized command in {agent_name}. \
                          Messages that start with `/` are interpreted as commands.
 
                          If you are trying to send a message and not run a command, \
                          try preceding the `/` with a space.
 
-                         Available commands for {agent_id}: {commands}",
+                         Available commands for {agent_name}: {commands}",
                         commands =
                             Self::format_available_commands(available_commands, available_skills),
                     )));
