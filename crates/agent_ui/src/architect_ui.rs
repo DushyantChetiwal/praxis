@@ -62,6 +62,11 @@ const UNDO_SHORTCUT: &str = if cfg!(target_os = "macos") {
 } else {
     "Ctrl+Z"
 };
+const REDO_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "Cmd+Shift+Z"
+} else {
+    "Ctrl+Y"
+};
 
 /// Edits that arrive as a stream, such as a drag or typing, and should undo as
 /// one change.

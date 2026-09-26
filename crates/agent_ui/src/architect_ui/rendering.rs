@@ -9,7 +9,7 @@ use gpui::{
     Hsla, MouseButton, MouseDownEvent, MouseUpEvent, PathBuilder, Pixels, Render, SharedString,
     Subscription, WeakEntity, Window, canvas, deferred, div, point, px,
 };
-use ui::{TintColor, Tooltip, prelude::*};
+use ui::{Divider, TintColor, Tooltip, prelude::*};
 use workspace::{
     HideStatusItem, StatusItemView,
     item::{Item, ItemEvent, ItemHandle},
@@ -18,7 +18,7 @@ use workspace::{
 use super::geometry::{EdgeCurve, NODE_WIDTH, paint_curve};
 use super::{
     ArchitectPane, ArchitectWorkspaceMode, DETAIL_ZOOM_THRESHOLD, EXPANDED_CHILD_LIMIT,
-    Interaction, MAX_ZOOM, MIN_ZOOM, Selection,
+    HistoryDirection, Interaction, MAX_ZOOM, MIN_ZOOM, REDO_SHORTCUT, Selection, UNDO_SHORTCUT,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -568,6 +568,26 @@ impl ArchitectPane {
         let running = self.is_running(cx);
         let empty_plan = self.graph(cx).is_none_or(ArchitectGraph::is_empty);
         let breadcrumb = self.render_breadcrumb(cx);
+        let can_undo = !running && !self.undo_stack.is_empty();
+        let can_redo = !running && !self.redo_stack.is_empty();
+        let history_buttons = [
+            IconButton::new("architect-undo", IconName::Undo)
+                .tab_index(0isize)
+                .icon_size(IconSize::Small)
+                .disabled(!can_undo)
+                .tooltip(Tooltip::text(format!("Undo ({UNDO_SHORTCUT})")))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.step_history(HistoryDirection::Undo, window, cx);
+                })),
+            IconButton::new("architect-redo", IconName::Redo)
+                .tab_index(0isize)
+                .icon_size(IconSize::Small)
+                .disabled(!can_redo)
+                .tooltip(Tooltip::text(format!("Redo ({REDO_SHORTCUT})")))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.step_history(HistoryDirection::Redo, window, cx);
+                })),
+        ];
 
         h_flex()
             .w_full()
@@ -602,6 +622,8 @@ impl ArchitectPane {
                 h_flex()
                     .gap_1()
                     .flex_none()
+                    .children(history_buttons)
+                    .child(Divider::vertical())
                     .when(!show_navigation, |this| {
                         this.child(
                             Button::new("architect-search", "Search")
