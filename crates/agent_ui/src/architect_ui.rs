@@ -957,7 +957,9 @@ impl ArchitectPane {
         }
 
         let restored = restored.clone();
-        self.thread.update(cx, |thread, cx| thread.set_architect_graph(Some(restored), cx));
+        self.thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(restored), cx)
+        });
         self.undo_group = None;
         self.interaction = Interaction::None;
         let message = match direction {
@@ -1241,7 +1243,10 @@ impl ArchitectPane {
         // The run writes each step's result back into the plan, so the plan's
         // shape stays fixed until it finishes, as Add Step and Tidy already do.
         if self.is_running(cx) {
-            self.report("Stop the run before deleting from the plan.".to_string(), cx);
+            self.report(
+                "Stop the run before deleting from the plan.".to_string(),
+                cx,
+            );
             return;
         }
         match selection {
@@ -1867,7 +1872,10 @@ mod tests {
 
             pane.step_history(HistoryDirection::Undo, window, cx);
             let graph = pane.root_graph(cx).unwrap();
-            assert!(graph.node(&target).is_some(), "undo restores a deleted step");
+            assert!(
+                graph.node(&target).is_some(),
+                "undo restores a deleted step"
+            );
             assert_eq!(graph.edges.len(), 1, "undo restores the step's connections");
             pane.step_history(HistoryDirection::Redo, window, cx);
             let graph = pane.root_graph(cx).unwrap();
@@ -1930,7 +1938,9 @@ mod tests {
                 "redo must not overwrite a plan changed elsewhere"
             );
             assert!(pane.undo_stack.is_empty() && pane.redo_stack.is_empty());
-            pane.thread.update(cx, |thread, cx| thread.set_architect_graph(Some(unchanged), cx));
+            pane.thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(unchanged), cx)
+            });
 
             pane.toggle_lock(parent.clone(), window, cx);
             assert!(!pane.root_graph(cx).unwrap().node(&parent).unwrap().locked);
