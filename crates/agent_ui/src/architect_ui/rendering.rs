@@ -924,7 +924,10 @@ impl ArchitectPane {
                                             let id = id.clone();
                                             Button::new(
                                                 ("architect-readiness-handoff", index),
-                                                truncate(&format!("Add a handoff for {title}"), 42),
+                                                truncate(
+                                                    &format!("Add a handoff for {title}"),
+                                                    42,
+                                                ),
                                             )
                                             .tab_index(0isize)
                                             .full_width()
