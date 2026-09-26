@@ -1658,7 +1658,7 @@ impl ArchitectPane {
 
                 let tooltip: SharedString = match edge.condition.label() {
                     Some(label) if matches!(edge.condition, EdgeCondition::LlmEvaluated { .. }) => {
-                        format!("The model decides: {label}").into()
+                        format!("The agent decides: {label}").into()
                     }
                     Some(label) => format!("Taken only if {label}").into(),
                     None => graph

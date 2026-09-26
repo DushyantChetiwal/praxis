@@ -307,7 +307,7 @@ impl ArchitectPane {
         let description = match &condition {
             EdgeCondition::Always => "Set this connection to always run",
             EdgeCondition::Objective { .. } => "Updated an observed routing condition",
-            EdgeCondition::LlmEvaluated { .. } => "Updated a model-decided routing condition",
+            EdgeCondition::LlmEvaluated { .. } => "Updated an agent-decided routing condition",
         };
         let focus = self.focus.clone();
         let activity_path = focus.clone();
@@ -1012,7 +1012,7 @@ impl ArchitectPane {
                                             .child(
                                                 Button::new(
                                                     "architect-edge-model",
-                                                    "Model Decides",
+                                                    "Agent Decides",
                                                 )
                                                 .tab_index(0isize)
                                                 .label_size(LabelSize::XSmall)
