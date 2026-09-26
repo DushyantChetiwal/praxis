@@ -10,10 +10,7 @@ use gpui::{
     Subscription, WeakEntity, Window, canvas, deferred, div, point, px,
 };
 use ui::{TintColor, Tooltip, prelude::*};
-use workspace::{
-    HideStatusItem, ShareProject, StatusItemView,
-    item::{Item, ItemEvent, ItemHandle},
-};
+use workspace::{HideStatusItem, StatusItemView, item::{Item, ItemEvent, ItemHandle}};
 
 use super::geometry::{EdgeCurve, NODE_WIDTH, paint_curve};
 use super::{
@@ -491,21 +488,6 @@ impl ArchitectPane {
                     )
                     .when(!compact, |this| {
                         this.child(
-                            Button::new("architect-share", "Share")
-                                .tab_index(0isize)
-                                .label_size(LabelSize::Small)
-                                .style(ButtonStyle::Subtle)
-                                .start_icon(
-                                    Icon::new(IconName::ArrowUpRight).size(IconSize::XSmall),
-                                )
-                                .tooltip(Tooltip::text("Share this project with collaborators"))
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(ShareProject), cx);
-                                }),
-                        )
-                    })
-                    .when(!compact, |this| {
-                        this.child(
                             Button::new("architect-review", "Review Plan")
                                 .tab_index(0isize)
                                 .label_size(LabelSize::Small)
@@ -520,15 +502,6 @@ impl ArchitectPane {
                     })
                     .when(compact, |this| {
                         this.child(
-                            IconButton::new("architect-share-compact", IconName::ArrowUpRight)
-                                .tab_index(0isize)
-                                .icon_size(IconSize::Small)
-                                .tooltip(Tooltip::text("Share this project with collaborators"))
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(ShareProject), cx);
-                                }),
-                        )
-                        .child(
                             IconButton::new("architect-review-compact", IconName::ListTodo)
                                 .tab_index(0isize)
                                 .icon_size(IconSize::Small)

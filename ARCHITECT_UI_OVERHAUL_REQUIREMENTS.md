@@ -518,6 +518,9 @@ these areas:
 - The native item title and status bar provide active-plan context while the
   operating-system title bar, menus, controls, and platform panel behavior remain
   owned by Zed.
+- The plan header omits the mockup's Share action. Project sharing is a Zed
+  collaboration-service feature that requires a Zed account, so it is not a
+  Praxis plan action.
 - Architect adds no custom animation, so Zed's reduced-motion behavior is
   respected without a separate animation path.
 - User-facing copy consistently distinguishes the overall plan conversation,
