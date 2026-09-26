@@ -889,9 +889,12 @@ impl ArchitectPane {
         let is_objective = matches!(edge.condition, EdgeCondition::Objective { .. });
         let is_model = matches!(edge.condition, EdgeCondition::LlmEvaluated { .. });
         let evaluation = if is_always {
-            "No evaluation required"
+            "Always taken when the step finishes"
+        } else if is_objective {
+            "When the step finishes, the agent checks whether this is true now, rather than \
+             recalling what was true earlier"
         } else {
-            "Evaluated by the model from the completed step summary"
+            "When the step finishes, the agent answers this question to decide the route"
         };
 
         div()
