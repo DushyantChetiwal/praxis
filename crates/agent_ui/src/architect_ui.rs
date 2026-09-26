@@ -1270,7 +1270,7 @@ impl ArchitectPane {
                     } else {
                         format!("Deleted \"{title}\"")
                     };
-                    self.report(format!("{deleted}. Press {UNDO_SHORTCUT} to undo."), cx);
+                    self.notice(format!("{deleted}. Press {UNDO_SHORTCUT} to undo."), cx);
                 }
             }
             Selection::Edge(id) => {
@@ -1283,6 +1283,10 @@ impl ArchitectPane {
                         cx,
                     );
                     self.set_selection(None, window, cx);
+                    self.notice(
+                        format!("Deleted a connection. Press {UNDO_SHORTCUT} to undo."),
+                        cx,
+                    );
                 }
             }
         }
@@ -1309,6 +1313,11 @@ impl ArchitectPane {
     /// Tells the user something the canvas cannot show in place.
     fn report(&self, message: String, cx: &mut Context<Self>) {
         log::warn!("Architect: {message}");
+        self.notice(message, cx);
+    }
+
+    /// Confirms something that went as asked, without logging it as a problem.
+    fn notice(&self, message: String, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
