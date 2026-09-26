@@ -156,7 +156,7 @@ jobs:
         run: cargo test --locked -p auto_update --lib
 
       - name: Test MCP OAuth client registration
-        run: cargo test --locked -p context_server --lib oauth::
+        run: "cargo test --locked -p context_server --lib oauth::"
 
   clippy:
     name: Clippy package checks
