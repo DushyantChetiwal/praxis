@@ -4565,7 +4565,8 @@ pub(crate) mod tests {
                 root_session_id.clone(),
                 window,
                 cx,
-            );
+            )
+            .detach();
         });
         cx.run_until_parked();
 
