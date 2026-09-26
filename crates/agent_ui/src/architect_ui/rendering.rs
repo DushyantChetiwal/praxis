@@ -5,9 +5,9 @@ use architect::{
     RunOutcome,
 };
 use gpui::{
-    App, Bounds, Context, CursorStyle, DragMoveEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, Hsla, MouseButton, MouseDownEvent, MouseUpEvent, PathBuilder, Pixels, Render,
-    SharedString, Subscription, WeakEntity, Window, canvas, deferred, div, point, px,
+    App, Bounds, Context, CursorStyle, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable,
+    Hsla, MouseButton, MouseDownEvent, MouseUpEvent, PathBuilder, Pixels, Render, SharedString,
+    Subscription, WeakEntity, Window, canvas, deferred, div, point, px,
 };
 use ui::{TintColor, Tooltip, prelude::*};
 use workspace::{
@@ -153,10 +153,9 @@ impl ArchitectPane {
                 "architect-outline-resize",
                 "Drag to resize the plan outline",
             ),
-            ArchitectDivider::Inspector => (
-                "architect-inspector-resize",
-                "Drag to resize the inspector",
-            ),
+            ArchitectDivider::Inspector => {
+                ("architect-inspector-resize", "Drag to resize the inspector")
+            }
         };
         let hover = cx.theme().colors().border_focused;
         div()
@@ -757,33 +756,29 @@ impl ArchitectPane {
                                     .size(LabelSize::XSmall)
                                     .color(Color::Muted),
                             )
-                            .child(
-                                h_flex()
-                                    .gap_0p5()
-                                    .child(chip(
-                                        if ready { "Ready" } else { "Review" },
-                                        Some(if ready {
-                                            IconName::Check
-                                        } else {
-                                            IconName::Warning
-                                        }),
-                                        if ready {
-                                            Color::Success
-                                        } else {
-                                            Color::Warning
-                                        },
-                                        if ready {
-                                            cx.theme().status().success_border
-                                        } else {
-                                            cx.theme().status().warning_border
-                                        },
-                                        if ready {
-                                            cx.theme().status().success_background
-                                        } else {
-                                            cx.theme().status().warning_background
-                                        },
-                                    )),
-                            ),
+                            .child(h_flex().gap_0p5().child(chip(
+                                if ready { "Ready" } else { "Review" },
+                                Some(if ready {
+                                    IconName::Check
+                                } else {
+                                    IconName::Warning
+                                }),
+                                if ready {
+                                    Color::Success
+                                } else {
+                                    Color::Warning
+                                },
+                                if ready {
+                                    cx.theme().status().success_border
+                                } else {
+                                    cx.theme().status().warning_border
+                                },
+                                if ready {
+                                    cx.theme().status().success_background
+                                } else {
+                                    cx.theme().status().warning_background
+                                },
+                            ))),
                     )
                     .child(
                         h_flex()
