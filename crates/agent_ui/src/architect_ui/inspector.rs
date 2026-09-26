@@ -8,7 +8,7 @@ use ui::{TintColor, Tooltip, prelude::*};
 use crate::AgentPanel;
 
 use super::rendering::truncate;
-use super::{ArchitectPane, Interaction, Selection};
+use super::{ArchitectPane, Interaction, Selection, UndoGroup};
 
 /// The inspector shows one step, either as fields or as the conversation about
 /// it. The conversation lives here rather than in the agent panel so that the
@@ -76,12 +76,50 @@ impl ArchitectPane {
         }
 
         self.selection = selection;
+        self.undo_group = None;
         self.plan_conversation_open = false;
         if self.selection.is_some() && f32::from(window.viewport_size().width) < 1060.0 {
             self.open_inspector_drawer(window, cx);
         } else {
             cx.notify();
         }
+    }
+
+    /// Brings the view back in line after the plan was replaced wholesale, as
+    /// undo does: leaves nested plans that no longer exist, drops a selection
+    /// that is gone, and rebuilds the inspector so its fields show the plan.
+    pub(super) fn sync_view_to_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        while !self.focus.is_empty() && self.graph(cx).is_none() {
+            self.focus = self.focus.parent().unwrap_or_default();
+        }
+        let selection = self.selection.clone().filter(|selection| {
+            let Some(graph) = self.graph(cx) else {
+                return false;
+            };
+            match selection {
+                Selection::Node(id) => graph.node(id).is_some(),
+                Selection::Edge(id) => graph.edges.iter().any(|edge| &edge.id == id),
+            }
+        });
+        self.inspector = match &selection {
+            Some(Selection::Node(id)) => self
+                .graph(cx)
+                .and_then(|graph| graph.node(id))
+                .cloned()
+                .map(|node| self.build_inspector(node, window, cx)),
+            _ => None,
+        };
+        self.edge_inspector = match &selection {
+            Some(Selection::Edge(id)) => self
+                .graph(cx)
+                .and_then(|graph| graph.edges.iter().find(|edge| &edge.id == id))
+                .cloned()
+                .map(|edge| self.build_edge_inspector(edge, window, cx)),
+            _ => None,
+        };
+        self.selection = selection;
+        self.hovered_node = None;
+        cx.notify();
     }
 
     fn build_edge_inspector(
@@ -124,6 +162,7 @@ impl ArchitectPane {
                 }
                 _ => EdgeCondition::Objective { statement: text },
             };
+            this.next_undo_group = Some(UndoGroup::Condition(edge_id.clone()));
             this.set_edge_condition(edge_id.clone(), condition, cx);
         });
 
@@ -186,6 +225,7 @@ impl ArchitectPane {
                 if matches!(event, EditorEvent::BufferEdited) {
                     let text = editor.read(cx).text(cx);
                     let id = id_for_title.clone();
+                    this.next_undo_group = Some(UndoGroup::NodeText(id.clone(), "title"));
                     this.edit_node(id, move |node| node.title = text, cx);
                 }
             }),
@@ -193,6 +233,7 @@ impl ArchitectPane {
                 if matches!(event, EditorEvent::BufferEdited) {
                     let text = editor.read(cx).text(cx);
                     let id = id_for_responsibility.clone();
+                    this.next_undo_group = Some(UndoGroup::NodeText(id.clone(), "responsibility"));
                     this.edit_node(id, move |node| node.responsibility = text, cx);
                 }
             }),
@@ -200,6 +241,7 @@ impl ArchitectPane {
                 if matches!(event, EditorEvent::BufferEdited) {
                     let text = editor.read(cx).text(cx);
                     let id = id_for_goal.clone();
+                    this.next_undo_group = Some(UndoGroup::NodeText(id.clone(), "goal"));
                     this.edit_node(id, move |node| node.intent = text, cx);
                 }
             }),
@@ -207,6 +249,7 @@ impl ArchitectPane {
                 if matches!(event, EditorEvent::BufferEdited) {
                     let text = editor.read(cx).text(cx);
                     let id = id_for_capture.clone();
+                    this.next_undo_group = Some(UndoGroup::NodeText(id.clone(), "capture"));
                     this.edit_node(id, move |node| node.capture = text, cx);
                 }
             }),
@@ -325,6 +368,13 @@ impl ArchitectPane {
         };
 
         if node.chat.as_ref() != Some(&session_id) {
+            let history_session_id = session_id.clone();
+            let history_path = node_path.clone();
+            self.update_history(move |graph| {
+                if let Some(node) = graph.node_at_mut(&history_path) {
+                    node.chat = Some(history_session_id.clone());
+                }
+            });
             let session_id = session_id.clone();
             let metadata_path = node_path.clone();
             self.thread.update(cx, |thread, cx| {

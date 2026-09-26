@@ -54,6 +54,36 @@ const WORKSPACE_MODE_KEY_PREFIX: &str = "architect-workspace-mode";
 /// title alone and let the shape of the graph do the talking.
 const DETAIL_ZOOM_THRESHOLD: f32 = 0.62;
 
+/// How many plan edits can be undone. Plans are small, so whole snapshots are
+/// cheap and far simpler to keep correct than inverse operations.
+const UNDO_LIMIT: usize = 100;
+const UNDO_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "Cmd+Z"
+} else {
+    "Ctrl+Z"
+};
+
+/// Edits that arrive as a stream, such as a drag or typing, and should undo as
+/// one change.
+#[derive(Clone, Debug, PartialEq)]
+enum UndoGroup {
+    Move(NodeId),
+    NodeText(NodeId, &'static str),
+    Condition(EdgeId),
+}
+
+/// A user edit to the plan, kept as the whole plan on either side of it.
+struct UndoEntry {
+    before: ArchitectGraph,
+    after: ArchitectGraph,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoryDirection {
+    Undo,
+    Redo,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Selection {
     Node(NodeId),
@@ -185,6 +215,12 @@ pub struct ArchitectPane {
     /// Set while a run is being started, so the toolbar can show it before the
     /// thread has been told. The run itself belongs to the thread.
     run_starting: Cell<bool>,
+    undo_stack: Vec<UndoEntry>,
+    redo_stack: Vec<UndoEntry>,
+    /// The group the newest undo entry belongs to, while it can still grow.
+    undo_group: Option<UndoGroup>,
+    /// The group the next edit belongs to, set by the code making it.
+    next_undo_group: Option<UndoGroup>,
 
     _thread_subscription: Subscription,
     _search_subscription: Subscription,
@@ -242,6 +278,10 @@ impl ArchitectPane {
             search_editor,
             activity: Vec::new(),
             run_starting: Cell::new(false),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            undo_group: None,
+            next_undo_group: None,
             _thread_subscription: subscription,
             _search_subscription: search_subscription,
         }
@@ -446,6 +486,10 @@ impl ArchitectPane {
         self.transient_return_focus = None;
         self.pan = point(px(0.0), px(0.0));
         self.zoom = 1.0;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.undo_group = None;
+        self.next_undo_group = None;
         cx.notify();
     }
 
@@ -804,11 +848,17 @@ impl ArchitectPane {
         edit: impl FnOnce(&mut ArchitectGraph) -> Result<(), GraphMutationError>,
         cx: &mut Context<Self>,
     ) -> bool {
+        let group = self.next_undo_group.take();
+        let before = self.root_graph(cx).cloned();
         let result = self
             .thread
             .update(cx, |thread, cx| thread.update_architect_graph(edit, cx));
         match result {
             Some(Ok(())) => {
+                let after = self.root_graph(cx).cloned();
+                if let (Some(before), Some(after)) = (before, after) {
+                    self.record_undo(before, after, group);
+                }
                 cx.notify();
                 true
             }
@@ -825,6 +875,98 @@ impl ArchitectPane {
                 false
             }
         }
+    }
+
+    fn record_undo(
+        &mut self,
+        before: ArchitectGraph,
+        after: ArchitectGraph,
+        group: Option<UndoGroup>,
+    ) {
+        if before == after {
+            return;
+        }
+        self.redo_stack.clear();
+        if group.is_some()
+            && group == self.undo_group
+            && let Some(last) = self.undo_stack.last_mut()
+            && last.after == before
+        {
+            last.after = after;
+            return;
+        }
+        self.undo_group = group;
+        if self.undo_stack.len() >= UNDO_LIMIT {
+            let excess = self.undo_stack.len() + 1 - UNDO_LIMIT;
+            self.undo_stack.drain(..excess);
+        }
+        self.undo_stack.push(UndoEntry { before, after });
+    }
+
+    /// Applies bookkeeping that is not a user edit, such as a step's
+    /// conversation id, to every recorded plan so it neither invalidates the
+    /// history nor is lost by undoing past it.
+    fn update_history(&mut self, mut update: impl FnMut(&mut ArchitectGraph)) {
+        for entry in self.undo_stack.iter_mut().chain(self.redo_stack.iter_mut()) {
+            update(&mut entry.before);
+            update(&mut entry.after);
+        }
+    }
+
+    fn step_history(
+        &mut self,
+        direction: HistoryDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_running(cx) {
+            self.report(
+                "Plan edits cannot be undone or redone while the plan is running.".to_string(),
+                cx,
+            );
+            return;
+        }
+        let entry = match direction {
+            HistoryDirection::Undo => self.undo_stack.pop(),
+            HistoryDirection::Redo => self.redo_stack.pop(),
+        };
+        let Some(entry) = entry else {
+            return;
+        };
+        let (expected, restored) = match direction {
+            HistoryDirection::Undo => (&entry.after, &entry.before),
+            HistoryDirection::Redo => (&entry.before, &entry.after),
+        };
+        // Anything else that changed the plan, such as the agent, has made the
+        // recorded snapshots stale. Restoring one would silently drop that work.
+        if self.root_graph(cx) != Some(expected) {
+            self.undo_stack.clear();
+            self.redo_stack.clear();
+            self.undo_group = None;
+            self.report(
+                "The plan was changed elsewhere, so earlier edits can no longer be undone."
+                    .to_string(),
+                cx,
+            );
+            return;
+        }
+
+        let restored = restored.clone();
+        self.thread.update(cx, |thread, cx| thread.set_architect_graph(Some(restored), cx));
+        self.undo_group = None;
+        self.interaction = Interaction::None;
+        let message = match direction {
+            HistoryDirection::Undo => {
+                self.redo_stack.push(entry);
+                "Undid a plan edit"
+            }
+            HistoryDirection::Redo => {
+                self.undo_stack.push(entry);
+                "Redid a plan edit"
+            }
+        };
+        self.record_activity(None, message, cx);
+        self.sync_view_to_graph(window, cx);
     }
 
     fn edit_node(
@@ -1093,6 +1235,11 @@ impl ArchitectPane {
         };
         match selection {
             Selection::Node(id) => {
+                let title = self
+                    .graph(cx)
+                    .and_then(|graph| graph.node(&id))
+                    .map(|node| node.title.trim().to_string())
+                    .unwrap_or_default();
                 let path = self.focus.child(id);
                 let activity_path = path.clone();
                 if self.edit_checked(move |graph| graph.remove_node_at(&path), cx) {
@@ -1102,6 +1249,12 @@ impl ArchitectPane {
                         cx,
                     );
                     self.set_selection(None, window, cx);
+                    let deleted = if title.is_empty() {
+                        "Deleted a step".to_string()
+                    } else {
+                        format!("Deleted \"{title}\"")
+                    };
+                    self.report(format!("{deleted}. Press {UNDO_SHORTCUT} to undo."), cx);
                 }
             }
             Selection::Edge(id) => {
@@ -1337,6 +1490,7 @@ impl ArchitectPane {
                     x: snap(canvas.x - grab.x),
                     y: snap(canvas.y - grab.y),
                 };
+                self.next_undo_group = Some(UndoGroup::Move(id.clone()));
                 self.edit_node(id, move |node| node.position = Some(position), cx);
             }
             Interaction::Connecting { at, .. } => {
@@ -1371,6 +1525,8 @@ impl ArchitectPane {
             }
         }
         self.interaction = Interaction::None;
+        // The gesture is over; the next drag is a separate change.
+        self.undo_group = None;
         cx.notify();
     }
 
@@ -1396,7 +1552,19 @@ impl ArchitectPane {
         cx: &mut Context<Self>,
     ) {
         let canvas_focused = self.focus_handle.is_focused(window);
+        let modifiers = event.keystroke.modifiers;
         match event.keystroke.key.as_str() {
+            "z" if canvas_focused && modifiers.secondary() => {
+                let direction = if modifiers.shift {
+                    HistoryDirection::Redo
+                } else {
+                    HistoryDirection::Undo
+                };
+                self.step_history(direction, window, cx);
+            }
+            "y" if canvas_focused && modifiers.control && !cfg!(target_os = "macos") => {
+                self.step_history(HistoryDirection::Redo, window, cx);
+            }
             "delete" | "backspace" if canvas_focused => self.delete_selection(window, cx),
             "down" | "right" if canvas_focused => self.select_adjacent_step(true, window, cx),
             "up" | "left" if canvas_focused => self.select_adjacent_step(false, window, cx),
@@ -1684,6 +1852,73 @@ mod tests {
             let graph = pane.root_graph(cx).unwrap();
             assert!(graph.node(&target).is_none());
             assert!(graph.edges.is_empty(), "deleting a step removes its edges");
+
+            pane.step_history(HistoryDirection::Undo, window, cx);
+            let graph = pane.root_graph(cx).unwrap();
+            assert!(graph.node(&target).is_some(), "undo restores a deleted step");
+            assert_eq!(graph.edges.len(), 1, "undo restores the step's connections");
+            pane.step_history(HistoryDirection::Redo, window, cx);
+            let graph = pane.root_graph(cx).unwrap();
+            assert!(graph.node(&target).is_none(), "redo deletes the step again");
+            assert!(graph.edges.is_empty());
+
+            pane.interaction = Interaction::DraggingNode {
+                id: parent.clone(),
+                grab: point(0.0, 0.0),
+            };
+            for position in [point(px(160.0), px(40.0)), point(px(240.0), px(80.0))] {
+                pane.handle_mouse_move(
+                    &MouseMoveEvent {
+                        position,
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Modifiers::default(),
+                    },
+                    window,
+                    cx,
+                );
+            }
+            pane.handle_mouse_up(
+                &MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: point(px(240.0), px(80.0)),
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                },
+                window,
+                cx,
+            );
+            pane.step_history(HistoryDirection::Undo, window, cx);
+            assert_eq!(
+                pane.root_graph(cx)
+                    .and_then(|graph| graph.node(&parent))
+                    .and_then(|node| node.position),
+                Some(Position { x: 80.0, y: 40.0 }),
+                "one drag undoes as one change"
+            );
+
+            // The agent editing the plan makes the recorded snapshots stale.
+            let unchanged = pane.root_graph(cx).cloned().unwrap();
+            let changed_path = NodePath::root(parent.clone());
+            pane.thread.update(cx, |thread, cx| {
+                thread.update_architect_graph(
+                    move |graph| {
+                        if let Some(node) = graph.node_at_mut(&changed_path) {
+                            node.intent = "Changed by the agent".to_string();
+                        }
+                    },
+                    cx,
+                )
+            });
+            pane.step_history(HistoryDirection::Redo, window, cx);
+            assert_eq!(
+                pane.root_graph(cx)
+                    .and_then(|graph| graph.node(&parent))
+                    .and_then(|node| node.position),
+                Some(Position { x: 80.0, y: 40.0 }),
+                "redo must not overwrite a plan changed elsewhere"
+            );
+            assert!(pane.undo_stack.is_empty() && pane.redo_stack.is_empty());
+            pane.thread.update(cx, |thread, cx| thread.set_architect_graph(Some(unchanged), cx));
 
             pane.toggle_lock(parent.clone(), window, cx);
             assert!(!pane.root_graph(cx).unwrap().node(&parent).unwrap().locked);
