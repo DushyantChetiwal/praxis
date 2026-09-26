@@ -212,6 +212,7 @@ pub enum IconName {
     PlayOutlined,
     Plus,
     Power,
+    PraxisMark,
     Public,
     PullRequest,
     QueueMessage,

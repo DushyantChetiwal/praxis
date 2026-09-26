@@ -1,13 +1,18 @@
 > [!IMPORTANT]
 > Remove this line to confirm you've reviewed this PR before submitting.
 
+<p align="center">
+  <img src="docs/brand/praxis-banner.png" alt="Praxis — detailed and deterministic planning" width="420">
+</p>
+
 # Praxis
 
 **Plan systems. Ship code.**
 
-Praxis is a plan-driven software workspace built on the open-source
-[Zed](https://github.com/zed-industries/zed) editor. It is an independent
-project and is not affiliated with or endorsed by Zed Industries.
+Praxis is a plan-driven software workspace for detailed and deterministic
+planning. It is an independent product built on the open-source
+[Zed](https://github.com/zed-industries/zed) editor and is not affiliated with
+or endorsed by Zed Industries.
 
 ## Architect workspace
 
