@@ -305,14 +305,20 @@ impl ArchitectPane {
         let all_locked = step_count > 0 && locked_count == step_count;
         let ready_to_run = root.is_some_and(ArchitectGraph::is_fully_locked_deeply)
             && root.is_some_and(|root| root.blocking_problems().is_empty());
-        let run_tooltip = if ready_to_run {
-            "Run the plan, one step at a time"
+        let run_tooltip: SharedString = if ready_to_run {
+            "Run the plan, one step at a time".into()
         } else if step_count == 0 {
-            "There is no plan yet"
+            "Nothing to run yet. Start planning to draft steps.".into()
         } else if !problems.is_empty() {
-            "Fix the problems with the plan first"
+            match problems.len() {
+                1 => "Fix 1 problem first. Review Plan shows it.".into(),
+                count => format!("Fix {count} problems first. Review Plan shows them.").into(),
+            }
         } else {
-            "Lock every step first"
+            match step_count.saturating_sub(locked_count) {
+                1 => "Lock the last open step to run the plan.".into(),
+                open => format!("Lock the {open} open steps to run the plan.").into(),
+            }
         };
 
         let running = self.is_running(cx);
