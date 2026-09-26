@@ -560,6 +560,7 @@ impl ArchitectPane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let running = self.is_running(cx);
+        let empty_plan = self.graph(cx).is_none_or(ArchitectGraph::is_empty);
         let breadcrumb = self.render_breadcrumb(cx);
 
         h_flex()
@@ -604,7 +605,7 @@ impl ArchitectPane {
                                 .start_icon(
                                     Icon::new(IconName::MagnifyingGlass).size(IconSize::XSmall),
                                 )
-                                .disabled(self.graph(cx).is_none_or(ArchitectGraph::is_empty))
+                                .disabled(empty_plan)
                                 .tooltip(Tooltip::text(
                                     "Open the ordered plan navigator to find a step",
                                 ))
@@ -618,7 +619,7 @@ impl ArchitectPane {
                                 .label_size(LabelSize::Small)
                                 .style(ButtonStyle::Subtle)
                                 .start_icon(Icon::new(IconName::RotateCw).size(IconSize::XSmall))
-                                .disabled(running)
+                                .disabled(running || empty_plan)
                                 .tooltip(Tooltip::text("Tidy up the graph layout"))
                                 .on_click(cx.listener(|this, _, _, cx| this.tidy_up(cx))),
                         )
@@ -640,7 +641,7 @@ impl ArchitectPane {
                             IconButton::new("architect-search-compact", IconName::MagnifyingGlass)
                                 .tab_index(0isize)
                                 .icon_size(IconSize::Small)
-                                .disabled(self.graph(cx).is_none_or(ArchitectGraph::is_empty))
+                                .disabled(empty_plan)
                                 .tooltip(Tooltip::text("Search plan steps"))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.open_outline_drawer(true, window, cx);
@@ -650,7 +651,7 @@ impl ArchitectPane {
                             IconButton::new("architect-tidy-compact", IconName::RotateCw)
                                 .tab_index(0isize)
                                 .icon_size(IconSize::Small)
-                                .disabled(running)
+                                .disabled(running || empty_plan)
                                 .tooltip(Tooltip::text("Tidy up the graph layout"))
                                 .on_click(cx.listener(|this, _, _, cx| this.tidy_up(cx))),
                         )
