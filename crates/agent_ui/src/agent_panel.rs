@@ -6276,19 +6276,25 @@ impl AgentPanel {
             .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))?;
         self.restore_architect_if_needed(thread.clone(), window, cx);
 
-        let step_count = thread
-            .read(cx)
-            .architect_graph()
-            .map_or(0, |graph| graph.nodes.len());
+        // Counted through nested plans, the same way Run counts what is left.
+        let graph = thread.read(cx).architect_graph();
+        let step_count = graph.map_or(0, architect::ArchitectGraph::step_count_deeply);
+        let settled = graph.map_or(0, architect::ArchitectGraph::locked_step_count_deeply);
 
         let tooltip = match step_count {
             0 => "Open the Architect canvas. Switch to Plan mode and describe the goal, and the plan appears here.".to_string(),
-            1 => "Open the Architect canvas (1 step)".to_string(),
-            count => format!("Open the Architect canvas ({count} steps)"),
+            1 => format!("Open the Architect canvas: {settled} of 1 step settled"),
+            count => format!("Open the Architect canvas: {settled} of {count} steps settled"),
+        };
+        // Progress at a glance from Code, without switching to find out.
+        let label: SharedString = if step_count == 0 {
+            "Architect".into()
+        } else {
+            format!("Architect {settled}/{step_count}").into()
         };
 
         Some(
-            Button::new("open-architect-canvas", "Architect")
+            Button::new("open-architect-canvas", label)
                 .label_size(LabelSize::Small)
                 .style(ButtonStyle::Subtle)
                 .start_icon(Icon::new(IconName::ListTree).size(IconSize::Small))
