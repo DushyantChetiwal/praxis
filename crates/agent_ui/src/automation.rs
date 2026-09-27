@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
-use gpui::{App, Entity, Keystroke, Window};
+use gpui::{AnyWindowHandle, App, Entity, Keystroke, Window};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use workspace::{MultiWorkspace, Workspace};
@@ -142,13 +142,30 @@ fn write_reply(folder: &Path, name: &str, reply: &Value) -> Result<()> {
     Ok(())
 }
 
-fn handle(request: Request, cx: &mut App) -> Result<Value> {
-    let window = cx
-        .window_stack()
+/// Every window that shows a workspace, frontmost first where the platform
+/// can tell.
+pub(crate) fn workspace_windows(cx: &App) -> Vec<AnyWindowHandle> {
+    cx.window_stack()
         .unwrap_or_else(|| cx.windows())
         .into_iter()
-        .find(|window| window.downcast::<MultiWorkspace>().is_some())
-        .context("no Praxis window is open")?;
+        .filter(|window| window.downcast::<MultiWorkspace>().is_some())
+        .collect()
+}
+
+/// Runs `f` against the workspace shown in the window with `window_id`, or in
+/// the frontmost workspace window when no id is given.
+pub(crate) fn with_workspace<R>(
+    window_id: Option<u64>,
+    cx: &mut App,
+    f: impl FnOnce(&Entity<Workspace>, &mut Window, &mut App) -> Result<R>,
+) -> Result<R> {
+    let window = workspace_windows(cx)
+        .into_iter()
+        .find(|window| window_id.is_none_or(|id| window.window_id().as_u64() == id))
+        .with_context(|| match window_id {
+            Some(id) => format!("no Praxis window has the id {id}"),
+            None => "no Praxis window is open".to_string(),
+        })?;
     // Updating the window rather than the `MultiWorkspace` in it leaves the
     // root free for anything the request goes on to do.
     window.update(cx, |root, window, cx| {
@@ -156,6 +173,13 @@ fn handle(request: Request, cx: &mut App) -> Result<Value> {
             .downcast::<MultiWorkspace>()
             .map_err(|_| anyhow!("the window no longer shows a workspace"))?;
         let workspace = multi_workspace.read(cx).workspace().clone();
+        f(&workspace, window, cx)
+    })?
+}
+
+fn handle(request: Request, cx: &mut App) -> Result<Value> {
+    with_workspace(None, cx, |workspace, window, cx| {
+        let workspace = workspace.clone();
         match request {
             Request::State => Ok(state(&workspace, window, cx)),
             Request::Action { name, data } => {
@@ -176,7 +200,7 @@ fn handle(request: Request, cx: &mut App) -> Result<Value> {
             }
             Request::Architect { op, args } => architect(&op, &args, &workspace, window, cx),
         }
-    })?
+    })
 }
 
 fn architect(
@@ -201,7 +225,7 @@ fn architect(
     pane.update(cx, |pane, cx| pane.automation_command(op, args, window, cx))
 }
 
-fn architect_pane(workspace: &Workspace, cx: &App) -> Option<Entity<ArchitectPane>> {
+pub(crate) fn architect_pane(workspace: &Workspace, cx: &App) -> Option<Entity<ArchitectPane>> {
     workspace.item_of_type::<ArchitectPane>(cx).or_else(|| {
         workspace
             .panel::<AgentPanel>(cx)

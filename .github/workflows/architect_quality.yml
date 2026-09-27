@@ -146,6 +146,9 @@ jobs:
       - name: Test Architect canvas support
         run: "cargo test --locked -p agent_ui --lib architect_ui::"
 
+      - name: Test Praxis Remote
+        run: "cargo test --locked -p agent_ui --lib remote::tests::"
+
   updater-tests:
     name: Auto-update integrity tests
     runs-on: ubuntu-24.04

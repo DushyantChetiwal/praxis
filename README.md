@@ -37,6 +37,17 @@ The main product additions live in:
 See [`docs/src/ai/architect-portfolio.md`](./docs/src/ai/architect-portfolio.md)
 for the architecture and reproducible demo.
 
+## Praxis Remote
+
+Follow and steer the agent from your phone: chat, answer permission prompts,
+switch modes, run a plan, and read project files. The phone app is an
+installable web app at
+[dushyantchetiwal.github.io/praxis/remote](https://dushyantchetiwal.github.io/praxis/remote/),
+and it talks to Praxis through an issue in a private GitHub repository you own,
+so nothing on your computer listens on the network. See
+[`docs/src/ai/praxis-remote.md`](./docs/src/ai/praxis-remote.md) for setup and
+the security model. The app's source is in [`remote-app/`](./remote-app/).
+
 ## Installation and updates
 
 Unsigned Windows, macOS, and Linux builds are published through this

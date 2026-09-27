@@ -1669,6 +1669,35 @@ impl ThreadView {
         self.send_content(contents_task, false, window, cx);
     }
 
+    /// Sends a message that did not come from the message editor, such as one
+    /// sent from Praxis Remote, as though it had been typed. While a turn is
+    /// running the message is queued, as a typed one would be, and `true` is
+    /// returned.
+    pub(crate) fn send_text(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let content = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
+        cx.emit(AcpThreadViewEvent::Interacted);
+        if self.thread.read(cx).status() != ThreadStatus::Idle || self.is_loading_contents {
+            self.add_to_queue(content, Vec::new(), window, cx);
+            return true;
+        }
+        self.thread_error.take();
+        self.thread_feedback.clear();
+        self.editing_message.take();
+        self.message_queue.resume();
+        self.send_content(
+            Task::ready(Ok(Some((content, Vec::new())))),
+            false,
+            window,
+            cx,
+        );
+        false
+    }
+
     pub fn send_content(
         &mut self,
         contents_task: Task<anyhow::Result<Option<(Vec<acp::ContentBlock>, Vec<Entity<Buffer>>)>>>,
