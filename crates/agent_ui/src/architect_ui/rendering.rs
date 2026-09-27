@@ -348,10 +348,9 @@ impl ArchitectPane {
                     Some(outcome) => root.map(|root| outcome.summary(root).into()),
                     // Loops can take a run past the number of steps, so no
                     // total is shown for the step number to exceed.
-                    None => Some(
-                        format!("Step {} · {}", run.step_number, run.current_title)
-                            .into(),
-                    ),
+                    None => {
+                        Some(format!("Step {} · {}", run.step_number, run.current_title).into())
+                    }
                 });
 
         // One line, in the order the plan is read: where you are, what it is,
