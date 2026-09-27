@@ -138,6 +138,18 @@ const COMPACTION_RETAINED_USER_MESSAGES_BYTE_BUDGET: usize = 80_000;
 /// request. Using the same 4-bytes-per-token heuristic, 60K bytes is ~15k tokens.
 const COMPACTION_RETAINED_AGENT_MESSAGES_BYTE_BUDGET: usize = 60_000;
 
+/// The most of a single tool result the model is shown, about 25k tokens.
+///
+/// One unbounded result, such as a fetched multi-megabyte JSON document, can
+/// overflow the context window in a single step, before auto-compaction has a
+/// chance to run. The start and end are kept, since that is where the shape of
+/// a document and the outcome of a command usually are.
+const MAX_TOOL_RESULT_BYTES: usize = 100_000;
+
+/// A deliberately low estimate of bytes per token when sizing a compaction
+/// request, since code and JSON tokenize far more densely than prose.
+const COMPACTION_BYTES_PER_TOKEN: u64 = 3;
+
 /// Whether a thread is working out what to do, or doing it.
 ///
 /// This replaces the old approach of a separate "architect" profile. A profile
@@ -254,6 +266,9 @@ pub struct ArchitectRun {
     /// Every step taken, in the order taken, including repeats. Kept after the
     /// run ends: what a run actually did is worth more once it is over.
     history: Vec<RunStep>,
+    /// The thread the current step runs in, when steps run in threads of their
+    /// own, so that stopping the run also stops that step's turn.
+    step_thread: Option<WeakEntity<acp_thread::AcpThread>>,
     /// Dropping this stops the run at its next await point. Held here so that
     /// closing the canvas cannot abandon a run.
     _task: Task<()>,
@@ -270,6 +285,10 @@ impl ArchitectRun {
 
     pub fn remote_workflow_url(&self) -> Option<&str> {
         self.remote_workflow_url.as_deref()
+    }
+
+    pub fn step_thread(&self) -> Option<Entity<acp_thread::AcpThread>> {
+        self.step_thread.as_ref().and_then(WeakEntity::upgrade)
     }
 }
 
@@ -2315,9 +2334,21 @@ impl Thread {
             outcome: None,
             remote_workflow_url: None,
             history: Vec::new(),
+            step_thread: None,
             _task: task,
         });
         cx.notify();
+    }
+
+    pub fn set_architect_run_step_thread(
+        &mut self,
+        step_thread: WeakEntity<acp_thread::AcpThread>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(run) = self.architect_run.as_mut() {
+            run.step_thread = Some(step_thread);
+            cx.notify();
+        }
     }
 
     pub fn set_architect_run_remote_workflow_url(
@@ -3330,6 +3361,9 @@ impl Thread {
     ) -> Result<()> {
         let mut attempt = 0;
         let mut repetition_steers = 0;
+        // Whether this turn has already compacted because a request overflowed
+        // the context window, so a turn that overflows again gives up.
+        let mut compacted_for_overflow = false;
         let mut intent = CompletionIntent::UserPrompt;
         // Set when a refusal fallback occurs so subsequent iterations use the fallback model.
         let mut refusal_fallback_model: Option<LanguageModel> = None;
@@ -3687,6 +3721,23 @@ impl Thread {
             }
 
             if let Some(error) = error {
+                // The history outgrew the model partway through the turn, as a
+                // large tool result can make it. Compact and carry on rather
+                // than ending the turn: the compaction request is sized to
+                // fit, and the next iteration runs it before retrying.
+                if let LanguageModelCompletionError::ProviderRejection {
+                    category: ProviderErrorCategory::PromptTooLarge { tokens },
+                    ..
+                } = &error
+                    && !compacted_for_overflow
+                    && this.read_with(cx, |this, cx| this.auto_compaction_enabled(cx))?
+                {
+                    compacted_for_overflow = true;
+                    let tokens = *tokens;
+                    log::info!("Request overflowed the context window; compacting and retrying");
+                    this.update(cx, |this, cx| this.mark_token_limit_exceeded(tokens, cx))?;
+                    continue;
+                }
                 attempt += 1;
                 match Self::retry_completion_error(
                     this,
@@ -4025,6 +4076,8 @@ impl Thread {
                 .raw_output(tool_result.output.clone()),
             None,
         );
+        let mut tool_result = tool_result;
+        cap_tool_result(&mut tool_result);
         this.update(cx, |this, _cx| {
             this.pending_message()
                 .tool_results
@@ -5327,12 +5380,20 @@ impl Thread {
         model: &LanguageModel,
         cx: &App,
     ) -> LanguageModelRequest {
+        // A history that no longer fits the model cannot be summarized by
+        // sending it as it is: that request fails exactly as the one that
+        // prompted compaction did, and the thread can never recover.
+        let messages = fit_compaction_history(
+            self.build_request_messages_until(Vec::new(), insertion_ix, cx),
+            || messages_to_markdown(&self.messages[..insertion_ix.min(self.messages.len())]),
+            compaction_request_byte_budget(model),
+        );
         let mut request = LanguageModelRequest {
             thread_id: Some(self.id.to_string()),
             prompt_id: Some(self.prompt_id.to_string()),
             intent: Some(CompletionIntent::ThreadContextSummarization),
             temperature: AgentSettings::temperature_for_model(&model, cx),
-            messages: self.build_request_messages_until(Vec::new(), insertion_ix, cx),
+            messages,
             ..Default::default()
         };
 
@@ -5733,6 +5794,121 @@ fn extend_request_history_until(
     for message in &messages[compaction_ix..end_ix] {
         request_messages.extend(message.to_request());
     }
+}
+
+/// Splits `text` into the part kept before an elision and the part kept after
+/// it, on character boundaries, returning how many bytes fall between them.
+fn split_for_elision(text: &str, head_bytes: usize, tail_bytes: usize) -> (&str, &str, usize) {
+    let head_end = text.floor_char_boundary(head_bytes.min(text.len()));
+    let mut tail_start = text.len().saturating_sub(tail_bytes).max(head_end);
+    while !text.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    (
+        &text[..head_end],
+        &text[tail_start..],
+        tail_start - head_end,
+    )
+}
+
+/// Shortens an oversized tool result to its start and end, saying what was cut
+/// and how to get it.
+fn cap_tool_result(tool_result: &mut LanguageModelToolResult) {
+    for part in &mut tool_result.content {
+        let LanguageModelToolResultContent::Text(text) = part else {
+            continue;
+        };
+        if text.len() <= MAX_TOOL_RESULT_BYTES {
+            continue;
+        }
+        let (head, tail, omitted) = split_for_elision(
+            text,
+            MAX_TOOL_RESULT_BYTES * 3 / 4,
+            MAX_TOOL_RESULT_BYTES / 4,
+        );
+        let capped = format!(
+            "{head}\n\n[... {omitted} bytes omitted. This result was too large to include in full; \
+             ask for a narrower range, a specific section, or a filtered query to see the rest. \
+             ...]\n\n{tail}"
+        );
+        log::info!(
+            "Shortened a {} result from {} to {} bytes",
+            tool_result.tool_name,
+            text.len(),
+            capped.len()
+        );
+        *text = capped.into();
+    }
+}
+
+/// How large a compaction request may be, in bytes, for it to fit the model
+/// with room left for the summary it has to write.
+fn compaction_request_byte_budget(model: &LanguageModel) -> usize {
+    let capacity = compaction_input_capacity(
+        model.max_input_tokens(),
+        model.max_total_tokens(),
+        model.max_output_tokens(),
+    );
+    let budget = capacity
+        .saturating_mul(COMPACTION_BYTES_PER_TOKEN)
+        .saturating_mul(3)
+        / 5;
+    usize::try_from(budget).unwrap_or(usize::MAX)
+}
+
+/// Makes a compaction request fit the model.
+///
+/// A history that fits is sent as it is. One that does not is sent as a
+/// transcript with its middle shortened, keeping how the conversation began
+/// and, at greater length, what happened most recently. A transcript also
+/// sidesteps pairing rules: dropping raw messages could separate a tool call
+/// from its result, which providers reject.
+fn fit_compaction_history(
+    messages: Vec<LanguageModelRequestMessage>,
+    transcript: impl FnOnce() -> String,
+    byte_budget: usize,
+) -> Vec<LanguageModelRequestMessage> {
+    let total: usize = messages.iter().map(request_message_byte_len).sum();
+    if total <= byte_budget {
+        return messages;
+    }
+
+    let system = messages
+        .into_iter()
+        .next()
+        .filter(|message| message.role == Role::System);
+    let system_bytes = system.as_ref().map_or(0, request_message_byte_len);
+    let transcript_budget = byte_budget.saturating_sub(system_bytes).max(20_000);
+    let transcript = transcript();
+    let transcript = if transcript.len() <= transcript_budget {
+        transcript
+    } else {
+        let (head, tail, omitted) = split_for_elision(
+            &transcript,
+            transcript_budget / 4,
+            transcript_budget * 3 / 4,
+        );
+        format!("{head}\n\n[... {omitted} bytes of the conversation omitted ...]\n\n{tail}")
+    };
+    log::info!(
+        "Compacting a {total}-byte history as a {}-byte transcript to fit the model",
+        transcript.len()
+    );
+
+    let mut fitted: Vec<LanguageModelRequestMessage> = system.into_iter().collect();
+    fitted.push(LanguageModelRequestMessage {
+        role: Role::User,
+        content: vec![
+            format!(
+                "The conversation so far was too long to send in full, so here it is as a \
+                 transcript with part of the middle left out.\n\n{transcript}"
+            )
+            .into(),
+        ],
+        cache: false,
+        reasoning_details: None,
+    });
+    fitted
 }
 
 fn latest_compaction_message_ix_before(messages: &[Arc<Message>], end_ix: usize) -> Option<usize> {
@@ -7841,6 +8017,61 @@ mod tests {
     use serde_json::json;
     use settings::LanguageModelProviderSetting;
     use std::sync::Arc;
+
+    fn text_message(role: Role, text: String) -> LanguageModelRequestMessage {
+        LanguageModelRequestMessage {
+            role,
+            content: vec![text.into()],
+            cache: false,
+            reasoning_details: None,
+        }
+    }
+
+    #[test]
+    fn an_oversized_tool_result_keeps_its_start_and_end() {
+        let text = format!("START{}é{}END", "a".repeat(150_000), "b".repeat(150_000));
+        let mut result = LanguageModelToolResult {
+            tool_use_id: LanguageModelToolUseId::from("fetch-1"),
+            tool_name: "fetch".into(),
+            is_error: false,
+            content: vec![LanguageModelToolResultContent::Text(text.into())],
+            output: None,
+        };
+        cap_tool_result(&mut result);
+        let capped = result.text_contents();
+        assert!(capped.len() < MAX_TOOL_RESULT_BYTES + 500);
+        assert!(capped.starts_with("START"));
+        assert!(capped.ends_with("END"));
+        assert!(capped.contains("bytes omitted"));
+
+        let mut small = LanguageModelToolResult {
+            content: vec![LanguageModelToolResultContent::Text("short".into())],
+            ..result
+        };
+        cap_tool_result(&mut small);
+        assert_eq!(small.text_contents(), "short");
+    }
+
+    #[test]
+    fn a_history_too_large_to_compact_is_sent_as_a_shortened_transcript() {
+        let messages = vec![
+            text_message(Role::System, "system prompt".into()),
+            text_message(Role::User, "x".repeat(50_000)),
+        ];
+        let fitting = fit_compaction_history(messages.clone(), String::new, 100_000);
+        assert_eq!(fitting.len(), 2, "a history that fits is sent unchanged");
+
+        let transcript = format!("GOAL{}LATEST", "y".repeat(500_000));
+        let fitted = fit_compaction_history(messages, || transcript, 100_000);
+        assert_eq!(fitted.len(), 2);
+        assert_eq!(fitted[0].role, Role::System);
+        let total: usize = fitted.iter().map(request_message_byte_len).sum();
+        assert!(total <= 100_500, "the fitted request stays within budget");
+        let MessageContent::Text(text) = &fitted[1].content[0] else {
+            panic!("the transcript should be text");
+        };
+        assert!(text.contains("GOAL") && text.ends_with("LATEST"));
+    }
 
     #[test]
     fn compaction_capacity_respects_prompt_and_combined_limits() {
