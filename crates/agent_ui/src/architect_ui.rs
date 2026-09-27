@@ -144,8 +144,10 @@ enum Interaction {
 }
 
 /// Identifies the canvas's notifications so a new one replaces the last rather
-/// than stacking up behind it.
+/// than stacking up behind it. Confirmations and problems are kept apart, so
+/// a confirmation hiding itself never takes a problem with it.
 struct ArchitectNotice;
+struct ArchitectReport;
 
 #[derive(Clone, Debug)]
 pub(super) struct ArchitectActivityEntry {
@@ -250,6 +252,9 @@ pub struct ArchitectPane {
     /// Set while a run is being started, so the toolbar can show it before the
     /// thread has been told. The run itself belongs to the thread.
     run_starting: Cell<bool>,
+    /// Numbers each confirmation, so the timer hiding one cannot hide the one
+    /// that replaced it.
+    notice_count: Cell<usize>,
     undo_stack: Vec<UndoEntry>,
     redo_stack: Vec<UndoEntry>,
     /// The group the newest undo entry belongs to, while it can still grow.
@@ -273,7 +278,9 @@ impl ArchitectPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscription = cx.observe(&thread, |_, _, cx| {
+        let subscription = cx.observe(&thread, |this, _, cx| {
+            // The agent or a run may have removed selected steps.
+            this.prune_bulk_selection(cx);
             cx.emit(workspace::item::ItemEvent::UpdateTab);
             cx.notify();
         });
@@ -315,6 +322,7 @@ impl ArchitectPane {
             search_editor,
             activity: Vec::new(),
             run_starting: Cell::new(false),
+            notice_count: Cell::new(0),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             undo_group: None,
@@ -503,7 +511,8 @@ impl ArchitectPane {
         }
 
         self.thread = thread.clone();
-        self._thread_subscription = cx.observe(&thread, |_, _, cx| {
+        self._thread_subscription = cx.observe(&thread, |this, _, cx| {
+            this.prune_bulk_selection(cx);
             cx.emit(workspace::item::ItemEvent::UpdateTab);
             cx.notify();
         });
@@ -1426,15 +1435,32 @@ impl ArchitectPane {
     }
 
     fn show_toast(&self, message: String, autohide: bool, cx: &mut Context<Self>) {
+        use workspace::notifications::NotificationId;
+
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
+        if !autohide {
+            let toast = workspace::Toast::new(NotificationId::unique::<ArchitectReport>(), message);
+            workspace.update(cx, |workspace, cx| workspace.show_toast(toast, cx));
+            return;
+        }
+        let number = self.notice_count.get();
+        self.notice_count.set(number + 1);
+        let previous = number
+            .checked_sub(1)
+            .map(NotificationId::composite::<ArchitectNotice>);
         let toast = workspace::Toast::new(
-            workspace::notifications::NotificationId::unique::<ArchitectNotice>(),
+            NotificationId::composite::<ArchitectNotice>(number),
             message,
-        );
-        let toast = if autohide { toast.autohide() } else { toast };
-        workspace.update(cx, |workspace, cx| workspace.show_toast(toast, cx));
+        )
+        .autohide();
+        workspace.update(cx, |workspace, cx| {
+            if let Some(previous) = &previous {
+                workspace.dismiss_toast(previous, cx);
+            }
+            workspace.show_toast(toast, cx);
+        });
     }
 
     fn open_plan_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1820,8 +1846,13 @@ impl ArchitectPane {
             // Escape closes the innermost transient surface before changing
             // navigation state, without ever leaving Architect mode.
             "escape" => {
+                // A rectangle being dragged out is cancelled on its own, keeping
+                // what was selected before it.
+                let marquee = matches!(self.interaction, Interaction::Selecting { .. });
                 self.interaction = Interaction::None;
-                if self.plan_conversation_open {
+                if marquee {
+                    cx.notify();
+                } else if self.plan_conversation_open {
                     self.close_plan_conversation(window, cx);
                 } else if self.inspector_drawer_open {
                     self.close_inspector_drawer(window, cx);

@@ -39,7 +39,83 @@ fn all_or_nothing(
     Ok(())
 }
 
+/// What the selected steps allow, so every surface offers the same actions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct BulkCounts {
+    pub locked: usize,
+    pub drafts: usize,
+    /// Drafts that can be locked now: not holding a plan still in draft.
+    pub lockable: usize,
+    /// False inside a locked step, whose plan cannot be changed from here.
+    pub editable: bool,
+}
+
 impl ArchitectPane {
+    /// Whether the plan on screen can be changed, which it cannot while any
+    /// step containing it is locked.
+    pub(super) fn focus_is_editable(&self, cx: &Context<Self>) -> bool {
+        let Some(mut graph) = self.root_graph(cx) else {
+            return false;
+        };
+        for id in self.focus.iter() {
+            let Some(node) = graph.node(id) else {
+                return false;
+            };
+            if node.locked {
+                return false;
+            }
+            let Some(subplan) = node.subplan.as_deref() else {
+                return false;
+            };
+            graph = subplan;
+        }
+        true
+    }
+
+    pub(super) fn bulk_counts(&self, cx: &Context<Self>) -> BulkCounts {
+        let Some(graph) = self.graph(cx) else {
+            return BulkCounts::default();
+        };
+        let mut counts = BulkCounts {
+            editable: self.focus_is_editable(cx),
+            ..BulkCounts::default()
+        };
+        for node in self.bulk.iter().filter_map(|id| graph.node(id)) {
+            if node.locked {
+                counts.locked += 1;
+            } else {
+                counts.drafts += 1;
+                if graph.can_lock(&node.id) {
+                    counts.lockable += 1;
+                }
+            }
+        }
+        counts
+    }
+
+    /// Drops steps that are no longer in the plan on screen, as after the agent
+    /// or Tidy changed it. Fewer than two left is no longer a bulk selection.
+    pub(super) fn prune_bulk_selection(&mut self, cx: &Context<Self>) {
+        if self.bulk.is_empty() {
+            return;
+        }
+        let remaining: Vec<NodeId> = self
+            .graph(cx)
+            .map(|graph| {
+                self.bulk
+                    .iter()
+                    .filter(|id| graph.node(id).is_some())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.bulk = if remaining.len() > 1 {
+            remaining
+        } else {
+            Vec::new()
+        };
+    }
+
     pub(super) fn has_bulk_selection(&self) -> bool {
         self.bulk.len() > 1
     }
@@ -68,8 +144,20 @@ impl ArchitectPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Only steps drawn on this level can be selected together.
+        let drawn: HashSet<NodeId> = self
+            .graph(cx)
+            .map(|graph| {
+                graph
+                    .nodes
+                    .iter()
+                    .filter(|node| node.position.is_some())
+                    .map(|node| node.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut seen = HashSet::new();
-        ids.retain(|id| seen.insert(id.clone()));
+        ids.retain(|id| drawn.contains(id) && seen.insert(id.clone()));
         if ids.len() < 2 {
             let selection = ids.pop().map(Selection::Node);
             self.set_selection(selection, window, cx);
@@ -253,6 +341,14 @@ impl ArchitectPane {
             );
             return;
         }
+        if !self.focus_is_editable(cx) {
+            self.report(
+                "The step containing this plan is locked. Unlock it to change these steps."
+                    .to_string(),
+                cx,
+            );
+            return;
+        }
         let Some(graph) = self.graph(cx) else {
             return;
         };
@@ -312,6 +408,14 @@ impl ArchitectPane {
         if self.is_running(cx) {
             self.report(
                 "Stop the run before deleting from the plan.".to_string(),
+                cx,
+            );
+            return;
+        }
+        if !self.focus_is_editable(cx) {
+            self.report(
+                "The step containing this plan is locked. Unlock it to delete these steps."
+                    .to_string(),
                 cx,
             );
             return;
@@ -396,24 +500,34 @@ impl ArchitectPane {
                     .collect()
             })
             .unwrap_or_default();
-        let locked = steps.iter().filter(|(_, locked)| *locked).count();
-        let drafts = steps.len() - locked;
+        let BulkCounts {
+            locked,
+            drafts,
+            lockable,
+            editable,
+        } = self.bulk_counts(cx);
+        let can_change = !running && editable;
         let hidden = steps.len().saturating_sub(LISTED_STEPS);
 
         let actions = h_flex()
             .flex_wrap()
             .gap_1()
-            .when(drafts > 0, |this| {
+            .when(lockable > 0, |this| {
                 this.child(
                     Button::new("architect-bulk-lock", "Lock")
                         .tab_index(0isize)
                         .label_size(LabelSize::Small)
                         .style(ButtonStyle::Subtle)
                         .start_icon(Icon::new(IconName::Lock).size(IconSize::XSmall))
-                        .tooltip(Tooltip::text(format!(
-                            "Settle the {} still in draft",
-                            count_label(drafts)
-                        )))
+                        .tooltip(Tooltip::text(if lockable < drafts {
+                            format!(
+                                "Settle {} of the drafts. The others still hold a plan in \
+                                 draft.",
+                                count_label(lockable)
+                            )
+                        } else {
+                            format!("Settle the {} still in draft", count_label(drafts))
+                        }))
                         .on_click(cx.listener(|this, _, _, cx| this.lock_bulk_selection(true, cx))),
                 )
             })
@@ -423,7 +537,7 @@ impl ArchitectPane {
                         .tab_index(0isize)
                         .label_size(LabelSize::Small)
                         .style(ButtonStyle::Subtle)
-                        .start_icon(Icon::new(IconName::Lock).size(IconSize::XSmall))
+                        .start_icon(Icon::new(IconName::LockOff).size(IconSize::XSmall))
                         .tooltip(Tooltip::text(format!(
                             "Reopen the {} that {} settled",
                             count_label(locked),
@@ -487,7 +601,7 @@ impl ArchitectPane {
                                     .justify_between()
                                     .child(
                                         Label::new(format!(
-                                            "{} Selected",
+                                            "{} selected",
                                             count_label(steps.len())
                                         ))
                                         .size(LabelSize::Default),
@@ -517,7 +631,7 @@ impl ArchitectPane {
                             .overflow_y_scroll()
                             .p_3()
                             .gap_3()
-                            .when(!running, |this| this.child(actions))
+                            .when(can_change, |this| this.child(actions))
                             .child(
                                 v_flex()
                                     .gap_1()
@@ -559,6 +673,9 @@ impl ArchitectPane {
                                 Label::new(if running {
                                     "The plan is running, so these steps can be moved but not \
                                      changed."
+                                } else if !editable {
+                                    "The step containing this plan is locked, so these steps can \
+                                     be moved but not changed."
                                 } else {
                                     "Drag any selected step to move them together. Shift-click \
                                      a step to add or remove it."

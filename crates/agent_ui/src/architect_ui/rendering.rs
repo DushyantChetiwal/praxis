@@ -16,7 +16,7 @@ use workspace::{
     item::{Item, ItemEvent, ItemHandle},
 };
 
-use super::bulk;
+use super::bulk::{self, BulkCounts};
 use super::geometry::{EdgeCurve, NODE_WIDTH, paint_curve};
 use super::{
     ArchitectPane, ArchitectWorkspaceMode, DETAIL_ZOOM_THRESHOLD, DUPLICATE_SHORTCUT,
@@ -1390,9 +1390,9 @@ impl ArchitectPane {
             let top_left = self.to_canvas(bounds.origin);
             let bottom_right = self.to_canvas(bounds.bottom_right());
             let left = (PADDING + (top_left.x - min_x) * scale).clamp(0.0, WIDTH);
-            let top = (TOP + (top_left.y - min_y) * scale).clamp(0.0, HEIGHT);
+            let top = (TOP + (top_left.y - min_y) * scale).clamp(TOP, HEIGHT);
             let right = (PADDING + (bottom_right.x - min_x) * scale).clamp(0.0, WIDTH);
-            let bottom = (TOP + (bottom_right.y - min_y) * scale).clamp(0.0, HEIGHT);
+            let bottom = (TOP + (bottom_right.y - min_y) * scale).clamp(TOP, HEIGHT);
             (left, top, (right - left).max(0.0), (bottom - top).max(0.0))
         });
 
@@ -1404,7 +1404,7 @@ impl ArchitectPane {
 
         let blocks = positions.into_iter().map(|(id, position)| {
             let is_running = running.as_ref() == Some(&id);
-            let is_selected = selected.as_ref() == Some(&id);
+            let is_selected = selected.as_ref() == Some(&id) || self.in_bulk_selection(&id);
             div()
                 .absolute()
                 .left(px(PADDING + (position.x - min_x) * scale - 4.0))
@@ -1942,16 +1942,7 @@ impl ArchitectPane {
         };
         let running = self.is_running(cx);
         let pane = cx.weak_entity();
-        let bulk_menu = self.has_bulk_selection().then(|| {
-            let locked = nodes
-                .iter()
-                .filter(|node| node.locked && self.bulk.contains(&node.id))
-                .count();
-            BulkMenu {
-                locked,
-                drafts: self.bulk.len().saturating_sub(locked),
-            }
-        });
+        let bulk_menu = self.has_bulk_selection().then(|| self.bulk_counts(cx));
 
         nodes
             .into_iter()
@@ -2616,13 +2607,7 @@ struct NodeMenu {
     running: bool,
     /// Set when the step is one of several selected, whose menu acts on all
     /// of them.
-    bulk: Option<BulkMenu>,
-}
-
-#[derive(Clone, Copy)]
-struct BulkMenu {
-    locked: usize,
-    drafts: usize,
+    bulk: Option<BulkCounts>,
 }
 
 type PaneAction = fn(&mut ArchitectPane, &mut Window, &mut Context<ArchitectPane>);
@@ -2695,7 +2680,7 @@ impl NodeMenu {
     /// The menu for a step that is one of several selected. Its actions apply
     /// to every selected step, and leave the selection as it is.
     fn build_bulk(
-        bulk: BulkMenu,
+        bulk: BulkCounts,
         running: bool,
         pane: WeakEntity<ArchitectPane>,
         window: &mut Window,
@@ -2708,15 +2693,16 @@ impl NodeMenu {
                     pane.update(cx, |pane, cx| run(pane, window, cx)).log_err();
                 }
             };
+            let can_change = !running && bulk.editable;
             context_menu
-                .when(!running && bulk.drafts > 0, |this| {
+                .when(can_change && bulk.lockable > 0, |this| {
                     this.entry(
-                        format!("Lock {}", bulk::count_label(bulk.drafts)),
+                        format!("Lock {}", bulk::count_label(bulk.lockable)),
                         None,
                         action(|pane, _, cx| pane.lock_bulk_selection(true, cx)),
                     )
                 })
-                .when(!running && bulk.locked > 0, |this| {
+                .when(can_change && bulk.locked > 0, |this| {
                     this.entry(
                         format!("Unlock {}", bulk::count_label(bulk.locked)),
                         None,
@@ -2728,7 +2714,7 @@ impl NodeMenu {
                     None,
                     action(|pane, window, cx| pane.set_selection(None, window, cx)),
                 )
-                .when(!running && bulk.drafts > 0, |this| {
+                .when(can_change && bulk.drafts > 0, |this| {
                     this.separator().entry(
                         format!("Delete {}", bulk::count_label(bulk.drafts)),
                         None,

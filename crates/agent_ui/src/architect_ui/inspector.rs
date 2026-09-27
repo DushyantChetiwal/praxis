@@ -97,6 +97,26 @@ impl ArchitectPane {
         while !self.focus.is_empty() && self.graph(cx).is_none() {
             self.focus = self.focus.parent().unwrap_or_default();
         }
+        // One step left of several becomes the ordinary selection, as it would
+        // when chosen that way.
+        let remaining: Vec<NodeId> = self
+            .graph(cx)
+            .map(|graph| {
+                self.bulk
+                    .iter()
+                    .filter(|id| graph.node(id).is_some())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let [only] = remaining.as_slice() {
+            self.selection = Some(Selection::Node(only.clone()));
+        }
+        self.bulk = if remaining.len() > 1 {
+            remaining
+        } else {
+            Vec::new()
+        };
         let selection = self.selection.clone().filter(|selection| {
             let Some(graph) = self.graph(cx) else {
                 return false;
@@ -123,17 +143,6 @@ impl ArchitectPane {
             _ => None,
         };
         self.selection = selection;
-        let bulk: Vec<NodeId> = self
-            .graph(cx)
-            .map(|graph| {
-                self.bulk
-                    .iter()
-                    .filter(|id| graph.node(id).is_some())
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.bulk = if bulk.len() > 1 { bulk } else { Vec::new() };
         self.hovered_node = None;
         cx.notify();
     }
