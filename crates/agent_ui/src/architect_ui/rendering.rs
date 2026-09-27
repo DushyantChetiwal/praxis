@@ -1423,6 +1423,11 @@ impl ArchitectPane {
     }
 
     fn render_empty_state(&self, cx: &Context<Self>) -> AnyElement {
+        // Inside a step, the whole-plan invitation to start planning is the
+        // wrong advice: the step exists, and what it lacks is steps of its own.
+        if !self.focus.is_empty() {
+            return self.render_empty_nested_plan(cx);
+        }
         let planning = self.thread.read(cx).session_mode() == agent::SessionMode::Plan;
 
         v_flex()
@@ -1432,7 +1437,7 @@ impl ArchitectPane {
             .justify_center()
             .gap_2()
             .child(
-                Icon::new(IconName::GitBranch)
+                Icon::new(IconName::ListTree)
                     .size(IconSize::XLarge)
                     .color(Color::Muted),
             )
@@ -1470,6 +1475,44 @@ impl ArchitectPane {
                         .color(Color::Muted),
                 )
             })
+            .bg(cx.theme().colors().editor_background)
+            .into_any()
+    }
+
+    fn render_empty_nested_plan(&self, cx: &Context<Self>) -> AnyElement {
+        let running = self.is_running(cx);
+
+        v_flex()
+            .id("architect-empty-nested-plan")
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .child(
+                Icon::new(IconName::ListTree)
+                    .size(IconSize::XLarge)
+                    .color(Color::Muted),
+            )
+            .child(Label::new("Nothing inside this step yet").color(Color::Muted))
+            .child(
+                div().max_w(px(420.0)).child(
+                    Label::new(
+                        "Break this step into smaller steps that run in its place. Press Escape \
+                         to go back to the plan that contains it.",
+                    )
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+                ),
+            )
+            .child(
+                Button::new("architect-add-nested-step", "Add Step")
+                    .tab_index(0isize)
+                    .style(ButtonStyle::Tinted(TintColor::Accent))
+                    .start_icon(Icon::new(IconName::Plus).size(IconSize::Small))
+                    .disabled(running)
+                    .tooltip(Tooltip::text("Add the first step inside this one"))
+                    .on_click(cx.listener(|this, _, window, cx| this.add_step(window, cx))),
+            )
             .bg(cx.theme().colors().editor_background)
             .into_any()
     }
