@@ -22,9 +22,11 @@ dependencies, conditions, loops, and expected hand-offs. Individual steps can
 be discussed and refined before the locked plan is executed.
 
 The alternate Code workspace retains the project tree, editor, terminal, Git
-panel, and overall plan conversation. Plan mode limits the agent to reviewed
-read capabilities, including shell-free Git and GitHub/GitLab pull-request
-inspection, while Build mode enables approved mutation and execution tools.
+panel, and overall plan conversation. Native threads have three modes: Plan
+researches with reviewed read capabilities and asks you to approve a plan
+before anything changes, as in Zed; Architect drafts the plan on the canvas
+with the same read-only boundary; and Build enables approved mutation and
+execution tools.
 
 The main product additions live in:
 

@@ -47,13 +47,24 @@ Every native tool declares one capability:
 - `ProjectMutation` changes project state.
 - `ExternalMutation` may change an external system.
 - `ArbitraryExecution` runs commands or delegates unrestricted execution.
+- `PlanHandoff` presents a finished plan to the user for approval.
 
-Plan mode permits `ReadOnly`, `ConversationMutation`, and `ExternalRead`. The
+A native thread is in one of three modes:
+
+- **Build** permits every capability except `PlanHandoff`.
+- **Plan** works like Zed's Plan mode. It permits `ReadOnly`, `ExternalRead`,
+  and `PlanHandoff`: the agent researches, then calls `exit_plan_mode` with its
+  plan. Approving it switches the thread to Build; otherwise planning goes on.
+- **Architect** drafts the plan on the canvas. It permits `ReadOnly`,
+  `ConversationMutation`, and `ExternalRead`.
+
+The
 default for a newly added tool is `ProjectMutation`, so an unreviewed tool fails
 closed. This is
 enforced when the enabled tool set is built, again when each completion request
 is serialized, and again at invocation time. A model cannot invoke a terminal
-from an earlier tool snapshot after the thread changes from Build to Plan.
+from an earlier tool snapshot after the thread changes from Build to Plan or
+Architect.
 
 The built-in research surface includes file and symbol reads, diagnostics,
 fetch, web search, and shell-free Git tools for status, diffs, branches, remotes,
@@ -62,7 +73,8 @@ of GitHub pull requests and GitLab merge requests, including optional files,
 conversation, reviews, and checks. Hosted review reads use bounded pagination,
 a shared response budget, cancellable requests, and preserve the summary when an
 optional section fails. Terminal, sibling threads, and subagents are
-classified as `ArbitraryExecution` and are unavailable in Plan mode.
+classified as `ArbitraryExecution` and are unavailable in Plan and Architect
+modes.
 
 MCP tools are admitted only when their annotation explicitly sets
 `readOnlyHint: true`. An open-world read is classified as `ExternalRead`; a
@@ -72,7 +84,7 @@ tool name or description is not a security boundary.
 
 The effective set can still be narrower. Provider support, the active tool
 profile, feature flags, restricted-project rules, network grants, and sandbox
-configuration are applied in addition to Plan mode. Plan-state tools such as
+configuration are applied in addition to the mode. Plan-state tools such as
 `draft_plan` and `refine_step` may update the conversation's proposed plan, but
 cannot change project files or external systems. External ACP agents advertise
 and enforce their own modes and capabilities.
@@ -135,7 +147,7 @@ Use a disposable repository with at least one committed file and one uncommitted
 change. Install the latest unsigned Praxis Dev build from this project's GitHub
 release; no local compilation is required.
 
-1. Open the repository and start a native-agent thread in **Plan** mode.
+1. Open the repository and start a native-agent thread in **Architect** mode.
 2. Ask the agent to inspect the working tree and draft a plan for the pending
    change. If a public GitHub PR or GitLab MR is relevant, include its browser
    URL and ask for its files and checks.

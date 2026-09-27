@@ -2700,6 +2700,7 @@ impl acp_thread::AgentSessionModes for NativeAgentSessionModes {
         vec![
             acp::SessionMode::new(crate::SessionMode::BUILD_ID, "Build"),
             acp::SessionMode::new(crate::SessionMode::PLAN_ID, "Plan"),
+            acp::SessionMode::new(crate::SessionMode::ARCHITECT_ID, "Architect"),
         ]
     }
 
@@ -8186,6 +8187,7 @@ mod internal_tests {
             vec![
                 crate::SessionMode::BUILD_ID.to_string(),
                 crate::SessionMode::PLAN_ID.to_string(),
+                crate::SessionMode::ARCHITECT_ID.to_string(),
             ],
         );
         assert_eq!(
@@ -8238,12 +8240,28 @@ mod internal_tests {
                 TerminalTool::NAME,
                 SpawnAgentTool::NAME,
                 CreateThreadTool::NAME,
+                // Drafting on the canvas belongs to Architect mode.
+                DraftPlanTool::NAME,
             ] {
                 assert!(
                     !tools.contains_key(tool_name),
                     "Plan mode must deny mutating or executable tool `{tool_name}`"
                 );
             }
+            assert!(
+                tools.contains_key(ExitPlanModeTool::NAME),
+                "Plan mode must offer a way to present the plan"
+            );
+        });
+
+        // Presenting a plan only means something while planning.
+        thread.update(cx, |thread, cx| {
+            thread.set_session_mode(crate::SessionMode::Build, cx);
+        });
+        thread.read_with(cx, |thread, cx| {
+            let tools = thread.enabled_tools(cx);
+            assert!(!tools.contains_key(ExitPlanModeTool::NAME));
+            assert!(tools.contains_key(EditFileTool::NAME));
         });
     }
 
@@ -8259,7 +8277,7 @@ mod internal_tests {
         graph.add_node(node);
         thread.update(cx, |thread, cx| {
             thread.set_architect_graph(Some(graph.clone()), cx);
-            thread.set_session_mode(crate::SessionMode::Plan, cx);
+            thread.set_session_mode(crate::SessionMode::Architect, cx);
         });
 
         cx.update(|cx| {
@@ -8328,7 +8346,7 @@ mod internal_tests {
         thread.update(cx, |thread, cx| {
             thread.set_title("Persisted plan".into(), cx);
             thread.set_model(model.clone(), cx);
-            thread.set_session_mode(crate::SessionMode::Plan, cx);
+            thread.set_session_mode(crate::SessionMode::Architect, cx);
         });
 
         agent.update(cx, |agent, cx| agent.save_thread(thread.clone(), cx));
@@ -8351,15 +8369,16 @@ mod internal_tests {
                 )
             })
             .await
-            .expect("the Plan-mode session should reload");
+            .expect("the Architect-mode session should reload");
         cx.run_until_parked();
         let restored = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
         restored.update(cx, |thread, cx| thread.set_model(model, cx));
         restored.read_with(cx, |thread, cx| {
-            assert_eq!(thread.session_mode(), crate::SessionMode::Plan);
+            assert_eq!(thread.session_mode(), crate::SessionMode::Architect);
             let tools = thread.enabled_tools(cx);
             assert!(tools.contains_key(ReadFileTool::NAME));
             assert!(tools.contains_key(DraftPlanTool::NAME));
+            assert!(!tools.contains_key(ExitPlanModeTool::NAME));
             assert!(!tools.contains_key(EditFileTool::NAME));
             assert!(!tools.contains_key(TerminalTool::NAME));
         });

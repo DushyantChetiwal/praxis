@@ -251,9 +251,10 @@ impl AgentTool for DraftPlanTool {
                 .update(cx, |thread, cx| {
                     thread.set_architect_graph(Some(graph), cx);
                     // Drawing a plan is the act that says this task is being
-                    // planned rather than carried out, so it is what puts the
-                    // thread into Plan. Nothing else has to be asked or set.
-                    thread.set_session_mode(crate::SessionMode::Plan, cx);
+                    // planned on the canvas rather than carried out, so it is
+                    // what puts the thread into Architect. Nothing else has to
+                    // be asked or set.
+                    thread.set_session_mode(crate::SessionMode::Architect, cx);
                 })
                 .map_err(|error| DraftPlanToolOutput::Error {
                     error: format!("The thread this plan belongs to is gone: {error}"),

@@ -13,6 +13,7 @@ mod edit_file_tool;
 mod edit_session;
 #[cfg(all(test, feature = "unit-eval"))]
 mod evals;
+mod exit_plan_mode_tool;
 mod fetch_tool;
 mod find_path_tool;
 mod find_references_tool;
@@ -88,6 +89,7 @@ pub use delete_path_tool::*;
 pub use diagnostics_tool::*;
 pub use draft_plan_tool::*;
 pub use edit_file_tool::*;
+pub use exit_plan_mode_tool::*;
 pub use fetch_tool::*;
 pub use find_path_tool::*;
 pub use find_references_tool::*;
@@ -221,6 +223,7 @@ tools! {
     DiagnosticsTool,
     DraftPlanTool,
     EditFileTool,
+    ExitPlanModeTool,
     FetchTool,
     FindPathTool,
     FindReferencesTool,

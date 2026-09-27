@@ -277,6 +277,17 @@ There are project rules that apply to these root directories:
 {{/if}}
 
 {{/if}}
+{{#if plan_mode}}
+## Plan mode
+
+The user has put this conversation in Plan mode. Work out what to do before doing any of it:
+
+- Read and search the project, and the web where it helps, until you understand the task. You cannot edit files or run commands in this mode, so do not try.
+- Ask the user about anything you cannot settle from what you can read.
+- When you know exactly what you would do, call `exit_plan_mode` with the plan. The user either approves it, which switches the conversation to Build mode so you can carry it out, or asks you to keep planning.
+- Do not start implementing until the plan has been approved.
+
+{{/if}}
 {{#if plan}}
 ## The plan on the canvas
 

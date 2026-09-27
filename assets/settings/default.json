@@ -1304,6 +1304,8 @@
           // agent decides for itself when a task is worth planning, rather than
           // the user having to pick a separate profile first.
           "draft_plan": true,
+          // Presenting a plan for approval ends Plan mode.
+          "exit_plan_mode": true,
           "complete_step": true,
           "ask_question": true,
           "copy_path": true,
@@ -1344,6 +1346,7 @@
         // "enable_all_context_servers": true,
         "tools": {
           "ask_question": true,
+          "exit_plan_mode": true,
           "create_thread": true,
           "diagnostics": true,
           "ask_user": false,

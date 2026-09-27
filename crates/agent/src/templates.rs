@@ -61,6 +61,9 @@ pub struct SystemPromptTemplate<'a> {
     pub is_linux: bool,
     /// Whether sandboxed terminal commands run through WSL on Windows.
     pub is_windows: bool,
+    /// Whether the thread is in Plan mode, where the agent researches and
+    /// then presents a plan for approval before changing anything.
+    pub plan_mode: bool,
     /// The plan on the Architect canvas, if this thread has one.
     ///
     /// Included because `draft_plan` replaces the plan wholesale. A model that
@@ -116,6 +119,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
             plan: None,
         };
         let templates = Templates::new();
@@ -144,6 +148,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
             plan: Some("- schema — \"Define schema\" [locked: settled, do not rewrite]".into()),
         };
 
@@ -181,6 +186,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
             plan: None,
         };
         let templates = Templates::new();
@@ -211,6 +217,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
             plan: None,
         };
         let templates = Templates::new();
@@ -245,6 +252,7 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
             plan: None,
         };
         let templates = Templates::new();
@@ -289,6 +297,7 @@ mod tests {
             sandboxing: true,
             is_linux: true,
             is_windows: false,
+            plan_mode: false,
             plan: None,
         };
         let templates = Templates::new();
@@ -323,6 +332,7 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: true,
+            plan_mode: false,
             plan: None,
         };
         let templates = Templates::new();
@@ -354,6 +364,7 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
             plan: None,
         };
         let templates = Templates::new();
@@ -377,6 +388,7 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
             plan: None,
         };
         let templates = Templates::new();
@@ -398,6 +410,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
             plan: None,
         };
         let templates = Templates::new();
@@ -417,6 +430,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            plan_mode: false,
             plan: None,
         };
         let templates = Templates::new();

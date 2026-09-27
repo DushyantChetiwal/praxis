@@ -1,11 +1,11 @@
 use crate::{
     ApplyCodeActionTool, AskUserTool, CodeActionStore, ContextServerRegistry, CopyPathTool,
     CreateDirectoryTool, CreateThreadTool, DbLanguageModel, DbThread, DeletePathTool,
-    DiagnosticsTool, DraftPlanTool, EditFileTool, FetchTool, FindPathTool, FindReferencesTool,
-    GetCodeActionsTool, GitBranchesTool, GitDiffTool, GitRemotesTool, GitShowTool, GitStatusTool,
-    GoToDefinitionTool, GrepTool, ListAgentsAndModelsTool, ListDirectoryTool, MovePathTool,
-    ProjectSnapshot, PullRequestTool, ReadFileTool, RenameTool, SandboxedTerminalTool,
-    SpawnAgentTool, SystemPromptTemplate, Template, Templates, TerminalTool,
+    DiagnosticsTool, DraftPlanTool, EditFileTool, ExitPlanModeTool, FetchTool, FindPathTool,
+    FindReferencesTool, GetCodeActionsTool, GitBranchesTool, GitDiffTool, GitRemotesTool,
+    GitShowTool, GitStatusTool, GoToDefinitionTool, GrepTool, ListAgentsAndModelsTool,
+    ListDirectoryTool, MovePathTool, ProjectSnapshot, PullRequestTool, ReadFileTool, RenameTool,
+    SandboxedTerminalTool, SpawnAgentTool, SystemPromptTemplate, Template, Templates, TerminalTool,
     ToolPermissionDecision, WebSearchTool, WriteFileTool, decide_permission_from_settings,
 };
 use acp_thread::{AgentModelId, ClientUserMessageId, MentionUri};
@@ -164,23 +164,29 @@ const OVERFLOW_BYTES_PER_TOKEN: u64 = 5;
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionMode {
-    /// Working out what to do. Read-only research and conversation-owned plan
-    /// updates are available; project/external mutation and arbitrary execution
-    /// are mechanically denied.
+    /// Working out what to do before doing it, as Zed's Plan mode does: the
+    /// agent researches read-only, then presents its plan with
+    /// `exit_plan_mode` and waits for the user to approve it.
     Plan,
     /// Carrying the work out.
     #[default]
     Build,
+    /// Drafting a plan on the Architect canvas. Read-only research and
+    /// conversation-owned plan updates are available; project/external
+    /// mutation and arbitrary execution are mechanically denied.
+    Architect,
 }
 
 impl SessionMode {
     pub const PLAN_ID: &'static str = "plan";
     pub const BUILD_ID: &'static str = "build";
+    pub const ARCHITECT_ID: &'static str = "architect";
 
     pub fn id(&self) -> &'static str {
         match self {
             SessionMode::Plan => Self::PLAN_ID,
             SessionMode::Build => Self::BUILD_ID,
+            SessionMode::Architect => Self::ARCHITECT_ID,
         }
     }
 
@@ -188,7 +194,20 @@ impl SessionMode {
         match id {
             Self::PLAN_ID => Some(SessionMode::Plan),
             Self::BUILD_ID => Some(SessionMode::Build),
+            Self::ARCHITECT_ID => Some(SessionMode::Architect),
             _ => None,
+        }
+    }
+
+    /// The mode a saved thread reopens in. Before Architect mode existed,
+    /// drafting on the canvas was saved as `plan`, so a thread saved in
+    /// `plan` that owns a canvas plan was drafting it and reopens in
+    /// Architect mode rather than Plan mode.
+    pub fn restored(saved: SessionMode, has_architect_graph: bool) -> Self {
+        if saved == SessionMode::Plan && has_architect_graph {
+            SessionMode::Architect
+        } else {
+            saved
         }
     }
 }
@@ -212,15 +231,26 @@ pub enum ToolCapability {
     ExternalMutation,
     /// Runs arbitrary programs or delegates unrestricted execution.
     ArbitraryExecution,
+    /// Hands a finished plan to the user for approval, which only means
+    /// something while in Plan mode.
+    PlanHandoff,
 }
 
 impl ToolCapability {
     pub fn is_allowed_in(self, mode: SessionMode) -> bool {
-        mode == SessionMode::Build
-            || matches!(
+        match mode {
+            SessionMode::Build => self != Self::PlanHandoff,
+            SessionMode::Plan => {
+                matches!(
+                    self,
+                    Self::ReadOnly | Self::ExternalRead | Self::PlanHandoff
+                )
+            }
+            SessionMode::Architect => matches!(
                 self,
                 Self::ReadOnly | Self::ConversationMutation | Self::ExternalRead
-            )
+            ),
+        }
     }
 }
 
@@ -2100,6 +2130,9 @@ impl Thread {
 
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
 
+        let session_mode =
+            SessionMode::restored(db_thread.session_mode, db_thread.architect_graph.is_some());
+
         Self {
             id,
             prompt_id: PromptId::new(),
@@ -2152,7 +2185,7 @@ impl Thread {
             inherits_parent_model_settings: true,
             architect_graph: db_thread.architect_graph,
             architect_active_visit: None,
-            session_mode: Rc::new(Cell::new(db_thread.session_mode)),
+            session_mode: Rc::new(Cell::new(session_mode)),
             architect_run: None,
             sandboxed_terminal_temp_dir: db_thread.sandboxed_terminal_temp_dir,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::from_db(
@@ -2788,6 +2821,7 @@ impl Thread {
 
         self.add_tool(DiagnosticsTool::new(self.project.clone()));
         self.add_tool(DraftPlanTool::new(cx.weak_entity()));
+        self.add_tool(ExitPlanModeTool::new(cx.weak_entity()));
 
         let code_action_store: CodeActionStore = cx.new(|_cx| None);
         self.add_tool(FindReferencesTool::new(self.project.clone()));
@@ -5269,6 +5303,7 @@ impl Thread {
             ),
             is_linux: cfg!(target_os = "linux"),
             is_windows: cfg!(target_os = "windows"),
+            plan_mode: self.session_mode.get() == SessionMode::Plan,
             // Rebuilt every request, so it is never a stale copy of a plan the
             // user has since reshaped.
             plan: self
@@ -10911,17 +10946,30 @@ mod session_mode_tests {
     use super::{SessionMode, ToolCapability};
 
     #[test]
-    fn planning_allows_research_and_conversation_mutations() {
+    fn planning_allows_research_and_presenting_the_plan_only() {
         assert!(ToolCapability::ReadOnly.is_allowed_in(SessionMode::Plan));
-        assert!(ToolCapability::ConversationMutation.is_allowed_in(SessionMode::Plan));
         assert!(ToolCapability::ExternalRead.is_allowed_in(SessionMode::Plan));
+        assert!(ToolCapability::PlanHandoff.is_allowed_in(SessionMode::Plan));
+        // The Architect canvas's tools belong to Architect mode.
+        assert!(!ToolCapability::ConversationMutation.is_allowed_in(SessionMode::Plan));
         assert!(!ToolCapability::ProjectMutation.is_allowed_in(SessionMode::Plan));
         assert!(!ToolCapability::ExternalMutation.is_allowed_in(SessionMode::Plan));
         assert!(!ToolCapability::ArbitraryExecution.is_allowed_in(SessionMode::Plan));
     }
 
     #[test]
-    fn building_allows_every_capability() {
+    fn architect_allows_research_and_conversation_mutations() {
+        assert!(ToolCapability::ReadOnly.is_allowed_in(SessionMode::Architect));
+        assert!(ToolCapability::ConversationMutation.is_allowed_in(SessionMode::Architect));
+        assert!(ToolCapability::ExternalRead.is_allowed_in(SessionMode::Architect));
+        assert!(!ToolCapability::PlanHandoff.is_allowed_in(SessionMode::Architect));
+        assert!(!ToolCapability::ProjectMutation.is_allowed_in(SessionMode::Architect));
+        assert!(!ToolCapability::ExternalMutation.is_allowed_in(SessionMode::Architect));
+        assert!(!ToolCapability::ArbitraryExecution.is_allowed_in(SessionMode::Architect));
+    }
+
+    #[test]
+    fn building_allows_every_capability_but_ending_plan_mode() {
         for capability in [
             ToolCapability::ReadOnly,
             ToolCapability::ConversationMutation,
@@ -10932,14 +10980,35 @@ mod session_mode_tests {
         ] {
             assert!(capability.is_allowed_in(SessionMode::Build));
         }
+        assert!(!ToolCapability::PlanHandoff.is_allowed_in(SessionMode::Build));
+    }
+
+    #[test]
+    fn a_canvas_plan_saved_as_plan_reopens_in_architect_mode() {
+        assert_eq!(
+            SessionMode::restored(SessionMode::Plan, true),
+            SessionMode::Architect
+        );
+        assert_eq!(
+            SessionMode::restored(SessionMode::Plan, false),
+            SessionMode::Plan
+        );
+        assert_eq!(
+            SessionMode::restored(SessionMode::Build, true),
+            SessionMode::Build
+        );
     }
 
     #[test]
     fn a_mode_survives_a_round_trip_through_its_id() {
-        for mode in [SessionMode::Plan, SessionMode::Build] {
+        for mode in [
+            SessionMode::Plan,
+            SessionMode::Build,
+            SessionMode::Architect,
+        ] {
             assert_eq!(SessionMode::from_id(mode.id()), Some(mode));
         }
-        assert_eq!(SessionMode::from_id("architect"), None);
+        assert_eq!(SessionMode::from_id("review"), None);
     }
 
     #[test]

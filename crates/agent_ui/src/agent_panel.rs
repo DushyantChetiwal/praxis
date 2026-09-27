@@ -6498,7 +6498,7 @@ impl AgentPanel {
         let settled = graph.map_or(0, architect::ArchitectGraph::locked_step_count_deeply);
 
         let tooltip = match step_count {
-            0 => "Open the Architect canvas. Switch to Plan mode and describe the goal, and the plan appears here.".to_string(),
+            0 => "Open the Architect canvas. Switch to Architect mode and describe the goal, and the plan appears here.".to_string(),
             1 => format!("Open the Architect canvas: {settled} of 1 step settled"),
             count => format!("Open the Architect canvas: {settled} of {count} steps settled"),
         };

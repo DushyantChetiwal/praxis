@@ -1448,6 +1448,9 @@ mod tests {
             // to the project until they do.
             "draft_plan",
             "refine_step",
+            // Presenting a plan always waits for the user's decision, so it has
+            // no settings-driven permission rules.
+            "exit_plan_mode",
         ];
 
         let tool_info_ids: Vec<&str> = TOOLS.iter().map(|t| t.id).collect();
