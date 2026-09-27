@@ -8,7 +8,10 @@ use ui::{TintColor, Tooltip, prelude::*};
 use crate::AgentPanel;
 
 use super::rendering::truncate;
-use super::{ArchitectPane, DUPLICATE_SHORTCUT, Interaction, Selection, UNDO_SHORTCUT, UndoGroup};
+use super::{
+    ArchitectPane, DUPLICATE_SHORTCUT, Interaction, REDO_SHORTCUT, Selection, UNDO_SHORTCUT,
+    UndoGroup,
+};
 
 /// The inspector shows one step, either as fields or as the conversation about
 /// it. The conversation lives here rather than in the agent panel so that the
@@ -809,20 +812,17 @@ impl ArchitectPane {
                                             "Architect turns a goal into a plan of explicit \
                                              steps. Start planning, refine and lock each step, \
                                              then run the plan."
-                                                .to_string()
                                         } else {
-                                            format!(
-                                                "Select a step to edit its goal, rules, handoff, \
-                                                 and conversation. Drag from the dot on a \
-                                                 step's right edge to connect it to the next \
-                                                 step. Press Delete to remove the selection and \
-                                                 {UNDO_SHORTCUT} to undo."
-                                            )
+                                            "Select a step to edit its goal, rules, handoff, and \
+                                             conversation. Drag from the dot on a step's right \
+                                             edge to connect it to another step, and right-click \
+                                             a step for everything else it can do."
                                         })
                                         .size(LabelSize::Small)
                                         .color(Color::Muted),
                                     ),
                             )
+                            .when(step_count > 0, |this| this.child(Self::render_shortcuts()))
                             .when_some(latest_run, |this, (visits, state)| {
                                 this.child(
                                     v_flex()
@@ -843,6 +843,40 @@ impl ArchitectPane {
                             }),
                     ),
             )
+            .into_any()
+    }
+
+    /// The canvas gestures nothing on screen advertises.
+    fn render_shortcuts() -> AnyElement {
+        let rows = [
+            ("Delete", "Remove the selection"),
+            (UNDO_SHORTCUT, "Undo"),
+            (REDO_SHORTCUT, "Redo"),
+            (DUPLICATE_SHORTCUT, "Duplicate the step"),
+            ("Up / Down", "Previous or next step"),
+            ("Home / End", "First or last step"),
+            ("Double-click", "Open a step's nested plan"),
+            ("Escape", "Close, deselect, or go up a level"),
+        ];
+        v_flex()
+            .gap_1()
+            .child(
+                Label::new("SHORTCUTS")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .children(rows.into_iter().map(|(keys, action)| {
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .justify_between()
+                    .child(
+                        Label::new(action)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(Label::new(keys).size(LabelSize::XSmall))
+            }))
             .into_any()
     }
 
