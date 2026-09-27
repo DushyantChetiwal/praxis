@@ -127,7 +127,11 @@ jobs:
 
   macos:
     name: macOS (${{ matrix.architecture }})
-    if: inputs.build_macos && !inputs.test_build
+    # A skipped Architect quality run skips every job after it unless the
+    # condition says otherwise, so each build checks the validation itself.
+    if: >-
+      !cancelled() && needs.validated.result == 'success' &&
+      inputs.build_macos && !inputs.test_build
     needs:
       - prepare
       - validated
@@ -198,7 +202,9 @@ jobs:
   linux_remote_server:
     name: Linux remote server (x86_64)
     # Bundled into the Windows installer for WSL, and published for Linux.
-    if: (inputs.build_linux || inputs.build_windows) && !inputs.test_build
+    if: >-
+      !cancelled() && needs.validated.result == 'success' &&
+      (inputs.build_linux || inputs.build_windows) && !inputs.test_build
     needs:
       - prepare
       - validated
@@ -237,7 +243,9 @@ jobs:
 
   linux:
     name: Linux (x86_64)
-    if: inputs.build_linux && !inputs.test_build
+    if: >-
+      !cancelled() && needs.validated.result == 'success' &&
+      inputs.build_linux && !inputs.test_build
     needs:
       - prepare
       - validated
@@ -278,7 +286,9 @@ jobs:
 
   windows:
     name: Windows (x86_64)
-    if: inputs.build_windows
+    if: >-
+      !cancelled() && needs.validated.result == 'success' &&
+      inputs.build_windows
     needs:
       - prepare
       - validated
