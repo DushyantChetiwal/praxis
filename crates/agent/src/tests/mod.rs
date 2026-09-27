@@ -7085,8 +7085,12 @@ async fn test_subagent_auto_compaction(cx: &mut TestAppContext) {
             .filter(|message| message.role != Role::System)
             .map(|message| message.string_contents())
             .collect::<Vec<_>>(),
+        // The most recent agent turn is replayed ahead of the summary, so the
+        // subagent keeps the concrete output it was working from.
         vec![
             "subagent task prompt",
+            "partial work",
+            "tool output",
             "The previous conversation was compacted. Use this summary as context:\n\nsubagent summary",
         ],
     );
