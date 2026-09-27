@@ -331,6 +331,28 @@ The mockup is illustrative rather than a literal implementation specification:
       forward edges, loops, nested plans, and fit bounds.
 - [x] **AUI-615** Add visual coverage for small, branching, cyclic, nested, and
       large plans.
+- [x] **AUI-616** Make canvas edits undoable with Undo and Redo buttons and
+      platform shortcuts (Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z; Cmd+Z and
+      Cmd+Shift+Z). A drag or a stretch of typing undoes as one change, and
+      history is dropped rather than applied over edits made elsewhere, such as
+      by the agent.
+- [x] **AUI-617** Give an empty nested plan its own empty state with Add Step,
+      rather than the whole-plan invitation to start planning.
+- [x] **AUI-618** Name the step each missing handoff belongs to, describe how
+      each routing condition is evaluated, and use the plan header's status
+      words in the status bar.
+- [x] **AUI-619** Let a loop connection carry a repeat limit, set from a Loop
+      section in the edge inspector and shown on the canvas. The runner closes a
+      connection once its limit is spent and moves on another way, drafts and
+      step refinement carry the limit, and a loop that could never be left is
+      reported before running.
+- [x] **AUI-620** Duplicate a step as a fresh draft with Duplicate Step or
+      Ctrl+D (Cmd+D), and select the first or last step with Home and End.
+- [x] **AUI-621** Hide actions that have nothing to act on: Review Plan without
+      a blocking problem, Run for an empty plan, Search and Tidy without steps,
+      pinning and Break Into Steps on settled steps, and deleting during a run.
+- [x] **AUI-622** Show settled-over-total plan progress on the Code workspace's
+      Architect button.
 - [x] **Phase 6 exit gate:** Existing graph capabilities work with the new cards,
       spacing, and three-region viewport.
 
@@ -400,6 +422,10 @@ The mockup is illustrative rather than a literal implementation specification:
       disabled behavior during execution.
 - [x] **AUI-815** Add run-state transition coverage for start, startup failure,
       progress, stop, stop failure, cancellation, failure, and success.
+- [x] **AUI-816** Refuse deleting and connecting steps while a run is active,
+      and let a finished run's bar be dismissed.
+- [x] **AUI-817** Show elapsed run time in seconds, minutes, or hours as fits,
+      and count nested steps when explaining why Run is disabled.
 - [x] **Phase 8 exit gate:** A complete run can be understood and controlled from
       Architect with one unambiguous primary action.
 
