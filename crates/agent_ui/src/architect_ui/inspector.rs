@@ -9,8 +9,8 @@ use crate::AgentPanel;
 
 use super::rendering::truncate;
 use super::{
-    ArchitectPane, DUPLICATE_SHORTCUT, Interaction, REDO_SHORTCUT, Selection, UNDO_SHORTCUT,
-    UndoGroup,
+    ArchitectPane, DUPLICATE_SHORTCUT, Interaction, REDO_SHORTCUT, SELECT_ALL_SHORTCUT, Selection,
+    UNDO_SHORTCUT, UndoGroup,
 };
 
 /// The inspector shows one step, either as fields or as the conversation about
@@ -49,6 +49,8 @@ impl ArchitectPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Any selection made here replaces a selection of several steps.
+        self.bulk.clear();
         let selected_node = match &selection {
             Some(Selection::Node(id)) => Some(id.clone()),
             _ => None,
@@ -121,6 +123,17 @@ impl ArchitectPane {
             _ => None,
         };
         self.selection = selection;
+        let bulk: Vec<NodeId> = self
+            .graph(cx)
+            .map(|graph| {
+                self.bulk
+                    .iter()
+                    .filter(|id| graph.node(id).is_some())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.bulk = if bulk.len() > 1 { bulk } else { Vec::new() };
         self.hovered_node = None;
         cx.notify();
     }
@@ -148,7 +161,9 @@ impl ArchitectPane {
         });
         let edge_id = edge.id.clone();
         let subscription = cx.subscribe(&condition, move |this, editor, event, cx| {
-            if !matches!(event, EditorEvent::BufferEdited) {
+            // Filling the editor when it is built is an edit too; only the
+            // user's own typing may change the plan.
+            if !matches!(event, EditorEvent::BufferEdited) || editor.read(cx).read_only(cx) {
                 return;
             }
             let text = editor.read(cx).text(cx);
@@ -159,6 +174,13 @@ impl ArchitectPane {
                 .graph(cx)
                 .and_then(|graph| graph.edges.iter().find(|edge| edge.id == edge_id))
                 .map(|edge| edge.condition.clone());
+            if current
+                .as_ref()
+                .and_then(EdgeCondition::label)
+                .is_some_and(|label| label == text)
+            {
+                return;
+            }
             let condition = match current {
                 Some(EdgeCondition::LlmEvaluated { .. }) => {
                     EdgeCondition::LlmEvaluated { question: text }
@@ -223,34 +245,45 @@ impl ArchitectPane {
         let id_for_responsibility = node.id.clone();
         let id_for_goal = node.id.clone();
         let id_for_capture = node.id.clone();
+        // Filling each editor when it is built is an edit too, and for a
+        // locked step writing it back was refused with an error, so only text
+        // that differs from the step is written.
         let subscriptions = vec![
             cx.subscribe(&title, move |this, editor, event, cx| {
-                if matches!(event, EditorEvent::BufferEdited) {
-                    let text = editor.read(cx).text(cx);
+                if let Some(text) =
+                    this.typed_text(&id_for_title, &editor, event, |node| &node.title, cx)
+                {
                     let id = id_for_title.clone();
                     this.next_undo_group = Some(UndoGroup::NodeText(id.clone(), "title"));
                     this.edit_node(id, move |node| node.title = text, cx);
                 }
             }),
             cx.subscribe(&responsibility, move |this, editor, event, cx| {
-                if matches!(event, EditorEvent::BufferEdited) {
-                    let text = editor.read(cx).text(cx);
+                if let Some(text) = this.typed_text(
+                    &id_for_responsibility,
+                    &editor,
+                    event,
+                    |node| &node.responsibility,
+                    cx,
+                ) {
                     let id = id_for_responsibility.clone();
                     this.next_undo_group = Some(UndoGroup::NodeText(id.clone(), "responsibility"));
                     this.edit_node(id, move |node| node.responsibility = text, cx);
                 }
             }),
             cx.subscribe(&goal, move |this, editor, event, cx| {
-                if matches!(event, EditorEvent::BufferEdited) {
-                    let text = editor.read(cx).text(cx);
+                if let Some(text) =
+                    this.typed_text(&id_for_goal, &editor, event, |node| &node.intent, cx)
+                {
                     let id = id_for_goal.clone();
                     this.next_undo_group = Some(UndoGroup::NodeText(id.clone(), "goal"));
                     this.edit_node(id, move |node| node.intent = text, cx);
                 }
             }),
             cx.subscribe(&capture, move |this, editor, event, cx| {
-                if matches!(event, EditorEvent::BufferEdited) {
-                    let text = editor.read(cx).text(cx);
+                if let Some(text) =
+                    this.typed_text(&id_for_capture, &editor, event, |node| &node.capture, cx)
+                {
                     let id = id_for_capture.clone();
                     this.next_undo_group = Some(UndoGroup::NodeText(id.clone(), "capture"));
                     this.edit_node(id, move |node| node.capture = text, cx);
@@ -267,6 +300,28 @@ impl ArchitectPane {
             new_rule,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// The editor's text when it is an edit the user made to one of a step's
+    /// fields: the editor can be edited and now says something the step does
+    /// not.
+    fn typed_text(
+        &self,
+        id: &NodeId,
+        editor: &Entity<Editor>,
+        event: &EditorEvent,
+        field: impl Fn(&ArchitectNode) -> &String,
+        cx: &Context<Self>,
+    ) -> Option<String> {
+        if !matches!(event, EditorEvent::BufferEdited) || editor.read(cx).read_only(cx) {
+            return None;
+        }
+        let text = editor.read(cx).text(cx);
+        let unchanged = self
+            .graph(cx)
+            .and_then(|graph| graph.node(id))
+            .is_some_and(|node| field(node) == &text);
+        (!unchanged).then_some(text)
     }
 
     fn add_rule(&mut self, rule: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -856,6 +911,9 @@ impl ArchitectPane {
             (UNDO_SHORTCUT, "Undo"),
             (REDO_SHORTCUT, "Redo"),
             (DUPLICATE_SHORTCUT, "Duplicate the step"),
+            ("Shift-click", "Add a step to the selection"),
+            ("Shift-drag", "Select steps in a rectangle"),
+            (SELECT_ALL_SHORTCUT, "Select every step"),
             ("Up / Down", "Previous or next step"),
             ("Home / End", "First or last step"),
             ("Double-click", "Open a step's nested plan"),
@@ -1296,6 +1354,9 @@ impl ArchitectPane {
     ) -> Option<AnyElement> {
         if self.plan_conversation_open {
             return Some(self.render_plan_conversation_inspector(width, cx));
+        }
+        if self.has_bulk_selection() {
+            return Some(self.render_bulk_inspector(width, cx));
         }
         match &self.selection {
             None => return Some(self.render_overview_inspector(width, cx)),

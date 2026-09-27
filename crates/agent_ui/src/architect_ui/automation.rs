@@ -142,6 +142,7 @@ impl ArchitectPane {
             "settled_steps": root.map_or(0, architect::ArchitectGraph::locked_step_count_deeply),
             "focus": self.focus.iter().map(|id| id.0.clone()).collect::<Vec<_>>(),
             "selection": selection,
+            "bulk_selection": self.bulk.iter().map(|id| id.0.clone()).collect::<Vec<_>>(),
             "inspector_tab": format!("{:?}", self.inspector_tab),
             "zoom": self.zoom,
             "viewport": viewport,
@@ -173,9 +174,27 @@ impl ArchitectPane {
                 } else {
                     Selection::Edge(EdgeId(text(args, "edge")?.to_string()))
                 };
-                self.set_selection(Some(selection), window, cx);
+                self.select_and_reveal(selection, window, cx);
             }
             "deselect" => self.set_selection(None, window, cx),
+            "bulk_select" => {
+                let ids = args
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .context("expected \"nodes\" to be a list of step ids")?
+                    .iter()
+                    .map(|id| {
+                        id.as_str()
+                            .map(|id| NodeId(id.to_string()))
+                            .context("expected every step id to be a string")
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                self.set_bulk_selection(ids, window, cx);
+            }
+            "select_all" => self.select_all_steps(window, cx),
+            "bulk_lock" => self.lock_bulk_selection(true, cx),
+            "bulk_unlock" => self.lock_bulk_selection(false, cx),
+            "bulk_delete" => self.delete_bulk_selection(window, cx),
             "undo" => self.step_history(HistoryDirection::Undo, window, cx),
             "redo" => self.step_history(HistoryDirection::Redo, window, cx),
             "duplicate" => self.duplicate_selection(window, cx),

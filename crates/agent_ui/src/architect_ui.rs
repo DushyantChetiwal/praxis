@@ -7,6 +7,7 @@
 //! two halves are drawn the way each is best drawn.
 
 mod automation;
+mod bulk;
 mod geometry;
 mod inspector;
 mod rendering;
@@ -73,6 +74,11 @@ const DUPLICATE_SHORTCUT: &str = if cfg!(target_os = "macos") {
 } else {
     "Ctrl+D"
 };
+const SELECT_ALL_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "Cmd+A"
+} else {
+    "Ctrl+A"
+};
 /// How far a duplicated step lands from its original, so both stay visible.
 const DUPLICATE_OFFSET: f32 = 40.0;
 
@@ -81,6 +87,8 @@ const DUPLICATE_OFFSET: f32 = 40.0;
 #[derive(Clone, Debug, PartialEq)]
 enum UndoGroup {
     Move(NodeId),
+    /// Dragging several selected steps together.
+    MoveSelection,
     NodeText(NodeId, &'static str),
     Condition(EdgeId),
 }
@@ -120,12 +128,19 @@ enum Interaction {
         from: NodeId,
         at: Point<Pixels>,
     },
-}
-
-impl Interaction {
-    fn is_idle(&self) -> bool {
-        matches!(self, Interaction::None)
-    }
+    /// Shift-dragging a rectangle over empty canvas to select what it touches.
+    Selecting {
+        start: Point<Pixels>,
+        at: Point<Pixels>,
+    },
+    /// Dragging the selected steps together. Each keeps its offset from where
+    /// it started; a press that never moves selects the pressed step alone.
+    DraggingGroup {
+        anchor: NodeId,
+        origin: Position,
+        starts: Vec<(NodeId, Position)>,
+        moved: bool,
+    },
 }
 
 /// Identifies the canvas's notifications so a new one replaces the last rather
@@ -205,6 +220,9 @@ pub struct ArchitectPane {
     pan: Point<Pixels>,
     zoom: f32,
     selection: Option<Selection>,
+    /// Steps selected together, in the order they were added. Only meaningful
+    /// with two or more; `selection` is empty meanwhile.
+    bulk: Vec<NodeId>,
     inspector: Option<NodeInspector>,
     edge_inspector: Option<EdgeInspector>,
     interaction: Interaction,
@@ -280,6 +298,7 @@ impl ArchitectPane {
             pan: point(px(0.0), px(0.0)),
             zoom: 1.0,
             selection: None,
+            bulk: Vec::new(),
             inspector: None,
             edge_inspector: None,
             interaction: Interaction::None,
@@ -490,6 +509,7 @@ impl ArchitectPane {
         });
         self.focus = NodePath::default();
         self.selection = None;
+        self.bulk.clear();
         self.inspector = None;
         self.edge_inspector = None;
         self.interaction = Interaction::None;
@@ -1059,6 +1079,7 @@ impl ArchitectPane {
 
         self.focus = self.focus.child(id);
         self.selection = None;
+        self.bulk.clear();
         self.inspector = None;
         self.edge_inspector = None;
         self.interaction = Interaction::None;
@@ -1089,6 +1110,7 @@ impl ArchitectPane {
         }
         self.focus = NodePath(self.focus.0[..depth].to_vec());
         self.selection = None;
+        self.bulk.clear();
         self.inspector = None;
         self.edge_inspector = None;
         self.interaction = Interaction::None;
@@ -1258,6 +1280,61 @@ impl ArchitectPane {
         cx.notify();
     }
 
+    /// Selects something chosen away from the canvas, such as in the outline or
+    /// with the keyboard, and brings it into view.
+    fn select_and_reveal(
+        &mut self,
+        selection: Selection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_selection(Some(selection.clone()), window, cx);
+        self.reveal(&selection, cx);
+    }
+
+    /// Centres a step or connection that is not wholly on screen. One already
+    /// in view stays where it is, so the canvas never moves under the pointer.
+    fn reveal(&mut self, selection: &Selection, cx: &mut Context<Self>) {
+        let Some(bounds) = self.viewport.get() else {
+            return;
+        };
+        let Some(graph) = self.graph(cx) else {
+            return;
+        };
+        let target = match selection {
+            Selection::Node(id) => graph.node(id).and_then(|node| {
+                let (width, height) = self.node_size(node);
+                node.position.map(|position| (position, width, height))
+            }),
+            Selection::Edge(id) => {
+                graph
+                    .edges
+                    .iter()
+                    .find(|edge| &edge.id == id)
+                    .and_then(|edge| {
+                        let from = graph.node(&edge.from)?.position?;
+                        let to = graph.node(&edge.to)?.position?;
+                        Some((EdgeCurve::between(from, to).midpoint(), 0.0, 0.0))
+                    })
+            }
+        };
+        let Some((centre, width, height)) = target else {
+            return;
+        };
+        let screen = self.to_screen(centre);
+        let half_width = px(width * self.zoom / 2.0);
+        let half_height = px(height * self.zoom / 2.0);
+        let visible = screen.x - half_width >= bounds.left()
+            && screen.x + half_width <= bounds.right()
+            && screen.y - half_height >= bounds.top()
+            && screen.y + half_height <= bounds.bottom();
+        if visible {
+            return;
+        }
+        self.pan = point(px(-centre.x * self.zoom), px(-centre.y * self.zoom));
+        cx.notify();
+    }
+
     // -- Editing --------------------------------------------------------------
 
     fn delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1335,25 +1412,29 @@ impl ArchitectPane {
     }
 
     /// Tells the user something the canvas cannot show in place.
+    /// It stays until dismissed, since it usually says why something did not
+    /// happen.
     fn report(&self, message: String, cx: &mut Context<Self>) {
         log::warn!("Architect: {message}");
-        self.notice(message, cx);
+        self.show_toast(message, false, cx);
     }
 
     /// Confirms something that went as asked, without logging it as a problem.
+    /// It hides itself: the canvas already shows the change.
     fn notice(&self, message: String, cx: &mut Context<Self>) {
+        self.show_toast(message, true, cx);
+    }
+
+    fn show_toast(&self, message: String, autohide: bool, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        workspace.update(cx, |workspace, cx| {
-            workspace.show_toast(
-                workspace::Toast::new(
-                    workspace::notifications::NotificationId::unique::<ArchitectNotice>(),
-                    message,
-                ),
-                cx,
-            );
-        });
+        let toast = workspace::Toast::new(
+            workspace::notifications::NotificationId::unique::<ArchitectNotice>(),
+            message,
+        );
+        let toast = if autohide { toast.autohide() } else { toast };
+        workspace.update(cx, |workspace, cx| workspace.show_toast(toast, cx));
     }
 
     fn open_plan_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1435,7 +1516,7 @@ impl ArchitectPane {
         }
         let path = self.focus.child(copy_id.clone());
         self.record_activity(Some(path), "Duplicated a step", cx);
-        self.set_selection(Some(Selection::Node(copy_id)), window, cx);
+        self.select_and_reveal(Selection::Node(copy_id), window, cx);
     }
 
     /// Selects the first or last step in the order the plan runs.
@@ -1446,7 +1527,7 @@ impl ArchitectPane {
             .unwrap_or_default();
         let target = if last { order.last() } else { order.first() };
         if let Some(id) = target.cloned() {
-            self.set_selection(Some(Selection::Node(id)), window, cx);
+            self.select_and_reveal(Selection::Node(id), window, cx);
         }
     }
 
@@ -1488,7 +1569,7 @@ impl ArchitectPane {
             return;
         };
         self.record_activity(None, "Reviewed the plan: issues need attention", cx);
-        self.set_selection(Some(selection), window, cx);
+        self.select_and_reveal(selection, window, cx);
     }
 
     fn select_adjacent_step(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -1509,7 +1590,7 @@ impl ArchitectPane {
             (None, false) => order.len().saturating_sub(1),
         };
         if let Some(id) = order.get(index).cloned() {
-            self.set_selection(Some(Selection::Node(id)), window, cx);
+            self.select_and_reveal(Selection::Node(id), window, cx);
         }
     }
 
@@ -1548,6 +1629,17 @@ impl ArchitectPane {
         }
         self.last_pressed_node = None;
         self.focus_handle.focus(window, cx);
+
+        // Shift-dragging over empty canvas selects with a rectangle, adding to
+        // what is already selected.
+        if event.modifiers.shift {
+            self.interaction = Interaction::Selecting {
+                start: event.position,
+                at: event.position,
+            };
+            cx.notify();
+            return;
+        }
 
         // Nodes handle their own presses, so reaching here means empty canvas
         // or an edge.
@@ -1592,10 +1684,11 @@ impl ArchitectPane {
                 let path = self.focus.child(id);
                 self.edit_checked(move |graph| graph.move_node_at(&path, position), cx);
             }
-            Interaction::Connecting { at, .. } => {
+            Interaction::Connecting { at, .. } | Interaction::Selecting { at, .. } => {
                 *at = event.position;
                 cx.notify();
             }
+            Interaction::DraggingGroup { .. } => self.drag_group_to(event.position, cx),
         }
     }
 
@@ -1605,6 +1698,17 @@ impl ArchitectPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Interaction::Selecting { start, .. } = &self.interaction {
+            let start = *start;
+            self.interaction = Interaction::None;
+            self.finish_marquee(start, event.position, window, cx);
+        } else if let Interaction::DraggingGroup { anchor, moved, .. } = &self.interaction {
+            let (anchor, moved) = (anchor.clone(), *moved);
+            self.interaction = Interaction::None;
+            if !moved {
+                self.set_selection(Some(Selection::Node(anchor)), window, cx);
+            }
+        }
         if let Interaction::Connecting { from, .. } = &self.interaction {
             let from = from.clone();
             let target = self.node_at(event.position, cx).filter(|to| *to != from);
@@ -1664,10 +1768,11 @@ impl ArchitectPane {
         };
         self.set_selection(Some(Selection::Edge(edge)), window, cx);
         if endless {
-            self.notice(
+            self.show_toast(
                 "That connection makes a loop the plan could never leave. Give it a condition \
                  or a repeat limit."
                     .to_string(),
+                false,
                 cx,
             );
         }
@@ -1696,13 +1801,19 @@ impl ArchitectPane {
             "d" if canvas_focused && modifiers.secondary() && !modifiers.shift => {
                 self.duplicate_selection(window, cx);
             }
+            "a" if canvas_focused && modifiers.secondary() && !modifiers.shift => {
+                self.select_all_steps(window, cx);
+            }
+            "delete" | "backspace" if canvas_focused && self.has_bulk_selection() => {
+                self.delete_bulk_selection(window, cx);
+            }
             "home" if canvas_focused => self.select_end_step(false, window, cx),
             "end" if canvas_focused => self.select_end_step(true, window, cx),
             "delete" | "backspace" if canvas_focused => self.delete_selection(window, cx),
             "down" | "right" if canvas_focused => self.select_adjacent_step(true, window, cx),
             "up" | "left" if canvas_focused => self.select_adjacent_step(false, window, cx),
             "enter" if canvas_focused => {
-                if self.selection.is_some() {
+                if self.selection.is_some() || self.has_bulk_selection() {
                     self.open_inspector_drawer(window, cx);
                 }
             }
@@ -1716,7 +1827,7 @@ impl ArchitectPane {
                     self.close_inspector_drawer(window, cx);
                 } else if self.outline_drawer_open {
                     self.close_outline_drawer(window, cx);
-                } else if self.selection.is_some() {
+                } else if self.selection.is_some() || self.has_bulk_selection() {
                     self.set_selection(None, window, cx);
                 } else {
                     self.drill_out(window, cx);
@@ -2102,6 +2213,119 @@ mod tests {
             assert_eq!(pane.selection, Some(Selection::Node(parent.clone())));
             pane.toggle_lock(parent.clone(), window, cx);
             assert!(pane.root_graph(cx).unwrap().node(&parent).unwrap().locked);
+
+            // Several steps at once: a rectangle gathers them, and locking,
+            // moving and deleting act on all of them as one change each.
+            let mut drafts = Vec::new();
+            for _ in 0..2 {
+                pane.add_step(window, cx);
+                let Some(Selection::Node(draft)) = pane.selection.clone() else {
+                    panic!("a new step should be selected");
+                };
+                drafts.push(draft);
+            }
+            pane.set_selection(None, window, cx);
+            pane.interaction = Interaction::Selecting {
+                start: point(px(-600.0), px(-600.0)),
+                at: point(px(-600.0), px(-600.0)),
+            };
+            pane.handle_mouse_up(
+                &MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: point(px(600.0), px(600.0)),
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                },
+                window,
+                cx,
+            );
+            assert_eq!(
+                pane.bulk.len(),
+                3,
+                "the rectangle selects every step it touches"
+            );
+            assert_eq!(pane.selection, None);
+
+            pane.lock_bulk_selection(true, cx);
+            assert!(
+                drafts
+                    .iter()
+                    .all(|id| pane.root_graph(cx).unwrap().node(id).unwrap().locked)
+            );
+            pane.step_history(HistoryDirection::Undo, window, cx);
+            assert!(
+                drafts
+                    .iter()
+                    .all(|id| !pane.root_graph(cx).unwrap().node(id).unwrap().locked),
+                "locking several steps undoes as one change"
+            );
+            assert_eq!(pane.bulk.len(), 3, "undo keeps the steps selected");
+
+            let positions = |pane: &ArchitectPane, cx: &Context<ArchitectPane>| {
+                pane.bulk
+                    .iter()
+                    .map(|id| pane.root_graph(cx).unwrap().node(id).unwrap().position)
+                    .collect::<Vec<_>>()
+            };
+            let before = positions(pane, cx);
+            pane.start_group_drag(drafts[0].clone(), point(px(0.0), px(0.0)), cx);
+            for position in [point(px(16.0), px(8.0)), point(px(40.0), px(16.0))] {
+                pane.handle_mouse_move(
+                    &MouseMoveEvent {
+                        position,
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Modifiers::default(),
+                    },
+                    window,
+                    cx,
+                );
+            }
+            pane.handle_mouse_up(
+                &MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: point(px(40.0), px(16.0)),
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                },
+                window,
+                cx,
+            );
+            let moved: Vec<_> = before
+                .iter()
+                .map(|position| {
+                    position.map(|position| Position {
+                        x: position.x + 40.0,
+                        y: position.y + 16.0,
+                    })
+                })
+                .collect();
+            assert_eq!(
+                positions(pane, cx),
+                moved,
+                "the steps move together, settled or not"
+            );
+            pane.step_history(HistoryDirection::Undo, window, cx);
+            assert_eq!(positions(pane, cx), before, "one drag undoes as one change");
+
+            pane.delete_bulk_selection(window, cx);
+            let graph = pane.root_graph(cx).unwrap();
+            assert!(drafts.iter().all(|id| graph.node(id).is_none()));
+            assert!(graph.node(&parent).is_some(), "a locked step is kept");
+            assert_eq!(
+                pane.selection,
+                Some(Selection::Node(parent.clone())),
+                "the step that was kept stays selected"
+            );
+            pane.step_history(HistoryDirection::Undo, window, cx);
+            assert!(
+                drafts
+                    .iter()
+                    .all(|id| pane.root_graph(cx).unwrap().node(id).is_some()),
+                "deleting several steps undoes as one change"
+            );
+            pane.set_bulk_selection(drafts.clone(), window, cx);
+            pane.delete_bulk_selection(window, cx);
+            assert!(pane.bulk.is_empty() && pane.selection.is_none());
 
             pane.drill_into(parent.clone(), window, cx);
             pane.focus_depth(0, window, cx);

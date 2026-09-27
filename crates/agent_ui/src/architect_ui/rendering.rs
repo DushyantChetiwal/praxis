@@ -5,9 +5,9 @@ use architect::{
     RunOutcome,
 };
 use gpui::{
-    App, Bounds, Context, CursorStyle, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    Hsla, MouseButton, MouseDownEvent, MouseUpEvent, PathBuilder, Pixels, Render, SharedString,
-    Subscription, WeakEntity, Window, canvas, deferred, div, point, px,
+    App, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, Entity, EventEmitter,
+    FocusHandle, Focusable, Hsla, MouseButton, MouseDownEvent, MouseUpEvent, PathBuilder, Pixels,
+    Render, SharedString, Subscription, WeakEntity, Window, canvas, deferred, div, point, px,
 };
 use ui::{ContextMenu, Divider, TintColor, Tooltip, prelude::*, right_click_menu};
 use util::ResultExt as _;
@@ -16,6 +16,7 @@ use workspace::{
     item::{Item, ItemEvent, ItemHandle},
 };
 
+use super::bulk;
 use super::geometry::{EdgeCurve, NODE_WIDTH, paint_curve};
 use super::{
     ArchitectPane, ArchitectWorkspaceMode, DETAIL_ZOOM_THRESHOLD, DUPLICATE_SHORTCUT,
@@ -996,8 +997,8 @@ impl ArchitectPane {
                                             )))
                                             .on_click(
                                                 cx.listener(move |this, _, window, cx| {
-                                                    this.set_selection(
-                                                        Some(Selection::Node(id.clone())),
+                                                    this.select_and_reveal(
+                                                        Selection::Node(id.clone()),
                                                         window,
                                                         cx,
                                                     )
@@ -1031,7 +1032,8 @@ impl ArchitectPane {
                                     let loop_target = loop_targets.contains(&node.id);
                                     let click_id = node.id.clone();
                                     let keyboard_id = node.id.clone();
-                                    let is_selected = selected == Some(&node.id);
+                                    let is_selected = selected == Some(&node.id)
+                                        || self.in_bulk_selection(&node.id);
                                     let is_running = running == Some(&node.id);
                                     let is_failed = failed_node == Some(&node.id);
                                     let is_complete = node
@@ -1099,10 +1101,8 @@ impl ArchitectPane {
                                                         cx.stop_propagation();
                                                     }
                                                     "enter" | "space" => {
-                                                        this.set_selection(
-                                                            Some(Selection::Node(
-                                                                keyboard_id.clone(),
-                                                            )),
+                                                        this.select_and_reveal(
+                                                            Selection::Node(keyboard_id.clone()),
                                                             window,
                                                             cx,
                                                         );
@@ -1113,13 +1113,23 @@ impl ArchitectPane {
                                                 }
                                             },
                                         ))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.set_selection(
-                                                Some(Selection::Node(click_id.clone())),
-                                                window,
-                                                cx,
-                                            )
-                                        }))
+                                        .on_click(cx.listener(
+                                            move |this, event: &ClickEvent, window, cx| {
+                                                if event.modifiers().shift {
+                                                    this.toggle_in_bulk_selection(
+                                                        click_id.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                } else {
+                                                    this.select_and_reveal(
+                                                        Selection::Node(click_id.clone()),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
+                                            },
+                                        ))
                                         .child(
                                             h_flex()
                                                 .gap_1()
@@ -1346,6 +1356,9 @@ impl ArchitectPane {
         const WIDTH: f32 = 168.0;
         const HEIGHT: f32 = 104.0;
         const PADDING: f32 = 8.0;
+        // Room for the label, so the steps are never drawn over it.
+        const TOP: f32 = 20.0;
+        const INSET: f32 = 16.0;
 
         let graph = self.graph(cx)?;
         if graph.nodes.len() < 4 {
@@ -1370,7 +1383,18 @@ impl ArchitectPane {
         }
         let span_x = (max_x - min_x).max(1.0);
         let span_y = (max_y - min_y).max(1.0);
-        let scale = ((WIDTH - PADDING * 2.0) / span_x).min((HEIGHT - PADDING * 2.0) / span_y);
+        let scale = ((WIDTH - PADDING * 2.0) / span_x).min((HEIGHT - TOP - PADDING) / span_y);
+
+        // The part of the plan on screen, so the minimap says where you are.
+        let visible = self.viewport.get().map(|bounds| {
+            let top_left = self.to_canvas(bounds.origin);
+            let bottom_right = self.to_canvas(bounds.bottom_right());
+            let left = (PADDING + (top_left.x - min_x) * scale).clamp(0.0, WIDTH);
+            let top = (TOP + (top_left.y - min_y) * scale).clamp(0.0, HEIGHT);
+            let right = (PADDING + (bottom_right.x - min_x) * scale).clamp(0.0, WIDTH);
+            let bottom = (TOP + (bottom_right.y - min_y) * scale).clamp(0.0, HEIGHT);
+            (left, top, (right - left).max(0.0), (bottom - top).max(0.0))
+        });
 
         let running = self.running_node(cx).cloned();
         let selected = match &self.selection {
@@ -1384,7 +1408,7 @@ impl ArchitectPane {
             div()
                 .absolute()
                 .left(px(PADDING + (position.x - min_x) * scale - 4.0))
-                .top(px(PADDING + (position.y - min_y) * scale - 2.5))
+                .top(px(TOP + (position.y - min_y) * scale - 2.5))
                 .w(px(9.0))
                 .h(px(5.0))
                 .rounded_sm()
@@ -1399,15 +1423,49 @@ impl ArchitectPane {
 
         Some(
             div()
+                .id("architect-minimap")
                 .absolute()
-                .right(px(16.0))
-                .bottom(px(16.0))
+                .right(px(INSET))
+                .bottom(px(INSET))
                 .w(px(WIDTH))
                 .h(px(HEIGHT))
                 .rounded_md()
                 .border_1()
                 .border_color(cx.theme().colors().border)
                 .bg(cx.theme().colors().editor_background.opacity(0.9))
+                .cursor_pointer()
+                .tooltip(Tooltip::text("Click to show that part of the plan"))
+                // Moves the view to the point clicked. The minimap sits a fixed
+                // inset from the canvas corner, which is where it is measured from.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        let Some(bounds) = this.viewport.get() else {
+                            return;
+                        };
+                        let left = f32::from(bounds.right()) - INSET - WIDTH;
+                        let top = f32::from(bounds.bottom()) - INSET - HEIGHT;
+                        let x = min_x + (f32::from(event.position.x) - left - PADDING) / scale;
+                        let y = min_y + (f32::from(event.position.y) - top - TOP) / scale;
+                        this.pan = point(px(-x * this.zoom), px(-y * this.zoom));
+                        cx.notify();
+                    }),
+                )
+                .when_some(visible, |this, (left, top, width, height)| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .left(px(left))
+                            .top(px(top))
+                            .w(px(width))
+                            .h(px(height))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(cx.theme().colors().border_focused)
+                            .bg(cx.theme().colors().border_focused.opacity(0.08)),
+                    )
+                })
                 .child(
                     div().absolute().left(px(8.0)).top(px(4.0)).child(
                         Label::new(match self.focus.0.last() {
@@ -1884,6 +1942,16 @@ impl ArchitectPane {
         };
         let running = self.is_running(cx);
         let pane = cx.weak_entity();
+        let bulk_menu = self.has_bulk_selection().then(|| {
+            let locked = nodes
+                .iter()
+                .filter(|node| node.locked && self.bulk.contains(&node.id))
+                .count();
+            BulkMenu {
+                locked,
+                drafts: self.bulk.len().saturating_sub(locked),
+            }
+        });
 
         nodes
             .into_iter()
@@ -1913,6 +1981,7 @@ impl ArchitectPane {
                     locked: node.locked,
                     has_subplan: node.has_subplan(),
                     running,
+                    bulk: bulk_menu.filter(|_| self.in_bulk_selection(&node.id)),
                 };
                 let card = self.render_node(ix, step_number, node, problem, cx);
                 let pane = pane.clone();
@@ -2072,7 +2141,8 @@ impl ArchitectPane {
         let invalid = problem.is_some();
         let theme = cx.theme().colors().clone();
         let error_border = cx.theme().status().error_border;
-        let selected = self.selection == Some(Selection::Node(node.id.clone()));
+        let selected = self.selection == Some(Selection::Node(node.id.clone()))
+            || self.in_bulk_selection(&node.id);
         let hovered = self.hovered_node.as_ref() == Some(&node.id);
         let detailed = self.zoom >= DETAIL_ZOOM_THRESHOLD;
         let running = self.running_node(cx) == Some(&node.id);
@@ -2178,10 +2248,24 @@ impl ArchitectPane {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.focus_handle.focus(window, cx);
+                    if event.modifiers.shift {
+                        this.last_pressed_node = None;
+                        this.toggle_in_bulk_selection(id.clone(), window, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    // Pressing one of several selected steps drags them all.
+                    if this.in_bulk_selection(&id) {
+                        this.last_pressed_node = Some(id.clone());
+                        this.start_group_drag(id.clone(), event.position, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+
                     let repeated =
                         event.click_count >= 2 && this.last_pressed_node.as_ref() == Some(&id);
                     this.last_pressed_node = Some(id.clone());
-                    this.focus_handle.focus(window, cx);
                     this.set_selection(Some(Selection::Node(id.clone())), window, cx);
 
                     // Double-click opens the step's plan: the gesture people
@@ -2475,6 +2559,7 @@ impl ArchitectPane {
         let nodes = self.render_nodes(cx);
         let minimap = self.render_minimap(cx);
         let zoom_control = self.render_zoom_control(cx);
+        let marquee = self.render_marquee(cx);
 
         v_flex()
             .id("architect-graph-workspace")
@@ -2491,10 +2576,10 @@ impl ArchitectPane {
                     .w_full()
                     .min_h_0()
                     .overflow_hidden()
-                    .cursor(if self.interaction.is_idle() {
-                        CursorStyle::Arrow
-                    } else {
-                        CursorStyle::ClosedHand
+                    .cursor(match self.interaction {
+                        Interaction::None => CursorStyle::Arrow,
+                        Interaction::Selecting { .. } => CursorStyle::Crosshair,
+                        _ => CursorStyle::ClosedHand,
                     })
                     .on_scroll_wheel(cx.listener(Self::handle_scroll))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
@@ -2503,6 +2588,7 @@ impl ArchitectPane {
                     .child(edges)
                     .children(edge_labels)
                     .children(nodes)
+                    .children(marquee)
                     .children(minimap)
                     .child(zoom_control)
                     .into_any()
@@ -2528,7 +2614,18 @@ struct NodeMenu {
     locked: bool,
     has_subplan: bool,
     running: bool,
+    /// Set when the step is one of several selected, whose menu acts on all
+    /// of them.
+    bulk: Option<BulkMenu>,
 }
+
+#[derive(Clone, Copy)]
+struct BulkMenu {
+    locked: usize,
+    drafts: usize,
+}
+
+type PaneAction = fn(&mut ArchitectPane, &mut Window, &mut Context<ArchitectPane>);
 
 impl NodeMenu {
     fn build(
@@ -2538,6 +2635,9 @@ impl NodeMenu {
         cx: &mut App,
     ) -> Entity<ContextMenu> {
         let menu = self.clone();
+        if let Some(bulk) = menu.bulk {
+            return Self::build_bulk(bulk, menu.running, pane, window, cx);
+        }
         ContextMenu::build(window, cx, move |context_menu, _, _| {
             let action = |run: NodeAction| {
                 let pane = pane.clone();
@@ -2587,6 +2687,52 @@ impl NodeMenu {
                         "Delete",
                         None,
                         action(|pane, _, window, cx| pane.delete_selection(window, cx)),
+                    )
+                })
+        })
+    }
+
+    /// The menu for a step that is one of several selected. Its actions apply
+    /// to every selected step, and leave the selection as it is.
+    fn build_bulk(
+        bulk: BulkMenu,
+        running: bool,
+        pane: WeakEntity<ArchitectPane>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<ContextMenu> {
+        ContextMenu::build(window, cx, move |context_menu, _, _| {
+            let action = |run: PaneAction| {
+                let pane = pane.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    pane.update(cx, |pane, cx| run(pane, window, cx)).log_err();
+                }
+            };
+            context_menu
+                .when(!running && bulk.drafts > 0, |this| {
+                    this.entry(
+                        format!("Lock {}", bulk::count_label(bulk.drafts)),
+                        None,
+                        action(|pane, _, cx| pane.lock_bulk_selection(true, cx)),
+                    )
+                })
+                .when(!running && bulk.locked > 0, |this| {
+                    this.entry(
+                        format!("Unlock {}", bulk::count_label(bulk.locked)),
+                        None,
+                        action(|pane, _, cx| pane.lock_bulk_selection(false, cx)),
+                    )
+                })
+                .entry(
+                    "Clear Selection",
+                    None,
+                    action(|pane, window, cx| pane.set_selection(None, window, cx)),
+                )
+                .when(!running && bulk.drafts > 0, |this| {
+                    this.separator().entry(
+                        format!("Delete {}", bulk::count_label(bulk.drafts)),
+                        None,
+                        action(|pane, window, cx| pane.delete_bulk_selection(window, cx)),
                     )
                 })
         })
