@@ -1338,7 +1338,9 @@ impl ArchitectGraph {
     /// limit. `None` whenever the run could go more than one way.
     fn forced_successor(&self, id: &NodeId) -> Option<&NodeId> {
         let mut first_plain = None;
-        for edge in self.edges_from(id) {
+        // Not `edges_from`, whose result borrows `id`: the successor returned
+        // here has to outlive the id it was looked up by.
+        for edge in self.edges.iter().filter(|edge| &edge.from == id) {
             if self.node(&edge.to).is_none() {
                 continue;
             }
