@@ -151,9 +151,12 @@ release; no local compilation is required.
 6. Lock the containing step before its nested steps. Architect refuses the lock.
    Lock the children first, then the parent. Attempting to edit a locked child,
    its outgoing route, or its containing plan is refused.
-7. Run the plan. The thread switches to Build mode, exposes one leaf step at a
-   time, records each `complete_step` summary, and passes the composed nested-plan
-   handoff to the successor. A disconnected second root begins only after the
+7. Run the plan. Each leaf step runs in a fresh Build-mode thread of its own,
+   given only its brief and the summaries earlier steps handed on, so a long
+   plan never has to fit one context window. Each `complete_step` summary is
+   recorded on the plan and the composed nested-plan handoff passes to the
+   successor. **Watch Step** shows the running step's conversation, where its
+   tool requests are allowed. A disconnected second root begins only after the
    first component ends.
 
 For the automated evidence, dispatch **Architect quality** from the Actions tab

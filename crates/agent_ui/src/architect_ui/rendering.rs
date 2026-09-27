@@ -330,6 +330,31 @@ impl ArchitectPane {
         };
 
         let running = self.is_running(cx);
+        // A step running in a thread of its own can only be followed, or its
+        // requests allowed, from that thread's conversation.
+        let watch_step = running && self.run_step_session(cx).is_some();
+        let step_pending = if watch_step {
+            self.run_step_pending_permissions(cx)
+        } else {
+            0
+        };
+        let watch_label = if step_pending > 0 {
+            "Approve Step"
+        } else {
+            "Watch Step"
+        };
+        let watch_tooltip: SharedString = match step_pending {
+            0 => "Show the conversation of the step being run".into(),
+            1 => "The step being run is waiting for you to allow something".into(),
+            count => {
+                format!("The step being run is waiting for you to allow {count} things").into()
+            }
+        };
+        let watch_style = if step_pending > 0 {
+            ButtonStyle::Tinted(TintColor::Warning)
+        } else {
+            ButtonStyle::Subtle
+        };
         // Review jumps to the first thing on this level that blocks a run, so
         // with nothing blocking there is nothing for it to do.
         let review_count = if running {
@@ -536,6 +561,31 @@ impl ArchitectPane {
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.review_plan(window, cx)),
                                 ),
+                        )
+                    })
+                    .when(watch_step && !compact, |this| {
+                        this.child(
+                            Button::new("architect-watch-step", watch_label)
+                                .tab_index(0isize)
+                                .label_size(LabelSize::Small)
+                                .style(watch_style)
+                                .start_icon(Icon::new(IconName::Eye).size(IconSize::XSmall))
+                                .tooltip(Tooltip::text(watch_tooltip.clone()))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.watch_running_step(window, cx);
+                                })),
+                        )
+                    })
+                    .when(watch_step && compact, |this| {
+                        this.child(
+                            IconButton::new("architect-watch-step-compact", IconName::Eye)
+                                .tab_index(0isize)
+                                .icon_size(IconSize::Small)
+                                .when(step_pending > 0, |this| this.icon_color(Color::Warning))
+                                .tooltip(Tooltip::text(watch_tooltip))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.watch_running_step(window, cx);
+                                })),
                         )
                     })
                     // An empty plan has nothing to run; the empty state offers

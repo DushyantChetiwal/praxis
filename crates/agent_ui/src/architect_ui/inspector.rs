@@ -649,6 +649,35 @@ impl ArchitectPane {
         let root_thread = self
             .plan_conversation_view(cx)
             .and_then(|conversation| conversation.read(cx).root_thread_view());
+        // While a step runs in a thread of its own, that thread is the one
+        // doing the work and the one asking to be allowed to do things.
+        let step_view = self.run_step_view(cx);
+        let has_step_view = step_view.is_some();
+        let step_view = step_view.filter(|_| !self.plan_drawer_shows_plan);
+        let showing_step = step_view.is_some();
+        let pending = if showing_step {
+            0
+        } else {
+            self.run_step_pending_permissions(cx)
+        };
+        let (title, subtitle): (SharedString, SharedString) = if showing_step {
+            let step = self
+                .thread
+                .read(cx)
+                .architect_run()
+                .map(|run| format!("Step {} · {}", run.step_number, run.current_title))
+                .unwrap_or_else(|| "Running step".to_string());
+            (
+                step.into(),
+                "This step's own conversation. Allow or deny what it asks here.".into(),
+            )
+        } else {
+            (
+                "Plan Conversation".into(),
+                "Describe the goal or ask for changes to the plan.".into(),
+            )
+        };
+        let root_thread = step_view.or(root_thread);
 
         div()
             .id("architect-plan-conversation-inspector")
@@ -679,23 +708,48 @@ impl ArchitectPane {
                                 v_flex()
                                     .min_w_0()
                                     .gap_0p5()
+                                    .child(Label::new(title).size(LabelSize::Default).truncate())
                                     .child(
-                                        Label::new("Plan Conversation")
-                                            .size(LabelSize::Default)
+                                        Label::new(subtitle)
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted)
                                             .truncate(),
-                                    )
-                                    .child(
-                                        Label::new(
-                                            "Describe the goal or ask for changes to the plan.",
-                                        )
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted)
-                                        .truncate(),
                                     ),
                             )
                             .child(
                                 h_flex()
                                     .gap_0p5()
+                                    .when(has_step_view, |this| {
+                                        this.child(
+                                            Button::new(
+                                                "architect-toggle-step-conversation",
+                                                if showing_step {
+                                                    "Plan"
+                                                } else if pending > 0 {
+                                                    "Step Needs Approval"
+                                                } else {
+                                                    "Running Step"
+                                                },
+                                            )
+                                            .tab_index(0isize)
+                                            .label_size(LabelSize::Small)
+                                            .style(if pending > 0 {
+                                                ButtonStyle::Tinted(TintColor::Warning)
+                                            } else {
+                                                ButtonStyle::Subtle
+                                            })
+                                            .tooltip(Tooltip::text(if showing_step {
+                                                "Show the plan's own conversation"
+                                            } else {
+                                                "Show the conversation of the step being run"
+                                            }))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.plan_drawer_shows_plan =
+                                                    !this.plan_drawer_shows_plan;
+                                                cx.notify();
+                                            })),
+                                        )
+                                    })
                                     .child(
                                         IconButton::new(
                                             "architect-close-plan-conversation",

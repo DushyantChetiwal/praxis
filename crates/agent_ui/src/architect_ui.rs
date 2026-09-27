@@ -245,6 +245,9 @@ pub struct ArchitectPane {
     outline_drawer_open: bool,
     inspector_drawer_open: bool,
     plan_conversation_open: bool,
+    /// While a run is going, the conversation drawer shows the running step's
+    /// own thread unless the user asked for the plan's conversation instead.
+    plan_drawer_shows_plan: bool,
     outline_width: Pixels,
     inspector_width: Pixels,
     search_editor: Entity<Editor>,
@@ -317,6 +320,7 @@ impl ArchitectPane {
             outline_drawer_open: false,
             inspector_drawer_open: false,
             plan_conversation_open: false,
+            plan_drawer_shows_plan: false,
             outline_width,
             inspector_width,
             search_editor,
@@ -1463,8 +1467,19 @@ impl ArchitectPane {
         });
     }
 
+    /// Opens the conversation drawer on the step being run, which is where it
+    /// asks to be allowed to do things.
+    fn watch_running_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_transient_focus(window, cx);
+        self.plan_drawer_shows_plan = false;
+        self.plan_conversation_open = true;
+        self.inspector_drawer_open = true;
+        cx.notify();
+    }
+
     fn open_plan_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_transient_focus(window, cx);
+        self.plan_drawer_shows_plan = true;
         self.plan_conversation_open = true;
         self.inspector_drawer_open = true;
         self.record_activity(None, "Opened the overall plan conversation", cx);

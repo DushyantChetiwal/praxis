@@ -721,6 +721,17 @@ impl ConversationView {
         connected.threads.get(session_id).cloned()
     }
 
+    /// How many tool calls in one of this conversation's threads are waiting
+    /// for the user to allow them.
+    pub(crate) fn pending_permission_count(&self, session_id: &acp::SessionId, cx: &App) -> usize {
+        self.as_connected().map_or(0, |connected| {
+            connected
+                .conversation
+                .read(cx)
+                .pending_tool_call_count_for_session(session_id)
+        })
+    }
+
     pub fn as_connected(&self) -> Option<&ConnectedServerState> {
         match &self.server_state {
             ServerState::Connected(connected) => Some(connected),

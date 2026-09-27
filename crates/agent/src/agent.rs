@@ -2243,6 +2243,50 @@ impl NativeAgentConnection {
         Ok(acp_thread)
     }
 
+    /// Creates a fresh thread to carry out one step of a running plan.
+    ///
+    /// It starts empty rather than inheriting the plan's conversation: the step
+    /// prompt already carries everything the step needs, including what earlier
+    /// steps reported, so each step gets the whole context window to itself and
+    /// the plan's conversation is not filled with every step's tool output. Its
+    /// `complete_step` writes to the plan's thread, which knows the step being
+    /// carried out. Registered as a subagent of the plan's session, so it is
+    /// saved, reopened, and deleted with it.
+    pub fn create_architect_run_step_thread(
+        &self,
+        parent_session_id: &acp::SessionId,
+        title: SharedString,
+        cx: &mut App,
+    ) -> Result<Entity<AcpThread>> {
+        let (parent_thread, project_id) = {
+            let agent = self.0.read(cx);
+            let session = agent
+                .sessions
+                .get(parent_session_id)
+                .context("the thread this plan belongs to is no longer open")?;
+            (session.thread.clone(), session.project_id)
+        };
+
+        let thread = cx.new(|cx| {
+            let mut thread = Thread::new_subagent(&parent_thread, None, cx);
+            thread.set_title(title, cx);
+            thread.set_session_mode(SessionMode::Build, cx);
+            thread
+        });
+        thread.update(cx, |thread, _cx| {
+            thread.add_tool(CompleteStepTool::new(parent_thread.downgrade()));
+        });
+        self.0.update(cx, |agent, cx| -> Result<Entity<AcpThread>> {
+            let acp_thread = agent.register_session(thread, project_id, cx);
+            let parent_session = agent
+                .sessions
+                .get_mut(parent_session_id)
+                .context("the thread this plan belongs to is no longer open")?;
+            parent_session.subagents.push(acp_thread.clone());
+            Ok(acp_thread)
+        })
+    }
+
     /// Gives a step's thread the tool that writes back to its step, if it does
     /// not have it already.
     ///

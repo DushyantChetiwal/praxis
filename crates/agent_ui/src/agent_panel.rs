@@ -5833,6 +5833,29 @@ impl AgentPanel {
         let locked_count = graph.locked_step_count_deeply();
         let nested_count = graph.nodes.iter().filter(|node| node.has_subplan()).count();
         let running = run.is_some_and(agent::ArchitectRun::is_running);
+        // A step running in a thread of its own is followed, and its requests
+        // allowed, by showing that thread in this panel.
+        let plan_session_id = self
+            .active_thread_view(cx)
+            .map(|view| view.read(cx).thread.read(cx).session_id().clone());
+        let step_session_id = run
+            .filter(|_| running)
+            .and_then(agent::ArchitectRun::step_thread)
+            .map(|step_thread| step_thread.read(cx).session_id().clone())
+            .filter(|session_id| Some(session_id) != plan_session_id.as_ref());
+        let conversation_view = self.active_conversation_view().cloned();
+        let step_pending = step_session_id
+            .as_ref()
+            .zip(conversation_view.as_ref())
+            .map_or(0, |(session_id, view)| {
+                view.read(cx).pending_permission_count(session_id, cx)
+            });
+        let viewing_step = step_session_id.as_ref().is_some_and(|session_id| {
+            conversation_view
+                .as_ref()
+                .and_then(|view| view.read(cx).active_thread().cloned())
+                .is_some_and(|view| view.read(cx).thread.read(cx).session_id() == session_id)
+        });
         // A plan that is settled and sound can be run from here, without
         // switching to the canvas only to press Run. Not while the conversation
         // is answering, since the run would start by interrupting it.
@@ -5972,6 +5995,54 @@ impl AgentPanel {
                             ),
                     )
                     .child(if running {
+                        h_flex()
+                            .gap_0p5()
+                            .when_some(step_session_id, |this, step_session_id| {
+                                this.child(
+                                    Button::new(
+                                        "architect-status-view-step",
+                                        if viewing_step {
+                                            "Back to Plan"
+                                        } else if step_pending > 0 {
+                                            "Approve Step"
+                                        } else {
+                                            "View Step"
+                                        },
+                                    )
+                                    .label_size(LabelSize::XSmall)
+                                    .style(if step_pending > 0 && !viewing_step {
+                                        ButtonStyle::Tinted(TintColor::Warning)
+                                    } else {
+                                        ButtonStyle::Subtle
+                                    })
+                                    .tooltip(Tooltip::text(if viewing_step {
+                                        "Return to the plan's conversation"
+                                    } else if step_pending > 0 {
+                                        "The step being run is waiting for you to allow something"
+                                    } else {
+                                        "Show the conversation of the step being run"
+                                    }))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        let Some(view) = this.active_conversation_view().cloned()
+                                        else {
+                                            return;
+                                        };
+                                        view.update(cx, |view, cx| {
+                                            if viewing_step {
+                                                view.return_to_root_thread(cx);
+                                            } else {
+                                                view.navigate_to_thread(
+                                                    step_session_id.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
+                                        });
+                                    })),
+                                )
+                            })
+                            .child(
                         Button::new("architect-status-stop", "Stop")
                             .label_size(LabelSize::XSmall)
                             .style(ButtonStyle::Subtle)
@@ -5981,14 +6052,19 @@ impl AgentPanel {
                             ))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                let Some(thread) = this
-                                    .active_thread_view(cx)
-                                    .and_then(|view| view.read(cx).as_native_thread(cx))
-                                else {
+                                let Some(thread_view) = this.active_thread_view(cx) else {
                                     return;
                                 };
-                                thread.update(cx, |thread, cx| thread.stop_architect_run(cx));
-                            }))
+                                let thread_view = thread_view.read(cx);
+                                let acp_thread = thread_view.thread.clone();
+                                let Some(thread) = thread_view.as_native_thread(cx) else {
+                                    return;
+                                };
+                                // Stops the turn the run is waiting on as well as
+                                // the run, as the canvas's Stop does.
+                                agent::stop_architect_run(&thread, Some(&acp_thread), cx);
+                            })),
+                            )
                             .into_any_element()
                     } else {
                         h_flex()

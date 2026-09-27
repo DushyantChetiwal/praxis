@@ -1,8 +1,11 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 
+use agent_client_protocol::schema::v1 as acp;
 use architect::{NodeId, NodePath};
-use gpui::{App, Context, SharedString};
+use gpui::{App, Context, Entity, SharedString};
+
+use crate::conversation_view::ThreadView;
 
 use super::ArchitectPane;
 
@@ -87,6 +90,39 @@ impl ArchitectPane {
                 .read(cx)
                 .architect_run()
                 .is_some_and(agent::ArchitectRun::is_running)
+    }
+
+    /// The thread the step being run works in, while it has one of its own
+    /// rather than sharing the plan's conversation.
+    pub(super) fn run_step_session(&self, cx: &App) -> Option<acp::SessionId> {
+        if !self.is_running(cx) {
+            return None;
+        }
+        let step_thread = self.thread.read(cx).architect_run()?.step_thread()?;
+        let session_id = step_thread.read(cx).session_id().clone();
+        let plan_session_id = self
+            .plan_acp_thread(cx)
+            .map(|thread| thread.read(cx).session_id().clone());
+        (plan_session_id.as_ref() != Some(&session_id)).then_some(session_id)
+    }
+
+    /// The view of the running step's thread, once the plan's conversation
+    /// has loaded it.
+    pub(super) fn run_step_view(&self, cx: &App) -> Option<Entity<ThreadView>> {
+        let session_id = self.run_step_session(cx)?;
+        self.plan_conversation_view(cx)?
+            .read(cx)
+            .thread_view(&session_id)
+    }
+
+    /// How many things the running step is waiting for the user to allow.
+    pub(super) fn run_step_pending_permissions(&self, cx: &App) -> usize {
+        let Some(session_id) = self.run_step_session(cx) else {
+            return 0;
+        };
+        self.plan_conversation_view(cx).map_or(0, |view| {
+            view.read(cx).pending_permission_count(&session_id, cx)
+        })
     }
 
     /// How often the latest run went from one step to another on the level

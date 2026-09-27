@@ -3,7 +3,7 @@ use agent_client_protocol::schema::v1 as acp;
 use architect::{Decision, PlanRun, RunOutcome, RunRefusal};
 use gpui::{App, AsyncApp, Entity, SharedString};
 
-use crate::{ArchitectRun, SessionMode, Thread};
+use crate::{ArchitectRun, NativeAgentConnection, SessionMode, Thread};
 
 #[derive(Debug)]
 pub enum ArchitectRunStartError {
@@ -56,6 +56,20 @@ pub fn start_architect_run(
     let first_step = plan_run.current();
     let first_title = step_title(&graph, &first_step);
 
+    // With the native agent each step runs in a fresh thread of its own, so a
+    // long plan never has to fit into one context window. Anything else runs
+    // every step in the plan's own conversation, as before.
+    let step_threads = acp_thread
+        .read(cx)
+        .connection()
+        .clone()
+        .downcast::<NativeAgentConnection>()
+        .map(|connection| (connection, acp_thread.read(cx).session_id().clone()));
+    let plan_title = thread
+        .read(cx)
+        .title()
+        .unwrap_or_else(|| SharedString::from("Untitled plan"));
+
     // A run must not inherit summaries from an earlier attempt. Clear both the
     // immutable run snapshot and the live graph that complete_step writes into.
     graph.clear_results();
@@ -70,6 +84,9 @@ pub fn start_architect_run(
     let first_step_for_run = first_step.clone();
     let task = cx.spawn(async move |cx| {
         let mut decision = Decision::Run(first_step_for_run);
+        // Where the last step ran, which is where a branch after it is decided:
+        // that conversation saw the work the question is about.
+        let mut last_step_thread = acp_thread.clone();
         let outcome = loop {
             match decision {
                 Decision::Run(node) => {
@@ -79,7 +96,7 @@ pub fn start_architect_run(
                     if let Err(error) = weak_thread.update(cx, |thread, cx| {
                         thread.note_architect_run_position(
                             node.clone(),
-                            title,
+                            title.clone(),
                             step_number,
                             attempt,
                             cx,
@@ -91,8 +108,57 @@ pub fn start_architect_run(
                         break RunOutcome::Cancelled;
                     }
 
-                    let prompt = architect::step_prompt(&graph, &node, step_number, attempt);
-                    let sent = send_and_wait(&acp_thread, prompt, cx).await;
+                    let mut prompt = architect::step_prompt(&graph, &node, step_number, attempt);
+                    let step_thread = match &step_threads {
+                        Some((connection, plan_session_id)) => {
+                            let label = SharedString::from(format!("Step {step_number}: {title}"));
+                            match cx.update(|cx| {
+                                connection.create_architect_run_step_thread(
+                                    plan_session_id,
+                                    label,
+                                    cx,
+                                )
+                            }) {
+                                Ok(step_thread) => {
+                                    prompt = format!(
+                                        "You are carrying out one step of the plan \"{plan_title}\". \
+                                         Earlier steps ran in conversations of their own; what \
+                                         they reported is included below.\n\n{prompt}"
+                                    );
+                                    step_thread
+                                }
+                                Err(error) => {
+                                    log::warn!(
+                                        "Architect: running {node} in the plan's conversation, \
+                                         since a thread of its own could not be made: {error:#}"
+                                    );
+                                    acp_thread.clone()
+                                }
+                            }
+                        }
+                        None => acp_thread.clone(),
+                    };
+                    last_step_thread = step_thread.clone();
+                    // Tells the plan's conversation about the step's thread, so
+                    // the UI can show it and surface anything it asks to be
+                    // allowed to do.
+                    if step_thread != acp_thread {
+                        let step_session_id = step_thread.read_with(cx, |thread, _cx| {
+                            thread.session_id().clone()
+                        });
+                        acp_thread.update(cx, |thread, cx| {
+                            thread.subagent_spawned(step_session_id, cx);
+                        });
+                    }
+                    if let Err(error) = weak_thread.update(cx, |thread, cx| {
+                        thread.set_architect_run_step_thread(step_thread.downgrade(), cx);
+                    }) {
+                        log::info!(
+                            "Architect: stopped starting a step whose thread was closed: {error}"
+                        );
+                        break RunOutcome::Cancelled;
+                    }
+                    let sent = send_and_wait(&step_thread, prompt, cx).await;
                     if let Err(error) = weak_thread
                         .update(cx, |thread, _cx| thread.clear_architect_step_visit())
                     {
@@ -140,7 +206,7 @@ pub fn start_architect_run(
                                 "Architect: {node} ended without calling complete_step; using its \
                                  closing message as the summary"
                             );
-                            let summary = acp_thread
+                            let summary = step_thread
                                 .read_with(cx, |thread, cx| last_assistant_text(thread, cx))
                                 .trim()
                                 .to_string();
@@ -186,14 +252,14 @@ pub fn start_architect_run(
                 }
                 Decision::Ask(branch) => {
                     let prompt = architect::branch_prompt(&graph, &branch);
-                    if let Err(error) = send_and_wait(&acp_thread, prompt, cx).await {
+                    if let Err(error) = send_and_wait(&last_step_thread, prompt, cx).await {
                         let message = format!("A branch could not be decided: {error}");
                         log::error!("Architect: {message}");
                         break RunOutcome::Failed { message };
                     }
 
-                    let reply =
-                        acp_thread.read_with(cx, |thread, cx| last_assistant_text(thread, cx));
+                    let reply = last_step_thread
+                        .read_with(cx, |thread, cx| last_assistant_text(thread, cx));
                     let taken = architect::parse_verdict(&reply).unwrap_or_else(|| {
                         log::warn!(
                             "Architect: no YES or NO in the reply deciding {}; treating it as no",
@@ -236,6 +302,16 @@ pub fn stop_architect_run(
 ) {
     if let Some(acp_thread) = acp_thread {
         acp_thread
+            .update(cx, |thread, cx| thread.cancel(cx))
+            .detach();
+    }
+    // A step running in a thread of its own has its own turn to stop.
+    if let Some(step_thread) = thread
+        .read(cx)
+        .architect_run()
+        .and_then(ArchitectRun::step_thread)
+    {
+        step_thread
             .update(cx, |thread, cx| thread.cancel(cx))
             .detach();
     }
