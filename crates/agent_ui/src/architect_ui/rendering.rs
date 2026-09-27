@@ -769,8 +769,16 @@ impl ArchitectPane {
                     .collect()
             })
             .unwrap_or_default();
-        let blocking_problems = graph
-            .map(ArchitectGraph::blocking_problems)
+        // Described by step title: the ids in a problem's `Display` form are for
+        // the model, not for the person reading the outline.
+        let blocking_problems: Vec<(Selection, String)> = graph
+            .map(|graph| {
+                graph
+                    .blocking_problems()
+                    .iter()
+                    .map(|problem| (Self::problem_selection(problem), problem.describe(graph)))
+                    .collect()
+            })
             .unwrap_or_default();
         // Named, because a list of identical "add a handoff" rows does not say
         // which step each one is for.
@@ -939,11 +947,11 @@ impl ArchitectPane {
                                             .color(Color::Muted),
                                     )
                                     .children(blocking_problems.iter().enumerate().map(
-                                        |(index, problem)| {
-                                            let selection = Self::problem_selection(problem);
+                                        |(index, (selection, description))| {
+                                            let selection = selection.clone();
                                             Button::new(
                                                 ("architect-readiness-problem", index),
-                                                truncate(&problem.to_string(), 42),
+                                                truncate(description, 42),
                                             )
                                             .tab_index(0isize)
                                             .full_width()
@@ -954,7 +962,7 @@ impl ArchitectPane {
                                                     .size(IconSize::XSmall)
                                                     .color(Color::Warning),
                                             )
-                                            .tooltip(Tooltip::text(problem.to_string()))
+                                            .tooltip(Tooltip::text(description.clone()))
                                             .on_click(
                                                 cx.listener(move |this, _, window, cx| {
                                                     this.set_selection(

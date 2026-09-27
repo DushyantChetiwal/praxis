@@ -1350,7 +1350,7 @@ impl ArchitectPane {
                     .blocking_problems()
                     .into_iter()
                     .filter(|problem| Self::problem_selection(problem) == node_selection)
-                    .map(|problem| problem.to_string())
+                    .map(|problem| problem.describe(graph))
                     .collect()
             })
             .unwrap_or_default();

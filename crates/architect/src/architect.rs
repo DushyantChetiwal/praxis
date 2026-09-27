@@ -294,6 +294,58 @@ impl Display for GraphProblem {
     }
 }
 
+impl GraphProblem {
+    /// The problem as the user should read it, naming steps by title. The
+    /// `Display` form keeps ids, which is what the model needs to fix a plan.
+    pub fn describe(&self, graph: &ArchitectGraph) -> String {
+        let title = |id: &NodeId| {
+            graph
+                .node(id)
+                .map(|node| node.title.trim())
+                .filter(|title| !title.is_empty())
+                .map_or_else(|| id.0.clone(), |title| title.to_string())
+        };
+        let edge_ends = |id: &EdgeId| {
+            graph
+                .edges
+                .iter()
+                .find(|edge| &edge.id == id)
+                .map(|edge| (title(&edge.from), title(&edge.to)))
+        };
+        match self {
+            GraphProblem::DuplicateNode(id) => format!("More than one step uses the id {id}"),
+            GraphProblem::DanglingEdge { edge, .. } => match edge_ends(edge) {
+                Some((from, _)) => {
+                    format!("A connection from \"{from}\" leads to a missing step")
+                }
+                None => "A connection points at a step that no longer exists".to_string(),
+            },
+            GraphProblem::Unreachable(id) => {
+                format!("Nothing leads to \"{}\", so it would never run", title(id))
+            }
+            GraphProblem::EmptyCondition(edge) => match edge_ends(edge) {
+                Some((from, to)) => {
+                    format!("The connection from \"{from}\" to \"{to}\" needs its condition")
+                }
+                None => "A connection needs its condition".to_string(),
+            },
+            GraphProblem::Unlocked(id) => format!("\"{}\" is not locked yet", title(id)),
+            GraphProblem::EndlessLoop(id) => format!(
+                "\"{}\" is in a loop with no way out; give one of its connections a condition \
+                 or a repeat limit",
+                title(id)
+            ),
+            GraphProblem::InSubplan { node, problem } => {
+                let inner = graph
+                    .node(node)
+                    .and_then(ArchitectNode::subplan)
+                    .map_or_else(|| problem.to_string(), |subplan| problem.describe(subplan));
+                format!("Inside \"{}\": {inner}", title(node))
+            }
+        }
+    }
+}
+
 /// Where a step sits, as the ids walked from the top-level plan down to it.
 ///
 /// A bare `NodeId` stops meaning anything once plans nest, because the same id
@@ -1654,6 +1706,16 @@ mod tests {
 
         assert_eq!(graph.roots(), vec![NodeId("reproduce".into())]);
         assert_eq!(graph.problems(), vec![]);
+    }
+
+    #[test]
+    fn problems_describe_steps_by_title() {
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(ArchitectNode::new("draft-step", "Draft the change"));
+        assert_eq!(
+            GraphProblem::Unlocked(NodeId("draft-step".into())).describe(&graph),
+            "\"Draft the change\" is not locked yet"
+        );
     }
 
     #[test]
