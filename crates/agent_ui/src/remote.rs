@@ -45,6 +45,7 @@ use gpui::{App, AsyncApp, Entity, Task, TaskExt as _};
 use http_client::{AsyncBody, HttpClient, HttpRequestExt as _, Method, Request, StatusCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use util::rel_path::RelPath;
 use workspace::{MultiWorkspace, Workspace};
 
 use crate::automation::{architect_pane, with_workspace, workspace_windows};
@@ -115,7 +116,17 @@ async fn run(config_path: PathBuf, http: Arc<dyn HttpClient>, cx: &mut AsyncApp)
         return Ok(());
     };
     validate_repository(&config.repository)?;
-    let token = resolve_token(config.token.as_deref()).await?;
+    // On macOS and Linux the login shell's environment, and with it `gh` on
+    // the `PATH`, may only arrive a little after startup.
+    let token = loop {
+        match resolve_token(config.token.as_deref()).await {
+            Ok(token) => break token,
+            Err(error) => {
+                log::warn!("Praxis Remote has no GitHub token yet, retrying: {error:#}");
+                cx.background_executor().timer(ERROR_BACKOFF).await;
+            }
+        }
+    };
     let device = resolve_device_name(config.device_name.as_deref()).await;
     let github = GitHub {
         http,
@@ -177,6 +188,7 @@ fn read_config(path: &Path) -> Result<Option<Config>> {
 fn validate_repository(repository: &str) -> Result<()> {
     let valid_part = |part: &str| {
         !part.is_empty()
+            && !part.chars().all(|c| c == '.')
             && part
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
@@ -298,7 +310,7 @@ impl GitHub {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
-                Err(_) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(_) => truncate(&String::from_utf8_lossy(&bytes), 500),
             };
             return Err(GitHubError {
                 status,
@@ -369,6 +381,9 @@ struct Remote {
     started_at: DateTime<Utc>,
     comments_etag: Option<String>,
     answered: HashSet<u64>,
+    /// Answers GitHub refused to take, retried before anything new is read,
+    /// since the request they answer has already been carried out.
+    unsent: Vec<(u64, String)>,
     watch: Option<Watch>,
     /// The last snapshot written, without its timestamp, to tell whether
     /// anything changed since.
@@ -398,6 +413,7 @@ impl Remote {
             started_at: Utc::now(),
             comments_etag: None,
             answered: HashSet::default(),
+            unsent: Vec::new(),
             watch: None,
             published: None,
             published_at: None,
@@ -408,25 +424,32 @@ impl Remote {
     }
 
     async fn answer_requests(&mut self, github: &GitHub, cx: &mut AsyncApp) -> Result<()> {
-        let path = github.repo_path(&format!("issues/{}/comments?per_page=100", self.issue));
-        let reply = match github
+        while let Some((comment_id, body)) = self.unsent.first().cloned() {
+            send_answer(github, comment_id, body).await?;
+            self.unsent.remove(0);
+        }
+
+        // The newest comments across the repository, so that a new request is
+        // always on the first page however many older comments pile up.
+        let path = github.repo_path("issues/comments?sort=created&direction=desc&per_page=100");
+        let reply = github
             .call(Method::GET, &path, None, self.comments_etag.as_deref())
-            .await
-        {
-            Ok(reply) => reply,
-            Err(error) if is_gone(&error) => {
-                self.recreate_issue(github).await?;
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
+            .await?;
         if reply.status == StatusCode::NOT_MODIFIED {
             return Ok(());
         }
-        self.comments_etag = reply.etag;
 
-        let comments = reply.body.as_array().cloned().unwrap_or_default();
+        let issue_suffix = format!("/issues/{}", self.issue);
+        let mut comments = reply.body.as_array().cloned().unwrap_or_default();
+        comments.reverse();
         for comment in comments {
+            let on_this_issue = comment
+                .get("issue_url")
+                .and_then(Value::as_str)
+                .is_some_and(|url| url.ends_with(&issue_suffix));
+            if !on_this_issue {
+                continue;
+            }
             let Some(request) = PendingRequest::from_comment(&comment) else {
                 continue;
             };
@@ -445,17 +468,14 @@ impl Remote {
 
             let answer = self.answer(&request, cx).await;
             let body = response_body(&request.id, answer);
-            let path = github.repo_path(&format!("issues/comments/{}", request.comment_id));
-            match github
-                .call(Method::PATCH, &path, Some(json!({ "body": body })), None)
-                .await
-            {
-                Ok(_) => {}
-                // The phone gave up and removed its request.
-                Err(error) if is_gone(&error) => {}
-                Err(error) => return Err(error),
+            if let Err(error) = send_answer(github, request.comment_id, body.clone()).await {
+                self.unsent.push((request.comment_id, body));
+                return Err(error);
             }
         }
+        // Only once every request on the page is answered, so that a failure
+        // part way through is not hidden behind an unchanged page.
+        self.comments_etag = reply.etag;
         Ok(())
     }
 
@@ -464,16 +484,17 @@ impl Remote {
             .parsed
             .as_ref()
             .map_err(|error| anyhow!("{error}"))?;
-        if let Some(created_at) = request.created_at {
-            let age = Utc::now().signed_duration_since(created_at).num_seconds();
-            if age > MAX_REQUEST_AGE_SECONDS {
-                bail!(
-                    "this request was sent {} minutes ago, while Praxis was not running on {}; \
-                     send it again",
-                    age / 60,
-                    self.device
-                );
-            }
+        let created_at = request
+            .created_at
+            .context("GitHub did not say when the request was sent")?;
+        let age = Utc::now().signed_duration_since(created_at).num_seconds();
+        if age > MAX_REQUEST_AGE_SECONDS {
+            bail!(
+                "this request was sent {} minutes ago, while Praxis was not running on {}; \
+                 send it again",
+                age / 60,
+                self.device
+            );
         }
         self.settle_at = Some(Instant::now() + SETTLE_DELAY);
         match parsed.op.as_str() {
@@ -593,6 +614,20 @@ fn is_gone(error: &anyhow::Error) -> bool {
     )
 }
 
+/// Answers a request by replacing the comment that carried it.
+async fn send_answer(github: &GitHub, comment_id: u64, body: String) -> Result<()> {
+    let path = github.repo_path(&format!("issues/comments/{comment_id}"));
+    match github
+        .call(Method::PATCH, &path, Some(json!({ "body": body })), None)
+        .await
+    {
+        Ok(_) => Ok(()),
+        // The phone gave up and removed its request.
+        Err(error) if is_gone(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 async fn find_or_create_issue(github: &GitHub, device: &str, login: &str) -> Result<u64> {
     let title = format!("{TITLE_PREFIX}{device}");
     for state in ["open", "closed"] {
@@ -614,7 +649,7 @@ async fn find_or_create_issue(github: &GitHub, device: &str, login: &str) -> Res
         }
     }
     let now = Utc::now();
-    let body = issue_body(device, now, now, json!(null));
+    let body = issue_body(device, now, now, json!({}));
     let reply = github
         .call(
             Method::POST,
@@ -739,7 +774,11 @@ fn issue_body(
         "device": device,
         "started_at": started_at.to_rfc3339(),
         "last_seen": now.to_rfc3339(),
-    });
+    })
+    .to_string()
+    // Only ever inside JSON strings, so escaping it keeps the JSON the same
+    // while stopping a device name from closing the comment around it.
+    .replace('>', "\\u003e");
     if let Some(object) = snapshot.as_object_mut() {
         object.insert("updated_at".into(), json!(now.to_rfc3339()));
     }
@@ -765,7 +804,17 @@ fn issue_body(
             json!("the conversation was too large to show"),
         );
     }
-    build(&snapshot)
+    let body = build(&snapshot);
+    if body.len() <= MAX_BODY_LEN {
+        return body;
+    }
+    build(&json!({
+        "updated_at": now.to_rfc3339(),
+        "watch": null,
+        "status": null,
+        "thread": null,
+        "thread_error": "what Praxis is doing was too large to show",
+    }))
 }
 
 /// What the phone sees without asking: every window, and the conversation it
@@ -852,7 +901,12 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
                 Err(error) => return Task::ready(Err(error)),
             };
             return match with_workspace(window, cx, |workspace, _, cx| {
-                Ok(project_roots(workspace, cx))
+                let roots = project_roots(workspace, cx);
+                let (root_name, relative) = split_project_path(&roots, &path)?;
+                if is_private(workspace, root_name, relative, cx) {
+                    bail!("{path} is private, so Praxis will not show it");
+                }
+                Ok(roots)
             }) {
                 Ok(roots) => cx
                     .background_executor()
@@ -1139,7 +1193,12 @@ fn architect(
     if !matches!(op, "run" | "stop") {
         bail!("Praxis Remote can only \"run\" or \"stop\" a plan");
     }
-    if let Some(pane) = architect_pane(workspace.read(cx), cx) {
+    // Stopping through the canvas records it in the plan's activity. Starting
+    // goes through the runner directly, since the canvas only shows why a run
+    // could not start, and the phone needs to be told.
+    if op == "stop"
+        && let Some(pane) = architect_pane(workspace.read(cx), cx)
+    {
         pane.update(cx, |pane, cx| {
             pane.automation_command(op, &Value::Null, window, cx)
         })?;
@@ -1191,7 +1250,7 @@ fn threads(workspace: &Entity<Workspace>, cx: &App) -> Result<Value> {
                     .any(|path| roots.contains(path))
         })
         .collect();
-    entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    entries.sort_by_key(|metadata| std::cmp::Reverse(metadata.updated_at));
     let threads: Vec<Value> = entries
         .into_iter()
         .take(MAX_THREADS)
@@ -1324,9 +1383,13 @@ fn truncate(text: &str, limit: usize) -> String {
     format!("{}…", &text[..end])
 }
 
-/// Resolves a path the phone names, such as `project/src/main.rs`, to a file
-/// in one of the window's projects, refusing anything that would leave it.
-fn resolve_project_path(roots: &[(String, PathBuf)], path: &str) -> Result<(String, PathBuf)> {
+/// Splits a path the phone names, such as `project/src/main.rs`, into the
+/// project it is in and the path inside that project, refusing anything that
+/// would climb out of the project or into its Git internals.
+fn split_project_path<'a>(
+    roots: &'a [(String, PathBuf)],
+    path: &'a str,
+) -> Result<(&'a str, &'a str)> {
     let path = path.trim().trim_matches('/');
     let (root_name, relative) = match path.split_once('/') {
         Some((first, rest)) if roots.iter().any(|(name, _)| name == first) => (first, rest),
@@ -1336,23 +1399,54 @@ fn resolve_project_path(roots: &[(String, PathBuf)], path: &str) -> Result<(Stri
             _ => bail!("{path:?} does not start with the name of one of this window's projects"),
         },
     };
+    let plain = Path::new(relative)
+        .components()
+        .all(|component| match component {
+            Component::Normal(name) => name != ".git",
+            Component::CurDir => true,
+            _ => false,
+        });
+    if !plain {
+        bail!("{relative:?} is not a plain path inside the project");
+    }
+    Ok((root_name, relative))
+}
+
+/// Resolves a path the phone names to where it is on disk, and the name to
+/// show for it.
+fn resolve_project_path(roots: &[(String, PathBuf)], path: &str) -> Result<(String, PathBuf)> {
+    let (root_name, relative) = split_project_path(roots, path)?;
     let (_, root) = roots
         .iter()
         .find(|(name, _)| name == root_name)
         .context("no such project")?;
-    let relative_path = Path::new(relative);
-    if relative_path
-        .components()
-        .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
-    {
-        bail!("{relative:?} is not a plain path inside the project");
-    }
     let display = if relative.is_empty() {
         root_name.to_string()
     } else {
         format!("{root_name}/{relative}")
     };
-    Ok((display, root.join(relative_path)))
+    Ok((display, root.join(relative)))
+}
+
+/// Whether the project's `private_files` setting covers a path, in which
+/// case the agent would not read it either.
+fn is_private(workspace: &Entity<Workspace>, root_name: &str, relative: &str, cx: &App) -> bool {
+    // A path Praxis cannot represent is refused rather than guessed about.
+    let Ok(relative) = RelPath::from_unix_str(relative) else {
+        return true;
+    };
+    workspace
+        .read(cx)
+        .project()
+        .read(cx)
+        .visible_worktrees(cx)
+        .any(|worktree| {
+            let worktree = worktree.read(cx);
+            worktree.root_name_str() == root_name
+                && worktree
+                    .as_local()
+                    .is_some_and(|local| local.is_path_private(relative))
+        })
 }
 
 /// Refuses a path that leaves its project through a link.
@@ -1408,8 +1502,8 @@ fn read_file(roots: &[(String, PathBuf)], path: &str) -> Result<Value> {
     let (display, path) = resolve_project_path(roots, path)?;
     let path = ensure_inside(roots, &path)?;
     let metadata = std::fs::metadata(&path)?;
-    if metadata.is_dir() {
-        bail!("{display} is a folder");
+    if !metadata.is_file() {
+        bail!("{display} is not a file");
     }
     if metadata.len() > MAX_FILE_BYTES {
         bail!("{display} is too large to show ({} bytes)", metadata.len());
@@ -1523,6 +1617,25 @@ mod tests {
         let body = issue_body("Laptop", now, now, huge);
         assert!(body.len() <= MAX_BODY_LEN);
         assert!(body.contains("too large to show"));
+
+        let huge_status = json!({ "status": { "text": "x".repeat(MAX_BODY_LEN * 2) } });
+        let body = issue_body("Laptop", now, now, huge_status);
+        assert!(body.len() <= MAX_BODY_LEN);
+        assert!(body.contains("too large to show"));
+    }
+
+    #[test]
+    fn a_device_name_cannot_close_the_heartbeat_comment() {
+        let now = Utc::now();
+        let body = issue_body("evil --> <b>", now, now, json!({}));
+        let device_line = body.lines().next().expect("a first line");
+        let meta = device_line
+            .strip_prefix(DEVICE_MARKER)
+            .and_then(|rest| rest.strip_suffix(" -->"))
+            .expect("one comment on the line");
+        assert!(!meta.contains("-->"));
+        let meta: Value = serde_json::from_str(meta).expect("still valid json");
+        assert_eq!(meta["device"], "evil --> <b>");
     }
 
     #[test]
@@ -1531,6 +1644,8 @@ mod tests {
         assert!(validate_repository("someone").is_err());
         assert!(validate_repository("someone/../x").is_err());
         assert!(validate_repository("a/b?c").is_err());
+        assert!(validate_repository("someone/..").is_err());
+        assert!(validate_repository("../..").is_err());
     }
 
     #[test]
@@ -1548,6 +1663,10 @@ mod tests {
         );
         assert!(resolve_project_path(&roots, "app/../secrets").is_err());
         assert!(resolve_project_path(&roots, "elsewhere/file").is_err());
+        assert!(
+            resolve_project_path(&roots, "app/.git/config").is_err(),
+            "Git's own files can hold credentials"
+        );
 
         let single = vec![("app".to_string(), PathBuf::from("/work/app"))];
         assert_eq!(
