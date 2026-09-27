@@ -1173,14 +1173,6 @@ impl ArchitectGraph {
         Some(graph)
     }
 
-    pub fn graph_at_mut(&mut self, path: &NodePath) -> Option<&mut ArchitectGraph> {
-        let mut graph = self;
-        for id in &path.0 {
-            graph = graph.node_mut(id)?.subplan.as_deref_mut()?;
-        }
-        Some(graph)
-    }
-
     /// Gives a step a plan of its own, or hands back the one it already has.
     pub fn subplan_mut(&mut self, id: &NodeId) -> Option<&mut ArchitectGraph> {
         let node = self.node_mut(id)?;
