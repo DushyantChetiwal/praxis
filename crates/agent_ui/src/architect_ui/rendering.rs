@@ -743,6 +743,30 @@ impl ArchitectPane {
             .cloned()
             .collect();
         let no_search_results = !query.is_empty() && ordered_nodes.is_empty();
+        // Numbered by place in the whole plan, so a search narrows the list
+        // without renumbering the steps it keeps.
+        let step_numbers: HashMap<NodeId, usize> = all_ordered_nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.id.clone(), index + 1))
+            .collect();
+        // Steps a loop can bring the plan back to: the target of a connection
+        // that points backwards and can lead round to where it left.
+        let loop_targets: HashSet<NodeId> = graph
+            .map(|graph| {
+                graph
+                    .edges
+                    .iter()
+                    .filter(|edge| {
+                        let from = step_numbers.get(&edge.from);
+                        let to = step_numbers.get(&edge.to);
+                        matches!((from, to), (Some(from), Some(to)) if to <= from)
+                            && graph.is_loop_edge(edge)
+                    })
+                    .map(|edge| edge.to.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         let blocking_problems = graph
             .map(ArchitectGraph::blocking_problems)
             .unwrap_or_default();
@@ -991,6 +1015,10 @@ impl ArchitectPane {
                             })
                             .children(ordered_nodes.into_iter().enumerate().map(
                                 |(index, node)| {
+                                    let step_number =
+                                        step_numbers.get(&node.id).copied().unwrap_or(index + 1);
+                                    let has_nested = node.has_subplan();
+                                    let loop_target = loop_targets.contains(&node.id);
                                     let click_id = node.id.clone();
                                     let keyboard_id = node.id.clone();
                                     let is_selected = selected == Some(&node.id);
@@ -1024,8 +1052,7 @@ impl ArchitectPane {
                                         .tab_index(0isize)
                                         .role(gpui::Role::Button)
                                         .aria_label(format!(
-                                            "Step {}: {} ({state})",
-                                            index + 1,
+                                            "Step {step_number}: {} ({state})",
                                             node.title
                                         ))
                                         .w_full()
@@ -1088,7 +1115,7 @@ impl ArchitectPane {
                                                 .gap_1()
                                                 .min_w_0()
                                                 .child(
-                                                    Label::new(format!("{:02}", index + 1))
+                                                    Label::new(format!("{step_number:02}"))
                                                         .size(LabelSize::XSmall)
                                                         .color(Color::Muted),
                                                 )
@@ -1096,7 +1123,21 @@ impl ArchitectPane {
                                                     Label::new(node.title)
                                                         .size(LabelSize::Small)
                                                         .truncate(),
-                                                ),
+                                                )
+                                                .when(loop_target, |this| {
+                                                    this.child(
+                                                        Icon::new(IconName::RotateCcw)
+                                                            .size(IconSize::XSmall)
+                                                            .color(Color::Warning),
+                                                    )
+                                                })
+                                                .when(has_nested, |this| {
+                                                    this.child(
+                                                        Icon::new(IconName::ListTree)
+                                                            .size(IconSize::XSmall)
+                                                            .color(Color::Accent),
+                                                    )
+                                                }),
                                         )
                                         .child(
                                             h_flex()
