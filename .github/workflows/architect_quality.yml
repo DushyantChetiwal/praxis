@@ -130,6 +130,7 @@ jobs:
           cargo test --locked -p agent --lib internal_tests::test_each_architect_step_gets_an_independent_chat -- --exact
           cargo test --locked -p agent --lib internal_tests::test_a_reopened_step_thread_gets_its_tool_back -- --exact
           cargo test --locked -p agent --lib internal_tests::test_a_run_records_the_steps_it_took -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_each_run_step_runs_in_a_thread_of_its_own -- --exact
           cargo test --locked -p agent --lib internal_tests::test_step_completion_is_idempotent_and_rejects_stale_visits -- --exact
           cargo test --locked -p agent --lib db::tests::test_architect_graph_roundtrips_through_save_load -- --exact
 
