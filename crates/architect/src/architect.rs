@@ -315,10 +315,8 @@ impl GraphProblem {
         match self {
             GraphProblem::DuplicateNode(id) => format!("More than one step uses the id {id}"),
             GraphProblem::DanglingEdge { edge, .. } => match edge_ends(edge) {
-                Some((from, _)) => {
-                    format!("A connection from \"{from}\" leads to a missing step")
-                }
-                None => "A connection points at a step that no longer exists".to_string(),
+                Some((from, _)) => format!("A connection from \"{from}\" leads to a missing step"),
+                None => "A connection leads to a missing step".to_string(),
             },
             GraphProblem::Unreachable(id) => {
                 format!("Nothing leads to \"{}\", so it would never run", title(id))
