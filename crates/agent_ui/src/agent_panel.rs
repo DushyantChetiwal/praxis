@@ -6289,8 +6289,36 @@ impl AgentPanel {
                             .size(LabelSize::XSmall)
                             .color(Color::Muted),
                     )
-                    .when_some(step.summary.clone(), |this, summary| {
-                        this.tooltip(Tooltip::text(summary))
+                    .map(|this| {
+                        let opens = step.session_id.is_some();
+                        let tooltip = match (step.summary.clone(), opens) {
+                            (Some(summary), true) => Some(SharedString::from(format!(
+                                "{summary}\n\nClick to read the conversation this step ran in."
+                            ))),
+                            (Some(summary), false) => Some(summary),
+                            (None, true) => {
+                                Some("Click to read the conversation this step ran in.".into())
+                            }
+                            (None, false) => None,
+                        };
+                        this.when_some(tooltip, |this, tooltip| {
+                            this.tooltip(Tooltip::text(tooltip))
+                        })
+                    })
+                    // Each step ran in a thread of its own, so the history is
+                    // also the way into what each step actually did.
+                    .when_some(step.session_id.clone(), |this, session_id| {
+                        this.cursor_pointer()
+                            .hover(|style| style.bg(cx.theme().colors().element_hover))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                let Some(view) = this.active_conversation_view().cloned() else {
+                                    return;
+                                };
+                                view.update(cx, |view, cx| {
+                                    view.show_subagent_thread(session_id.clone(), window, cx);
+                                });
+                            }))
                     })
             }))
             .into_any_element()

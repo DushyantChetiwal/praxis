@@ -151,7 +151,7 @@ pub fn start_architect_run(
                         });
                     }
                     if let Err(error) = weak_thread.update(cx, |thread, cx| {
-                        thread.set_architect_run_step_thread(step_thread.downgrade(), cx);
+                        thread.set_architect_run_step_thread(&step_thread, cx);
                     }) {
                         log::info!(
                             "Architect: stopped starting a step whose thread was closed: {error}"

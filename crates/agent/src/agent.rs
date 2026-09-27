@@ -8844,6 +8844,99 @@ mod internal_tests {
     }
 
     #[gpui::test]
+    async fn test_each_run_step_runs_in_a_thread_of_its_own(cx: &mut TestAppContext) {
+        let fake = init_test(cx);
+        let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let model = fake.model("fake");
+
+        let mut graph = architect::ArchitectGraph::default();
+        for (id, title) in [("first", "First"), ("second", "Second")] {
+            let mut node = architect::ArchitectNode::new(id, title);
+            node.locked = true;
+            graph.add_node(node);
+        }
+        graph.connect("first", "second");
+        thread.update(cx, |thread, cx| {
+            thread.set_model(model.clone(), cx);
+            thread.set_architect_graph(Some(graph.clone()), cx);
+        });
+
+        cx.update(|cx| crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx))
+            .expect("a locked plan should start");
+        cx.run_until_parked();
+
+        let request = fake
+            .pending_completions()
+            .pop()
+            .expect("the first step should be sent to the model");
+        assert_ne!(
+            request.thread_id,
+            Some(session_id.to_string()),
+            "a step runs in a thread of its own, not in the plan's conversation"
+        );
+        let prompt = request_texts_after_system(&request.messages)
+            .pop()
+            .expect("the step thread should be sent its brief");
+        assert!(
+            prompt.contains("## Step 1: First"),
+            "unexpected brief: {prompt}"
+        );
+        fake.send_last_text(&model, "Did the first step.");
+        fake.end_last(&model);
+        cx.run_until_parked();
+
+        let request = fake
+            .pending_completions()
+            .pop()
+            .expect("the second step should be sent to the model");
+        let prompt = request_texts_after_system(&request.messages)
+            .pop()
+            .expect("the second step thread should be sent its brief");
+        assert!(
+            prompt.contains("## Step 2: Second"),
+            "unexpected brief: {prompt}"
+        );
+        assert!(
+            prompt.contains("Did the first step."),
+            "what the first step reported is handed on: {prompt}"
+        );
+        assert_eq!(
+            request_texts_after_system(&request.messages).len(),
+            1,
+            "a step starts without any earlier step's transcript"
+        );
+        fake.send_last_text(&model, "Did the second step.");
+        fake.end_last(&model);
+        cx.run_until_parked();
+
+        thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().expect("the run should be recorded");
+            assert_eq!(run.outcome, Some(architect::RunOutcome::Completed));
+            let sessions: Vec<_> = run
+                .history()
+                .iter()
+                .map(|step| step.session_id.clone())
+                .collect();
+            assert_eq!(sessions.len(), 2);
+            assert!(
+                sessions
+                    .iter()
+                    .all(|step| step.as_ref().is_some_and(|step| step != &session_id)),
+                "each step records the thread it ran in: {sessions:?}"
+            );
+            assert_ne!(sessions[0], sessions[1], "each step gets a fresh thread");
+        });
+        acp_thread.read_with(cx, |thread, _| {
+            assert!(
+                thread.entries().is_empty(),
+                "a successful run leaves the plan's conversation untouched"
+            );
+        });
+    }
+
+    #[gpui::test]
     async fn test_step_completion_is_idempotent_and_rejects_stale_visits(cx: &mut TestAppContext) {
         init_test(cx);
         let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;

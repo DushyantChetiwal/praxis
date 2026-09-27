@@ -237,6 +237,9 @@ pub struct RunStep {
     pub attempt: usize,
     /// What the step reported. `None` while it is still running.
     pub summary: Option<SharedString>,
+    /// The thread the step ran in, when it had one of its own, so what it did
+    /// can be read afterwards.
+    pub session_id: Option<acp::SessionId>,
     started_at: Instant,
     /// Set when the step ends, so a finished step stops counting up.
     elapsed: Option<Duration>,
@@ -2342,13 +2345,20 @@ impl Thread {
         cx.notify();
     }
 
+    /// Records the thread the current step runs in. A step running in this
+    /// thread's own conversation has no separate thread to record.
     pub fn set_architect_run_step_thread(
         &mut self,
-        step_thread: WeakEntity<acp_thread::AcpThread>,
+        step_thread: &Entity<acp_thread::AcpThread>,
         cx: &mut Context<Self>,
     ) {
+        let session_id = step_thread.read(cx).session_id().clone();
+        let own_thread = session_id == self.id;
         if let Some(run) = self.architect_run.as_mut() {
-            run.step_thread = Some(step_thread);
+            run.step_thread = Some(step_thread.downgrade());
+            if !own_thread && let Some(step) = run.history.last_mut() {
+                step.session_id = Some(session_id);
+            }
             cx.notify();
         }
     }
@@ -2388,6 +2398,7 @@ impl Thread {
                 title: current_title,
                 attempt,
                 summary: None,
+                session_id: None,
                 started_at: Instant::now(),
                 elapsed: None,
             });

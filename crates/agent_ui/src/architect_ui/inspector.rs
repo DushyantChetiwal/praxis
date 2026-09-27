@@ -651,16 +651,44 @@ impl ArchitectPane {
             .and_then(|conversation| conversation.read(cx).root_thread_view());
         // While a step runs in a thread of its own, that thread is the one
         // doing the work and the one asking to be allowed to do things.
-        let step_view = self.run_step_view(cx);
+        // A past visit opened from a step's activity takes precedence over
+        // following the step being run.
+        let inspected = self.inspected_step_session.clone();
+        let step_view = match &inspected {
+            Some(session_id) => self
+                .plan_conversation_view(cx)
+                .and_then(|view| view.read(cx).thread_view(session_id)),
+            None => self.run_step_view(cx),
+        };
         let has_step_view = step_view.is_some();
         let step_view = step_view.filter(|_| !self.plan_drawer_shows_plan);
         let showing_step = step_view.is_some();
-        let pending = if showing_step {
+        // A visit is loaded when it is opened, and shows once it arrives.
+        let loading_visit = inspected.is_some() && !has_step_view && !self.plan_drawer_shows_plan;
+        let pending = if showing_step || inspected.is_some() {
             0
         } else {
             self.run_step_pending_permissions(cx)
         };
-        let (title, subtitle): (SharedString, SharedString) = if showing_step {
+        let (title, subtitle): (SharedString, SharedString) = if let Some(session_id) =
+            inspected.as_ref().filter(|_| showing_step || loading_visit)
+        {
+            let step = self
+                .thread
+                .read(cx)
+                .architect_run()
+                .and_then(|run| {
+                    run.history()
+                        .iter()
+                        .find(|step| step.session_id.as_ref() == Some(session_id))
+                })
+                .map(|step| match step.attempt {
+                    1 => step.title.to_string(),
+                    attempt => format!("{} · attempt {attempt}", step.title),
+                })
+                .unwrap_or_else(|| "Step visit".to_string());
+            (step.into(), "The conversation this step ran in.".into())
+        } else if showing_step {
             let step = self
                 .thread
                 .read(cx)
@@ -727,6 +755,8 @@ impl ArchitectPane {
                                                     "Plan"
                                                 } else if pending > 0 {
                                                     "Step Needs Approval"
+                                                } else if inspected.is_some() {
+                                                    "Step Visit"
                                                 } else {
                                                     "Running Step"
                                                 },
@@ -740,6 +770,8 @@ impl ArchitectPane {
                                             })
                                             .tooltip(Tooltip::text(if showing_step {
                                                 "Show the plan's own conversation"
+                                            } else if inspected.is_some() {
+                                                "Show the conversation this step ran in"
                                             } else {
                                                 "Show the conversation of the step being run"
                                             }))
@@ -766,7 +798,18 @@ impl ArchitectPane {
                                     ),
                             ),
                     )
-                    .child(match root_thread {
+                    .child(match root_thread.filter(|_| !loading_visit) {
+                        None if loading_visit => v_flex()
+                            .flex_1()
+                            .items_center()
+                            .justify_center()
+                            .p_3()
+                            .child(
+                                Label::new("Opening this step's conversation…")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .into_any(),
                         Some(view) => div()
                             .flex_1()
                             .min_h_0()
@@ -1499,7 +1542,14 @@ impl ArchitectPane {
             .filter(|entry| entry.path.as_ref().is_none_or(|path| path == &node_path))
             .map(|entry| entry.message.clone())
             .collect();
-        let run_activity: Vec<(SharedString, usize, u64, bool, Option<SharedString>)> = self
+        let run_activity: Vec<(
+            SharedString,
+            usize,
+            u64,
+            bool,
+            Option<SharedString>,
+            Option<acp::SessionId>,
+        )> = self
             .thread
             .read(cx)
             .architect_run()
@@ -1514,6 +1564,7 @@ impl ArchitectPane {
                             step.elapsed().as_secs(),
                             step.is_running(),
                             step.summary.clone(),
+                            step.session_id.clone(),
                         )
                     })
                     .collect()
@@ -2166,12 +2217,7 @@ impl ArchitectPane {
                                         h_flex()
                                             .w_full()
                                             .justify_between()
-                                            .child(field("Run Activity"))
-                                            .child(
-                                                Label::new("source · plan conversation")
-                                                    .size(LabelSize::XSmall)
-                                                    .color(Color::Muted),
-                                            ),
+                                            .child(field("Run Activity")),
                                     )
                                     .when(run_activity.is_empty(), |this| {
                                         this.child(
@@ -2183,7 +2229,7 @@ impl ArchitectPane {
                                         )
                                     })
                                     .children(run_activity.iter().enumerate().map(
-                                        |(index, (title, attempt, elapsed, running, summary))| {
+                                        |(index, (title, attempt, elapsed, running, summary, session))| {
                                             v_flex()
                                                 .id(("architect-step-activity", index))
                                                 .gap_0p5()
@@ -2220,7 +2266,32 @@ impl ArchitectPane {
                                                             ))
                                                             .size(LabelSize::XSmall)
                                                             .color(Color::Muted),
-                                                        ),
+                                                        )
+                                                        // Each visit ran in a thread of its
+                                                        // own, which is where what it did can
+                                                        // be read.
+                                                        .when_some(session.clone(), |this, session| {
+                                                            this.child(
+                                                                Button::new(
+                                                                    ("architect-open-step-visit", index),
+                                                                    "Open",
+                                                                )
+                                                                .label_size(LabelSize::XSmall)
+                                                                .style(ButtonStyle::Subtle)
+                                                                .tooltip(Tooltip::text(
+                                                                    "Read the conversation this visit ran in",
+                                                                ))
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, window, cx| {
+                                                                        this.open_step_visit(
+                                                                            session.clone(),
+                                                                            window,
+                                                                            cx,
+                                                                        );
+                                                                    },
+                                                                )),
+                                                            )
+                                                        }),
                                                 )
                                                 .when_some(summary.clone(), |this, summary| {
                                                     this.child(

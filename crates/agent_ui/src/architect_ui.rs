@@ -27,7 +27,7 @@ use git_ui::git_panel::GitPanel;
 use gpui::{
     AnyWindowHandle, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    ScrollDelta, ScrollWheelEvent, Subscription, WeakEntity, Window, point, px,
+    ScrollDelta, ScrollWheelEvent, Subscription, TaskExt as _, WeakEntity, Window, point, px,
 };
 use project_panel::ProjectPanel;
 use settings::Settings as _;
@@ -248,6 +248,9 @@ pub struct ArchitectPane {
     /// While a run is going, the conversation drawer shows the running step's
     /// own thread unless the user asked for the plan's conversation instead.
     plan_drawer_shows_plan: bool,
+    /// A past step visit whose thread the conversation drawer is showing, as
+    /// opened from a step's run activity. `None` follows the running step.
+    inspected_step_session: Option<agent_client_protocol::schema::v1::SessionId>,
     outline_width: Pixels,
     inspector_width: Pixels,
     search_editor: Entity<Editor>,
@@ -321,6 +324,7 @@ impl ArchitectPane {
             inspector_drawer_open: false,
             plan_conversation_open: false,
             plan_drawer_shows_plan: false,
+            inspected_step_session: None,
             outline_width,
             inspector_width,
             search_editor,
@@ -533,6 +537,7 @@ impl ArchitectPane {
         self.outline_drawer_open = false;
         self.inspector_drawer_open = false;
         self.plan_conversation_open = false;
+        self.inspected_step_session = None;
         self.last_architect_focus = None;
         self.transient_return_focus = None;
         self.pan = point(px(0.0), px(0.0));
@@ -813,6 +818,7 @@ impl ArchitectPane {
 
     fn close_plan_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.plan_conversation_open = false;
+        self.inspected_step_session = None;
         self.restore_transient_focus(window, cx);
         cx.notify();
     }
@@ -1472,16 +1478,50 @@ impl ArchitectPane {
     fn watch_running_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The step's thread is normally loaded as it starts; this covers a
         // plan conversation that missed it.
-        if let Some((session_id, view)) = self
-            .run_step_session(cx)
-            .zip(self.plan_conversation_view(cx))
-        {
-            view.update(cx, |view, cx| {
-                view.ensure_subagent_thread_loaded(session_id, window, cx);
-            });
+        if let Some(session_id) = self.run_step_session(cx) {
+            self.load_step_thread(session_id, window, cx);
         }
         self.remember_transient_focus(window, cx);
         self.plan_drawer_shows_plan = false;
+        self.inspected_step_session = None;
+        self.plan_conversation_open = true;
+        self.inspector_drawer_open = true;
+        cx.notify();
+    }
+
+    /// Loads a step's thread into the plan's conversation, if it is not there
+    /// already, and redraws once it is so the drawer can show it.
+    fn load_step_thread(
+        &mut self,
+        session_id: agent_client_protocol::schema::v1::SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.plan_conversation_view(cx) else {
+            return;
+        };
+        let load = view.update(cx, |view, cx| {
+            view.ensure_subagent_thread_loaded(session_id, window, cx)
+        });
+        cx.spawn(async move |this, cx| {
+            load.await?;
+            this.update(cx, |_, cx| cx.notify())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Opens the conversation drawer on the thread a step ran in, so what it
+    /// did can be read after the run.
+    fn open_step_visit(
+        &mut self,
+        session_id: agent_client_protocol::schema::v1::SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_step_thread(session_id.clone(), window, cx);
+        self.remember_transient_focus(window, cx);
+        self.plan_drawer_shows_plan = false;
+        self.inspected_step_session = Some(session_id);
         self.plan_conversation_open = true;
         self.inspector_drawer_open = true;
         cx.notify();
@@ -1490,6 +1530,7 @@ impl ArchitectPane {
     fn open_plan_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_transient_focus(window, cx);
         self.plan_drawer_shows_plan = true;
+        self.inspected_step_session = None;
         self.plan_conversation_open = true;
         self.inspector_drawer_open = true;
         self.record_activity(None, "Opened the overall plan conversation", cx);

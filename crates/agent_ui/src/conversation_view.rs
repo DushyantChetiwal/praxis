@@ -753,15 +753,16 @@ impl ConversationView {
         session_id: acp::SessionId,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Task<Result<()>> {
         if self.thread_view(&session_id).is_some() {
-            return;
+            return Task::ready(Ok(()));
         }
         let Some(root_session_id) = self.root_session_id.clone() else {
-            return;
+            return Task::ready(Err(anyhow!(
+                "the conversation that owns this step is not open"
+            )));
         };
         self.load_subagent_session(session_id, root_session_id, window, cx)
-            .detach_and_log_err(cx);
     }
 
     /// How many tool calls in one of this conversation's threads are waiting
