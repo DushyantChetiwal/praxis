@@ -209,6 +209,10 @@ pub struct ArchitectPane {
     edge_inspector: Option<EdgeInspector>,
     interaction: Interaction,
     hovered_node: Option<NodeId>,
+    /// The step the last left press landed on. The platform counts a double
+    /// click by time and place alone, so a press on a menu or the canvas
+    /// followed by one on a step must not open that step's plan.
+    last_pressed_node: Option<NodeId>,
     /// Which plan the canvas is showing. Empty is the top-level plan; each id
     /// appended is a step whose own plan has been opened.
     focus: NodePath,
@@ -280,6 +284,7 @@ impl ArchitectPane {
             edge_inspector: None,
             interaction: Interaction::None,
             hovered_node: None,
+            last_pressed_node: None,
             focus: NodePath::default(),
             expanded: HashSet::default(),
             inspector_tab: InspectorTab::Details,
@@ -1541,6 +1546,7 @@ impl ArchitectPane {
         if event.button != MouseButton::Left {
             return;
         }
+        self.last_pressed_node = None;
         self.focus_handle.focus(window, cx);
 
         // Nodes handle their own presses, so reaching here means empty canvas

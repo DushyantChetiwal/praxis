@@ -2178,12 +2178,15 @@ impl ArchitectPane {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    let repeated =
+                        event.click_count >= 2 && this.last_pressed_node.as_ref() == Some(&id);
+                    this.last_pressed_node = Some(id.clone());
                     this.focus_handle.focus(window, cx);
                     this.set_selection(Some(Selection::Node(id.clone())), window, cx);
 
                     // Double-click opens the step's plan: the gesture people
                     // already try on a box that looks like it contains something.
-                    if event.click_count >= 2 {
+                    if repeated {
                         this.drill_into(id.clone(), window, cx);
                         cx.stop_propagation();
                         return;
@@ -2541,6 +2544,7 @@ impl NodeMenu {
                 let id = menu.id.clone();
                 move |window: &mut Window, cx: &mut App| {
                     pane.update(cx, |pane, cx| {
+                        pane.last_pressed_node = None;
                         pane.set_selection(Some(Selection::Node(id.clone())), window, cx);
                         run(pane, id.clone(), window, cx);
                     })
