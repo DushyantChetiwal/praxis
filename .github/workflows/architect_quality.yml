@@ -118,6 +118,7 @@ jobs:
           cargo test --locked -p agent --lib tools::git_tool::tests::
           cargo test --locked -p agent --lib tools::pull_request_tool::tests::
           cargo test --locked -p agent --lib tools::refine_step_tool::tests::
+          cargo test --locked -p agent --lib tools::draft_plan_tool::tests::
 
       - name: Test native-agent mode and run integration
         run: |
