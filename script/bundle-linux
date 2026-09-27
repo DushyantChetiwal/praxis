@@ -12,8 +12,13 @@ Build a release .tar.gz for Linux.
 Options:
   -h, --help     Display this help and exit.
   --flatpak      Set ZED_BUNDLE_TYPE=flatpak so that this can be included in system info
+  --remote-server-only
+                 Build and package only the remote server, which the Windows
+                 installer bundles for WSL
   "
 }
+
+remote_server_only=false
 
 # Parse all arguments manually
 while [[ $# -gt 0 ]]; do
@@ -24,6 +29,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --flatpak)
             export ZED_BUNDLE_TYPE=flatpak
+            shift
+            ;;
+        --remote-server-only)
+            remote_server_only=true
             shift
             ;;
         --)
@@ -79,7 +88,9 @@ fi
 export CC=${CC:-$(which clang)}
 
 # Build binary in release mode
-cargo --config .cargo/bundle-config.toml build --release --target "${target_triple}" --package zed --package cli
+if ! "$remote_server_only"; then
+    cargo --config .cargo/bundle-config.toml build --release --target "${target_triple}" --package zed --package cli
+fi
 # Build remote_server in separate invocation to prevent feature unification from other crates
 # from influencing dynamic libraries required by it.
 if [[ "$remote_server_triple" == "$musl_triple" ]]; then
@@ -87,6 +98,17 @@ if [[ "$remote_server_triple" == "$musl_triple" ]]; then
     export "$musl_cc_var"=musl-gcc
 fi
 cargo --config .cargo/bundle-config.toml build --release --target "${remote_server_triple}" --package remote_server
+
+if "$remote_server_only"; then
+    remote_server="${target_dir}/${remote_server_triple}/release/remote_server"
+    llvm-objcopy --only-keep-debug "${remote_server}" "${remote_server}.dbg"
+    llvm-objcopy --strip-debug --discard-all "${remote_server}"
+    if [[ "$remote_server_triple" == *-musl ]] && ldd "${remote_server}" | grep -q 'libcrypto\|libssl'; then
+        echo "Error: remote_server still depends on libssl or libcrypto" && exit 1
+    fi
+    gzip -f --stdout --best "${remote_server}" > "${target_dir}/zed-remote-server-linux-$(uname -m).gz"
+    exit 0
+fi
 
 # Upload debug info to sentry.io
 if ! command -v sentry-cli >/dev/null 2>&1; then

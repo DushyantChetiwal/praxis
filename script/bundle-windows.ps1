@@ -27,7 +27,10 @@ $Architecture = if ($Architecture) {
     $OSArchitecture
 }
 
-$CargoOutDir = "./target/$Architecture-pc-windows-msvc/release"
+# A lighter profile makes test installers far quicker to build. Published
+# installers keep the default.
+$CargoProfile = if ($env:PRAXIS_CARGO_PROFILE) { $env:PRAXIS_CARGO_PROFILE } else { "release" }
+$CargoOutDir = "./target/$Architecture-pc-windows-msvc/$CargoProfile"
 
 function Get-VSArch {
     param(
@@ -127,8 +130,41 @@ function PrepareForBundle {
     New-Item -Path "$innoDir\bin" -ItemType Directory -Force
     New-Item -Path "$innoDir\tools" -ItemType Directory -Force
 
+    rustup target add $target
+}
+
+# Staged last rather than first, so a CI run can build the Linux remote server
+# at the same time as this installer and hand it over once both are done.
+function StageLinuxRemoteServer {
     $linuxRemoteServerName = "zed-remote-server-linux-x86_64.gz"
     $stagedLinuxRemoteServer = Join-Path $env:ZED_WORKSPACE "target\$linuxRemoteServerName"
+    $artifact = $env:PRAXIS_LINUX_REMOTE_SERVER_ARTIFACT
+    if ($artifact -and -not (Test-Path $stagedLinuxRemoteServer -PathType Leaf)) {
+        # Downloads the artifact from the workflow run this build is part of.
+        $deadline = (Get-Date).AddMinutes(90)
+        while ($true) {
+            # Not there yet is expected, so a failed download is retried rather
+            # than allowed to stop the script.
+            try {
+                $PSNativeCommandUseErrorActionPreference = $false
+                & gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name $artifact --dir (Join-Path $env:ZED_WORKSPACE "target")
+            }
+            catch {
+                Write-Output "Download attempt failed: $_"
+            }
+            finally {
+                $PSNativeCommandUseErrorActionPreference = $true
+            }
+            if (Test-Path $stagedLinuxRemoteServer -PathType Leaf) {
+                break
+            }
+            if ((Get-Date) -gt $deadline) {
+                throw "The Linux remote server artifact $artifact did not arrive in time"
+            }
+            Write-Output "Waiting for the Linux remote server artifact $artifact"
+            Start-Sleep -Seconds 60
+        }
+    }
     if (Test-Path $stagedLinuxRemoteServer -PathType Leaf) {
         Copy-Item $stagedLinuxRemoteServer (Join-Path $innoDir $linuxRemoteServerName) -Force
         Write-Output "Staged bundled Linux remote server"
@@ -136,8 +172,6 @@ function PrepareForBundle {
     else {
         Write-Warning "No staged Linux remote server found at $stagedLinuxRemoteServer; WSL will use the source-build fallback"
     }
-
-    rustup target add $target
 }
 
 function GenerateLicenses {
@@ -147,20 +181,20 @@ function GenerateLicenses {
 function BuildZedAndItsFriends {
     Write-Output "Building Zed and its friends, for channel: $channel"
     # Build zed.exe, cli.exe and auto_update_helper.exe
-    cargo --config .cargo/bundle-config.toml build --release --package zed --package cli --package auto_update_helper --target $target
+    cargo --config .cargo/bundle-config.toml build --profile $CargoProfile --package zed --package cli --package auto_update_helper --target $target
     Copy-Item -Path ".\$CargoOutDir\zed.exe" -Destination "$innoDir\Zed.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
     # Build explorer_command_injector.dll
     switch ($channel) {
         "stable" {
-            cargo --config .cargo/bundle-config.toml build --release --features stable --no-default-features --package explorer_command_injector --target $target
+            cargo --config .cargo/bundle-config.toml build --profile $CargoProfile --features stable --no-default-features --package explorer_command_injector --target $target
         }
         "preview" {
-            cargo --config .cargo/bundle-config.toml build --release --features preview --no-default-features --package explorer_command_injector --target $target
+            cargo --config .cargo/bundle-config.toml build --profile $CargoProfile --features preview --no-default-features --package explorer_command_injector --target $target
         }
         default {
-            cargo --config .cargo/bundle-config.toml build --release --package explorer_command_injector --target $target
+            cargo --config .cargo/bundle-config.toml build --profile $CargoProfile --package explorer_command_injector --target $target
         }
     }
     Copy-Item -Path ".\$CargoOutDir\explorer_command_injector.dll" -Destination "$innoDir\zed_explorer_command_injector.dll" -Force
@@ -168,7 +202,7 @@ function BuildZedAndItsFriends {
 
 function BuildRemoteServer {
     Write-Output "Building remote_server for $target"
-    cargo --config .cargo/bundle-config.toml build --release --package remote_server --target $target
+    cargo --config .cargo/bundle-config.toml build --profile $CargoProfile --package remote_server --target $target
 
     # Create zipped remote server binary
     $remoteServerSrc = (Resolve-Path ".\$CargoOutDir\remote_server.exe").Path
@@ -448,6 +482,7 @@ ZipZedAndItsFriendsDebug
 DownloadAMDGpuServices
 DownloadConpty
 CollectFiles
+StageLinuxRemoteServer
 BuildInstaller
 
 if($env:CI) {
