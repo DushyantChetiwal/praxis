@@ -4278,6 +4278,11 @@ impl AgentPanel {
         }
 
         self.refresh_base_view_subscriptions(window, cx);
+        // Deferred because this can run inside a workspace update, and
+        // restoring reads the workspace.
+        cx.defer_in(window, |this, window, cx| {
+            this.restore_architect_for_active_thread(window, cx);
+        });
 
         if focus {
             self.activation_focus_handle(cx).focus(window, cx);
@@ -4304,6 +4309,11 @@ impl AgentPanel {
                     this.observe_active_draft_for_empty_editor(&server_view, cx);
                     cx.emit(AgentPanelEvent::ActiveViewChanged);
                     this.serialize(cx);
+                    // A thread that finishes loading after the view was set
+                    // is only now able to bring Architect back.
+                    cx.defer_in(window, |this, window, cx| {
+                        this.restore_architect_for_active_thread(window, cx);
+                    });
                     cx.notify();
                 }))
             }
@@ -6242,6 +6252,18 @@ impl AgentPanel {
                 log::error!("Could not restore the Architect workspace: {error:#}");
             }
         });
+    }
+
+    /// Restoring only while the panel renders is not enough: quitting from
+    /// Architect saves the workspace with its docks hidden, so after a relaunch
+    /// the panel is not drawn until something opens it.
+    fn restore_architect_for_active_thread(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(thread) = self
+            .active_thread_view(cx)
+            .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))
+        {
+            self.restore_architect_if_needed(thread, window, cx);
+        }
     }
 
     pub(crate) fn retained_architect_pane(

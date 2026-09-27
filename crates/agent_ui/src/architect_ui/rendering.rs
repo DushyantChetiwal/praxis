@@ -380,7 +380,9 @@ impl ArchitectPane {
             .read(cx)
             .title()
             .unwrap_or_else(|| SharedString::from("Untitled plan"));
-        let empty = step_count == 0 && !running;
+        // Whether the plan has started is, like readiness, about the whole
+        // plan: an empty sub-plan inside a drafted plan is not "Not started".
+        let empty = run_step_count == 0 && !running;
         let readiness = if running {
             "Running"
         } else if ready_to_run {
