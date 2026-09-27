@@ -14,7 +14,8 @@
 //! - `{"command":"state"}`: the window, its docks and tabs, and the canvas.
 //! - `{"command":"action","name":"workspace::Save","data":null}`: dispatches
 //!   an action to whatever has focus.
-//! - `{"command":"keys","keys":"ctrl-z ctrl-d"}`: types keystrokes.
+//! - `{"command":"keys","keys":"ctrl-z ctrl-d"}`: types keystrokes, all
+//!   against the same frame; send a key that moves focus in its own request.
 //! - `{"command":"architect","op":"select","args":{"node":"..."}}`: a canvas
 //!   action; see `ArchitectPane::automation_command`. `open` opens the canvas
 //!   for the Agent panel's thread.
@@ -82,10 +83,11 @@ pub fn init(cx: &mut App) {
                 }
             };
             for (name, contents) in pending {
-                let result = match serde_json::from_str::<Request>(&contents) {
-                    Ok(request) => cx.update(|cx| handle(request, cx)),
-                    Err(error) => Err(anyhow!("could not parse the request: {error}")),
-                };
+                let result = contents.and_then(|contents| {
+                    let request = serde_json::from_str::<Request>(&contents)
+                        .context("could not parse the request")?;
+                    cx.update(|cx| handle(request, cx))
+                });
                 let reply = match result {
                     Ok(result) => json!({ "ok": true, "result": result }),
                     Err(error) => json!({ "ok": false, "error": format!("{error:#}") }),
@@ -105,8 +107,10 @@ pub fn init(cx: &mut App) {
 }
 
 /// Reads and removes every waiting request, oldest name first. A request is
-/// removed before it is handled so that one which fails is never retried.
-fn take_requests(folder: &Path) -> Result<Vec<(String, String)>> {
+/// removed before it is handled so that one which fails is never retried, and
+/// one that cannot be read is answered with the reason rather than holding up
+/// the rest.
+fn take_requests(folder: &Path) -> Result<Vec<(String, Result<String>)>> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(folder)?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| {
@@ -121,9 +125,11 @@ fn take_requests(folder: &Path) -> Result<Vec<(String, String)>> {
             continue;
         };
         let name = name.to_string();
-        let contents = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        let contents =
+            std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()));
+        if let Err(error) = std::fs::remove_file(&path) {
+            log::error!("Could not remove {}: {error:#}", path.display());
+        }
         pending.push((name, contents));
     }
     Ok(pending)

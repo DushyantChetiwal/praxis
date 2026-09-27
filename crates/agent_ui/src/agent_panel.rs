@@ -1151,6 +1151,9 @@ pub struct AgentPanel {
     retained_architect_pane: Option<Entity<crate::architect_ui::ArchitectPane>>,
     /// Avoids a database read on every render before Architect has been opened.
     persisted_architect_mode: std::cell::Cell<Option<crate::architect_ui::ArchitectWorkspaceMode>>,
+    /// The thread Architect was last brought back for outside of rendering, so
+    /// a thread's stream of updates does not repeat the check on every one.
+    architect_restored_for: std::cell::Cell<Option<gpui::EntityId>>,
 
     is_active: bool,
 }
@@ -1570,6 +1573,7 @@ impl AgentPanel {
             architect_timeline_expanded: true,
             retained_architect_pane: None,
             persisted_architect_mode: std::cell::Cell::new(None),
+            architect_restored_for: std::cell::Cell::new(None),
             is_active: false,
         };
 
@@ -5830,11 +5834,20 @@ impl AgentPanel {
         let nested_count = graph.nodes.iter().filter(|node| node.has_subplan()).count();
         let running = run.is_some_and(agent::ArchitectRun::is_running);
         // A plan that is settled and sound can be run from here, without
-        // switching to the canvas only to press Run.
+        // switching to the canvas only to press Run. Not while the conversation
+        // is answering, since the run would start by interrupting it.
+        let conversation_idle = self.active_thread_view(cx).is_some_and(|thread_view| {
+            matches!(
+                thread_view.read(cx).thread.read(cx).status(),
+                ThreadStatus::Idle
+            )
+        });
         let ready_to_run = !running
+            && conversation_idle
             && step_count > 0
             && graph.is_fully_locked_deeply()
             && graph.blocking_problems().is_empty();
+        let run_label = if run.is_some() { "Run Again" } else { "Run" };
 
         fn run_plan(this: &mut AgentPanel, cx: &mut Context<AgentPanel>) {
             let Some(thread_view) = this.active_thread_view(cx) else {
@@ -5982,15 +5995,19 @@ impl AgentPanel {
                             .gap_0p5()
                             .when(ready_to_run, |this| {
                                 this.child(
-                                    Button::new("architect-status-run", "Run")
+                                    Button::new("architect-status-run", run_label)
                                         .label_size(LabelSize::XSmall)
                                         .style(ButtonStyle::Tinted(TintColor::Accent))
                                         .start_icon(
                                             Icon::new(IconName::PlayFilled).size(IconSize::XSmall),
                                         )
-                                        .tooltip(Tooltip::text(
-                                            "Run the plan, one step at a time, without leaving Code",
-                                        ))
+                                        .tooltip(Tooltip::text(if run.is_some() {
+                                            "Run the plan again from the start. The latest \
+                                             run's results are replaced."
+                                        } else {
+                                            "Run the plan, one step at a time, without leaving \
+                                             Code"
+                                        }))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             cx.stop_propagation();
                                             run_plan(this, cx);
@@ -6211,6 +6228,7 @@ impl AgentPanel {
     pub(crate) fn restore_architect_if_needed(
         &self,
         thread: Entity<agent::Thread>,
+        arrange_code_layout: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -6249,7 +6267,8 @@ impl AgentPanel {
             let architect_missing = workspace
                 .item_of_type::<crate::architect_ui::ArchitectPane>(cx)
                 .is_none();
-            let code_layout_needed = mode == crate::architect_ui::ArchitectWorkspaceMode::Code
+            let code_layout_needed = arrange_code_layout
+                && mode == crate::architect_ui::ArchitectWorkspaceMode::Code
                 && (panel_needs_position::<project_panel::ProjectPanel>(
                     workspace,
                     DockPosition::Left,
@@ -6307,13 +6326,21 @@ impl AgentPanel {
     /// Restoring only while the panel renders is not enough: quitting from
     /// Architect saves the workspace with its docks hidden, so after a relaunch
     /// the panel is not drawn until something opens it.
+    ///
+    /// Only reopens a missing Architect; moving panels back for Code stays with
+    /// rendering, so it never happens behind a hidden panel's back.
     fn restore_architect_for_active_thread(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(thread) = self
+        let Some(thread) = self
             .active_thread_view(cx)
             .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))
-        {
-            self.restore_architect_if_needed(thread, window, cx);
+        else {
+            return;
+        };
+        let thread_id = thread.entity_id();
+        if self.architect_restored_for.replace(Some(thread_id)) == Some(thread_id) {
+            return;
         }
+        self.restore_architect_if_needed(thread, false, window, cx);
     }
 
     pub(crate) fn retained_architect_pane(
@@ -6358,7 +6385,7 @@ impl AgentPanel {
         let thread = self
             .active_thread_view(cx)
             .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))?;
-        self.restore_architect_if_needed(thread.clone(), window, cx);
+        self.restore_architect_if_needed(thread.clone(), true, window, cx);
 
         // Counted through nested plans, the same way Run counts what is left.
         let graph = thread.read(cx).architect_graph();
