@@ -11,7 +11,7 @@ the application owns that graph, and the runner exposes one step at a time.
 
 ```text
 user request
-    -> native agent thread and Plan/Build mode
+    -> native agent thread and Plan/Build/Architect mode
     -> Architect graph (steps, connections, locks, nested plans)
     -> canvas and per-step refinement chats
     -> bounded application-owned PlanRun state machine
@@ -231,8 +231,8 @@ behavior or the Architect changes.
   `gitlab.com` URLs. Private repositories require `GITHUB_TOKEN` or
   `GITLAB_TOKEN` in Zed's environment; self-hosted forges are rejected rather
   than guessed.
-- MCP read-only annotations are declarations made by the server. Plan mode
-  enforces the declaration boundary but cannot prove that a dishonest server
+- MCP read-only annotations are declarations made by the server. Plan and
+  Architect modes enforce the declaration boundary but cannot prove that a dishonest server
   implemented its tool without side effects.
 - `objective` conditions remain model-mediated in the built-in runner until a
   typed evaluator exists. The API names what the statement represents without

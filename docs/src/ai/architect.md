@@ -4,18 +4,21 @@ Architect is a mode for planning a task as a flowchart before any of it is carri
 
 The difference from simply asking an agent to "make a plan" is where the plan lives. A plan written into a chat message is a suggestion the model may drift away from. An Architect plan is a graph the agent is driven through: Zed holds the position in it, tells the agent about one step at a time, and decides every branch itself.
 
-## Plan and Build modes
+## Plan, Build and Architect modes
 
-The agent works in one of two modes, shown next to the message editor:
+The agent works in one of three modes, shown next to the message editor:
 
-| Mode                | Can change your project | Purpose                 |
-| ------------------- | ----------------------- | ----------------------- |
-| **Build** (default) | Yes                     | Carrying work out.      |
-| **Plan**            | **No**                  | Working out what to do. |
+| Mode                | Can change your project | Purpose                                           |
+| ------------------- | ----------------------- | ------------------------------------------------- |
+| **Build** (default) | Yes                     | Carrying work out.                                |
+| **Plan**            | **No**                  | Working out what to do, then asking to go ahead.  |
+| **Architect**       | **No**                  | Drawing a plan on the canvas to run step by step. |
 
-You do not have to switch modes yourself. When the agent decides a task is worth planning, it draws a plan, and drawing a plan is what puts the thread into Plan mode. Pressing **Run** puts it back into Build.
+**Plan** works like Zed's Plan mode. The agent reads and researches, then presents its plan for approval. Choosing **Start Building** switches the conversation to Build so it can carry the plan out; **Keep Planning** keeps it in Plan to refine it.
 
-In Plan mode only tools reviewed as local reads, external reads, or conversation-owned plan updates are available. Plan tools may draft, refine, and report steps, but cannot change project files or external systems. Project mutation, external mutation, terminal execution, subagents, sibling threads, and MCP tools without an explicit read-only annotation are withheld rather than merely discouraged. Shell-free Git and GitHub/GitLab pull-request tools remain available for research. The selected mode is saved with the thread, so reopening a plan does not silently restore Build tools. You can switch modes by hand at any time from the mode selector.
+You do not have to switch to Architect yourself. When the agent decides a task is worth drawing as a flowchart, it draws a plan, and drawing a plan is what puts the thread into Architect mode. Pressing **Run** puts it back into Build.
+
+In Plan and Architect modes only tools reviewed as local or external reads are available, and Architect adds conversation-owned plan updates. Architect's tools may draft, refine, and report steps, but cannot change project files or external systems. Project mutation, external mutation, terminal execution, subagents, sibling threads, and MCP tools without an explicit read-only annotation are withheld rather than merely discouraged. Shell-free Git and GitHub/GitLab pull-request tools remain available for research. The selected mode is saved with the thread, so reopening a plan does not silently restore Build tools. You can switch modes by hand at any time from the mode selector.
 
 ## Drafting a plan
 
@@ -42,7 +45,7 @@ Each **connection** says when one step leads to another:
 
 Pointing a connection back at an earlier step forms a loop, which is how you express "go back and fix it if the tests fail". Loops are expected; just make sure something can leave the loop.
 
-Plan mode can read and search your project but cannot change it through native tools. Drawing a plan and carrying it out are separate jobs.
+Architect mode can read and search your project but cannot change it through native tools. Drawing a plan and carrying it out are separate jobs.
 
 ## Steps inside steps
 

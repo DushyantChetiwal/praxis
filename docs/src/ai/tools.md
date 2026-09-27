@@ -41,7 +41,7 @@ Quickly finds files by matching glob patterns (like "\*_/_.js"), returning match
 
 ### `git_status`, `git_diff`, `git_branches`, `git_remotes`, and `git_show`
 
-Inspect repository state through Zed's Git backend without invoking a shell. These tools cover working-tree status, staged/worktree/merge-base diffs, local and remote branches, remote URLs, and commit metadata with changed-file names. They are available in Plan mode because their API surface contains no Git mutation operation.
+Inspect repository state through Zed's Git backend without invoking a shell. These tools cover working-tree status, staged/worktree/merge-base diffs, local and remote branches, remote URLs, and commit metadata with changed-file names. They are available in Plan and Architect modes because their API surface contains no Git mutation operation.
 
 ### `grep`
 
