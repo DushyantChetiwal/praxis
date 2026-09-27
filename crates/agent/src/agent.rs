@@ -2267,8 +2267,14 @@ impl NativeAgentConnection {
             (session.thread.clone(), session.project_id)
         };
 
+        let parent_model = parent_thread.read(cx).model().cloned();
         let thread = cx.new(|cx| {
             let mut thread = Thread::new_subagent(&parent_thread, None, cx);
+            // A step is the plan's own work, so it runs on the plan's model
+            // rather than on whatever model is configured for subagents.
+            if let Some(model) = parent_model {
+                thread.set_model(model, cx);
+            }
             thread.set_title(title, cx);
             thread.set_session_mode(SessionMode::Build, cx);
             thread

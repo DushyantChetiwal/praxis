@@ -300,18 +300,16 @@ pub fn stop_architect_run(
     acp_thread: Option<&Entity<AcpThread>>,
     cx: &mut App,
 ) {
-    if let Some(acp_thread) = acp_thread {
-        acp_thread
-            .update(cx, |thread, cx| thread.cancel(cx))
-            .detach();
-    }
-    // A step running in a thread of its own has its own turn to stop.
-    if let Some(step_thread) = thread
+    // Only the thread doing the work is interrupted. A step running in a
+    // thread of its own leaves the plan's conversation alone, since the user
+    // may be talking in it while the run goes on.
+    let working_thread = thread
         .read(cx)
         .architect_run()
         .and_then(ArchitectRun::step_thread)
-    {
-        step_thread
+        .or_else(|| acp_thread.cloned());
+    if let Some(working_thread) = working_thread {
+        working_thread
             .update(cx, |thread, cx| thread.cancel(cx))
             .detach();
     }

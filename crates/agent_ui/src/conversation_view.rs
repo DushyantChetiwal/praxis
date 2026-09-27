@@ -721,6 +721,49 @@ impl ConversationView {
         connected.threads.get(session_id).cloned()
     }
 
+    /// Shows a thread spawned from this conversation, loading it first if it
+    /// has not been loaded yet, as a plan step's thread may not have been.
+    pub(crate) fn show_subagent_thread(
+        &mut self,
+        session_id: acp::SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.thread_view(&session_id).is_some() {
+            self.navigate_to_thread(session_id, window, cx);
+            return;
+        }
+        let Some(root_session_id) = self.root_session_id.clone() else {
+            return;
+        };
+        let load = self.load_subagent_session(session_id.clone(), root_session_id, window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            load.await?;
+            this.update_in(cx, |this, window, cx| {
+                this.navigate_to_thread(session_id, window, cx);
+            })
+        })
+        .detach_and_log_err(cx);
+    }
+
+    /// Loads a thread spawned from this conversation without showing it, so
+    /// that anything it asks to be allowed to do is tracked.
+    pub(crate) fn ensure_subagent_thread_loaded(
+        &mut self,
+        session_id: acp::SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.thread_view(&session_id).is_some() {
+            return;
+        }
+        let Some(root_session_id) = self.root_session_id.clone() else {
+            return;
+        };
+        self.load_subagent_session(session_id, root_session_id, window, cx)
+            .detach_and_log_err(cx);
+    }
+
     /// How many tool calls in one of this conversation's threads are waiting
     /// for the user to allow them.
     pub(crate) fn pending_permission_count(&self, session_id: &acp::SessionId, cx: &App) -> usize {

@@ -6032,7 +6032,7 @@ impl AgentPanel {
                                             if viewing_step {
                                                 view.return_to_root_thread(cx);
                                             } else {
-                                                view.navigate_to_thread(
+                                                view.show_subagent_thread(
                                                     step_session_id.clone(),
                                                     window,
                                                     cx,

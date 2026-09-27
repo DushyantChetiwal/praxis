@@ -3832,6 +3832,64 @@ async fn test_prompt_too_large_uses_reported_token_count(cx: &mut TestAppContext
 }
 
 #[gpui::test]
+async fn test_prompt_too_large_compacts_and_retries(cx: &mut TestAppContext) {
+    let ThreadTest {
+        model,
+        fake,
+        thread,
+        ..
+    } = setup(cx, TestModel::Fake).await;
+    cx.update(|cx| {
+        let mut settings = AgentSettings::get_global(cx).clone();
+        settings.auto_compact.enabled = true;
+        AgentSettings::override_global(settings, cx);
+    });
+
+    thread
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["Message 1"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    fake.send_last_error(
+        &model,
+        LanguageModelCompletionError::from_http_status(
+            LanguageModelProviderName::new("test"),
+            http_client::StatusCode::PAYLOAD_TOO_LARGE,
+            "prompt too large".to_string(),
+            None,
+        ),
+    );
+    fake.end_last(&model);
+    cx.run_until_parked();
+
+    let compaction = fake
+        .pending_completions()
+        .pop()
+        .expect("an overflow should start a compaction instead of ending the turn");
+    assert_eq!(
+        compaction.intent,
+        Some(CompletionIntent::ThreadContextSummarization)
+    );
+    fake.send_last_text(&model, "Summary of the conversation so far");
+    fake.end_last(&model);
+    cx.run_until_parked();
+
+    let retry = fake
+        .pending_completions()
+        .pop()
+        .expect("the turn should be retried once the history is compacted");
+    assert_ne!(
+        retry.intent,
+        Some(CompletionIntent::ThreadContextSummarization)
+    );
+    fake.send_last_text(&model, "Done");
+    fake.end_last(&model);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
 async fn test_cumulative_token_usage(cx: &mut TestAppContext) {
     let ThreadTest {
         model,

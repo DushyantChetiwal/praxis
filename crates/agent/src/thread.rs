@@ -147,8 +147,13 @@ const COMPACTION_RETAINED_AGENT_MESSAGES_BYTE_BUDGET: usize = 60_000;
 const MAX_TOOL_RESULT_BYTES: usize = 100_000;
 
 /// A deliberately low estimate of bytes per token when sizing a compaction
-/// request, since code and JSON tokenize far more densely than prose.
+/// request for a history that overflowed, since code and JSON tokenize far
+/// more densely than prose.
 const COMPACTION_BYTES_PER_TOKEN: u64 = 3;
+
+/// Above this many bytes per token of capacity a history cannot fit the model
+/// however it tokenizes, even before the provider has said so.
+const OVERFLOW_BYTES_PER_TOKEN: u64 = 5;
 
 /// Whether a thread is working out what to do, or doing it.
 ///
@@ -887,13 +892,10 @@ impl AgentMessage {
                 }
             }
 
-            if let Some(output) = tool_result.output.as_ref() {
-                writeln!(
-                    markdown,
-                    "**Debug Output**:\n\n```json\n{}\n```\n",
-                    serde_json::to_string_pretty(output).unwrap()
-                )
-                .unwrap();
+            if let Some(output) = tool_result.output.as_ref()
+                && let Ok(output) = serde_json::to_string_pretty(output)
+            {
+                writeln!(markdown, "**Debug Output**:\n\n```json\n{output}\n```\n").ok();
             }
         }
 
@@ -3735,8 +3737,34 @@ impl Thread {
                     compacted_for_overflow = true;
                     let tokens = *tokens;
                     log::info!("Request overflowed the context window; compacting and retrying");
-                    this.update(cx, |this, cx| this.mark_token_limit_exceeded(tokens, cx))?;
-                    continue;
+                    // Compacted directly rather than through the usual
+                    // threshold, which does not fire again when this turn has
+                    // already compacted once.
+                    let compaction = this.update(cx, |this, cx| {
+                        this.mark_token_limit_exceeded(tokens, cx);
+                        let insertion_ix = this.forced_compaction_target_ix()?;
+                        let model = this.compaction_model(cx)?;
+                        let request = this.build_compaction_request(insertion_ix, &model, cx);
+                        this.current_request_token_usage = TokenUsage::default();
+                        Some((model, request, insertion_ix))
+                    })?;
+                    if let Some((model, request, insertion_ix)) = compaction {
+                        match Self::stream_compaction(
+                            this,
+                            event_stream,
+                            cancellation_rx.clone(),
+                            model,
+                            request,
+                            CompactionInsertion::Auto { insertion_ix },
+                            cx,
+                        )
+                        .await
+                        .context("Compacting after the context window overflowed")?
+                        {
+                            ControlFlow::Break(()) => return Ok(()),
+                            ControlFlow::Continue(()) => continue,
+                        }
+                    }
                 }
                 attempt += 1;
                 match Self::retry_completion_error(
@@ -5382,12 +5410,34 @@ impl Thread {
     ) -> LanguageModelRequest {
         // A history that no longer fits the model cannot be summarized by
         // sending it as it is: that request fails exactly as the one that
-        // prompted compaction did, and the thread can never recover.
-        let messages = fit_compaction_history(
-            self.build_request_messages_until(Vec::new(), insertion_ix, cx),
-            || messages_to_markdown(&self.messages[..insertion_ix.min(self.messages.len())]),
-            compaction_request_byte_budget(model),
+        // prompted compaction did, and the thread can never recover. Only a
+        // history that has overflowed is reshaped; an ordinary compaction is
+        // sent whole, as upstream sends it.
+        let history = self.build_request_messages_until(Vec::new(), insertion_ix, cx);
+        let capacity = compaction_input_capacity(
+            model.max_input_tokens(),
+            model.max_total_tokens(),
+            model.max_output_tokens(),
         );
+        let history_bytes: usize = history.iter().map(request_message_byte_len).sum();
+        let overflowed = self
+            .latest_request_token_usage()
+            .is_some_and(|usage| total_input_tokens(usage) >= capacity)
+            || u64::try_from(history_bytes).unwrap_or(u64::MAX)
+                > capacity.saturating_mul(OVERFLOW_BYTES_PER_TOKEN);
+        let messages = if overflowed {
+            let end_ix = insertion_ix.min(self.messages.len());
+            // Starting at the latest summary keeps it, rather than history it
+            // already stands for, at the head of what is kept.
+            let start_ix = latest_compaction_message_ix_before(&self.messages, end_ix).unwrap_or(0);
+            fit_compaction_history(
+                history,
+                || messages_to_markdown(&self.messages[start_ix..end_ix]),
+                compaction_request_byte_budget(model),
+            )
+        } else {
+            history
+        };
         let mut request = LanguageModelRequest {
             thread_id: Some(self.id.to_string()),
             prompt_id: Some(self.prompt_id.to_string()),
@@ -8054,15 +8104,19 @@ mod tests {
 
     #[test]
     fn a_history_too_large_to_compact_is_sent_as_a_shortened_transcript() {
-        let messages = vec![
+        let fitting = vec![
             text_message(Role::System, "system prompt".into()),
             text_message(Role::User, "x".repeat(50_000)),
         ];
-        let fitting = fit_compaction_history(messages.clone(), String::new, 100_000);
-        assert_eq!(fitting.len(), 2, "a history that fits is sent unchanged");
+        let unchanged = fit_compaction_history(fitting.clone(), String::new, 100_000);
+        assert_eq!(unchanged, fitting, "a history that fits is sent unchanged");
 
+        let overflowing = vec![
+            text_message(Role::System, "system prompt".into()),
+            text_message(Role::User, "x".repeat(150_000)),
+        ];
         let transcript = format!("GOAL{}LATEST", "y".repeat(500_000));
-        let fitted = fit_compaction_history(messages, || transcript, 100_000);
+        let fitted = fit_compaction_history(overflowing, || transcript, 100_000);
         assert_eq!(fitted.len(), 2);
         assert_eq!(fitted[0].role, Role::System);
         let total: usize = fitted.iter().map(request_message_byte_len).sum();

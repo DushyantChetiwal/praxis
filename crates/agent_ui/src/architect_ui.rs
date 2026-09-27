@@ -1470,6 +1470,16 @@ impl ArchitectPane {
     /// Opens the conversation drawer on the step being run, which is where it
     /// asks to be allowed to do things.
     fn watch_running_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The step's thread is normally loaded as it starts; this covers a
+        // plan conversation that missed it.
+        if let Some((session_id, view)) = self
+            .run_step_session(cx)
+            .zip(self.plan_conversation_view(cx))
+        {
+            view.update(cx, |view, cx| {
+                view.ensure_subagent_thread_loaded(session_id, window, cx);
+            });
+        }
         self.remember_transient_focus(window, cx);
         self.plan_drawer_shows_plan = false;
         self.plan_conversation_open = true;
