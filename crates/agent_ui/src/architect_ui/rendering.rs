@@ -1885,20 +1885,25 @@ impl ArchitectPane {
                     has_subplan: node.has_subplan(),
                     running,
                 };
-                let card = div()
-                    .absolute()
-                    .left(left)
-                    .top(top)
-                    .w(width)
-                    .h(height)
-                    .child(self.render_node(ix, step_number, node, problem, cx));
+                let card = self.render_node(ix, step_number, node, problem, cx);
                 let pane = pane.clone();
 
+                // The menu sizes its hit area from its child, and an absolutely
+                // positioned child has no size to give it, so the menu sits
+                // inside the positioned box around a card of definite size.
                 Some(
-                    right_click_menu(("architect-node-menu", ix))
-                        .trigger(move |_, _, _| card)
-                        .menu(move |window, cx| menu.build(pane.clone(), window, cx))
-                        .into_any_element(),
+                    div()
+                        .absolute()
+                        .left(left)
+                        .top(top)
+                        .w(width)
+                        .h(height)
+                        .child(
+                            right_click_menu(("architect-node-menu", ix))
+                                .trigger(move |_, _, _| div().w(width).h(height).child(card))
+                                .menu(move |window, cx| menu.build(pane.clone(), window, cx)),
+                        )
+                        .into_any(),
                 )
             })
             .collect()
