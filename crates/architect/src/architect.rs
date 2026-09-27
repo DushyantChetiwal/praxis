@@ -58,16 +58,6 @@ impl From<&str> for EdgeId {
     }
 }
 
-/// How Architect's built-in runner resolves an edge condition.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConditionEvaluation {
-    /// No evaluation is needed.
-    Unconditional,
-    /// The condition is returned to the caller and, in the default prompt-based
-    /// integration, checked by the model.
-    ModelMediated,
-}
-
 /// When one step leads to another.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -99,16 +89,6 @@ impl EdgeCondition {
 
     pub fn is_always(&self) -> bool {
         matches!(self, EdgeCondition::Always)
-    }
-
-    /// Describes what the built-in runner actually does.
-    pub fn evaluation(&self) -> ConditionEvaluation {
-        match self {
-            EdgeCondition::Always => ConditionEvaluation::Unconditional,
-            EdgeCondition::Objective { .. } | EdgeCondition::LlmEvaluated { .. } => {
-                ConditionEvaluation::ModelMediated
-            }
-        }
     }
 }
 

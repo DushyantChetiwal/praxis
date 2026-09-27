@@ -1665,21 +1665,6 @@ impl ArchitectPane {
         }
     }
 
-    /// Selecting a step, then selecting it again, opens its plan. Double-click
-    /// is the gesture people already try on a box that looks like it contains
-    /// something.
-    fn handle_node_click(
-        &mut self,
-        id: NodeId,
-        click_count: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if click_count >= 2 {
-            self.drill_into(id, window, cx);
-        }
-    }
-
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,

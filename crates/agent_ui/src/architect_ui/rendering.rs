@@ -2141,8 +2141,10 @@ impl ArchitectPane {
                     this.focus_handle.focus(window, cx);
                     this.set_selection(Some(Selection::Node(id.clone())), window, cx);
 
+                    // Double-click opens the step's plan: the gesture people
+                    // already try on a box that looks like it contains something.
                     if event.click_count >= 2 {
-                        this.handle_node_click(id.clone(), event.click_count, window, cx);
+                        this.drill_into(id.clone(), window, cx);
                         cx.stop_propagation();
                         return;
                     }
