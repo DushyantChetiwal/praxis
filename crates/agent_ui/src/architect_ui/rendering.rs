@@ -244,7 +244,7 @@ impl ArchitectPane {
             .gap_0p5()
             .min_w_0()
             .child(
-                Icon::new(IconName::GitBranch)
+                Icon::new(IconName::ListTree)
                     .size(IconSize::XSmall)
                     .color(Color::Muted),
             )
@@ -2748,7 +2748,7 @@ impl Item for ArchitectPane {
     }
 
     fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
-        Some(Icon::new(IconName::GitBranch))
+        Some(Icon::new(IconName::ListTree))
     }
 
     fn show_in_tab_bar(&self, _cx: &App) -> bool {
