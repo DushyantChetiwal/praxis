@@ -163,6 +163,32 @@ mod tests {
     }
 
     #[test]
+    fn test_system_prompt_explains_plan_mode_only_in_plan_mode() {
+        let project = prompt_store::ProjectContext::default();
+        let render = |plan_mode| {
+            SystemPromptTemplate {
+                project: &project,
+                available_tools: vec!["read_file".into(), "exit_plan_mode".into()],
+                model_name: Some("test-model".to_string()),
+                date: "2026-01-01".to_string(),
+                user_agents_md: None,
+                sandboxing: false,
+                is_linux: false,
+                is_windows: false,
+                plan_mode,
+                plan: None,
+            }
+            .render(&Templates::new())
+            .unwrap()
+        };
+
+        let planning = render(true);
+        assert!(planning.contains("## Plan mode"));
+        assert!(planning.contains("call `exit_plan_mode` with the plan"));
+        assert!(!render(false).contains("## Plan mode"));
+    }
+
+    #[test]
     fn test_system_prompt_renders_user_agents_md_before_project_rules() {
         use prompt_store::{ProjectContext, RulesFileContext, WorktreeContext};
         use util::rel_path::RelPath;
