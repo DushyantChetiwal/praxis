@@ -2365,6 +2365,12 @@ mod tests {
                 "Git should replace Project as the active native left-dock tab"
             );
         });
+        // Rendering the Agent panel in Code runs the restoration check while
+        // the panel is being updated, so the check must not read the panel.
+        agent_panel_entity.update_in(cx, |agent_panel, window, cx| {
+            agent_panel.restore_architect_if_needed(thread.clone(), window, cx);
+        });
+        cx.run_until_parked();
         agent_panel_entity.update_in(cx, |agent_panel, window, cx| {
             agent_panel.defer_open_architect_workspace(window, cx);
         });

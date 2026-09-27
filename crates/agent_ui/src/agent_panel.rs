@@ -6140,7 +6140,7 @@ impl AgentPanel {
     /// existed was a deadlock: the canvas is where you learn that planning
     /// exists, so gating it on a plan meant nobody could reach the feature that
     /// produces one.
-    fn restore_architect_if_needed(
+    pub(crate) fn restore_architect_if_needed(
         &self,
         thread: Entity<agent::Thread>,
         window: &mut Window,
@@ -6197,12 +6197,16 @@ impl AgentPanel {
                     DockPosition::Bottom,
                     window,
                     cx,
-                ) || panel_needs_position::<AgentPanel>(
-                    workspace,
-                    DockPosition::Right,
-                    window,
-                    cx,
-                ));
+                ) || workspace.panel::<AgentPanel>(cx).is_some_and(|panel| {
+                    // This runs while the Agent panel renders, so reading the
+                    // panel's own position would re-enter it. Which dock holds
+                    // it is enough, and does not read the panel.
+                    workspace
+                        .dock_at_position(DockPosition::Right)
+                        .read(cx)
+                        .panel_for_id(panel.entity_id())
+                        .is_none()
+                }));
             (
                 architect_missing && mode == crate::architect_ui::ArchitectWorkspaceMode::Architect,
                 code_layout_needed,
