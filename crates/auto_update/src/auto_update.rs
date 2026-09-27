@@ -923,7 +923,10 @@ impl AutoUpdater {
                 } else {
                     installed_version
                 };
-                Ok(Self::check_if_praxis_version_is_newer(current_version, fetched_version))
+                Ok(Self::check_if_praxis_version_is_newer(
+                    current_version,
+                    fetched_version,
+                ))
             }
             ReleaseChannel::Nightly => {
                 let should_download = if let AutoUpdateStatus::Updated { version } = status {
