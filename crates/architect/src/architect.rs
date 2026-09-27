@@ -956,15 +956,25 @@ impl ArchitectGraph {
     }
 
     /// Moves a step on the canvas. Where a step sits is layout, not part of
-    /// what was settled, so a locked step can still be moved.
+    /// what was settled, so a locked step, or one inside a locked step, can
+    /// still be moved.
     pub fn move_node_at(
         &mut self,
         path: &NodePath,
         position: Position,
     ) -> Result<(), GraphMutationError> {
-        let (graph, id) = self.containing_graph_mut(path)?;
+        let (last, parents) = path.0.split_last().ok_or(GraphMutationError::EmptyPath)?;
+        let mut graph = self;
+        for (depth, id) in parents.iter().enumerate() {
+            graph = graph
+                .node_mut(id)
+                .and_then(|node| node.subplan.as_deref_mut())
+                .ok_or_else(|| GraphMutationError::MissingSubplan {
+                    path: NodePath(parents[..=depth].to_vec()),
+                })?;
+        }
         let node = graph
-            .node_mut(&id)
+            .node_mut(last)
             .ok_or_else(|| GraphMutationError::NodeNotFound { path: path.clone() })?;
         node.position = Some(position);
         Ok(())
