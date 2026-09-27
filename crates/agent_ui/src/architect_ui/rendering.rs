@@ -2261,7 +2261,13 @@ impl ArchitectPane {
 
                     // Double-click opens the step's plan: the gesture people
                     // already try on a box that looks like it contains something.
-                    if repeated {
+                    // A settled step with no plan has none to open, and one
+                    // cannot be started there, so it is only selected.
+                    let settled_leaf = this
+                        .graph(cx)
+                        .and_then(|graph| graph.node(&id))
+                        .is_some_and(|node| node.locked && !node.has_subplan());
+                    if repeated && !settled_leaf {
                         this.drill_into(id.clone(), window, cx);
                         cx.stop_propagation();
                         return;
