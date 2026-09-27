@@ -101,7 +101,7 @@ pub enum RefineStepToolOutput {
         locked: bool,
         /// Routing that was asked for but could not be applied, because it
         /// pointed at a step that does not exist.
-        #[serde(skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unknown_steps: Vec<String>,
     },
     Error {

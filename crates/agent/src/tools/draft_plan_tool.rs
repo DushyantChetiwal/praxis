@@ -105,12 +105,14 @@ pub enum DraftPlanToolOutput {
         connections: usize,
         /// Anything wrong with the plan as drawn, such as a connection to a
         /// step that does not exist. Worth fixing before the user sees it.
-        #[serde(skip_serializing_if = "Vec::is_empty")]
+        // Defaulted as well as skipped: output saved without the field has
+        // to read back when a conversation is reopened.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         problems: Vec<String>,
         /// Steps that kept detail this draft did not carry, because it was
         /// settled after the plan was first drawn. Said out loud so the model
         /// does not assume the plan now reads exactly as it wrote it.
-        #[serde(skip_serializing_if = "Vec::is_empty")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         kept_existing_detail: Vec<String>,
     },
     Error {
@@ -271,6 +273,22 @@ impl AgentTool for DraftPlanTool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn saved_output_without_optional_lists_replays() {
+        let saved = serde_json::to_value(DraftPlanToolOutput::Success {
+            steps: 2,
+            connections: 1,
+            problems: Vec::new(),
+            kept_existing_detail: Vec::new(),
+        })
+        .unwrap();
+        assert_eq!(saved, json!({ "steps": 2, "connections": 1 }));
+        assert!(matches!(
+            serde_json::from_value::<DraftPlanToolOutput>(saved).unwrap(),
+            DraftPlanToolOutput::Success { steps: 2, .. }
+        ));
+    }
 
     #[test]
     fn a_plan_the_model_might_send_deserializes() {
