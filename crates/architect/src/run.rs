@@ -95,6 +95,27 @@ impl RunOutcome {
             RunOutcome::Cancelled => "The run was cancelled before it finished.".into(),
         }
     }
+
+    /// A short account of the end of the run for the user. `describe` is
+    /// addressed to the model, and tells it what to do next.
+    pub fn summary(&self, graph: &ArchitectGraph) -> String {
+        let title = |id: &NodeId| find_title(graph, id).unwrap_or_else(|| id.0.clone());
+        match self {
+            RunOutcome::Completed => "Plan complete".into(),
+            RunOutcome::StepLimit { steps } => {
+                format!("Stopped after {steps} steps because the plan kept looping")
+            }
+            RunOutcome::NodeLimit { node, visits } => format!(
+                "Stopped after \"{}\" ran {visits} times; a repeat limit lets its loop move on",
+                title(node)
+            ),
+            RunOutcome::DepthLimit { node } => {
+                format!("Stopped because plans nest too deep at \"{}\"", title(node))
+            }
+            RunOutcome::Failed { message } => format!("Run failed: {message}"),
+            RunOutcome::Cancelled => "Run stopped".into(),
+        }
+    }
 }
 
 fn find_title(graph: &ArchitectGraph, id: &NodeId) -> Option<String> {
@@ -1177,6 +1198,18 @@ mod tests {
         run.finish_step(&graph);
         run.cancel();
         assert_eq!(run.decide(&graph), Decision::Done(RunOutcome::Cancelled));
+    }
+
+    #[test]
+    fn an_outcome_summary_names_the_step_and_the_way_out() {
+        let graph = nested_graph();
+        let summary = RunOutcome::NodeLimit {
+            node: NodeId("parse".into()),
+            visits: 25,
+        }
+        .summary(&graph);
+        assert!(summary.contains("Parse body"), "{summary}");
+        assert!(summary.contains("repeat limit"), "{summary}");
     }
 
     #[test]

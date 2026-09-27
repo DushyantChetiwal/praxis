@@ -5946,7 +5946,7 @@ impl AgentPanel {
             )
             .child(
                 Label::new(match run.and_then(|run| run.outcome.as_ref()) {
-                    Some(outcome) => outcome.describe(graph),
+                    Some(outcome) => outcome.summary(graph),
                     // While running, the step being carried out is more use than
                     // a count of the plan, and the trail says how deep it is.
                     None if running => run

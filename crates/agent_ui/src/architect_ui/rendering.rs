@@ -345,7 +345,7 @@ impl ArchitectPane {
                 .read(cx)
                 .architect_run()
                 .and_then(|run| match &run.outcome {
-                    Some(outcome) => root.map(|root| outcome.describe(root).into()),
+                    Some(outcome) => root.map(|root| outcome.summary(root).into()),
                     None => Some(
                         format!(
                             "Step {} of {} · {}",
@@ -1195,7 +1195,7 @@ impl ArchitectPane {
         let status: SharedString = match &run.outcome {
             Some(outcome) => self
                 .root_graph(cx)
-                .map(|graph| outcome.describe(graph).into())
+                .map(|graph| outcome.summary(graph).into())
                 .unwrap_or_else(|| SharedString::from("Run finished")),
             None => format!("Running {}", run.current_title).into(),
         };
