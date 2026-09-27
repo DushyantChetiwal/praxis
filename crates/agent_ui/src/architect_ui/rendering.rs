@@ -653,7 +653,7 @@ impl ArchitectPane {
                                 .style(ButtonStyle::Subtle)
                                 .start_icon(Icon::new(IconName::RotateCw).size(IconSize::XSmall))
                                 .disabled(running || empty_plan)
-                                .tooltip(Tooltip::text("Tidy up the graph layout"))
+                                .tooltip(Tooltip::text("Arrange the steps automatically"))
                                 .on_click(cx.listener(|this, _, _, cx| this.tidy_up(cx))),
                         )
                         .child(
@@ -685,7 +685,7 @@ impl ArchitectPane {
                                 .tab_index(0isize)
                                 .icon_size(IconSize::Small)
                                 .disabled(running || empty_plan)
-                                .tooltip(Tooltip::text("Tidy up the graph layout"))
+                                .tooltip(Tooltip::text("Arrange the steps automatically"))
                                 .on_click(cx.listener(|this, _, _, cx| this.tidy_up(cx))),
                         )
                         .child(
@@ -1406,7 +1406,7 @@ impl ArchitectPane {
                     .label_size(LabelSize::XSmall)
                     .style(ButtonStyle::Subtle)
                     .start_icon(Icon::new(IconName::Maximize).size(IconSize::XSmall))
-                    .tooltip(Tooltip::text("Fit the entire plan in the graph workspace"))
+                    .tooltip(Tooltip::text("Fit the whole plan in view"))
                     .on_click(cx.listener(|this, _, _, cx| this.zoom_to_fit(cx))),
             )
             .child(
