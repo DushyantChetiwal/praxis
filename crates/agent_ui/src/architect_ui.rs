@@ -1378,7 +1378,11 @@ impl ArchitectPane {
 
     fn tidy_up(&mut self, cx: &mut Context<Self>) {
         self.edit_graph(|graph| graph.relayout(), cx);
-        self.record_activity(Some(self.focus.clone()), "Arranged the steps automatically", cx);
+        self.record_activity(
+            Some(self.focus.clone()),
+            "Arranged the steps automatically",
+            cx,
+        );
         self.zoom_to_fit(cx);
     }
 
