@@ -94,7 +94,7 @@ use text::OffsetRangeExt;
 use theme_settings::ThemeSettings;
 use ui::{
     ContextMenu, ContextMenuEntry, Disclosure, GradientFade, IconButton, KeyBinding, PopoverMenu,
-    PopoverMenuHandle, ProjectEmptyState, Tab, Tooltip, prelude::*, utils::WithRemSize,
+    PopoverMenuHandle, ProjectEmptyState, Tab, TintColor, Tooltip, prelude::*, utils::WithRemSize,
 };
 use util::ResultExt as _;
 use workspace::{
@@ -5829,6 +5829,33 @@ impl AgentPanel {
         let locked_count = graph.locked_step_count_deeply();
         let nested_count = graph.nodes.iter().filter(|node| node.has_subplan()).count();
         let running = run.is_some_and(agent::ArchitectRun::is_running);
+        // A plan that is settled and sound can be run from here, without
+        // switching to the canvas only to press Run.
+        let ready_to_run = !running
+            && step_count > 0
+            && graph.is_fully_locked_deeply()
+            && graph.blocking_problems().is_empty();
+
+        fn run_plan(this: &mut AgentPanel, cx: &mut Context<AgentPanel>) {
+            let Some(thread_view) = this.active_thread_view(cx) else {
+                return;
+            };
+            let thread_view = thread_view.read(cx);
+            let acp_thread = thread_view.thread.clone();
+            let Some(thread) = thread_view.as_native_thread(cx) else {
+                return;
+            };
+            let Some(graph) = thread.read(cx).architect_graph().cloned() else {
+                return;
+            };
+            if let Err(error) = agent::start_architect_run(thread, acp_thread, graph, cx) {
+                let error = anyhow!("{error}");
+                this.workspace
+                    .update(cx, |workspace, cx| workspace.show_error(error, cx))
+                    .log_err();
+            }
+            cx.notify();
+        }
 
         fn open_canvas(this: &mut AgentPanel, window: &mut Window, cx: &mut Context<AgentPanel>) {
             this.defer_open_architect_workspace(window, cx);
@@ -5951,14 +5978,37 @@ impl AgentPanel {
                             }))
                             .into_any_element()
                     } else {
-                        Button::new("architect-status-open", "Open")
-                            .label_size(LabelSize::XSmall)
-                            .style(ButtonStyle::Subtle)
-                            .end_icon(Icon::new(IconName::ArrowUpRight).size(IconSize::XSmall))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                cx.stop_propagation();
-                                open_canvas(this, window, cx);
-                            }))
+                        h_flex()
+                            .gap_0p5()
+                            .when(ready_to_run, |this| {
+                                this.child(
+                                    Button::new("architect-status-run", "Run")
+                                        .label_size(LabelSize::XSmall)
+                                        .style(ButtonStyle::Tinted(TintColor::Accent))
+                                        .start_icon(
+                                            Icon::new(IconName::PlayFilled).size(IconSize::XSmall),
+                                        )
+                                        .tooltip(Tooltip::text(
+                                            "Run the plan, one step at a time, without leaving Code",
+                                        ))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            run_plan(this, cx);
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new("architect-status-open", "Open")
+                                    .label_size(LabelSize::XSmall)
+                                    .style(ButtonStyle::Subtle)
+                                    .end_icon(
+                                        Icon::new(IconName::ArrowUpRight).size(IconSize::XSmall),
+                                    )
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        open_canvas(this, window, cx);
+                                    })),
+                            )
                             .into_any_element()
                     }),
             )
