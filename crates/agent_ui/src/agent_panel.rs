@@ -6291,7 +6291,7 @@ impl AgentPanel {
             Button::new("open-architect-canvas", "Architect")
                 .label_size(LabelSize::Small)
                 .style(ButtonStyle::Subtle)
-                .start_icon(Icon::new(IconName::GitBranch).size(IconSize::Small))
+                .start_icon(Icon::new(IconName::ListTree).size(IconSize::Small))
                 .tooltip(move |_window, cx| {
                     Tooltip::for_action(tooltip.clone(), &crate::ToggleArchitectWorkspace, cx)
                 })
