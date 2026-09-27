@@ -1584,7 +1584,7 @@ impl ArchitectPane {
         let canvas_focused = self.focus_handle.is_focused(window);
         let modifiers = event.keystroke.modifiers;
         match event.keystroke.key.as_str() {
-            "z" if canvas_focused && modifiers.secondary() => {
+            "z" | "Z" if canvas_focused && modifiers.secondary() => {
                 let direction = if modifiers.shift {
                     HistoryDirection::Redo
                 } else {
