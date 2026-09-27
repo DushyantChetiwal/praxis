@@ -16,6 +16,15 @@
 #
 # It can be run from the Actions tab and is also dispatched after a successful
 # automated upstream sync.
+#
+# Kept as short as hosted runners allow:
+#   - a revision that already passed Architect quality is not validated again;
+#   - Windows builds alongside the Linux remote server it bundles for WSL,
+#     collecting it just before making the installer;
+#   - both macOS architectures build on Apple silicon, which is much faster
+#     than the Intel runners;
+#   - `test_build` makes only a Windows installer, with a lighter optimization
+#     profile, for checking a change in the real app. It is never published.
 name: Bundle Praxis
 
 on:
@@ -41,6 +50,11 @@ on:
         required: false
         default: true
         type: boolean
+      test_build:
+        description: Only a quicker Windows test installer, never published
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   attestations: write
@@ -52,18 +66,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  quality:
-    name: Validate the release source
-    uses: ./.github/workflows/architect_quality.yml
-    with:
-      source_ref: ${{ inputs.source_ref }}
-
   prepare:
     name: Pin the source revision
-    needs: quality
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
+      validated: ${{ steps.validated.outputs.validated }}
     steps:
       - name: Check out the selected source
         uses: actions/checkout@v7
@@ -75,10 +86,51 @@ jobs:
         shell: bash
         run: echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
+      - name: Look for a passing Architect quality run of this revision
+        id: validated
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          passed="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/architect_quality.yml/runs?head_sha=${SOURCE_SHA}&status=success&per_page=1" --jq '.total_count')"
+          if [[ "${passed}" -gt 0 ]]; then
+            echo "Architect quality already passed for ${SOURCE_SHA}"
+            echo "validated=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "validated=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+  quality:
+    name: Validate the release source
+    needs: prepare
+    if: needs.prepare.outputs.validated != 'true'
+    uses: ./.github/workflows/architect_quality.yml
+    with:
+      source_ref: ${{ needs.prepare.outputs.source_sha }}
+
+  validated:
+    name: Source validated
+    needs:
+      - prepare
+      - quality
+    # Quality is skipped for a revision that already passed it.
+    if: >-
+      !cancelled() &&
+      needs.prepare.result == 'success' &&
+      (needs.quality.result == 'success' || needs.quality.result == 'skipped')
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Record the validated revision
+        run: echo "Building ${{ needs.prepare.outputs.source_sha }}"
+
   macos:
     name: macOS (${{ matrix.architecture }})
-    if: inputs.build_macos
-    needs: prepare
+    if: inputs.build_macos && !inputs.test_build
+    needs:
+      - prepare
+      - validated
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
@@ -88,8 +140,10 @@ jobs:
           - architecture: aarch64
             runner: macos-15
             target: aarch64-apple-darwin
+          # Cross-compiled on Apple silicon, as upstream does. The Intel runners
+          # took over an hour longer than every other platform.
           - architecture: x86_64
-            runner: macos-15-intel
+            runner: macos-15
             target: x86_64-apple-darwin
     env:
       # Nothing is reused between runs, so incremental artifacts are only cost.
@@ -141,10 +195,52 @@ jobs:
           path: target/zed-remote-server-macos-${{ matrix.architecture }}.gz
           if-no-files-found: error
 
+  linux_remote_server:
+    name: Linux remote server (x86_64)
+    # Bundled into the Windows installer for WSL, and published for Linux.
+    if: (inputs.build_linux || inputs.build_windows) && !inputs.test_build
+    needs:
+      - prepare
+      - validated
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bundle-linux-remote-server-x86_64
+          cache-on-failure: true
+
+      - name: Install Linux build dependencies
+        run: ./script/linux
+
+      - name: Download the WASI SDK
+        run: ./script/download-wasi-sdk
+
+      - name: Build the remote server
+        run: ./script/bundle-linux --remote-server-only
+
+      - name: Upload the remote server
+        uses: actions/upload-artifact@v7
+        with:
+          name: praxis-remote-server-linux-x86_64
+          path: target/zed-remote-server-linux-x86_64.gz
+          if-no-files-found: error
+
   linux:
     name: Linux (x86_64)
-    if: inputs.build_linux || inputs.build_windows
-    needs: prepare
+    if: inputs.build_linux && !inputs.test_build
+    needs:
+      - prepare
+      - validated
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
@@ -169,22 +265,15 @@ jobs:
       - name: Download the WASI SDK
         run: ./script/download-wasi-sdk
 
-      - name: Bundle the desktop app and remote server
+      # The remote server it also builds is published from its own job.
+      - name: Bundle the desktop app
         run: ./script/bundle-linux
 
       - name: Upload the desktop archive
-        if: inputs.build_linux
         uses: actions/upload-artifact@v7
         with:
           name: praxis-linux-x86_64-archive
           path: target/release/praxis-linux-x86_64.tar.gz
-          if-no-files-found: error
-
-      - name: Upload the remote server
-        uses: actions/upload-artifact@v7
-        with:
-          name: praxis-remote-server-linux-x86_64
-          path: target/zed-remote-server-linux-x86_64.gz
           if-no-files-found: error
 
   windows:
@@ -192,15 +281,24 @@ jobs:
     if: inputs.build_windows
     needs:
       - prepare
-      - linux
+      - validated
     # Pinned to 2022 on purpose: `bundle-windows.ps1` expects Inno Setup 6 at its
     # default location, which the 2022 image has and later images may not.
     runs-on: windows-2022
     timeout-minutes: 240
+    permissions:
+      # Collects the Linux remote server from this run once it is uploaded.
+      actions: read
+      contents: read
     env:
       CARGO_INCREMENTAL: 0
       RUST_BACKTRACE: 1
       PRAXIS_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
+      GH_TOKEN: ${{ github.token }}
+      PRAXIS_CARGO_PROFILE: ${{ inputs.test_build && 'praxis-test' || 'release' }}
+      # A test installer leaves WSL to the source-build fallback rather than
+      # wait for a server it does not need.
+      PRAXIS_LINUX_REMOTE_SERVER_ARTIFACT: ${{ !inputs.test_build && 'praxis-remote-server-linux-x86_64' || '' }}
     steps:
       - name: Check out the fork
         uses: actions/checkout@v7
@@ -216,14 +314,8 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: bundle-windows-x86_64
+          shared-key: bundle-windows-x86_64-${{ inputs.test_build && 'test' || 'release' }}
           cache-on-failure: true
-
-      - name: Download the Linux remote server
-        uses: actions/download-artifact@v8
-        with:
-          name: praxis-remote-server-linux-x86_64
-          path: target
 
       - name: Show the toolchain
         run: rustup show; cargo --version
@@ -251,17 +343,20 @@ jobs:
     name: Publish the self-update release
     if: >-
       always() &&
+      !inputs.test_build &&
       inputs.build_macos &&
       inputs.build_windows &&
       inputs.build_linux &&
       needs.macos.result == 'success' &&
       needs.windows.result == 'success' &&
-      needs.linux.result == 'success'
+      needs.linux.result == 'success' &&
+      needs.linux_remote_server.result == 'success'
     needs:
       - prepare
       - macos
       - windows
       - linux
+      - linux_remote_server
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the built source
