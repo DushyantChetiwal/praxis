@@ -1591,13 +1591,19 @@ impl ArchitectPane {
         }
     }
 
-    fn handle_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn handle_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Interaction::Connecting { from, .. } = &self.interaction {
             let from = from.clone();
             let target = self.node_at(event.position, cx).filter(|to| *to != from);
             if target.is_some() && self.is_running(cx) {
                 self.report("Stop the run before connecting steps.".to_string(), cx);
             } else if let Some(to) = target {
+                let (from_id, to_id) = (from.clone(), to.clone());
                 let from_path = self.focus.child(from);
                 let activity_path = self.focus.child(to.clone());
                 if self.edit_checked(
@@ -1613,6 +1619,7 @@ impl ArchitectPane {
                         "Connected this step to a predecessor",
                         cx,
                     );
+                    self.select_new_loop(&from_id, &to_id, window, cx);
                 }
             }
         }
@@ -1620,6 +1627,42 @@ impl ArchitectPane {
         // The gesture is over; the next drag is a separate change.
         self.undo_group = None;
         cx.notify();
+    }
+
+    /// A connection drawn back round a loop is selected, so the inspector
+    /// shows its Loop section, and the user is told when the plan could now
+    /// never leave the loop.
+    fn select_new_loop(
+        &mut self,
+        from: &NodeId,
+        to: &NodeId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((edge, endless)) = self.graph(cx).and_then(|graph| {
+            let edge = graph
+                .edges
+                .iter()
+                .rev()
+                .find(|edge| &edge.from == from && &edge.to == to)
+                .filter(|edge| graph.is_loop_edge(edge))?;
+            let endless = graph
+                .problems()
+                .iter()
+                .any(|problem| matches!(problem, GraphProblem::EndlessLoop(_)));
+            Some((edge.id.clone(), endless))
+        }) else {
+            return;
+        };
+        self.set_selection(Some(Selection::Edge(edge)), window, cx);
+        if endless {
+            self.notice(
+                "That connection makes a loop the plan could never leave. Give it a condition \
+                 or a repeat limit."
+                    .to_string(),
+                cx,
+            );
+        }
     }
 
     /// Selecting a step, then selecting it again, opens its plan. Double-click
