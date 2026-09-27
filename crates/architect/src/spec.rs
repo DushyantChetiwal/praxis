@@ -87,6 +87,10 @@ pub fn compile_spec(graph: &ArchitectGraph) -> Result<String, Vec<GraphProblem>>
                 Some(target_number) => format!("go to step {target_number} ({target})"),
                 None => format!("go to {target}"),
             };
+            let destination = match edge.max_repeats {
+                Some(limit) => format!("{destination} (at most {limit} times in total)"),
+                None => destination,
+            };
 
             match &edge.condition {
                 EdgeCondition::Always => writeln!(spec, "- {destination}.").ok(),

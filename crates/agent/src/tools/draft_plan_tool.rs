@@ -75,6 +75,10 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 /// - Pointing a connection back at an earlier step is how you express a loop,
 ///   such as returning to the edit step when tests fail. Loops are expected;
 ///   just make sure something can leave the loop.
+///   Give a retry loop a `max_repeats` so it moves on after that many rounds
+///   instead of going round until the run is stopped. A loop in which every
+///   connection is unconditional and unlimited can never be left, and is
+///   reported as a problem.
 ///
 /// ### Replacing an existing plan
 /// This call replaces the whole plan. Send the complete set of steps every

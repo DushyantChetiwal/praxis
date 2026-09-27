@@ -1675,6 +1675,13 @@ impl ArchitectPane {
                             )
                         }
                     }
+                    None if edge.max_repeats.is_some() => (
+                        Some(IconName::RotateCcw),
+                        String::new(),
+                        Color::Warning,
+                        cx.theme().status().warning_border,
+                        cx.theme().status().warning_background,
+                    ),
                     None => {
                         // Nothing to say about an unconditional connection until
                         // the step behind it has actually produced something.
@@ -1692,6 +1699,13 @@ impl ArchitectPane {
                         )
                     }
                 };
+                // A repeat limit is the one fact about a loop worth reading at a
+                // glance, so it leads the label rather than being truncated off.
+                let text = match edge.max_repeats {
+                    Some(limit) if text.is_empty() => format!("repeats up to {limit}×"),
+                    Some(limit) => format!("up to {limit}× · {text}"),
+                    None => text,
+                };
 
                 let midpoint = curve.midpoint();
                 let screen = self.to_screen(midpoint);
@@ -1705,6 +1719,9 @@ impl ArchitectPane {
                         format!("The agent decides: {label}").into()
                     }
                     Some(label) => format!("Taken only if {label}").into(),
+                    None if edge.max_repeats.is_some() => {
+                        "Always taken, until its repeat limit is spent".into()
+                    }
                     None => graph
                         .node(&edge.from)
                         .and_then(|node| node.result.as_ref())
@@ -1717,6 +1734,12 @@ impl ArchitectPane {
                         .unwrap_or_else(|| {
                             "The summary of the earlier step went along here".into()
                         }),
+                };
+                let tooltip = match edge.max_repeats {
+                    Some(limit) => SharedString::from(format!(
+                        "{tooltip}\nTaken at most {limit} times per run."
+                    )),
+                    None => tooltip,
                 };
 
                 Some(

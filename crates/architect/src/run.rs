@@ -133,7 +133,7 @@ enum Phase {
     Working,
     Deciding {
         remaining: Vec<Branch>,
-        fallback: Option<NodeId>,
+        fallback: Option<(EdgeId, NodeId)>,
     },
 }
 
@@ -148,6 +148,9 @@ struct Frame {
     remaining_roots: Vec<NodeId>,
     phase: Phase,
     visits: HashMap<NodeId, usize>,
+    /// How many times each connection in this plan has been taken, for
+    /// connections with a repeat limit.
+    edge_uses: HashMap<EdgeId, usize>,
 }
 
 impl Frame {
@@ -210,6 +213,7 @@ impl PlanRun {
             remaining_roots: entries.collect(),
             phase: Phase::Working,
             visits,
+            edge_uses: HashMap::default(),
         };
         self.history.push(frame.path());
         self.stack.push(frame);
@@ -304,11 +308,19 @@ impl PlanRun {
             if local.node(&edge.to).is_none() {
                 continue;
             }
+            // A connection that has used up its repeats is closed for the rest
+            // of this plan's run, which is how a limited loop lets go.
+            let uses = frame.edge_uses.get(&edge.id).copied().unwrap_or(0);
+            if let Some(limit) = edge.max_repeats
+                && uses >= limit as usize
+            {
+                continue;
+            }
             if edge.condition.is_always() {
-                // The first plain connection is the "otherwise" branch. Later
-                // ones are unreachable by this policy, and silently taking one
-                // would make the graph mean something other than it looks.
-                fallback.get_or_insert_with(|| edge.to.clone());
+                // The first open plain connection is the "otherwise" branch.
+                // Later ones are unreachable by this policy, and silently taking
+                // one would make the graph mean something other than it looks.
+                fallback.get_or_insert_with(|| (edge.id.clone(), edge.to.clone()));
             } else {
                 remaining.push(Branch {
                     edge: edge.id.clone(),
@@ -346,12 +358,12 @@ impl PlanRun {
 
         let branch = remaining.remove(0);
         if taken {
-            return self.enter(branch.to, graph);
+            return self.take(branch.edge, branch.to, graph);
         }
         let fallback = fallback.clone();
         if remaining.is_empty() {
             return match fallback {
-                Some(to) => self.enter(to, graph),
+                Some((edge, to)) => self.take(edge, to, graph),
                 None => self.leave_frame(graph),
             };
         }
@@ -373,9 +385,18 @@ impl PlanRun {
             return Decision::Ask(branch.clone());
         }
         match fallback.clone() {
-            Some(to) => self.enter(to, graph),
+            Some((edge, to)) => self.take(edge, to, graph),
             None => self.leave_frame(graph),
         }
+    }
+
+    /// Follows a connection out of the current step, counting it against any
+    /// repeat limit it has.
+    fn take(&mut self, edge: EdgeId, to: NodeId, graph: &ArchitectGraph) -> Decision {
+        if let Some(frame) = self.stack.last_mut() {
+            *frame.edge_uses.entry(edge).or_insert(0) += 1;
+        }
+        self.enter(to, graph)
     }
 
     /// Moves onto a step within the current plan, descending into it if it is
@@ -1082,6 +1103,62 @@ mod tests {
                 node: NodeId("work".into()),
                 visits: MAX_NODE_VISITS + 1,
             }
+        );
+    }
+
+    #[test]
+    fn a_limited_loop_moves_on_once_its_repeats_are_spent() {
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(ArchitectNode::new("edit", "Edit"));
+        graph.add_node(ArchitectNode::new("test", "Test"));
+        graph.add_node(ArchitectNode::new("ship", "Ship"));
+        graph.connect("edit", "test");
+        let mut retry = ArchitectEdge::new("retry", "test", "edit");
+        retry.condition = EdgeCondition::LlmEvaluated {
+            question: "Did the tests fail?".into(),
+        };
+        retry.max_repeats = Some(2);
+        graph.edges.push(retry);
+        graph.connect("test", "ship");
+        lock_deeply(&mut graph);
+
+        let mut run = PlanRun::start(&graph).unwrap();
+        for _ in 0..2 {
+            assert_eq!(run.finish_step(&graph), Decision::Run(path(&["test"])));
+            assert!(matches!(run.finish_step(&graph), Decision::Ask(_)));
+            assert_eq!(run.answer(&graph, true), Decision::Run(path(&["edit"])));
+        }
+        assert_eq!(run.finish_step(&graph), Decision::Run(path(&["test"])));
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Run(path(&["ship"])),
+            "with its repeats spent, the loop is not offered again"
+        );
+        assert_eq!(run.attempt(&NodeId("edit".into())), 3);
+    }
+
+    #[test]
+    fn an_unconditional_loop_with_a_limit_repeats_then_moves_on() {
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(ArchitectNode::new("draft", "Draft"));
+        graph.add_node(ArchitectNode::new("polish", "Polish"));
+        graph.add_node(ArchitectNode::new("publish", "Publish"));
+        graph.connect("draft", "polish");
+        let mut again = ArchitectEdge::new("again", "polish", "draft");
+        again.max_repeats = Some(1);
+        graph.edges.push(again);
+        graph.connect("polish", "publish");
+        lock_deeply(&mut graph);
+        assert_eq!(graph.blocking_problems(), vec![]);
+
+        let mut run = PlanRun::start(&graph).unwrap();
+        assert_eq!(run.finish_step(&graph), Decision::Run(path(&["polish"])));
+        assert_eq!(run.finish_step(&graph), Decision::Run(path(&["draft"])));
+        assert_eq!(run.finish_step(&graph), Decision::Run(path(&["polish"])));
+        assert_eq!(run.finish_step(&graph), Decision::Run(path(&["publish"])));
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Done(RunOutcome::Completed)
         );
     }
 

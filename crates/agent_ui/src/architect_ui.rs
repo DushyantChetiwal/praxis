@@ -1391,6 +1391,7 @@ impl ArchitectPane {
             GraphProblem::DuplicateNode(id)
             | GraphProblem::Unreachable(id)
             | GraphProblem::Unlocked(id)
+            | GraphProblem::EndlessLoop(id)
             | GraphProblem::InSubplan { node: id, .. } => Selection::Node(id.clone()),
             GraphProblem::DanglingEdge { edge, .. } | GraphProblem::EmptyCondition(edge) => {
                 Selection::Edge(edge.clone())

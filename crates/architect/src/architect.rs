@@ -223,6 +223,11 @@ pub struct ArchitectEdge {
     pub to: NodeId,
     #[serde(default = "always_condition")]
     pub condition: EdgeCondition,
+    /// The most times a run may take this connection before treating it as
+    /// closed and moving on. This is how a loop says "retry at most three
+    /// times": once the limit is spent, the next way out is taken instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_repeats: Option<u32>,
 }
 
 fn always_condition() -> EdgeCondition {
@@ -236,6 +241,7 @@ impl ArchitectEdge {
             from: from.into(),
             to: to.into(),
             condition: EdgeCondition::Always,
+            max_repeats: None,
         }
     }
 
@@ -268,6 +274,9 @@ pub enum GraphProblem {
     EmptyCondition(EdgeId),
     /// A step still open for deliberation.
     Unlocked(NodeId),
+    /// A loop that always goes round again: every step in it has exactly one
+    /// way on, unconditional and unlimited, so a run could never leave it.
+    EndlessLoop(NodeId),
     /// Something wrong inside a step's nested plan.
     InSubplan {
         node: NodeId,
@@ -293,6 +302,11 @@ impl Display for GraphProblem {
                 write!(formatter, "connection {} has an empty condition", id.0)
             }
             GraphProblem::Unlocked(id) => write!(formatter, "{id} is not locked yet"),
+            GraphProblem::EndlessLoop(id) => write!(
+                formatter,
+                "{id} is in a loop with no way out; give one of its connections a condition or a \
+                 repeat limit"
+            ),
             GraphProblem::InSubplan { node, problem } => {
                 write!(formatter, "inside {node}: {problem}")
             }
@@ -432,10 +446,12 @@ pub struct MergedDraft {
 
 /// Where a step leads, and on what terms, in a form two graphs can be compared
 /// by. Ordered, so the same routing written in a different order still matches.
-fn routes_from(graph: &ArchitectGraph, id: &NodeId) -> Vec<(String, EdgeCondition)> {
-    let mut routes: Vec<(String, EdgeCondition)> = graph
+type Route = (String, EdgeCondition, Option<u32>);
+
+fn routes_from(graph: &ArchitectGraph, id: &NodeId) -> Vec<Route> {
+    let mut routes: Vec<Route> = graph
         .edges_from(id)
-        .map(|edge| (edge.to.0.clone(), edge.condition.clone()))
+        .map(|edge| (edge.to.0.clone(), edge.condition.clone(), edge.max_repeats))
         .collect();
     routes.sort_by(|a, b| {
         a.0.cmp(&b.0)
@@ -644,7 +660,11 @@ impl ArchitectGraph {
                         format!("model decides: {question}")
                     }
                 };
-                let _ = writeln!(out, "{pad}  leads to {} ({when})", edge.to.0);
+                let limit = edge
+                    .max_repeats
+                    .map(|limit| format!(", at most {limit} times"))
+                    .unwrap_or_default();
+                let _ = writeln!(out, "{pad}  leads to {} ({when}{limit})", edge.to.0);
             }
             if let Some(result) = &node.result {
                 let _ = writeln!(
@@ -721,6 +741,7 @@ impl ArchitectGraph {
             from,
             to,
             condition: EdgeCondition::Always,
+            max_repeats: None,
         });
         id
     }
@@ -929,9 +950,19 @@ impl ArchitectGraph {
             }
         }
 
+        // A refined route to the same step keeps the repeat limit the user set,
+        // since refining a step's routing is not a request to lift it.
+        let limits: HashMap<NodeId, u32> = graph
+            .edges_from(&id)
+            .filter_map(|edge| Some((edge.to.clone(), edge.max_repeats?)))
+            .collect();
         graph.edges.retain(|edge| edge.from != id);
         for (to, condition) in accepted {
-            graph.connect_with(id.clone(), to, condition);
+            let limit = limits.get(&to).copied();
+            let edge_id = graph.connect_with(id.clone(), to, condition);
+            if let Some(edge) = graph.edges.iter_mut().find(|edge| edge.id == edge_id) {
+                edge.max_repeats = limit;
+            }
         }
         Ok(unknown)
     }
@@ -1008,6 +1039,45 @@ impl ArchitectGraph {
                 edge: edge_id.clone(),
             })?;
         target.condition = condition;
+        Ok(())
+    }
+
+    /// Limits how many times a run may take a connection, or lifts the limit,
+    /// unless its source step or a containing step is locked. A limit of zero
+    /// would close the connection outright, so it is stored as one.
+    pub fn set_edge_max_repeats_at(
+        &mut self,
+        graph_path: &NodePath,
+        edge_id: &EdgeId,
+        max_repeats: Option<u32>,
+    ) -> Result<(), GraphMutationError> {
+        let edge = self
+            .graph_at(graph_path)
+            .and_then(|graph| graph.edges.iter().find(|edge| &edge.id == edge_id))
+            .cloned()
+            .ok_or_else(|| GraphMutationError::EdgeNotFound {
+                graph: graph_path.clone(),
+                edge: edge_id.clone(),
+            })?;
+        let source_path = graph_path.child(edge.from);
+        let (graph, source_id) = self.containing_graph_mut(&source_path)?;
+        let source = graph
+            .node(&source_id)
+            .ok_or_else(|| GraphMutationError::NodeNotFound {
+                path: source_path.clone(),
+            })?;
+        if source.locked {
+            return Err(GraphMutationError::Locked { path: source_path });
+        }
+        let target = graph
+            .edges
+            .iter_mut()
+            .find(|edge| &edge.id == edge_id)
+            .ok_or_else(|| GraphMutationError::EdgeNotFound {
+                graph: graph_path.clone(),
+                edge: edge_id.clone(),
+            })?;
+        target.max_repeats = max_repeats.map(|limit| limit.max(1));
         Ok(())
     }
 
@@ -1208,6 +1278,10 @@ impl ArchitectGraph {
             problems.push(GraphProblem::Unreachable(id));
         }
 
+        for id in self.endless_loops() {
+            problems.push(GraphProblem::EndlessLoop(id));
+        }
+
         problems.extend(self.edges.iter().filter_map(|edge| {
             edge.condition
                 .label()
@@ -1240,6 +1314,75 @@ impl ArchitectGraph {
             .filter(|node| !reached.contains(&node.id))
             .map(|node| node.id.clone())
             .collect()
+    }
+
+    /// Whether taking this connection can lead back to where it started, which
+    /// is what makes it part of a loop and a repeat limit meaningful.
+    pub fn is_loop_edge(&self, edge: &ArchitectEdge) -> bool {
+        let mut reached: HashSet<&NodeId> = HashSet::default();
+        let mut stack = vec![&edge.to];
+        while let Some(id) = stack.pop() {
+            if id == &edge.from {
+                return true;
+            }
+            if !reached.insert(id) {
+                continue;
+            }
+            stack.extend(self.edges_from(id).map(|next| &next.to));
+        }
+        false
+    }
+
+    /// Where a run must go after this step, when it has no say in the matter:
+    /// no conditional way out, and a first plain connection with no repeat
+    /// limit. `None` whenever the run could go more than one way.
+    fn forced_successor(&self, id: &NodeId) -> Option<&NodeId> {
+        let mut first_plain = None;
+        for edge in self.edges_from(id) {
+            if self.node(&edge.to).is_none() {
+                continue;
+            }
+            if !edge.condition.is_always() {
+                return None;
+            }
+            first_plain.get_or_insert(edge);
+        }
+        first_plain
+            .filter(|edge| edge.max_repeats.is_none())
+            .map(|edge| &edge.to)
+    }
+
+    /// Loops a run could never leave, each reported once by its first step in
+    /// plan order. Steps nothing leads to are already reported as unreachable.
+    fn endless_loops(&self) -> Vec<NodeId> {
+        let unreachable: HashSet<NodeId> = self.unreachable_nodes().into_iter().collect();
+        let mut in_reported_loop: HashSet<NodeId> = HashSet::default();
+        let mut loops = Vec::new();
+        for node in &self.nodes {
+            if unreachable.contains(&node.id) || in_reported_loop.contains(&node.id) {
+                continue;
+            }
+            let mut walk = vec![node.id.clone()];
+            while let Some(next) = walk.last().and_then(|id| self.forced_successor(id)) {
+                if let Some(start) = walk.iter().position(|id| id == next) {
+                    let cycle = &walk[start..];
+                    let is_new = cycle.iter().all(|id| !in_reported_loop.contains(id));
+                    let first = cycle
+                        .iter()
+                        .min_by_key(|id| self.node_index(id).unwrap_or(usize::MAX));
+                    if is_new {
+                        loops.extend(first.cloned());
+                    }
+                    in_reported_loop.extend(cycle.iter().cloned());
+                    break;
+                }
+                if walk.len() > self.nodes.len() {
+                    break;
+                }
+                walk.push(next.clone());
+            }
+        }
+        loops
     }
 
     /// Gives a position to every node that does not have one yet, leaving nodes
@@ -1326,6 +1469,10 @@ pub struct ProposedEdge {
     /// When this connection is taken. Defaults to always.
     #[serde(default)]
     pub condition: Option<EdgeCondition>,
+    /// For a connection that loops back: the most times it may be taken before
+    /// the plan moves on another way. Leave out for no limit.
+    #[serde(default)]
+    pub max_repeats: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -1365,6 +1512,7 @@ impl ProposedGraph {
                 from: edge.from,
                 to: edge.to,
                 condition: edge.condition.unwrap_or(EdgeCondition::Always),
+                max_repeats: edge.max_repeats.map(|limit| limit.max(1)),
             });
         }
         graph.place_unpositioned_nodes();
@@ -1522,10 +1670,55 @@ mod tests {
         graph.add_node(ArchitectNode::new("reproduce", "Reproduce"));
         graph.add_node(ArchitectNode::new("fix", "Fix"));
         graph.connect("reproduce", "fix");
-        graph.connect("fix", "reproduce");
+        graph.connect_with(
+            "fix",
+            "reproduce",
+            EdgeCondition::LlmEvaluated {
+                question: "Does it still fail?".into(),
+            },
+        );
 
         assert_eq!(graph.roots(), vec![NodeId("reproduce".into())]);
         assert_eq!(graph.problems(), vec![]);
+    }
+
+    #[test]
+    fn a_loop_with_no_way_out_is_reported_until_it_gets_one() {
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(ArchitectNode::new("start", "Start"));
+        graph.add_node(ArchitectNode::new("draft", "Draft"));
+        graph.add_node(ArchitectNode::new("review", "Review"));
+        graph.connect("start", "draft");
+        graph.connect("draft", "review");
+        let back = graph.connect("review", "draft");
+
+        assert_eq!(
+            graph.problems(),
+            vec![GraphProblem::EndlessLoop(NodeId("draft".into()))],
+            "the loop should be reported once, by its first step"
+        );
+        let loop_edges: Vec<&EdgeId> = graph
+            .edges
+            .iter()
+            .filter(|edge| graph.is_loop_edge(edge))
+            .map(|edge| &edge.id)
+            .collect();
+        assert_eq!(
+            loop_edges.len(),
+            2,
+            "only the connections inside the loop are loop edges"
+        );
+
+        graph
+            .set_edge_max_repeats_at(&NodePath::default(), &back, Some(0))
+            .unwrap();
+        let limited = graph.edges.iter().find(|edge| edge.id == back).unwrap();
+        assert_eq!(
+            limited.max_repeats,
+            Some(1),
+            "a limit of zero is stored as one"
+        );
+        assert_eq!(graph.problems(), vec![], "a repeat limit is a way out");
     }
 
     #[test]

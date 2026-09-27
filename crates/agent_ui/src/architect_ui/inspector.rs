@@ -871,6 +871,7 @@ impl ArchitectPane {
         let source_locked = graph
             .and_then(|graph| graph.node(&edge.from))
             .is_some_and(|node| node.locked);
+        let is_loop = graph.is_some_and(|graph| graph.is_loop_edge(&edge));
         let Some(condition_editor) = self
             .edge_inspector
             .as_ref()
@@ -895,6 +896,12 @@ impl ArchitectPane {
              recalling what was true earlier"
         } else {
             "When the step finishes, the agent answers this question to decide the route"
+        };
+        let editable = !source_locked && !self.is_running(cx);
+        let repeat_limit = if is_loop {
+            Some(self.render_repeat_limit(&edge, editable, cx))
+        } else {
+            None
         };
 
         div()
@@ -1058,29 +1065,165 @@ impl ArchitectPane {
                                             .color(Color::Muted),
                                     ),
                             )
-                            .child(
-                                Button::new("architect-delete-edge", "Delete Connection")
-                                    .tab_index(0isize)
-                                    .full_width()
-                                    .label_size(LabelSize::Small)
-                                    .style(ButtonStyle::Subtle)
-                                    .start_icon(Icon::new(IconName::Trash).size(IconSize::XSmall))
-                                    .disabled(source_locked)
-                                    .tooltip(Tooltip::text(format!(
-                                        "Remove this connection. {UNDO_SHORTCUT} undoes it."
-                                    )))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.set_selection(
-                                            Some(Selection::Edge(delete_id.clone())),
-                                            window,
-                                            cx,
-                                        );
-                                        this.delete_selection(window, cx);
-                                    })),
-                            ),
+                            .children(repeat_limit)
+                            // A locked source or a running plan cannot lose a
+                            // connection, so the action is not offered at all.
+                            .when(editable, |this| {
+                                this.child(
+                                    Button::new("architect-delete-edge", "Delete Connection")
+                                        .tab_index(0isize)
+                                        .full_width()
+                                        .label_size(LabelSize::Small)
+                                        .style(ButtonStyle::Subtle)
+                                        .start_icon(
+                                            Icon::new(IconName::Trash).size(IconSize::XSmall),
+                                        )
+                                        .tooltip(Tooltip::text(format!(
+                                            "Remove this connection. {UNDO_SHORTCUT} undoes it."
+                                        )))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.set_selection(
+                                                Some(Selection::Edge(delete_id.clone())),
+                                                window,
+                                                cx,
+                                            );
+                                            this.delete_selection(window, cx);
+                                        })),
+                                )
+                            }),
                     ),
             )
             .into_any()
+    }
+
+    /// How many times a run may take a loop connection. Only shown for a
+    /// connection that can lead back to where it started, since a limit means
+    /// nothing on one that cannot.
+    fn render_repeat_limit(
+        &self,
+        edge: &ArchitectEdge,
+        editable: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Past the run's own per-step ceiling a limit could never be reached.
+        let ceiling = (architect::MAX_NODE_VISITS as u32).saturating_sub(1);
+        let limit = edge.max_repeats;
+        let description = match limit {
+            None if edge.condition.is_always() => {
+                "Without a limit this loop goes round until the run is stopped.".to_string()
+            }
+            None => "Taken whenever its condition holds.".to_string(),
+            Some(1) => "Taken at most once, then the plan moves on another way.".to_string(),
+            Some(count) => {
+                format!("Taken at most {count} times, then the plan moves on another way.")
+            }
+        };
+        let edge_id = edge.id.clone();
+        let controls = match limit {
+            None => h_flex()
+                .child(
+                    Button::new("architect-edge-add-limit", "Limit Repeats")
+                        .tab_index(0isize)
+                        .label_size(LabelSize::Small)
+                        .style(ButtonStyle::Subtle)
+                        .start_icon(Icon::new(IconName::RotateCcw).size(IconSize::XSmall))
+                        .tooltip(Tooltip::text(
+                            "Let the plan go round this loop at most three times",
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_edge_max_repeats(edge_id.clone(), Some(3), cx);
+                        })),
+                )
+                .into_any_element(),
+            Some(count) => {
+                let fewer_id = edge_id.clone();
+                let more_id = edge_id.clone();
+                h_flex()
+                    .gap_1()
+                    .child(
+                        IconButton::new("architect-edge-fewer-repeats", IconName::Dash)
+                            .tab_index(0isize)
+                            .icon_size(IconSize::Small)
+                            .disabled(count <= 1)
+                            .tooltip(Tooltip::text("Allow one fewer round"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_edge_max_repeats(fewer_id.clone(), Some(count - 1), cx);
+                            })),
+                    )
+                    .child(
+                        Label::new(match count {
+                            1 => "At most once".to_string(),
+                            count => format!("At most {count} times"),
+                        })
+                        .size(LabelSize::Small),
+                    )
+                    .child(
+                        IconButton::new("architect-edge-more-repeats", IconName::Plus)
+                            .tab_index(0isize)
+                            .icon_size(IconSize::Small)
+                            .disabled(count >= ceiling)
+                            .tooltip(Tooltip::text("Allow one more round"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_edge_max_repeats(more_id.clone(), Some(count + 1), cx);
+                            })),
+                    )
+                    .child(
+                        IconButton::new("architect-edge-remove-limit", IconName::Close)
+                            .tab_index(0isize)
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Remove the limit"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_edge_max_repeats(edge_id.clone(), None, cx);
+                            })),
+                    )
+                    .into_any_element()
+            }
+        };
+
+        v_flex()
+            .gap_1()
+            .child(
+                Label::new("LOOP")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .when(editable, |this| this.child(controls))
+            .when(!editable, |this| {
+                this.child(
+                    Label::new(match limit {
+                        Some(1) => "At most once".to_string(),
+                        Some(count) => format!("At most {count} times"),
+                        None => "No limit".to_string(),
+                    })
+                    .size(LabelSize::Small),
+                )
+            })
+            .child(
+                Label::new(description)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .into_any()
+    }
+
+    fn set_edge_max_repeats(
+        &mut self,
+        id: EdgeId,
+        max_repeats: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let focus = self.focus.clone();
+        let activity_path = focus.clone();
+        if self.edit_checked(
+            move |graph| graph.set_edge_max_repeats_at(&focus, &id, max_repeats),
+            cx,
+        ) {
+            let message = match max_repeats {
+                Some(count) => format!("Limited a loop to {count} rounds"),
+                None => "Removed a loop's repeat limit".to_string(),
+            };
+            self.record_activity(Some(activity_path), message, cx);
+        }
     }
 
     /// The contextual panel beside the graph.
