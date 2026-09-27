@@ -9,7 +9,8 @@ use gpui::{
     Hsla, MouseButton, MouseDownEvent, MouseUpEvent, PathBuilder, Pixels, Render, SharedString,
     Subscription, WeakEntity, Window, canvas, deferred, div, point, px,
 };
-use ui::{Divider, TintColor, Tooltip, prelude::*};
+use ui::{ContextMenu, Divider, TintColor, Tooltip, prelude::*, right_click_menu};
+use util::ResultExt as _;
 use workspace::{
     HideStatusItem, StatusItemView,
     item::{Item, ItemEvent, ItemHandle},
@@ -17,8 +18,9 @@ use workspace::{
 
 use super::geometry::{EdgeCurve, NODE_WIDTH, paint_curve};
 use super::{
-    ArchitectPane, ArchitectWorkspaceMode, DETAIL_ZOOM_THRESHOLD, EXPANDED_CHILD_LIMIT,
-    HistoryDirection, Interaction, MAX_ZOOM, MIN_ZOOM, REDO_SHORTCUT, Selection, UNDO_SHORTCUT,
+    ArchitectPane, ArchitectWorkspaceMode, DETAIL_ZOOM_THRESHOLD, DUPLICATE_SHORTCUT,
+    EXPANDED_CHILD_LIMIT, HistoryDirection, Interaction, MAX_ZOOM, MIN_ZOOM, REDO_SHORTCUT,
+    Selection, UNDO_SHORTCUT,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1826,11 +1828,12 @@ impl ArchitectPane {
         // The nodes are copied out before rendering: building elements needs
         // mutable access to the context, which is where the graph is read from.
         let Some((nodes, invalid, step_numbers)) = self.graph(cx).map(|graph| {
-            let invalid: HashSet<NodeId> = graph
+            let invalid: HashMap<NodeId, &'static str> = graph
                 .problems()
                 .iter()
                 .filter_map(|problem| match problem {
-                    GraphProblem::Unreachable(id) => Some(id.clone()),
+                    GraphProblem::Unreachable(id) => Some((id.clone(), "unreachable")),
+                    GraphProblem::EndlessLoop(id) => Some((id.clone(), "endless loop")),
                     _ => None,
                 })
                 .collect();
@@ -1844,6 +1847,8 @@ impl ArchitectPane {
         }) else {
             return Vec::new();
         };
+        let running = self.is_running(cx);
+        let pane = cx.weak_entity();
 
         nodes
             .into_iter()
@@ -1866,18 +1871,28 @@ impl ArchitectPane {
                 ) {
                     return None;
                 }
-                let is_invalid = invalid.contains(&node.id);
+                let problem = invalid.get(&node.id).copied();
                 let step_number = step_numbers.get(&node.id).copied().unwrap_or(ix + 1);
+                let menu = NodeMenu {
+                    id: node.id.clone(),
+                    locked: node.locked,
+                    has_subplan: node.has_subplan(),
+                    running,
+                };
+                let card = div()
+                    .absolute()
+                    .left(left)
+                    .top(top)
+                    .w(width)
+                    .h(height)
+                    .child(self.render_node(ix, step_number, node, problem, cx));
+                let pane = pane.clone();
 
                 Some(
-                    div()
-                        .absolute()
-                        .left(left)
-                        .top(top)
-                        .w(width)
-                        .h(height)
-                        .child(self.render_node(ix, step_number, node, is_invalid, cx))
-                        .into_any(),
+                    right_click_menu(("architect-node-menu", ix))
+                        .trigger(move |_, _, _| card)
+                        .menu(move |window, cx| menu.build(pane.clone(), window, cx))
+                        .into_any_element(),
                 )
             })
             .collect()
@@ -2011,9 +2026,10 @@ impl ArchitectPane {
         ix: usize,
         step_number: usize,
         node: ArchitectNode,
-        invalid: bool,
+        problem: Option<&'static str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let invalid = problem.is_some();
         let theme = cx.theme().colors().clone();
         let error_border = cx.theme().status().error_border;
         let selected = self.selection == Some(Selection::Node(node.id.clone()));
@@ -2290,9 +2306,9 @@ impl ArchitectPane {
                             h_flex()
                                 .flex_none()
                                 .gap_1p5()
-                                .when(invalid, |this| {
+                                .when_some(problem, |this, problem| {
                                     this.child(chip(
-                                        "unreachable",
+                                        problem,
                                         Some(IconName::Warning),
                                         Color::Error,
                                         cx.theme().status().error_border,
@@ -2454,6 +2470,80 @@ impl ArchitectPane {
                     .into_any()
             })
             .into_any()
+    }
+}
+
+type NodeAction = fn(&mut ArchitectPane, NodeId, &mut Window, &mut Context<ArchitectPane>);
+
+/// What a step's right-click menu offers, decided when the canvas renders so
+/// the menu never lists an action the step cannot take.
+#[derive(Clone)]
+struct NodeMenu {
+    id: NodeId,
+    locked: bool,
+    has_subplan: bool,
+    running: bool,
+}
+
+impl NodeMenu {
+    fn build(
+        &self,
+        pane: WeakEntity<ArchitectPane>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<ContextMenu> {
+        let menu = self.clone();
+        ContextMenu::build(window, cx, move |context_menu, _, _| {
+            let action = |run: NodeAction| {
+                let pane = pane.clone();
+                let id = menu.id.clone();
+                move |window: &mut Window, cx: &mut App| {
+                    pane.update(cx, |pane, cx| {
+                        pane.set_selection(Some(Selection::Node(id.clone())), window, cx);
+                        run(pane, id.clone(), window, cx);
+                    })
+                    .log_err();
+                }
+            };
+            let can_edit = !menu.running;
+            let can_break_down = can_edit && !menu.locked;
+            context_menu
+                .when(menu.has_subplan || can_break_down, |this| {
+                    this.entry(
+                        if menu.has_subplan {
+                            "Open Nested Plan"
+                        } else {
+                            "Break Into Steps"
+                        },
+                        None,
+                        action(|pane, id, window, cx| pane.drill_into(id, window, cx)),
+                    )
+                })
+                .entry(
+                    "Discuss This Step",
+                    None,
+                    action(|pane, id, window, cx| pane.discuss_node(id, window, cx)),
+                )
+                .when(can_edit, |this| {
+                    this.entry(
+                        format!("Duplicate ({DUPLICATE_SHORTCUT})"),
+                        None,
+                        action(|pane, _, window, cx| pane.duplicate_selection(window, cx)),
+                    )
+                    .entry(
+                        if menu.locked { "Unlock" } else { "Lock" },
+                        None,
+                        action(|pane, id, window, cx| pane.toggle_lock(id, window, cx)),
+                    )
+                })
+                .when(can_break_down, |this| {
+                    this.separator().entry(
+                        "Delete",
+                        None,
+                        action(|pane, _, window, cx| pane.delete_selection(window, cx)),
+                    )
+                })
+        })
     }
 }
 
