@@ -5,6 +5,7 @@ mod agent_model_selector;
 mod agent_panel;
 mod agent_registry_ui;
 mod architect_ui;
+mod automation;
 mod buffer_codegen;
 mod completion_provider;
 mod config_options;
@@ -621,6 +622,7 @@ pub fn init(
         init_language_model_settings(cx);
     }
     agent_panel::init(cx);
+    automation::init(cx);
     context_server_configuration::init(language_registry, fs.clone(), cx);
     thread_metadata_store::init(cx);
     terminal_thread_metadata_store::init(cx);

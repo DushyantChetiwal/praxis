@@ -301,7 +301,7 @@ impl ArchitectPane {
         );
     }
 
-    fn set_edge_condition(
+    pub(super) fn set_edge_condition(
         &mut self,
         id: EdgeId,
         condition: EdgeCondition,
@@ -808,7 +808,10 @@ impl ArchitectPane {
                                             .color(Color::Muted),
                                     )
                                     .child(
-                                        Label::new(if step_count == 0 {
+                                        Label::new(if step_count == 0 && !self.focus.0.is_empty() {
+                                            "Steps added here run in place of the step that \
+                                             contains them. Press Escape to go back up a level."
+                                        } else if step_count == 0 {
                                             "Architect turns a goal into a plan of explicit \
                                              steps. Start planning, refine and lock each step, \
                                              then run the plan."
@@ -1240,7 +1243,7 @@ impl ArchitectPane {
             .into_any()
     }
 
-    fn set_edge_max_repeats(
+    pub(super) fn set_edge_max_repeats(
         &mut self,
         id: EdgeId,
         max_repeats: Option<u32>,

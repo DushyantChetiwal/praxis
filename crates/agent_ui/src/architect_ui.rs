@@ -6,6 +6,7 @@
 //! text layout, hover and buttons inside nodes (if nodes were painted), so the
 //! two halves are drawn the way each is best drawn.
 
+mod automation;
 mod geometry;
 mod inspector;
 mod rendering;
