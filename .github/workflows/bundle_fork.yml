@@ -367,9 +367,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          # The release tag is created on the default branch. GITHUB_TOKEN is
+          # refused a ref at a product commit whose workflow files differ from
+          # the default branch, and the updater reads only the manifests, so the
+          # source commit is recorded in the version and notes instead.
           gh release create "${{ steps.release.outputs.tag }}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --target "${{ steps.release.outputs.source_sha }}" \
+            --target "${{ github.event.repository.default_branch }}" \
             --title "Praxis Dev ${{ steps.release.outputs.version }}" \
             --notes "Automated Praxis build from ${{ steps.release.outputs.source_sha }}. Desktop packages are unsigned." \
             --draft \
