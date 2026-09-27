@@ -913,10 +913,19 @@ impl AutoUpdater {
         let fetched_version = fetched_version.parse::<Version>()?;
 
         match release_channel {
-            ReleaseChannel::Nightly | ReleaseChannel::Dev
-                if release_channel == ReleaseChannel::Nightly
-                    || dev_updates_enabled(release_channel) =>
-            {
+            // Praxis Dev builds are published as numbered releases, and the
+            // installed build can be ahead of the manifest. Unlike Nightly, a
+            // differing commit is not reason enough to install: that would
+            // replace a newer build with an older one.
+            ReleaseChannel::Dev if dev_updates_enabled(release_channel) => {
+                let current_version = if let AutoUpdateStatus::Updated { version } = status {
+                    version
+                } else {
+                    installed_version
+                };
+                Ok(Self::check_if_praxis_version_is_newer(current_version, fetched_version))
+            }
+            ReleaseChannel::Nightly => {
                 let should_download = if let AutoUpdateStatus::Updated { version } = status {
                     fetched_version != version
                 } else {
@@ -996,6 +1005,34 @@ impl AutoUpdater {
             "windows" => install_release_windows(&target_path).await,
             unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
         }
+    }
+
+    /// Praxis builds share a Cargo version across many releases, so the bundle
+    /// number in the build metadata (`dev.25.<sha>` or `praxis.25.<sha>`)
+    /// orders builds of the same version.
+    fn check_if_praxis_version_is_newer(
+        installed_version: Version,
+        fetched_version: Version,
+    ) -> Option<Version> {
+        fn build_number(version: &Version) -> Option<u64> {
+            version.build.as_str().split('.').nth(1)?.parse().ok()
+        }
+        let core = |version: &Version| (version.major, version.minor, version.patch);
+        let newer = match core(&fetched_version).cmp(&core(&installed_version)) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => {
+                let fetched_build = build_number(&fetched_version);
+                let installed_build = build_number(&installed_version);
+                match (fetched_build, installed_build) {
+                    (Some(fetched), Some(installed)) => fetched > installed,
+                    // A local build carries no bundle number, so any published
+                    // build of its version is treated as an update, as before.
+                    _ => fetched_version.build != installed_version.build,
+                }
+            }
+        };
+        newer.then_some(fetched_version)
     }
 
     fn check_if_fetched_version_is_newer_non_nightly(
@@ -1792,6 +1829,39 @@ mod tests {
 
         let downloaded_len = std::fs::metadata(&target_path).unwrap().len();
         assert_eq!(downloaded_len, content_length as u64);
+    }
+
+    #[test]
+    fn test_praxis_dev_orders_published_builds_by_version_then_bundle_number() {
+        let version = |text: &str| text.parse::<semver::Version>().unwrap();
+        let newer = |installed: &str, fetched: &str| {
+            AutoUpdater::check_if_praxis_version_is_newer(version(installed), version(fetched))
+        };
+
+        assert_eq!(
+            newer("1.23.0+dev.25.b7c6391", "1.22.0+praxis.18.3be316a"),
+            None,
+            "an older published build must not replace the installed one"
+        );
+        assert_eq!(
+            newer("1.23.0+dev.25.b7c6391", "1.23.0+praxis.25.b7c6391"),
+            None,
+            "the installed build is not an update to itself"
+        );
+        assert_eq!(
+            newer("1.23.0+dev.25.b7c6391", "1.23.0+praxis.26.c1d2e3f"),
+            Some(version("1.23.0+praxis.26.c1d2e3f")),
+            "a later bundle of the same version is an update"
+        );
+        assert_eq!(
+            newer("1.22.0+dev.18.3be316a", "1.23.0+praxis.25.b7c6391"),
+            Some(version("1.23.0+praxis.25.b7c6391"))
+        );
+        assert_eq!(
+            newer("1.23.0+dev.b7c6391", "1.23.0+praxis.25.b7c6391"),
+            Some(version("1.23.0+praxis.25.b7c6391")),
+            "a local build takes a published build of its version"
+        );
     }
 
     #[test]
