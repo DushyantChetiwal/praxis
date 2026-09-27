@@ -90,7 +90,9 @@ thread can still change files while a plan is being drafted.
   capture field must carry enough information for downstream steps.
 - **Explicit locks:** A plan cannot run until deliberation is complete. This adds
   friction, but preserves reviewed steps when the graph is redrafted.
-- **Conditional loops:** Retry behavior is visible and bounded. Branch decisions
+- **Conditional loops:** Retry behavior is visible and bounded. A loop connection
+  can carry a repeat limit, after which the runner closes it and takes the next
+  way out, and a loop that could never be left blocks the run. Branch decisions
   that require judgment still depend on model output.
 - **Fail-closed Plan tools:** Repository-aware plans remain useful through
   structured Git and hosting reads. Arbitrary shell execution is deferred until
