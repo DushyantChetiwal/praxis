@@ -353,6 +353,14 @@ The mockup is illustrative rather than a literal implementation specification:
       pinning and Break Into Steps on settled steps, and deleting during a run.
 - [x] **AUI-622** Show settled-over-total plan progress on the Code workspace's
       Architect button.
+- [x] **AUI-623** Offer a right-click menu on steps listing only the actions the
+      step can take now, select a newly drawn loop connection, and warn when
+      the plan could never leave it. Outline rows mark loop targets and nested
+      plans.
+- [x] **AUI-624** Launching into a workspace left in Code mode no longer aborts:
+      the restoration check run while the Agent panel renders no longer reads
+      the panel itself. Found by capturing the installed build's panic output;
+      the published `praxis-dev-18-1` build has the same crash.
 - [x] **Phase 6 exit gate:** Existing graph capabilities work with the new cards,
       spacing, and three-region viewport.
 
