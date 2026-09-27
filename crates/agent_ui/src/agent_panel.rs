@@ -6110,12 +6110,13 @@ impl AgentPanel {
             })
         });
 
-        // Matched insets, so the card sits in the panel rather than being
-        // pushed against whatever follows it.
+        // Matched insets on every side, so the card sits in the panel rather
+        // than against the toolbar above it or the conversation below.
         Some(
             v_flex()
                 .w_full()
                 .px_2()
+                .pt_1p5()
                 .pb_1p5()
                 .gap_0p5()
                 .child(card)
