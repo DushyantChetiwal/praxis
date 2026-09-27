@@ -327,6 +327,17 @@ impl ArchitectPane {
         };
 
         let running = self.is_running(cx);
+        // Review jumps to the first thing on this level that blocks a run, so
+        // with nothing blocking there is nothing for it to do.
+        let review_count = if running {
+            0
+        } else {
+            graph.map_or(0, |graph| graph.blocking_problems().len())
+        };
+        let review_tooltip: SharedString = match review_count {
+            1 => "Select the one thing that needs attention".into(),
+            count => format!("Select the first of {count} things that need attention").into(),
+        };
         let run_status: Option<SharedString> =
             self.thread
                 .read(cx)
@@ -500,49 +511,53 @@ impl ArchitectPane {
                             )
                         },
                     )
-                    .when(!compact, |this| {
+                    .when(!compact && review_count > 0, |this| {
                         this.child(
                             Button::new("architect-review", "Review Plan")
                                 .tab_index(0isize)
                                 .label_size(LabelSize::Small)
                                 .style(ButtonStyle::Subtle)
                                 .start_icon(Icon::new(IconName::ListTodo).size(IconSize::XSmall))
-                                .disabled(step_count == 0)
-                                .tooltip(Tooltip::text("Focus the first step that needs attention"))
+                                .tooltip(Tooltip::text(review_tooltip.clone()))
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.review_plan(window, cx)),
                                 ),
                         )
                     })
-                    .when(compact, |this| {
+                    .when(compact && review_count > 0, |this| {
                         this.child(
                             IconButton::new("architect-review-compact", IconName::ListTodo)
                                 .tab_index(0isize)
                                 .icon_size(IconSize::Small)
-                                .disabled(step_count == 0)
-                                .tooltip(Tooltip::text("Focus the first step that needs attention"))
+                                .tooltip(Tooltip::text(review_tooltip))
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.review_plan(window, cx)),
                                 ),
                         )
                     })
-                    .child(if running {
-                        Button::new("architect-stop", "Stop")
-                            .tab_index(0isize)
-                            .label_size(LabelSize::Small)
-                            .style(ButtonStyle::Tinted(TintColor::Warning))
-                            .start_icon(Icon::new(IconName::Stop).size(IconSize::XSmall))
-                            .tooltip(Tooltip::text("Stop the run and the turn it is waiting on"))
-                            .on_click(cx.listener(|this, _, _, cx| this.stop_run(cx)))
-                    } else {
-                        Button::new("architect-run", "Run")
-                            .tab_index(0isize)
-                            .label_size(LabelSize::Small)
-                            .style(ButtonStyle::Tinted(TintColor::Accent))
-                            .start_icon(Icon::new(IconName::PlayFilled).size(IconSize::XSmall))
-                            .disabled(!ready_to_run)
-                            .tooltip(Tooltip::text(run_tooltip))
-                            .on_click(cx.listener(|this, _, _, cx| this.run(cx)))
+                    // An empty plan has nothing to run; the empty state offers
+                    // Start planning instead of a Run that can only refuse.
+                    .when(running || run_step_count > 0, |this| {
+                        this.child(if running {
+                            Button::new("architect-stop", "Stop")
+                                .tab_index(0isize)
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Tinted(TintColor::Warning))
+                                .start_icon(Icon::new(IconName::Stop).size(IconSize::XSmall))
+                                .tooltip(Tooltip::text(
+                                    "Stop the run and the turn it is waiting on",
+                                ))
+                                .on_click(cx.listener(|this, _, _, cx| this.stop_run(cx)))
+                        } else {
+                            Button::new("architect-run", "Run")
+                                .tab_index(0isize)
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Tinted(TintColor::Accent))
+                                .start_icon(Icon::new(IconName::PlayFilled).size(IconSize::XSmall))
+                                .disabled(!ready_to_run)
+                                .tooltip(Tooltip::text(run_tooltip))
+                                .on_click(cx.listener(|this, _, _, cx| this.run(cx)))
+                        })
                     })
                     .child(
                         Button::new("architect-open-code", "Code")
@@ -629,7 +644,7 @@ impl ArchitectPane {
                     .flex_none()
                     .children(history_buttons)
                     .child(Divider::vertical())
-                    .when(!show_navigation, |this| {
+                    .when(!show_navigation && !empty_plan, |this| {
                         this.child(
                             Button::new("architect-search", "Search")
                                 .tab_index(0isize)
@@ -638,7 +653,6 @@ impl ArchitectPane {
                                 .start_icon(
                                     Icon::new(IconName::MagnifyingGlass).size(IconSize::XSmall),
                                 )
-                                .disabled(empty_plan)
                                 .tooltip(Tooltip::text(
                                     "Open the ordered plan navigator to find a step",
                                 ))
@@ -652,11 +666,13 @@ impl ArchitectPane {
                                 .label_size(LabelSize::Small)
                                 .style(ButtonStyle::Subtle)
                                 .start_icon(Icon::new(IconName::RotateCw).size(IconSize::XSmall))
-                                .disabled(running || empty_plan)
+                                .disabled(running)
                                 .tooltip(Tooltip::text("Arrange the steps automatically"))
                                 .on_click(cx.listener(|this, _, _, cx| this.tidy_up(cx))),
                         )
-                        .child(
+                    })
+                    .when(!show_navigation, |this| {
+                        this.child(
                             Button::new("architect-add-step", "Add Step")
                                 .tab_index(0isize)
                                 .label_size(LabelSize::Small)
@@ -669,12 +685,11 @@ impl ArchitectPane {
                                 ),
                         )
                     })
-                    .when(show_navigation, |this| {
+                    .when(show_navigation && !empty_plan, |this| {
                         this.child(
                             IconButton::new("architect-search-compact", IconName::MagnifyingGlass)
                                 .tab_index(0isize)
                                 .icon_size(IconSize::Small)
-                                .disabled(empty_plan)
                                 .tooltip(Tooltip::text("Search plan steps"))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.open_outline_drawer(true, window, cx);
@@ -684,11 +699,13 @@ impl ArchitectPane {
                             IconButton::new("architect-tidy-compact", IconName::RotateCw)
                                 .tab_index(0isize)
                                 .icon_size(IconSize::Small)
-                                .disabled(running || empty_plan)
+                                .disabled(running)
                                 .tooltip(Tooltip::text("Arrange the steps automatically"))
                                 .on_click(cx.listener(|this, _, _, cx| this.tidy_up(cx))),
                         )
-                        .child(
+                    })
+                    .when(show_navigation, |this| {
+                        this.child(
                             IconButton::new("architect-add-step-compact", IconName::Plus)
                                 .tab_index(0isize)
                                 .icon_size(IconSize::Small)

@@ -1399,29 +1399,20 @@ impl ArchitectPane {
         }
     }
 
+    /// Selects the first thing on this level that blocks a run. Review Plan is
+    /// only offered while there is one.
     fn review_plan(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let review = self.graph(cx).map(|graph| {
-            let problems = graph.blocking_problems();
-            let selection = problems.first().map(Self::problem_selection).or_else(|| {
-                graph
-                    .execution_order()
-                    .first()
-                    .cloned()
-                    .map(Selection::Node)
-            });
-            (selection, problems.len())
+        let first_problem = self.graph(cx).and_then(|graph| {
+            graph
+                .blocking_problems()
+                .first()
+                .map(Self::problem_selection)
         });
-        let (selection, problem_count) = review.unwrap_or_default();
-        self.record_activity(
-            None,
-            if problem_count == 0 {
-                "Reviewed the plan: ready"
-            } else {
-                "Reviewed the plan: issues need attention"
-            },
-            cx,
-        );
-        self.set_selection(selection, window, cx);
+        let Some(selection) = first_problem else {
+            return;
+        };
+        self.record_activity(None, "Reviewed the plan: issues need attention", cx);
+        self.set_selection(Some(selection), window, cx);
     }
 
     fn select_adjacent_step(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
