@@ -955,6 +955,21 @@ impl ArchitectGraph {
         Ok(update(node))
     }
 
+    /// Moves a step on the canvas. Where a step sits is layout, not part of
+    /// what was settled, so a locked step can still be moved.
+    pub fn move_node_at(
+        &mut self,
+        path: &NodePath,
+        position: Position,
+    ) -> Result<(), GraphMutationError> {
+        let (graph, id) = self.containing_graph_mut(path)?;
+        let node = graph
+            .node_mut(&id)
+            .ok_or_else(|| GraphMutationError::NodeNotFound { path: path.clone() })?;
+        node.position = Some(position);
+        Ok(())
+    }
+
     /// Replaces one unlocked step's outgoing routes, ignoring and returning
     /// destinations that do not exist in that step's own plan.
     pub fn replace_outgoing_at(
@@ -1704,6 +1719,21 @@ mod tests {
 
         assert_eq!(graph.roots(), vec![NodeId("reproduce".into())]);
         assert_eq!(graph.problems(), vec![]);
+    }
+
+    #[test]
+    fn a_locked_step_can_be_moved_but_not_edited() {
+        let mut graph = ArchitectGraph::default();
+        let mut settled = ArchitectNode::new("settled", "Settled");
+        settled.locked = true;
+        graph.add_node(settled);
+        let path = NodePath::root(NodeId("settled".into()));
+        let position = Position { x: 40.0, y: 80.0 };
+
+        graph.move_node_at(&path, position).unwrap();
+        assert_eq!(graph.node_at(&path).unwrap().position, Some(position));
+        let edit = graph.mutate_node_at(&path, |node| node.title.clear());
+        assert!(edit.is_err(), "a locked step keeps its brief");
     }
 
     #[test]

@@ -1582,7 +1582,8 @@ impl ArchitectPane {
                     y: snap(canvas.y - grab.y),
                 };
                 self.next_undo_group = Some(UndoGroup::Move(id.clone()));
-                self.edit_node(id, move |node| node.position = Some(position), cx);
+                let path = self.focus.child(id);
+                self.edit_checked(move |graph| graph.move_node_at(&path, position), cx);
             }
             Interaction::Connecting { at, .. } => {
                 *at = event.position;
