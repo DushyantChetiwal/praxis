@@ -5814,8 +5814,9 @@ impl AgentPanel {
         let graph = thread_ref.architect_graph()?;
         let run = thread_ref.architect_run();
 
-        let step_count = graph.nodes.len();
-        let locked_count = graph.nodes.iter().filter(|node| node.locked).count();
+        // Counted through nested plans, as Run counts what is left to lock.
+        let step_count = graph.step_count_deeply();
+        let locked_count = graph.locked_step_count_deeply();
         let nested_count = graph.nodes.iter().filter(|node| node.has_subplan()).count();
         let running = run.is_some_and(agent::ArchitectRun::is_running);
 
@@ -5847,16 +5848,20 @@ impl AgentPanel {
         }
 
         let mut summary = match step_count {
+            0 => "No steps yet".to_string(),
             1 => "1 step".to_string(),
             count => format!("{count} steps"),
         };
         if nested_count > 0 {
             summary.push_str(&format!(" · {nested_count} nested"));
         }
-        if locked_count == step_count {
-            summary.push_str(" · all locked");
-        } else {
-            summary.push_str(&format!(" · {locked_count} of {step_count} locked"));
+        // With no steps, "all locked" would be vacuously true.
+        if step_count > 0 {
+            if locked_count == step_count {
+                summary.push_str(" · all locked");
+            } else {
+                summary.push_str(&format!(" · {locked_count} of {step_count} locked"));
+            }
         }
 
         let card = v_flex()
@@ -5892,7 +5897,7 @@ impl AgentPanel {
                                 Icon::new(if running {
                                     IconName::PlayFilled
                                 } else {
-                                    IconName::GitBranch
+                                    IconName::ListTree
                                 })
                                 .size(IconSize::XSmall)
                                 .color(if running {
@@ -5902,10 +5907,13 @@ impl AgentPanel {
                                 }),
                             )
                             .child(
+                                // Loops can take a run past the number of steps, so
+                                // the step taken is shown without a total to exceed.
                                 Label::new(match run {
                                     Some(run) if running => {
-                                        format!("Step {} of {}", run.step_number, step_count)
+                                        format!("Running step {}", run.step_number)
                                     }
+                                    _ if step_count == 0 => "Plan not started".to_string(),
                                     _ => "Plan drafted".to_string(),
                                 })
                                 .size(LabelSize::Small)
