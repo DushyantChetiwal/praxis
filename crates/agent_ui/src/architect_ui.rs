@@ -1020,6 +1020,13 @@ impl ArchitectPane {
             );
             return;
         }
+        if !existing && self.is_running(cx) {
+            self.report(
+                "Stop the run before breaking a step into steps.".to_string(),
+                cx,
+            );
+            return;
+        }
 
         if !existing {
             let nested_path = self.focus.child(id.clone());

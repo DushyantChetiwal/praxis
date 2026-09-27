@@ -1333,6 +1333,7 @@ impl ArchitectPane {
             })
             .unwrap_or_default();
         let locked = node.locked;
+        let running = self.is_running(cx);
         let has_chat = node.chat.is_some();
         // A step nothing leads out of has nobody to hand anything to, so an
         // empty capture there is a decision rather than an oversight.
@@ -1726,42 +1727,43 @@ impl ArchitectPane {
                                                         Color::Muted
                                                     }),
                                                 )
-                                                .child(
-                                                    IconButton::new(
-                                                        "architect-pin-step",
-                                                        if node.pinned {
-                                                            IconName::StarFilled
+                                                .when(!locked, |this| {
+                                                    this.child(
+                                                        IconButton::new(
+                                                            "architect-pin-step",
+                                                            if node.pinned {
+                                                                IconName::StarFilled
+                                                            } else {
+                                                                IconName::Star
+                                                            },
+                                                        )
+                                                        .tab_index(0isize)
+                                                        .icon_size(IconSize::XSmall)
+                                                        .icon_color(if node.pinned {
+                                                            Color::Accent
                                                         } else {
-                                                            IconName::Star
-                                                        },
+                                                            Color::Muted
+                                                        })
+                                                        .tooltip(Tooltip::text(if node.pinned {
+                                                            "Every later step is told this summary. \
+                                                             Click to tell only the next ones."
+                                                        } else {
+                                                            "Only the steps this one leads to are told \
+                                                             its summary. Click to tell every later \
+                                                             step."
+                                                        }))
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                let id = pin_id.clone();
+                                                                this.edit_node(
+                                                                    id,
+                                                                    |node| node.pinned = !node.pinned,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        )),
                                                     )
-                                                    .tab_index(0isize)
-                                                    .icon_size(IconSize::XSmall)
-                                                    .icon_color(if node.pinned {
-                                                        Color::Accent
-                                                    } else {
-                                                        Color::Muted
-                                                    })
-                                                    .disabled(locked)
-                                                    .tooltip(Tooltip::text(if node.pinned {
-                                                        "Every later step is told this summary. \
-                                                         Click to tell only the next ones."
-                                                    } else {
-                                                        "Only the steps this one leads to are told \
-                                                         its summary. Click to tell every later \
-                                                         step."
-                                                    }))
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            let id = pin_id.clone();
-                                                            this.edit_node(
-                                                                id,
-                                                                |node| node.pinned = !node.pinned,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                                ),
+                                                }),
                                         ),
                                 )
                                 .child(
@@ -1790,40 +1792,46 @@ impl ArchitectPane {
                                     )
                                 })
                         )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(field("Nested Plan"))
-                                .child(
-                                    Button::new(
-                                        "architect-details-open-subplan",
-                                        match subplan_steps {
-                                            0 => "Break Into Steps".to_string(),
-                                            1 => "Open Nested Plan (1 step)".to_string(),
-                                            count => {
-                                                format!("Open Nested Plan ({count} steps)")
-                                            }
-                                        },
+                        // A settled step, or any step during a run, cannot be
+                        // broken down, so with nothing inside to open the
+                        // section would only offer a dead button.
+                        .when((!locked && !running) || subplan_steps > 0, |this| {
+                            this.child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(field("Nested Plan"))
+                                    .child(
+                                        Button::new(
+                                            "architect-details-open-subplan",
+                                            match subplan_steps {
+                                                0 => "Break Into Steps".to_string(),
+                                                1 => "Open Nested Plan (1 step)".to_string(),
+                                                count => {
+                                                    format!("Open Nested Plan ({count} steps)")
+                                                }
+                                            },
+                                        )
+                                        .tab_index(0isize)
+                                        .full_width()
+                                        .label_size(LabelSize::Small)
+                                        .start_icon(
+                                            Icon::new(IconName::ListTree).size(IconSize::XSmall),
+                                        )
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.drill_into(details_subplan_id.clone(), window, cx);
+                                        })),
                                     )
-                                    .tab_index(0isize)
-                                    .full_width()
-                                    .label_size(LabelSize::Small)
-                                    .start_icon(
-                                        Icon::new(IconName::ListTree).size(IconSize::XSmall),
-                                    )
-                                    .disabled(locked && subplan_steps == 0)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.drill_into(details_subplan_id.clone(), window, cx);
-                                    })),
-                                )
-                                .child(
-                                    Label::new(
-                                        "Use a nested plan when this responsibility needs several coordinated steps at a closer level.",
-                                    )
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                                ),
-                        )
+                                    .when(subplan_steps == 0, |this| {
+                                        this.child(
+                                            Label::new(
+                                                "Use a nested plan when this responsibility needs several coordinated steps at a closer level.",
+                                            )
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                        )
+                                    }),
+                            )
+                        })
                         .when_some(node.result.clone(), |this, result| {
                             this.child(
                                 v_flex()
@@ -1861,7 +1869,7 @@ impl ArchitectPane {
                                     ),
                             )
                         })
-                        .when(!locked, |this| {
+                        .when(!locked && !running, |this| {
                             this.child(
                                 Button::new("architect-delete-step", "Delete Step")
                                     .tab_index(0isize)
