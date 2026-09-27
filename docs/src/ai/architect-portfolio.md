@@ -162,6 +162,31 @@ show separate formatting, graph-test, agent/canvas-test, and Clippy jobs. Link
 the immutable Actions run in a portfolio or review; do not describe an unrun
 workflow as passing validation.
 
+## Driving the installed app {#driving-the-installed-app}
+
+An installed build can be exercised by an agent through a local automation
+channel, so a change can be checked in the real app rather than only in tests.
+The channel is off unless an `automation` folder exists in the app's data
+folder when the app starts (on Windows,
+`%LOCALAPPDATA%\Praxis Dev\automation`). It never listens on the network; it
+only reads requests from and writes replies to that folder. Delete the folder
+and restart to turn it off.
+
+A client writes one JSON request to `automation/requests/<name>.json`, writing
+it elsewhere first and renaming it into place, and reads the reply from
+`automation/responses/<name>.json`. A reply is either
+`{"ok": true, "result": ...}` or `{"ok": false, "error": "..."}`.
+
+| Request                                                | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{"command": "state"}`                                 | The window's scale factor and bounds, open tabs, docks, and the canvas: mode, selection, zoom, undo depth, run, problems, recent activity, every step with its on-screen rectangle, and every connection with its condition, repeat limit, and uses in the latest run.                                                                                                                                                                                                            |
+| `{"command": "architect", "op": "...", "args": {...}}` | A canvas action, answered with the canvas state afterwards: `open`, `code`, `select` (`node` or `edge`), `deselect`, `undo`, `redo`, `duplicate`, `delete`, `drill` (`node`), `up`, `lock` (`node`), `add_step`, `tidy`, `fit`, `first`, `last`, `move` (`node`, `x`, `y`), `connect` (`from`, `to`), `repeats` (`edge`, `limit` or `null`), `condition` (`edge`, `kind`: `always`, `objective` or `agent`, `text`), and `tab` (`name`: `details`, `conversation` or `activity`). |
+| `{"command": "action", "name": "workspace::Save"}`     | Dispatches any registered action to whatever has focus, with optional `data`.                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `{"command": "keys", "keys": "ctrl-z"}`                | Types keystrokes. They are all routed through the same frame, so send a key that moves focus in a request of its own.                                                                                                                                                                                                                                                                                                                                                             |
+
+Step rectangles are in logical window pixels; multiply by the reported scale
+factor for physical pixels when aiming a real pointer.
+
 ## Maintenance and distribution {#maintenance-and-distribution}
 
 The fork keeps product source on `Enhanced_Agents` and workflow definitions on
