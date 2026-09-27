@@ -67,6 +67,13 @@ const REDO_SHORTCUT: &str = if cfg!(target_os = "macos") {
 } else {
     "Ctrl+Y"
 };
+const DUPLICATE_SHORTCUT: &str = if cfg!(target_os = "macos") {
+    "Cmd+D"
+} else {
+    "Ctrl+D"
+};
+/// How far a duplicated step lands from its original, so both stay visible.
+const DUPLICATE_OFFSET: f32 = 40.0;
 
 /// Edits that arrive as a stream, such as a drag or typing, and should undo as
 /// one change.
@@ -840,12 +847,16 @@ impl ArchitectPane {
 
     /// Edits the plan being shown. An edit made while inside a step's plan
     /// belongs to that plan, not to the one containing it.
-    fn edit_graph(&mut self, edit: impl FnOnce(&mut ArchitectGraph), cx: &mut Context<Self>) {
+    fn edit_graph(
+        &mut self,
+        edit: impl FnOnce(&mut ArchitectGraph),
+        cx: &mut Context<Self>,
+    ) -> bool {
         let focus = self.focus.clone();
         self.edit_checked(
             move |root| root.mutate_graph_at(&focus, edit).map(|_| ()),
             cx,
-        );
+        )
     }
 
     fn edit_checked(
@@ -1372,19 +1383,71 @@ impl ArchitectPane {
         let mut node = ArchitectNode::new(id.clone(), "New step");
         node.position = Some(centre);
 
-        self.edit_graph(
+        let added = self.edit_graph(
             move |graph| {
                 graph.add_node(node);
             },
             cx,
         );
+        if !added {
+            return;
+        }
         let path = self.focus.child(id.clone());
         self.record_activity(Some(path), "Added this step to the plan", cx);
         self.set_selection(Some(Selection::Node(id)), window, cx);
     }
 
+    /// Copies the selected step beside itself as a fresh draft, keeping its
+    /// brief and any plan inside it but none of its connections.
+    fn duplicate_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Selection::Node(id)) = self.selection.clone() else {
+            return;
+        };
+        if self.is_running(cx) {
+            self.report("Stop the run before duplicating a step.".to_string(), cx);
+            return;
+        }
+        let Some(mut copy) = self.graph(cx).and_then(|graph| graph.node(&id)).cloned() else {
+            return;
+        };
+        reset_for_copy(&mut copy);
+        copy.id = NodeId(format!("step-{}", uuid::Uuid::new_v4().simple()));
+        copy.title = format!("{} (copy)", copy.title.trim());
+        copy.position = copy.position.map(|position| Position {
+            x: snap(position.x + DUPLICATE_OFFSET),
+            y: snap(position.y + DUPLICATE_OFFSET),
+        });
+        let copy_id = copy.id.clone();
+        let added = self.edit_graph(
+            move |graph| {
+                graph.add_node(copy);
+            },
+            cx,
+        );
+        if !added {
+            return;
+        }
+        let path = self.focus.child(copy_id.clone());
+        self.record_activity(Some(path), "Duplicated a step", cx);
+        self.set_selection(Some(Selection::Node(copy_id)), window, cx);
+    }
+
+    /// Selects the first or last step in the order the plan runs.
+    fn select_end_step(&mut self, last: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let order = self
+            .graph(cx)
+            .map(ArchitectGraph::execution_order)
+            .unwrap_or_default();
+        let target = if last { order.last() } else { order.first() };
+        if let Some(id) = target.cloned() {
+            self.set_selection(Some(Selection::Node(id)), window, cx);
+        }
+    }
+
     fn tidy_up(&mut self, cx: &mut Context<Self>) {
-        self.edit_graph(|graph| graph.relayout(), cx);
+        if !self.edit_graph(|graph| graph.relayout(), cx) {
+            return;
+        }
         self.record_activity(
             Some(self.focus.clone()),
             "Arranged the steps automatically",
@@ -1594,6 +1657,11 @@ impl ArchitectPane {
             "y" if canvas_focused && modifiers.control && !cfg!(target_os = "macos") => {
                 self.step_history(HistoryDirection::Redo, window, cx);
             }
+            "d" if canvas_focused && modifiers.secondary() && !modifiers.shift => {
+                self.duplicate_selection(window, cx);
+            }
+            "home" if canvas_focused => self.select_end_step(false, window, cx),
+            "end" if canvas_focused => self.select_end_step(true, window, cx),
             "delete" | "backspace" if canvas_focused => self.delete_selection(window, cx),
             "down" | "right" if canvas_focused => self.select_adjacent_step(true, window, cx),
             "up" | "left" if canvas_focused => self.select_adjacent_step(false, window, cx),
@@ -1619,6 +1687,19 @@ impl ArchitectPane {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// A copy starts as a fresh draft: it has not been settled, argued out in a
+/// conversation, or run, whatever the original has been through.
+fn reset_for_copy(node: &mut ArchitectNode) {
+    node.locked = false;
+    node.chat = None;
+    node.result = None;
+    if let Some(subplan) = node.subplan.as_deref_mut() {
+        for child in &mut subplan.nodes {
+            reset_for_copy(child);
         }
     }
 }
@@ -1953,6 +2034,27 @@ mod tests {
             pane.thread.update(cx, |thread, cx| {
                 thread.set_architect_graph(Some(unchanged), cx)
             });
+
+            pane.selection = Some(Selection::Node(parent.clone()));
+            pane.duplicate_selection(window, cx);
+            let copy = pane
+                .root_graph(cx)
+                .and_then(|graph| graph.nodes.last())
+                .cloned()
+                .expect("duplicating a step should add a copy of it");
+            assert_eq!(copy.title, "Parent (copy)");
+            assert!(!copy.locked, "a copy starts as a draft");
+            assert!(copy.has_subplan(), "a copy keeps its nested plan");
+            assert_eq!(pane.selection, Some(Selection::Node(copy.id.clone())));
+            pane.step_history(HistoryDirection::Undo, window, cx);
+            assert!(
+                pane.root_graph(cx).unwrap().node(&copy.id).is_none(),
+                "undo removes the copy"
+            );
+            assert_eq!(
+                pane.selection, None,
+                "a selection that was undone away is dropped"
+            );
 
             pane.toggle_lock(parent.clone(), window, cx);
             assert!(!pane.root_graph(cx).unwrap().node(&parent).unwrap().locked);

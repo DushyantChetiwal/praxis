@@ -8,7 +8,7 @@ use ui::{TintColor, Tooltip, prelude::*};
 use crate::AgentPanel;
 
 use super::rendering::truncate;
-use super::{ArchitectPane, Interaction, Selection, UNDO_SHORTCUT, UndoGroup};
+use super::{ArchitectPane, DUPLICATE_SHORTCUT, Interaction, Selection, UNDO_SHORTCUT, UndoGroup};
 
 /// The inspector shows one step, either as fields or as the conversation about
 /// it. The conversation lives here rather than in the agent panel so that the
@@ -1252,6 +1252,7 @@ impl ArchitectPane {
         let id = node.id.clone();
         let footer_lock_id = node.id.clone();
         let pin_id = node.id.clone();
+        let duplicate_id = node.id.clone();
         let details_subplan_id = node.id.clone();
         let chat_tab_id = node.id.clone();
         let tab = self.inspector_tab;
@@ -1867,6 +1868,28 @@ impl ArchitectPane {
                                                     .color(Color::Muted),
                                             ),
                                     ),
+                            )
+                        })
+                        .when(!running, |this| {
+                            this.child(
+                                Button::new("architect-duplicate-step", "Duplicate Step")
+                                    .tab_index(0isize)
+                                    .full_width()
+                                    .label_size(LabelSize::Small)
+                                    .style(ButtonStyle::Subtle)
+                                    .start_icon(Icon::new(IconName::Copy).size(IconSize::XSmall))
+                                    .tooltip(Tooltip::text(format!(
+                                        "Copy this step beside it as a new draft \
+                                         ({DUPLICATE_SHORTCUT})"
+                                    )))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.set_selection(
+                                            Some(Selection::Node(duplicate_id.clone())),
+                                            window,
+                                            cx,
+                                        );
+                                        this.duplicate_selection(window, cx);
+                                    })),
                             )
                         })
                         .when(!locked && !running, |this| {
