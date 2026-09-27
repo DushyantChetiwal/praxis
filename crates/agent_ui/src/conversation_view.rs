@@ -414,6 +414,23 @@ impl Conversation {
         Some((result_session_id, tool_id.clone(), options))
     }
 
+    /// Every tool call in this conversation that is waiting for the user,
+    /// with the thread it belongs to, in the order they asked.
+    pub(crate) fn pending_tool_calls(&self) -> Vec<(Entity<AcpThread>, acp::ToolCallId)> {
+        self.permission_requests
+            .iter()
+            .filter_map(|(session_id, tool_call_ids)| {
+                let thread = self.threads.get(session_id)?;
+                Some(
+                    tool_call_ids
+                        .iter()
+                        .map(|tool_call_id| (thread.clone(), tool_call_id.clone())),
+                )
+            })
+            .flatten()
+            .collect()
+    }
+
     pub fn subagents_awaiting_permission(&self, cx: &App) -> Vec<(acp::SessionId, usize)> {
         self.permission_requests
             .iter()
@@ -774,6 +791,10 @@ impl ConversationView {
                 .read(cx)
                 .pending_tool_call_count_for_session(session_id)
         })
+    }
+
+    pub(crate) fn conversation(&self) -> Option<&Entity<Conversation>> {
+        self.as_connected().map(|connected| &connected.conversation)
     }
 
     pub fn as_connected(&self) -> Option<&ConnectedServerState> {

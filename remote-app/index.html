@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src https://api.github.com; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <meta name="referrer" content="no-referrer" />
+    <title>Praxis Remote</title>
+    <meta name="description" content="Control the Praxis coding agent on your laptop from your phone." />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0e1014" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="icon" href="./icon-192.png" type="image/png" sizes="192x192" />
+    <link rel="apple-touch-icon" href="./icon-192.png" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <!-- Setup -->
+    <main id="setup" class="setup" hidden>
+      <div class="setup-card">
+        <div class="brand">
+          <img src="./icon.svg" alt="" width="52" height="52" />
+          <div>
+            <h1>Praxis Remote</h1>
+            <p class="muted">Control Praxis on your laptop from your phone.</p>
+          </div>
+        </div>
+
+        <form id="setup-form" class="setup-form" novalidate>
+          <label class="field">
+            <span class="field-label">Repository</span>
+            <input
+              id="setup-repo"
+              name="repo"
+              type="text"
+              placeholder="owner/praxis-remote"
+              autocomplete="off"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              required
+            />
+          </label>
+          <label class="field">
+            <span class="field-label">Access token</span>
+            <input
+              id="setup-token"
+              name="token"
+              type="password"
+              placeholder="github_pat_…"
+              autocomplete="off"
+              autocapitalize="off"
+              spellcheck="false"
+              required
+            />
+          </label>
+          <p id="setup-error" class="form-error" role="alert" hidden></p>
+          <button id="setup-submit" class="btn primary block" type="submit">Connect</button>
+        </form>
+
+        <details class="howto" open>
+          <summary>How to set this up</summary>
+          <ol>
+            <li>Create a <strong>private</strong> GitHub repository, for example <code>praxis-remote</code>.</li>
+            <li>
+              Create a
+              <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener noreferrer"
+                >fine-grained personal access token</a
+              >:
+              <ul>
+                <li>Repository access: <em>Only select repositories</em> → your repository.</li>
+                <li>Permissions → Repository → <em>Issues: Read and write</em>.</li>
+                <li>Choose an expiration you're comfortable with.</li>
+              </ul>
+            </li>
+            <li>Turn on Remote in Praxis on your laptop, pointing at the same repository.</li>
+            <li>Enter the repository and token above. They are stored only on this device.</li>
+          </ol>
+        </details>
+      </div>
+    </main>
+
+    <!-- App -->
+    <div id="app" class="app" hidden>
+      <header class="topbar">
+        <button id="device-button" class="device-button" type="button" aria-haspopup="dialog">
+          <span id="device-dot" class="dot" aria-hidden="true"></span>
+          <span class="device-text">
+            <span id="device-name" class="device-name">Loading…</span>
+            <span id="device-sub" class="device-sub"></span>
+          </span>
+          <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg>
+        </button>
+        <select id="window-select" class="window-select" aria-label="Window" hidden></select>
+        <button id="refresh-button" class="icon-btn" type="button" aria-label="Refresh">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 11a8 8 0 0 0-14.3-4.9L4 8" />
+            <path d="M4 4v4h4" />
+            <path d="M4 13a8 8 0 0 0 14.3 4.9L20 16" />
+            <path d="M20 20v-4h-4" />
+          </svg>
+        </button>
+        <button id="settings-button" class="icon-btn" type="button" aria-label="Settings" aria-haspopup="dialog">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="3" />
+            <path
+              d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"
+            />
+          </svg>
+        </button>
+      </header>
+
+      <nav class="tabs" role="tablist" aria-label="Sections">
+        <button class="tab" type="button" role="tab" data-tab="chat" aria-selected="true" aria-controls="view-chat">
+          Chat
+        </button>
+        <button class="tab" type="button" role="tab" data-tab="files" aria-selected="false" aria-controls="view-files">
+          Files
+        </button>
+        <button
+          class="tab"
+          type="button"
+          role="tab"
+          data-tab="threads"
+          aria-selected="false"
+          aria-controls="view-threads"
+        >
+          Threads
+        </button>
+      </nav>
+
+      <div id="banners" class="banners" aria-live="polite"></div>
+
+      <main class="views">
+        <section id="view-chat" class="view chat" role="tabpanel" aria-label="Chat">
+          <div class="chat-head">
+            <div class="chat-title-row">
+              <h2 id="thread-title" class="thread-title">Connecting…</h2>
+              <span id="thread-status" class="pill" hidden></span>
+              <button id="new-thread" class="btn small ghost" type="button">New thread</button>
+            </div>
+            <div id="mode-control" class="segmented" role="group" aria-label="Mode" hidden></div>
+            <div id="architect" class="architect" hidden></div>
+          </div>
+          <div id="permissions" class="permissions"></div>
+          <div class="transcript-wrap">
+            <div id="transcript" class="transcript"></div>
+            <button id="jump-bottom" class="jump" type="button" hidden>↓ New messages</button>
+          </div>
+          <form id="composer" class="composer">
+            <textarea
+              id="prompt"
+              rows="1"
+              placeholder="Message Praxis…"
+              aria-label="Message"
+              autocomplete="off"
+              enterkeyhint="enter"
+            ></textarea>
+            <button id="stop-button" class="btn danger" type="button" hidden>Stop</button>
+            <button id="send-button" class="btn primary" type="submit">Send</button>
+          </form>
+        </section>
+
+        <section id="view-files" class="view" role="tabpanel" aria-label="Files" hidden></section>
+
+        <section id="view-threads" class="view" role="tabpanel" aria-label="Threads" hidden></section>
+      </main>
+    </div>
+
+    <!-- Settings sheet -->
+    <dialog id="settings-sheet" class="sheet" aria-labelledby="settings-title">
+      <div class="sheet-body">
+        <div class="sheet-head">
+          <h2 id="settings-title">Settings</h2>
+          <button class="icon-btn" type="button" data-close aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+          </button>
+        </div>
+        <dl class="kv">
+          <dt>Repository</dt>
+          <dd id="settings-repo"></dd>
+          <dt>Signed in as</dt>
+          <dd id="settings-user"></dd>
+          <dt>Device</dt>
+          <dd id="settings-device"></dd>
+        </dl>
+        <div class="sheet-actions">
+          <button id="settings-change-device" class="btn block" type="button">Change device</button>
+          <button id="settings-signout" class="btn danger-outline block" type="button">Sign out / forget token</button>
+        </div>
+        <p class="muted small">
+          Praxis Remote talks to your laptop through comments on an issue in your private repository. Your token is
+          stored only in this browser and is sent only to api.github.com.
+        </p>
+      </div>
+    </dialog>
+
+    <!-- Device picker sheet -->
+    <dialog id="device-sheet" class="sheet" aria-labelledby="device-sheet-title">
+      <div class="sheet-body">
+        <div class="sheet-head">
+          <h2 id="device-sheet-title">Devices</h2>
+          <button id="device-sheet-reload" class="icon-btn" type="button" aria-label="Reload devices">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 11a8 8 0 0 0-14.3-4.9L4 8" />
+              <path d="M4 4v4h4" />
+              <path d="M4 13a8 8 0 0 0 14.3 4.9L20 16" />
+              <path d="M20 20v-4h-4" />
+            </svg>
+          </button>
+          <button class="icon-btn" type="button" data-close aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+          </button>
+        </div>
+        <div id="device-list"></div>
+      </div>
+    </dialog>
+
+    <div id="toasts" class="toasts" aria-live="assertive"></div>
+  </body>
+</html>
