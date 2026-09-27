@@ -3,11 +3,31 @@
 Status: Complete; exact SHA green on all platforms, installed, update-safe, and runtime-verified on Windows
 Mockup: [`docs/architect-ui-overhaul.html`](docs/architect-ui-overhaul.html)
 Product branch: `Enhanced_Agents`
-Release candidate source: `32f4463549da3675dd7fe64299f8b4f1d41f7553`
-Quality workflow: [run 35536400258](https://github.com/DushyantChetiwal/praxis/actions/runs/35536400258) (successful)
-Bundle workflow: [run 35537028206, attempt 2](https://github.com/DushyantChetiwal/praxis/actions/runs/35537028206/attempts/2) (successful)
-Release: [`praxis-dev-17-2`](https://github.com/DushyantChetiwal/praxis/releases/tag/praxis-dev-17-2)
-Last reviewed: 2026-09-21
+Release source: `b7c639191da009b10775232504f1aa5d41741dd1`
+Quality workflow: [run 36290102420](https://github.com/DushyantChetiwal/praxis/actions/runs/36290102420) (successful)
+Bundle workflow: [run 36290651943](https://github.com/DushyantChetiwal/praxis/actions/runs/36290651943) (every platform built; publishing was refused and done manually from its artifacts)
+Release: [`praxis-dev-25-2`](https://github.com/DushyantChetiwal/praxis/releases/tag/praxis-dev-25-2)
+Next release candidate: `8efa355fca0ada7666df5f6aa5d4c2fea2a3cd1c`, quality [run 36302686836](https://github.com/DushyantChetiwal/praxis/actions/runs/36302686836), bundle [run 36303228402](https://github.com/DushyantChetiwal/praxis/actions/runs/36303228402)
+Last reviewed: 2026-09-27
+
+Release `praxis-dev-25-2` verification (Windows):
+
+- Builds `praxis-dev-18-1` and `fc8f2ac` aborted on launch (`0xc0000409`) for
+  a workspace left in Code mode. Captured stderr showed `cannot read AgentPanel
+  while it is already being updated`; fixed in `bb8605c05b` with a regression
+  test.
+- The published manifest and the installed installer both have SHA-256
+  `128714ea0fa66c96cf3e8e60870388d39d6e45aac5ad4ca30b51fcd2b40b69d1`. The
+  installed build reports `1.23.0+dev.25.b7c639191da0`.
+- Praxis settings (`C057B762…E7B4`), Praxis databases, and Stable Zed
+  settings (`C7E90BE4…7D5F`) are unchanged by installation; Stable Zed kept
+  running throughout.
+- The installed app launches into Code, switches to Architect, and shows
+  plan progress, the outline, Undo and Redo, and selection with Home and End,
+  with no new crash dump and no panic in the log.
+- Found in the installed app and fixed after it: dragging a settled step
+  showed a refusal on every move, the step menu did not open on right-click,
+  and Dev builds downloaded the older published release over a newer one.
 
 Installation baseline (captured before release installation):
 
