@@ -58,6 +58,7 @@ impl ArchitectPane {
                     .collect()
             })
             .unwrap_or_default();
+        let uses = self.connection_uses(cx);
         let edges: Vec<Value> = graph
             .map(|graph| {
                 graph
@@ -76,6 +77,10 @@ impl ArchitectPane {
                             "condition": kind,
                             "label": edge.condition.label(),
                             "max_repeats": edge.max_repeats,
+                            "taken_in_latest_run": uses
+                                .get(&(edge.from.clone(), edge.to.clone()))
+                                .copied()
+                                .unwrap_or(0),
                             "is_loop": graph.is_loop_edge(edge),
                         })
                     })

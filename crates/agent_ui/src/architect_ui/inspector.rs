@@ -1155,6 +1155,20 @@ impl ArchitectPane {
                 format!("Taken at most {count} times, then the plan moves on another way.")
             }
         };
+        let taken = self
+            .connection_uses(cx)
+            .get(&(edge.from.clone(), edge.to.clone()))
+            .copied()
+            .unwrap_or(0);
+        let exhausted = taken > 0 && limit.is_some_and(|limit| taken >= limit as usize);
+        let latest_run = match (taken, limit) {
+            (0, _) => None,
+            (taken, Some(limit)) if taken >= limit as usize => {
+                Some(format!("The latest run used all {limit} repeats."))
+            }
+            (1, _) => Some("The latest run took it once.".to_string()),
+            (taken, _) => Some(format!("The latest run took it {taken} times.")),
+        };
         let edge_id = edge.id.clone();
         let controls = match limit {
             None => h_flex()
@@ -1240,6 +1254,17 @@ impl ArchitectPane {
                     .size(LabelSize::XSmall)
                     .color(Color::Muted),
             )
+            .when_some(latest_run, |this, latest_run| {
+                this.child(
+                    Label::new(latest_run)
+                        .size(LabelSize::XSmall)
+                        .color(if exhausted {
+                            Color::Warning
+                        } else {
+                            Color::Muted
+                        }),
+                )
+            })
             .into_any()
     }
 

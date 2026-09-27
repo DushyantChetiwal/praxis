@@ -1708,12 +1708,20 @@ impl ArchitectPane {
         let Some(bounds) = self.viewport.get() else {
             return Vec::new();
         };
+        let uses = self.connection_uses(cx);
 
         graph
             .edges
             .iter()
             .enumerate()
             .filter_map(|(ix, edge)| {
+                // Only a loop can be taken more than once in a pass, and only
+                // there is the count news.
+                let taken = uses
+                    .get(&(edge.from.clone(), edge.to.clone()))
+                    .copied()
+                    .filter(|_| edge.max_repeats.is_some() || graph.is_loop_edge(edge))
+                    .unwrap_or(0);
                 let from = graph.node(&edge.from).and_then(|node| node.position)?;
                 let to = graph.node(&edge.to).and_then(|node| node.position)?;
                 let curve = EdgeCurve::between(from, to);
@@ -1769,10 +1777,17 @@ impl ArchitectPane {
                 };
                 // A repeat limit is the one fact about a loop worth reading at a
                 // glance, so it leads the label rather than being truncated off.
-                let text = match edge.max_repeats {
-                    Some(limit) if text.is_empty() => format!("repeats up to {limit}×"),
-                    Some(limit) => format!("up to {limit}× · {text}"),
-                    None => text,
+                // Once a run has gone round, how much of the limit it used
+                // replaces the limit itself.
+                let text = match (edge.max_repeats, taken) {
+                    (Some(limit), 0) if text.is_empty() => format!("repeats up to {limit}×"),
+                    (Some(limit), 0) => format!("up to {limit}× · {text}"),
+                    (Some(limit), taken) if text.is_empty() => {
+                        format!("repeated {taken} of {limit}")
+                    }
+                    (Some(limit), taken) => format!("{taken} of {limit} · {text}"),
+                    (None, 0) => text,
+                    (None, taken) => format!("{taken}× · {text}"),
                 };
 
                 let midpoint = curve.midpoint();
@@ -1808,6 +1823,18 @@ impl ArchitectPane {
                         "{tooltip}\nTaken at most {limit} times per run."
                     )),
                     None => tooltip,
+                };
+                let tooltip = match (edge.max_repeats, taken) {
+                    (_, 0) => tooltip,
+                    (Some(limit), taken) if taken >= limit as usize => SharedString::from(format!(
+                        "{tooltip}\nThe latest run used all {limit} repeats."
+                    )),
+                    (_, 1) => {
+                        SharedString::from(format!("{tooltip}\nThe latest run took it once."))
+                    }
+                    (_, taken) => SharedString::from(format!(
+                        "{tooltip}\nThe latest run took it {taken} times."
+                    )),
                 };
 
                 Some(
