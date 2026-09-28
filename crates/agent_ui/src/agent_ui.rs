@@ -722,9 +722,8 @@ pub fn init(
                 let Some(thread) = thread else {
                     workspace.show_toast(
                         workspace::Toast::new(
-                            workspace::notifications::NotificationId::unique::<
-                                ToggleArchitectView,
-                            >(),
+                            workspace::notifications::NotificationId::unique::<ToggleArchitectView>(
+                            ),
                             "Architect View needs an open Praxis Agent thread. Open the agent \
                              panel and start a thread, then try again.",
                         ),
