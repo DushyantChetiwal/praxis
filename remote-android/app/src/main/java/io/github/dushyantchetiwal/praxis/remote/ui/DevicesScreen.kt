@@ -13,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Computer
+import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -38,7 +39,6 @@ import io.github.dushyantchetiwal.praxis.remote.AppState
 import io.github.dushyantchetiwal.praxis.remote.DeviceUi
 import io.github.dushyantchetiwal.praxis.remote.MainViewModel
 import io.github.dushyantchetiwal.praxis.remote.R
-import io.github.dushyantchetiwal.praxis.remote.data.DEVICE_TITLE_PREFIX
 import io.github.dushyantchetiwal.praxis.remote.data.Device
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -52,9 +52,9 @@ fun DevicesScreen(state: AppState, ui: DeviceUi, vm: MainViewModel, snackbar: Sn
                 title = {
                     Column {
                         Text(stringResource(R.string.devices_title))
-                        state.repo?.let {
+                        state.login?.let {
                             Text(
-                                it,
+                                stringResource(R.string.devices_signed_in_as, it),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
@@ -93,18 +93,20 @@ fun DevicesScreen(state: AppState, ui: DeviceUi, vm: MainViewModel, snackbar: Sn
                     devices.devices.isEmpty() -> item(key = "empty") {
                         EmptyState(
                             title = stringResource(R.string.devices_empty_title),
-                            body = stringResource(
-                                R.string.devices_empty_body,
-                                "$DEVICE_TITLE_PREFIX…",
-                                state.repo ?: "",
-                            ),
+                            body = state.login?.let { stringResource(R.string.devices_empty_body, it) }
+                                ?: stringResource(R.string.devices_empty_body_generic),
                             icon = Icons.Outlined.Computer,
                         ) {
                             OutlinedButton(onClick = { vm.loadDevices() }) { Text(stringResource(R.string.action_refresh)) }
                         }
                     }
-                    else -> items(devices.devices, key = { it.number }) { device ->
-                        DeviceCard(device, ui.isOnline(device, now), now) { vm.openDevice(device) }
+                    else -> items(devices.devices, key = { it.channel }) { device ->
+                        val pairing = when (device.channel) {
+                            in devices.paired -> Pairing.Paired
+                            in devices.unpairedByComputer -> Pairing.RemovedByComputer
+                            else -> Pairing.NotPaired
+                        }
+                        DeviceCard(device, ui.isOnline(device, now), pairing, now) { vm.openDevice(device) }
                     }
                 }
             }
@@ -112,8 +114,10 @@ fun DevicesScreen(state: AppState, ui: DeviceUi, vm: MainViewModel, snackbar: Sn
     }
 }
 
+private enum class Pairing { Paired, NotPaired, RemovedByComputer }
+
 @Composable
-private fun DeviceCard(device: Device, online: Boolean, now: Long, onClick: () -> Unit) {
+private fun DeviceCard(device: Device, online: Boolean, pairing: Pairing, now: Long, onClick: () -> Unit) {
     val context = LocalContext.current
     val presence = when {
         online -> stringResource(R.string.presence_online)
@@ -127,8 +131,27 @@ private fun DeviceCard(device: Device, online: Boolean, now: Long, onClick: () -
         ListItem(
             leadingContent = { OnlineDot(online) },
             headlineContent = { Text(device.name, style = MaterialTheme.typography.titleMedium) },
-            supportingContent = { Text(stringResource(R.string.devices_subtitle, presence, device.number)) },
-            trailingContent = { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null) },
+            supportingContent = {
+                val status = stringResource(
+                    when (pairing) {
+                        Pairing.Paired -> R.string.devices_paired
+                        Pairing.NotPaired -> R.string.devices_not_paired
+                        Pairing.RemovedByComputer -> R.string.devices_unpaired_by_computer
+                    },
+                )
+                Text(stringResource(R.string.devices_subtitle, presence, status))
+            },
+            trailingContent = {
+                if (pairing == Pairing.Paired) {
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+                } else {
+                    Icon(
+                        Icons.Outlined.Link,
+                        contentDescription = stringResource(R.string.pair_start),
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            },
             colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
             modifier = Modifier.clickable(onClick = onClick),
         )

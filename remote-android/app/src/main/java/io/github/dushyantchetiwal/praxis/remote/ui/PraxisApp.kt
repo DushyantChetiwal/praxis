@@ -39,8 +39,8 @@ fun PraxisApp(vm: MainViewModel) {
                 CircularProgressIndicator()
             }
             Screen.SignIn -> SignInScreen(state, vm, snackbar)
-            Screen.Repos -> RepoPickerScreen(state, vm, snackbar)
             Screen.Devices -> DevicesScreen(state, ui, vm, snackbar)
+            Screen.Pair -> PairingScreen(state, vm, snackbar)
             Screen.Device -> DeviceScreen(state, ui, busy, vm, snackbar)
             Screen.Settings -> SettingsScreen(state, ui, vm, snackbar)
         }

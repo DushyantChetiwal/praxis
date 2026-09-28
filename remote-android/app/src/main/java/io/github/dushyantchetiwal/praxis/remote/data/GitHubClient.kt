@@ -24,7 +24,7 @@ import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 
-enum class ErrorKind { Network, Auth, RateLimit, Forbidden, NotFound, Http, Timeout, Praxis, State, Cancelled }
+enum class ErrorKind { Network, Auth, RateLimit, Forbidden, NotFound, Http, Timeout, Praxis, State, Cancelled, Unpaired }
 
 class ApiException(
     val kind: ErrorKind,
@@ -64,12 +64,14 @@ suspend fun OkHttpClient.fetch(request: Request): RawResponse = withContext(Disp
  * The GitHub REST API, with conditional requests: a GET made with
  * `conditional = true` sends the last ETag for that path and, on
  * `304 Not Modified` (which does not count against the rate limit), returns
- * the cached body with `changed = false`.
+ * the cached body with `changed = false`. A rejected token is refreshed and
+ * the call retried once before giving up.
  */
 class GitHubClient(
     context: Context,
-    private val token: () -> String?,
-    /** Called whenever GitHub rejects the current token. */
+    val http: OkHttpClient,
+    private val tokens: TokenManager,
+    /** Called when GitHub rejects the token and it cannot be refreshed. */
     private val onUnauthorized: () -> Unit,
 ) {
     private val context = context.applicationContext
@@ -83,13 +85,6 @@ class GitHubClient(
 
     private val etags = ConcurrentHashMap<String, Cached>()
 
-    val http: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .callTimeout(60, TimeUnit.SECONDS)
-        .build()
-
     suspend fun call(
         method: String,
         path: String,
@@ -98,19 +93,19 @@ class GitHubClient(
         allow: Set<Int> = emptySet(),
         authenticated: Boolean = true,
     ): Reply {
-        val bearer = if (authenticated) {
-            token() ?: throw ApiException(ErrorKind.Auth, context.getString(R.string.error_not_signed_in))
+        var bearer = if (authenticated) {
+            tokens.valid() ?: throw ApiException(ErrorKind.Auth, context.getString(R.string.error_not_signed_in))
         } else {
             null
         }
         val cached = if (conditional) etags[path] else null
-        val request = Request.Builder()
+        fun build(token: String?): Request = Request.Builder()
             .url(API_BASE + path)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", USER_AGENT)
             .apply {
-                if (bearer != null) header("Authorization", "Bearer $bearer")
+                if (token != null) header("Authorization", "Bearer $token")
                 if (cached != null) header("If-None-Match", cached.etag)
                 val requestBody: RequestBody? = when {
                     body != null -> body.toString().toRequestBody(JSON)
@@ -121,10 +116,17 @@ class GitHubClient(
             }
             .build()
 
-        val response = try {
-            http.fetch(request)
-        } catch (e: IOException) {
-            throw ApiException(ErrorKind.Network, context.getString(R.string.error_network))
+        var response = send(build(bearer))
+        if (response.code == 401 && bearer != null) {
+            when (val outcome = tokens.afterUnauthorized(bearer)) {
+                is TokenManager.Outcome.Fresh -> {
+                    bearer = outcome.token
+                    response = send(build(bearer))
+                }
+                TokenManager.Outcome.Unavailable ->
+                    throw ApiException(ErrorKind.Network, context.getString(R.string.error_network))
+                TokenManager.Outcome.Failed -> Unit // Reported as a 401 below, which signs out.
+            }
         }
 
         if (response.code == 304) return Reply(304, false, cached?.body)
@@ -137,6 +139,28 @@ class GitHubClient(
             if (etag != null) etags[path] = Cached(etag, text) else etags.remove(path)
         }
         return Reply(response.code, true, text)
+    }
+
+    private suspend fun send(request: Request): RawResponse = try {
+        http.fetch(request)
+    } catch (e: IOException) {
+        throw ApiException(ErrorKind.Network, context.getString(R.string.error_network))
+    }
+
+    /**
+     * Downloads a gist file from its `raw_url`, for content the API truncated,
+     * sending the token since the gist is secret.
+     */
+    suspend fun fetchRaw(url: String): String {
+        val bearer = tokens.valid()
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", USER_AGENT)
+            .apply { if (bearer != null) header("Authorization", "Bearer $bearer") }
+            .build()
+        val response = send(request)
+        if (response.code !in 200..299) throw toError(response, bearer)
+        return response.body.orEmpty()
     }
 
     /** Downloads a small public file, such as an avatar; null on any failure. */
@@ -175,7 +199,7 @@ class GitHubClient(
         val code = response.code
         return when {
             code == 401 -> {
-                if (bearer != null && bearer == token()) onUnauthorized()
+                if (bearer != null && bearer == tokens.current()) onUnauthorized()
                 ApiException(ErrorKind.Auth, context.getString(R.string.error_unauthorized), 401)
             }
             code == 429 || (code == 403 && (remaining == "0" || message.contains("rate limit", ignoreCase = true))) -> {
@@ -196,5 +220,12 @@ class GitHubClient(
         const val API_BASE = "https://api.github.com"
         const val USER_AGENT = "PraxisRemote-Android"
         private val JSON = "application/json; charset=utf-8".toMediaType()
+
+        fun newHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(60, TimeUnit.SECONDS)
+            .build()
     }
 }

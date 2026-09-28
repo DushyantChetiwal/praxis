@@ -2,6 +2,7 @@ package io.github.dushyantchetiwal.praxis.remote
 
 import android.app.Application
 import android.graphics.BitmapFactory
+import android.os.Build
 import androidx.annotation.StringRes
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -10,34 +11,32 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.dushyantchetiwal.praxis.remote.data.ApiException
+import io.github.dushyantchetiwal.praxis.remote.data.CryptoException
 import io.github.dushyantchetiwal.praxis.remote.data.Device
 import io.github.dushyantchetiwal.praxis.remote.data.DeviceFlow
 import io.github.dushyantchetiwal.praxis.remote.data.DirEntry
 import io.github.dushyantchetiwal.praxis.remote.data.ErrorKind
+import io.github.dushyantchetiwal.praxis.remote.data.GistRead
+import io.github.dushyantchetiwal.praxis.remote.data.Gists
 import io.github.dushyantchetiwal.praxis.remote.data.GitHubClient
+import io.github.dushyantchetiwal.praxis.remote.data.Link
+import io.github.dushyantchetiwal.praxis.remote.data.PHONE_NAME_MAX
+import io.github.dushyantchetiwal.praxis.remote.data.PairResult
+import io.github.dushyantchetiwal.praxis.remote.data.Pairer
 import io.github.dushyantchetiwal.praxis.remote.data.Permission
 import io.github.dushyantchetiwal.praxis.remote.data.PermissionOption
 import io.github.dushyantchetiwal.praxis.remote.data.RemoteChannel
-import io.github.dushyantchetiwal.praxis.remote.data.RepoInfo
-import io.github.dushyantchetiwal.praxis.remote.data.SavedDevice
 import io.github.dushyantchetiwal.praxis.remote.data.Snapshot
 import io.github.dushyantchetiwal.praxis.remote.data.Status
 import io.github.dushyantchetiwal.praxis.remote.data.Store
 import io.github.dushyantchetiwal.praxis.remote.data.ThreadItem
+import io.github.dushyantchetiwal.praxis.remote.data.TokenManager
 import io.github.dushyantchetiwal.praxis.remote.data.UpdateInfo
-import io.github.dushyantchetiwal.praxis.remote.data.arr
-import io.github.dushyantchetiwal.praxis.remote.data.bool
 import io.github.dushyantchetiwal.praxis.remote.data.findUpdate
-import io.github.dushyantchetiwal.praxis.remote.data.long
-import io.github.dushyantchetiwal.praxis.remote.data.normalizeRepo
 import io.github.dushyantchetiwal.praxis.remote.data.obj
-import io.github.dushyantchetiwal.praxis.remote.data.objects
-import io.github.dushyantchetiwal.praxis.remote.data.parseDevice
 import io.github.dushyantchetiwal.praxis.remote.data.parseFile
 import io.github.dushyantchetiwal.praxis.remote.data.parseListing
-import io.github.dushyantchetiwal.praxis.remote.data.parseSnapshot
 import io.github.dushyantchetiwal.praxis.remote.data.parseThreads
-import io.github.dushyantchetiwal.praxis.remote.data.repoPath
 import io.github.dushyantchetiwal.praxis.remote.data.str
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -56,7 +55,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
-private const val ISSUE_POLL_MS = 3_000L
+private const val STATE_POLL_MS = 3_000L
 private const val MAX_POLL_BACKOFF_MS = 30_000L
 private const val WATCH_SECONDS = 300
 private const val WATCH_RENEW_MS = 4 * 60_000L
@@ -68,6 +67,11 @@ private const val OUTBOX_FALLBACK_MS = 90_000L
 private const val MODE_OVERRIDE_MS = 20_000L
 private const val DEVICE_REFRESH_MS = 60_000L
 private const val UPDATE_INTERVAL_MS = 6 * 60 * 60_000L
+// Right after pairing, the computer's praxis-remote.json may not list this
+// phone yet; it is rewritten at least every minute.
+private const val PAIR_GRACE_MS = 3 * 60_000L
+/** Screens that show computers, whose list is refreshed in the background. */
+private val LISTING_SCREENS = setOf(Screen.Devices, Screen.Pair, Screen.Device)
 
 /**
  * All app state and behaviour. State is only changed on the main thread, so
@@ -75,16 +79,27 @@ private const val UPDATE_INTERVAL_MS = 6 * 60 * 60_000L
  */
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val store = Store(application)
+    private val http = GitHubClient.newHttpClient()
+    private val deviceFlow = DeviceFlow(application, http)
+    private val tokens = TokenManager(
+        store,
+        deviceFlow,
+        clientId = { store.tokenClientId ?: effectiveClientId() },
+        onRefreshed = { expiresAt -> _app.update { it.copy(tokenExpiresAt = expiresAt) } },
+    )
     private val gh = GitHubClient(
         application,
-        token = { store.token },
+        http,
+        tokens,
         onUnauthorized = { viewModelScope.launch(Dispatchers.Main) { onUnauthorized() } },
     )
-    private val deviceFlow = DeviceFlow(application, gh.http)
-    private val channel = RemoteChannel(application, gh)
+    private val channel = RemoteChannel(application, gh) { store.login }
+    private val gists = Gists(gh)
+    private val pairer = Pairer(application, gh) { store.login }
+    private val phoneId: String by lazy { store.phoneId }
 
     private val _app = MutableStateFlow(
-        AppState(clientIdOverride = store.clientIdOverride, repo = store.repo, login = store.login),
+        AppState(clientIdOverride = store.clientIdOverride, login = store.login, phoneName = phoneName()),
     )
     val app: StateFlow<AppState> = _app.asStateFlow()
 
@@ -108,8 +123,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var pollJob: Job? = null
     private val pollNow = Channel<Unit>(Channel.CONFLATED)
     private var pollFailures = 0
+    /** The gist response last applied to the selected computer. */
+    private var appliedGist: String? = null
     private var signInJob: Job? = null
     private var devicesJob: Job? = null
+    private var pairJob: Job? = null
     private var outboxSeq = 0
     private val watcher = Watcher()
 
@@ -139,7 +157,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { store.loadSecrets() }
+            withContext(Dispatchers.IO) {
+                store.loadSecrets()
+                phoneId // Chosen and saved on first launch.
+            }
             _app.update {
                 it.copy(tokenExpiresAt = store.tokenExpiresAt, update = visibleUpdate(), latestUpdate = latestUpdate())
             }
@@ -158,23 +179,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun go(screen: Screen) = _app.update { it.copy(screen = screen) }
 
     private fun route() {
-        when {
-            store.token == null -> go(Screen.SignIn)
-            store.repo == null -> {
-                go(Screen.Repos)
-                discoverRepos(autoSelect = true)
-            }
-            else -> {
-                go(Screen.Devices)
-                loadDevices(initial = true)
-            }
+        if (store.token == null) {
+            go(Screen.SignIn)
+        } else {
+            go(Screen.Devices)
+            loadDevices(initial = true)
         }
     }
 
     /** Whether the system back gesture stays inside the app. */
     fun canGoBack(state: AppState): Boolean = when (state.screen) {
-        Screen.Settings, Screen.Device -> true
-        Screen.Repos -> state.repo != null
+        Screen.Settings, Screen.Device, Screen.Pair -> true
         else -> false
     }
 
@@ -184,11 +199,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         when (_app.value.screen) {
             Screen.Settings -> go(_app.value.settingsReturn)
             Screen.Device -> leaveDevice()
-            Screen.Repos -> {
-                // Switching was abandoned; keep the repository already chosen.
-                go(Screen.Devices)
-                loadDevices()
-            }
+            Screen.Pair -> cancelPairing()
             else -> return false
         }
         return true
@@ -204,7 +215,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (store.token == null) return
         startPolling()
         startDeviceRefresh()
-        if (_app.value.screen == Screen.Devices || _app.value.screen == Screen.Device) loadDevices()
+        if (_app.value.screen in LISTING_SCREENS) loadDevices()
         maybeCheckForUpdates()
     }
 
@@ -223,8 +234,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         devicesJob = viewModelScope.launch {
             while (isActive) {
                 delay(DEVICE_REFRESH_MS)
-                val screen = _app.value.screen
-                if (screen == Screen.Devices || screen == Screen.Device) loadDevices()
+                if (_app.value.screen in LISTING_SCREENS) loadDevices()
             }
         }
     }
@@ -263,6 +273,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 setSignIn(FlowPhase.Finishing, null)
                 val expiresAt = token.expiresInSeconds?.let { now() + it * 1000L }
                 withContext(Dispatchers.IO) { store.saveToken(token.accessToken, token.refreshToken, expiresAt) }
+                store.tokenClientId = clientId
                 _app.update { it.copy(tokenExpiresAt = expiresAt) }
                 fetchUser()
                 if (store.token == null) return@launch // Rejected straight away.
@@ -303,15 +314,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** GitHub rejected the token and refreshing it failed. */
     private fun onUnauthorized() {
         if (store.token == null) return
         signOut(explicit = false)
         setSignIn(FlowPhase.Idle, str(R.string.signin_expired))
     }
 
-    /** Explicit sign-out forgets the account; a rejected token only forgets the token. */
+    /**
+     * Explicit sign-out forgets the account and every pairing; a token that
+     * can no longer be refreshed only forgets the tokens.
+     */
     fun signOut(explicit: Boolean = true) {
         signInJob?.cancel()
+        pairJob?.cancel()
+        pairJob = null
         stopDevice()
         gh.clearCache()
         if (explicit) store.clearAccount() else store.clearToken()
@@ -321,101 +338,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 screen = Screen.SignIn,
                 login = store.login,
                 avatar = if (explicit) null else it.avatar,
-                repo = store.repo,
                 clientIdOverride = store.clientIdOverride,
+                phoneName = it.phoneName,
                 update = it.update,
                 latestUpdate = it.latestUpdate,
             )
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Repository
-    // -----------------------------------------------------------------------
-
-    private inline fun setRepos(block: ReposState.() -> ReposState) {
-        _app.update { it.copy(repos = it.repos.block()) }
-    }
-
-    fun discoverRepos(autoSelect: Boolean = false) {
-        viewModelScope.launch {
-            setRepos { copy(loading = true, error = null) }
-            try {
-                val installations = gh.call("GET", "/user/installations?per_page=100")
-                    .obj()?.arr("installations")?.objects().orEmpty()
-                val repos = mutableListOf<RepoInfo>()
-                for (installation in installations) {
-                    val id = installation.long("id") ?: continue
-                    gh.call("GET", "/user/installations/$id/repositories?per_page=100")
-                        .obj()?.arr("repositories")?.objects()
-                        ?.forEach { repo -> repo.str("full_name")?.let { repos += RepoInfo(it, repo.bool("private")) } }
-                }
-                val unique = repos.distinctBy { it.fullName.lowercase() }.sortedBy { it.fullName.lowercase() }
-                setRepos {
-                    copy(loading = false, loaded = true, repos = unique, noInstallations = installations.isEmpty())
-                }
-                val only = unique.singleOrNull()
-                if (autoSelect && only != null && only.private && _app.value.screen == Screen.Repos) {
-                    chooseRepo(only.fullName)
-                }
-            } catch (e: ApiException) {
-                setRepos { copy(loading = false, loaded = true, error = e.message) }
-            }
-        }
-    }
-
-    fun pickRepo(repo: RepoInfo) {
-        if (repo.private) chooseRepo(repo.fullName) else setRepos { copy(confirmPublic = repo) }
-    }
-
-    fun confirmPublicRepo() {
-        val repo = _app.value.repos.confirmPublic ?: return
-        chooseRepo(repo.fullName)
-    }
-
-    fun dismissPublicRepo() = setRepos { copy(confirmPublic = null) }
-
-    fun useManualRepo(input: String) {
-        val repo = normalizeRepo(input)
-        if (repo == null) {
-            setRepos { copy(manualError = str(R.string.repos_manual_invalid)) }
-            return
-        }
-        viewModelScope.launch {
-            setRepos { copy(checking = true, manualError = null) }
-            try {
-                val data = gh.call("GET", repoPath(repo, "")).obj()
-                pickRepo(RepoInfo(data?.str("full_name") ?: repo, data?.opt("private") != false))
-            } catch (e: ApiException) {
-                val text = if (e.kind == ErrorKind.NotFound) str(R.string.repos_manual_not_found) else e.message
-                setRepos { copy(manualError = text) }
-            } finally {
-                setRepos { copy(checking = false) }
-            }
-        }
-    }
-
-    private fun chooseRepo(fullName: String) {
-        store.repo = fullName
-        store.savedDevice = null
-        stopDevice()
-        gh.clearCache()
-        _app.update {
-            it.copy(repo = fullName, devices = DevicesState(), repos = it.repos.copy(confirmPublic = null))
-        }
-        go(Screen.Devices)
-        loadDevices(initial = true)
-    }
-
-    fun switchRepo() {
-        stopDevice()
-        store.savedDevice = null
-        go(Screen.Repos)
-        discoverRepos(autoSelect = false)
+    private fun phoneName(): String {
+        val maker = Build.MANUFACTURER.orEmpty().trim().replaceFirstChar { it.titlecase() }
+        val model = Build.MODEL.orEmpty().trim()
+        val name = if (maker.isNotEmpty() && model.startsWith(maker, ignoreCase = true)) model else "$maker $model"
+        return name.trim().ifEmpty { "Android phone" }.take(PHONE_NAME_MAX)
     }
 
     // -----------------------------------------------------------------------
-    // Devices
+    // Computers
     // -----------------------------------------------------------------------
 
     private inline fun setDevices(block: DevicesState.() -> DevicesState) {
@@ -423,19 +362,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadDevices(initial: Boolean = false) {
-        val repo = store.repo ?: return
         if (store.token == null) return
         viewModelScope.launch {
             setDevices { copy(loading = true) }
             try {
-                val reply = gh.call(
-                    "GET",
-                    repoPath(repo, "/issues?state=open&per_page=100&sort=updated&direction=desc"),
-                    conditional = true,
-                )
-                if (store.repo != repo) return@launch
-                val list = reply.array()?.objects()?.mapNotNull(::parseDevice)
-                setDevices { copy(devices = list ?: devices, error = null) }
+                // Comments are only trusted when written by this account, so learn it first.
+                if (store.login == null) fetchUser()
+                val found = gists.discover(known = store.pairedChannels().mapNotNull(store::gistFor))
+                if (store.token == null) return@launch
+                found.forEach { store.rememberComputer(it.channel, it.gistId, it.name) }
+                setDevices { copy(devices = found, error = null) }
+                _app.value.pairing.device?.let { pairing ->
+                    val fresh = found.find { it.channel == pairing.channel }
+                    if (fresh != null) setPairing { copy(device = fresh) }
+                }
+                found.forEach(::checkPairing)
+                setDevices { copy(paired = found.filter(::isPaired).map { it.channel }.toSet()) }
                 reconcileDevice(initial)
             } catch (e: ApiException) {
                 if (e.kind != ErrorKind.Auth) setDevices { copy(error = str(R.string.devices_error, e.message.orEmpty())) }
@@ -445,50 +387,169 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Whether this phone holds a key for [device] that the computer still honours. */
+    private fun isPaired(device: Device): Boolean {
+        if (store.keyFor(device.channel) == null) return false
+        return phoneId in device.phones || withinPairingGrace(device.channel)
+    }
+
+    private fun withinPairingGrace(channel: String): Boolean =
+        now() - (store.pairedAt(channel) ?: 0L) < PAIR_GRACE_MS
+
+    /**
+     * Drops the key for a computer that no longer lists this phone (it was
+     * unpaired there); returns whether the phone is still paired.
+     */
+    private fun checkPairing(device: Device): Boolean {
+        if (store.keyFor(device.channel) == null) return false
+        if (isPaired(device)) return true
+        onUnpaired(device, str(R.string.unpaired_by_computer, device.name))
+        return false
+    }
+
+    /** Forgets the pairing with [device] after the computer removed or refused this phone. */
+    private fun onUnpaired(device: Device, text: String) {
+        store.forgetPairing(device.channel)
+        setDevices {
+            copy(paired = paired - device.channel, unpairedByComputer = unpairedByComputer + device.channel)
+        }
+        if (d.device?.channel == device.channel) leaveDevice()
+        message(text)
+    }
+
     private fun reconcileDevice(initial: Boolean) {
         val devices = _app.value.devices.devices
         val current = d.device
         if (current != null) {
-            val match = devices.find { it.number == current.number } ?: devices.find { it.name == current.name }
-            if (match != null) {
-                if (match.number != current.number) {
-                    selectDevice(match)
-                } else if ((match.lastSeen ?: 0L) >= (current.lastSeen ?: 0L)) {
-                    edit { copy(device = match) }
-                }
+            val match = devices.find { it.channel == current.channel } ?: return
+            if (match.gistId != current.gistId) {
+                // Praxis recreated its gist; follow it.
+                appliedGist = null
+                edit { copy(device = match, stateApplied = false) }
+                setBanner("poll", null)
+                requestPoll()
+            } else if ((match.lastSeen ?: 0L) >= (current.lastSeen ?: 0L)) {
+                edit { copy(device = match) }
             }
             return
         }
         if (!initial || _app.value.screen != Screen.Devices) return
-        val saved = store.savedDevice
-        val match = saved?.let { s -> devices.find { it.number == s.number } ?: devices.find { it.name == s.name } }
-        (match ?: devices.singleOrNull())?.let(::openDevice)
+        val paired = devices.filter { it.channel in _app.value.devices.paired }
+        val saved = store.savedChannel
+        val match = saved?.let { s -> paired.find { it.channel == s } }
+        (match ?: paired.singleOrNull()?.takeIf { devices.size == 1 })?.let(::openDevice)
     }
 
+    /** Opens a paired computer, or offers to pair with one that is not. */
     fun openDevice(device: Device) {
+        if (device.channel !in _app.value.devices.paired) {
+            showPairing(device)
+            return
+        }
         selectDevice(device)
         go(Screen.Device)
     }
 
     fun leaveDevice() {
         stopDevice()
-        store.savedDevice = null
+        store.savedChannel = null
         composer = ""
         go(Screen.Devices)
         loadDevices()
     }
 
     private fun selectDevice(device: Device) {
-        val changed = device.number != d.device?.number
-        store.savedDevice = SavedDevice(device.number, device.name)
+        val changed = device.channel != d.device?.channel
+        store.savedChannel = device.channel
         if (!changed) {
             edit { copy(device = device) }
             if (pollJob == null) startPolling()
             return
         }
         stopDevice()
-        edit { copy(device = device, windowId = store.windowFor(device.name)) }
+        edit { copy(device = device, windowId = store.windowFor(device.channel)) }
         startPolling() // The watch is sent once the first poll has resolved the window.
+    }
+
+    private fun linkFor(device: Device): Link? =
+        store.keyFor(device.channel)?.let { Link(device.gistId, device.channel, phoneId, it, device.name) }
+
+    // -----------------------------------------------------------------------
+    // Pairing
+    // -----------------------------------------------------------------------
+
+    private inline fun setPairing(block: PairingState.() -> PairingState) {
+        _app.update { it.copy(pairing = it.pairing.block()) }
+    }
+
+    private fun showPairing(device: Device) {
+        pairJob?.cancel()
+        pairJob = null
+        _app.update { it.copy(pairing = PairingState(device = device), screen = Screen.Pair) }
+    }
+
+    /** Starts (or restarts) pairing with the computer on the pairing screen. */
+    fun startPairing() {
+        val device = _app.value.pairing.device ?: return
+        pairJob?.cancel()
+        setPairing { copy(phase = PairPhase.Waiting, startedAt = now()) }
+        pairJob = viewModelScope.launch {
+            val result = try {
+                pairer.pair(device.gistId, device.channel, phoneId, _app.value.phoneName) { code ->
+                    setPairing { copy(phase = PairPhase.Code(code)) }
+                }
+            } catch (e: ApiException) {
+                if (e.kind != ErrorKind.Auth) setPairing { copy(phase = PairPhase.Failed(e.message.orEmpty())) }
+                return@launch
+            }
+            val failure = when (result) {
+                is PairResult.Approved -> {
+                    withContext(Dispatchers.IO) { store.savePairing(device.channel, result.key, now()) }
+                    setDevices {
+                        copy(paired = paired + device.channel, unpairedByComputer = unpairedByComputer - device.channel)
+                    }
+                    _app.update { it.copy(pairing = PairingState()) }
+                    message(str(R.string.pair_done, device.name))
+                    selectDevice(device)
+                    go(Screen.Device)
+                    return@launch
+                }
+                PairResult.Denied -> str(R.string.pair_denied, device.name)
+                PairResult.Expired -> str(R.string.pair_expired)
+                PairResult.Invalid -> str(R.string.pair_invalid, device.name)
+                PairResult.TimedOut -> str(R.string.pair_timed_out, device.name)
+                PairResult.Removed -> str(R.string.pair_removed)
+            }
+            setPairing { copy(phase = PairPhase.Failed(failure)) }
+        }
+    }
+
+    /** Leaves the pairing screen; a pairing in progress is withdrawn (its comment deleted). */
+    fun cancelPairing() {
+        pairJob?.cancel()
+        pairJob = null
+        _app.update { it.copy(pairing = PairingState()) }
+        go(Screen.Devices)
+        loadDevices()
+    }
+
+    /** Asks the computer to forget this phone (best effort) and forgets its key. */
+    fun unpairCurrent() {
+        val device = d.device ?: return
+        val link = linkFor(device)
+        store.forgetPairing(device.channel)
+        setDevices { copy(paired = paired - device.channel) }
+        leaveDevice()
+        message(str(R.string.unpair_done, device.name))
+        if (link != null) {
+            viewModelScope.launch {
+                try {
+                    channel.serialized { channel.exchange(link, "unpair", JSONObject()) }
+                } catch (_: ApiException) {
+                    // The computer drops the phone when it next refuses a request, or the user can remove it there.
+                }
+            }
+        }
     }
 
     private fun stopDevice() {
@@ -497,6 +558,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         generation++
         resetWatcher()
         pollFailures = 0
+        appliedGist = null
         _ui.value = DeviceUi()
     }
 
@@ -530,7 +592,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (id == d.windowId) return
         edit { copy(windowId = id, watchSession = null) }
         val device = d.device
-        if (device != null && id != null) store.setWindowFor(device.name, id)
+        if (device != null && id != null) store.setWindowFor(device.channel, id)
         resetWindowView()
     }
 
@@ -548,7 +610,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // -----------------------------------------------------------------------
-    // Live state: issue polling
+    // Live state: gist polling
     // -----------------------------------------------------------------------
 
     private fun startPolling() {
@@ -567,17 +629,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pollNow.trySend(Unit)
     }
 
-    /** Reads the device's issue (free when unchanged); returns the delay before the next read. */
+    /** Reads the computer's gist (free when unchanged); returns the delay before the next read. */
     private suspend fun pollOnce(): Long? {
         val device = d.device ?: return null
-        val repo = store.repo ?: return null
-        var wait: Long? = ISSUE_POLL_MS
+        var wait: Long? = STATE_POLL_MS
         try {
-            val reply = gh.call("GET", repoPath(repo, "/issues/${device.number}"), conditional = true)
-            // A 304 still carries the cached issue, which matters right after reselecting a device.
-            val issue = reply.obj()
-            if (device.number == d.device?.number && issue != null && (reply.changed || !d.issueApplied)) {
-                applyIssue(issue)
+            // A 304 still carries the cached gist, which matters right after reselecting a computer.
+            val read = gists.read(device.gistId)
+            val same = d.device?.let { it.channel == device.channel && it.gistId == device.gistId } == true
+            if (same && read.gist != null && read.body != appliedGist) {
+                appliedGist = read.body
+                applyGist(read)
             }
             pollFailures = 0
             setBanner("poll", null)
@@ -598,29 +660,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 e.resetAt?.let { maxOf(5_000L, it - now() + 1_000L) } ?: MAX_POLL_BACKOFF_MS
             }
             e.kind == ErrorKind.NotFound || e.status == 410 -> {
-                setBanner("poll", str(R.string.banner_issue_gone, d.device?.number ?: 0L))
+                // The gist was deleted; Praxis makes a new one, found again by channel.
+                setBanner("poll", str(R.string.banner_channel_gone, d.device?.name.orEmpty()))
                 loadDevices()
                 MAX_POLL_BACKOFF_MS
             }
             else -> {
                 if (failures >= 2) setBanner("poll", str(R.string.banner_poll_failed, e.message.orEmpty()), error = true)
-                minOf(ISSUE_POLL_MS shl (failures - 1).coerceAtMost(4), MAX_POLL_BACKOFF_MS)
+                minOf(STATE_POLL_MS shl (failures - 1).coerceAtMost(4), MAX_POLL_BACKOFF_MS)
             }
         }
     }
 
-    private fun applyIssue(issue: JSONObject) {
-        edit { copy(issueApplied = true) }
-        parseDevice(issue)?.let { device ->
-            if (device.number == d.device?.number) {
-                edit { copy(device = device) }
-                setDevices { copy(devices = devices.map { if (it.number == device.number) device else it }) }
-            }
+    private suspend fun applyGist(read: GistRead) {
+        val gist = read.gist ?: return
+        val current = d.device ?: return
+        edit { copy(stateApplied = true) }
+        val device = read.device
+        if (device == null || device.channel != current.channel) {
+            // The gist no longer describes this computer; look for it again.
+            setBanner("poll", str(R.string.banner_channel_gone, current.name))
+            loadDevices()
+            return
         }
-        val closed = issue.str("state") == "closed"
-        setBanner("closed", if (closed) str(R.string.banner_issue_closed, issue.long("number") ?: 0L) else null)
-        if (closed) loadDevices()
-        parseSnapshot(issue.str("body"))?.let(::applySnapshot)
+        edit { copy(device = device) }
+        setDevices { copy(devices = devices.map { if (it.channel == device.channel) device else it }) }
+        if (!checkPairing(device)) return
+        val link = linkFor(device) ?: return
+        try {
+            gists.snapshot(gist, link)?.let(::applySnapshot)
+            setBanner("state", null)
+        } catch (e: CryptoException) {
+            setBanner("state", str(R.string.banner_state_unreadable, device.name), error = true)
+        }
         // The window may have just been resolved or changed, which resets tab data.
         loadActiveTabData()
     }
@@ -725,14 +797,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Requests
     // -----------------------------------------------------------------------
 
-    /** Runs an op on the selected device and unwraps the `{ok, result | error}` envelope. */
+    /** Runs an op on the selected computer and unwraps the `{ok, result | error}` envelope. */
     private suspend fun praxis(op: String, args: JSONObject = JSONObject()): JSONObject? {
         val device = d.device ?: throw ApiException(ErrorKind.State, str(R.string.error_no_device))
-        val repo = store.repo ?: throw ApiException(ErrorKind.State, str(R.string.error_no_device))
+        val link = linkFor(device) ?: throw ApiException(ErrorKind.Unpaired, str(R.string.error_not_paired, device.name))
         val gen = generation
-        val envelope = channel.serialized {
-            if (gen != generation) throw ApiException(ErrorKind.Cancelled, str(R.string.error_switched_device))
-            channel.exchange(repo, device, op, args)
+        val envelope = try {
+            channel.serialized {
+                if (gen != generation) throw ApiException(ErrorKind.Cancelled, str(R.string.error_switched_device))
+                channel.exchange(link, op, args)
+            }
+        } catch (e: ApiException) {
+            if (e.kind == ErrorKind.Unpaired && gen == generation) onUnpaired(device, e.message.orEmpty())
+            throw e
         }
         if (gen == generation) edit { copy(lastContact = now()) }
         if (envelope.optBoolean("ok")) return envelope.obj("result")
@@ -746,14 +823,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return args
     }
 
-    private fun viewKey(): String = "${d.device?.number}:${d.windowId}"
+    private fun viewKey(): String = "${d.device?.channel}:${d.windowId}"
 
     private fun report(e: ApiException, label: String?) {
-        if (e.kind == ErrorKind.Cancelled || e.kind == ErrorKind.Auth) return
+        // An unpaired computer has already been reported by onUnpaired.
+        if (e.kind == ErrorKind.Cancelled || e.kind == ErrorKind.Auth || e.kind == ErrorKind.Unpaired) return
         message(if (e.kind == ErrorKind.Praxis && label != null) "$label: ${e.message}" else e.message)
     }
 
-    /** Runs an op, reports a failure, and re-reads the issue at once on success. */
+    /** Runs an op, reports a failure, and re-reads the gist at once on success. */
     private suspend fun act(op: String, args: JSONObject, label: String): Boolean {
         return try {
             praxis(op, args)
