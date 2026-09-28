@@ -329,12 +329,15 @@ actions!(
         ImportThreadsFromOtherChannels,
         /// Starts a new terminal thread.
         NewTerminalThread,
-        /// Opens the Architect workspace for the active thread's plan.
-        OpenArchitect,
-        /// Returns to the native Code workspace without closing Architect.
-        OpenCodeWorkspace,
-        /// Switches between the Architect and Code workspaces.
-        ToggleArchitectWorkspace,
+        /// Opens Architect View for the active thread's plan.
+        #[action(deprecated_aliases = ["agent::OpenArchitect"])]
+        OpenArchitectView,
+        /// Returns to Editor View without closing the plan.
+        #[action(deprecated_aliases = ["agent::OpenCodeWorkspace"])]
+        OpenEditorView,
+        /// Switches between Architect View and Editor View.
+        #[action(deprecated_aliases = ["agent::ToggleArchitectWorkspace"])]
+        ToggleArchitectView,
     ]
 );
 
@@ -666,7 +669,7 @@ pub fn init(
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(
             |workspace: &mut Workspace,
-             _: &OpenArchitect,
+             _: &OpenArchitectView,
              window: &mut Window,
              cx: &mut Context<Workspace>| {
                 let thread = workspace
@@ -677,9 +680,9 @@ pub fn init(
                 let Some(thread) = thread else {
                     workspace.show_toast(
                         workspace::Toast::new(
-                            workspace::notifications::NotificationId::unique::<OpenArchitect>(),
-                            "Architect needs an open Praxis Agent thread. Open the agent panel and \
-                             start a thread, then try again.",
+                            workspace::notifications::NotificationId::unique::<OpenArchitectView>(),
+                            "Architect View needs an open Praxis Agent thread. Open the agent \
+                             panel and start a thread, then try again.",
                         ),
                         cx,
                     );
@@ -690,7 +693,7 @@ pub fn init(
         );
         workspace.register_action(
             |workspace: &mut Workspace,
-             _: &OpenCodeWorkspace,
+             _: &OpenEditorView,
              window: &mut Window,
              cx: &mut Context<Workspace>| {
                 crate::architect_ui::ArchitectPane::activate_code(workspace, window, cx);
@@ -698,7 +701,7 @@ pub fn init(
         );
         workspace.register_action(
             |workspace: &mut Workspace,
-             _: &ToggleArchitectWorkspace,
+             _: &ToggleArchitectView,
              window: &mut Window,
              cx: &mut Context<Workspace>| {
                 if workspace
@@ -719,11 +722,10 @@ pub fn init(
                 let Some(thread) = thread else {
                     workspace.show_toast(
                         workspace::Toast::new(
-                            workspace::notifications::NotificationId::unique::<
-                                ToggleArchitectWorkspace,
-                            >(),
-                            "Architect needs an open Praxis Agent thread. Open the agent panel and \
-                             start a thread, then try again.",
+                            workspace::notifications::NotificationId::unique::<ToggleArchitectView>(
+                            ),
+                            "Architect View needs an open Praxis Agent thread. Open the agent \
+                             panel and start a thread, then try again.",
                         ),
                         cx,
                     );

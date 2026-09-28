@@ -6082,7 +6082,7 @@ impl AgentPanel {
                                              run's results are replaced."
                                         } else {
                                             "Run the plan, one step at a time, without leaving \
-                                             Code"
+                                             Editor View"
                                         }))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             cx.stop_propagation();
@@ -6498,15 +6498,15 @@ impl AgentPanel {
         let settled = graph.map_or(0, architect::ArchitectGraph::locked_step_count_deeply);
 
         let tooltip = match step_count {
-            0 => "Open the Architect canvas. Switch to Architect mode and describe the goal, and the plan appears here.".to_string(),
-            1 => format!("Open the Architect canvas: {settled} of 1 step settled"),
-            count => format!("Open the Architect canvas: {settled} of {count} steps settled"),
+            0 => "Open Architect View. Switch to Architect mode and describe the goal, and the plan appears here.".to_string(),
+            1 => format!("Open Architect View: {settled} of 1 step settled"),
+            count => format!("Open Architect View: {settled} of {count} steps settled"),
         };
-        // Progress at a glance from Code, without switching to find out.
+        // Progress at a glance from Editor View, without switching to find out.
         let label: SharedString = if step_count == 0 {
-            "Architect".into()
+            "Architect View".into()
         } else {
-            format!("Architect {settled}/{step_count}").into()
+            format!("Architect View {settled}/{step_count}").into()
         };
 
         Some(
@@ -6515,7 +6515,7 @@ impl AgentPanel {
                 .style(ButtonStyle::Subtle)
                 .start_icon(Icon::new(IconName::ListTree).size(IconSize::Small))
                 .tooltip(move |_window, cx| {
-                    Tooltip::for_action(tooltip.clone(), &crate::ToggleArchitectWorkspace, cx)
+                    Tooltip::for_action(tooltip.clone(), &crate::ToggleArchitectView, cx)
                 })
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.defer_open_architect_workspace(window, cx);

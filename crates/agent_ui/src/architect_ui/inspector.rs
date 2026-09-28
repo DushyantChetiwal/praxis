@@ -405,7 +405,7 @@ impl ArchitectPane {
         };
         let Some(conversation_view) = self.plan_conversation_view(cx) else {
             self.report(
-                "The overall plan conversation is unavailable. Open Code, restore the root plan conversation, and try again."
+                "The overall plan conversation is unavailable. Switch to Editor View, restore the root plan conversation, and try again."
                     .to_string(),
                 cx,
             );
@@ -427,7 +427,7 @@ impl ArchitectPane {
 
         let Some(session_id) = session_id else {
             self.report(
-                "The selected-step conversation could not be opened. Open Code, verify the overall plan conversation, and try again."
+                "The selected-step conversation could not be opened. Switch to Editor View, verify the overall plan conversation, and try again."
                     .to_string(),
                 cx,
             );
@@ -828,7 +828,7 @@ impl ArchitectPane {
                             )
                             .child(
                                 Label::new(
-                                    "Open the Agent panel in Code and select the conversation that owns this plan.",
+                                    "Open the Agent panel in Editor View and select the conversation that owns this plan.",
                                 )
                                 .size(LabelSize::XSmall)
                                 .color(Color::Muted),

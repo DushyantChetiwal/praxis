@@ -278,7 +278,7 @@ impl ArchitectPane {
                 };
                 cx.notify();
             }
-            "code" => self.request_code_mode(window, cx),
+            "code" | "editor" => self.request_code_mode(window, cx),
             "run" => self.run(cx),
             "stop" => self.stop_run(cx),
             op => return Err(anyhow!("unknown Architect op {op:?}")),

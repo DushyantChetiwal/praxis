@@ -865,4 +865,9 @@ impl StatusItemView for ActivityIndicator {
         // Activity indicator auto-hides when there's no work to display.
         None
     }
+
+    // Progress, errors and update notices matter whatever is in front.
+    fn show_over_exclusive_item(&self, _: &App) -> bool {
+        true
+    }
 }
