@@ -1216,7 +1216,10 @@ impl ArchitectGraph {
             .map(|node| {
                 let changed = usize::from(!node.locked);
                 node.locked = true;
-                let nested = node.subplan.as_deref_mut().map_or(0, ArchitectGraph::lock_all);
+                let nested = node
+                    .subplan
+                    .as_deref_mut()
+                    .map_or(0, ArchitectGraph::lock_all);
                 changed + nested
             })
             .sum()
@@ -2121,7 +2124,10 @@ mod tests {
         let mut graph = two_level_plan();
         let parent = NodePath::from(NodeId::from("parent"));
         graph
-            .set_locked_at(&NodePath::from(vec!["parent".into(), "sibling".into()]), true)
+            .set_locked_at(
+                &NodePath::from(vec!["parent".into(), "sibling".into()]),
+                true,
+            )
             .unwrap();
 
         assert_eq!(graph.lock_deeply_at(&parent), Ok(3));
@@ -2132,7 +2138,11 @@ mod tests {
             !graph.node(&NodeId::from("other")).unwrap().locked,
             "steps outside the one locked are left alone"
         );
-        assert_eq!(graph.lock_deeply_at(&parent), Ok(0), "locking again changes nothing");
+        assert_eq!(
+            graph.lock_deeply_at(&parent),
+            Ok(0),
+            "locking again changes nothing"
+        );
 
         graph.set_locked_at(&parent, false).unwrap();
         assert!(

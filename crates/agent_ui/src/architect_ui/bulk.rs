@@ -334,7 +334,8 @@ impl ArchitectPane {
             return;
         }
         let open = self.root_graph(cx).map_or(0, |root| {
-            root.step_count_deeply().saturating_sub(root.locked_step_count_deeply())
+            root.step_count_deeply()
+                .saturating_sub(root.locked_step_count_deeply())
         });
         if open == 0 {
             return;
@@ -346,7 +347,11 @@ impl ArchitectPane {
             },
             cx,
         ) {
-            self.record_activity(None, format!("Locked the {} still open", count_label(open)), cx);
+            self.record_activity(
+                None,
+                format!("Locked the {} still open", count_label(open)),
+                cx,
+            );
         }
         // An open inspector goes read-only with its step.
         self.refresh_inspector(window, cx);

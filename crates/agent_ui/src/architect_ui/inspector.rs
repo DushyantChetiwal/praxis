@@ -600,7 +600,9 @@ impl ArchitectPane {
         // Locking a step that holds a plan settles that plan with it, at every
         // depth; unlocking reopens only the step itself.
         let nested_open = node.subplan().map_or(0, |subplan| {
-            subplan.step_count_deeply().saturating_sub(subplan.locked_step_count_deeply())
+            subplan
+                .step_count_deeply()
+                .saturating_sub(subplan.locked_step_count_deeply())
         });
 
         let path = self.focus.child(id);
