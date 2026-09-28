@@ -12,9 +12,7 @@ Your phone and your computer never connect directly, and nothing on your compute
    gh repo create praxis-remote --private
    ```
 
-2. **Create a token for your phone.** Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) with access to **only** that repository and the **Issues: Read and write** permission. Nothing else is needed.
-
-3. **Turn it on in Praxis.** Create `remote/config.json` in Praxis's data folder:
+2. **Turn it on in Praxis.** Create `remote/config.json` in Praxis's data folder:
 
    - Windows: `%LOCALAPPDATA%\Praxis Dev\remote\config.json`
    - macOS: `~/Library/Application Support/Praxis Dev/remote/config.json`
@@ -24,9 +22,11 @@ Your phone and your computer never connect directly, and nothing on your compute
    { "repository": "your-name/praxis-remote" }
    ```
 
-   Praxis signs in to GitHub with the GitHub CLI (`gh auth login`) if it is installed. Otherwise, add `"token": "…"` with a token like the phone's, or set `PRAXIS_REMOTE_TOKEN`. `"device_name"` changes the name your phone shows, which is the computer's name by default. Restart Praxis. Praxis opens an issue named `Praxis · <device>` in the repository.
+   Praxis signs in to GitHub with the GitHub CLI (`gh auth login`) if it is installed. Otherwise, add `"token": "…"` with a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) that has **Issues: Read and write** on only that repository, or set `PRAXIS_REMOTE_TOKEN`. It must belong to the same GitHub account you sign in with on your phone. `"device_name"` changes the name your phone shows, which is the computer's name by default. Restart Praxis. Praxis opens an issue named `Praxis · <device>` in the repository.
 
-4. **Install the app on your phone.** Open [dushyantchetiwal.github.io/praxis/remote](https://dushyantchetiwal.github.io/praxis/remote/) in Chrome on Android, then choose **Add to Home screen** (or **Install app**). Enter the repository and the phone's token, then pick your computer.
+3. **Install the Praxis Remote GitHub App** on only the channel repository. The app lets your phone sign in with GitHub and limits it to that repository's issues.
+
+4. **Install Praxis Remote on your Android phone.** Download the newest `PraxisRemote-….apk` from the [releases](https://github.com/DushyantChetiwal/praxis/releases) tagged `praxis-remote-android-…` and open it; Android asks you to allow installing apps from your browser the first time. Tap **Sign in with GitHub**, enter the code it shows on github.com, then pick your computer. The app tells you when a newer version is available.
 
 ## What you can do
 
@@ -52,8 +52,8 @@ Expect a delay of a few seconds between tapping and seeing the result.
 
 - Praxis only obeys comments written by the GitHub account its own token belongs to. Anyone else's comments are ignored.
 - Requests more than five minutes old are refused rather than replayed, so nothing queued while your computer was off runs later by surprise.
-- Anyone who can post comments as your account in that repository can direct the agent, and in Build mode the agent can change files and run commands. Keep the repository private, give tokens access to that repository alone with only the Issues permission, and revoke a token from GitHub's settings if a phone is lost.
+- Anyone who can post comments as your account in that repository can direct the agent, and in Build mode the agent can change files and run commands. Keep the repository private, install the GitHub App on that repository alone, and if a phone is lost, revoke its access under **Settings → Applications → Authorized GitHub Apps** on GitHub.
 - The issue shows your recent conversation and project file names to anyone who can read the repository.
-- The phone keeps its token in the browser's local storage for that site. Use **Forget token** in the app's settings to remove it.
+- The phone keeps its sign-in in Android's encrypted storage. **Sign out** in the app's settings removes it.
 
 To turn Praxis Remote off, delete `remote/config.json` and restart Praxis. You can also close or delete the issue; Praxis reopens it the next time it runs with the configuration in place.

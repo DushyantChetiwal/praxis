@@ -37,13 +37,12 @@ for the architecture and reproducible demo.
 ## Praxis Remote
 
 Follow and steer the agent from your phone: chat, answer permission prompts,
-switch modes, run a plan, and read project files. The phone app is an
-installable web app at
-[dushyantchetiwal.github.io/praxis/remote](https://dushyantchetiwal.github.io/praxis/remote/),
-and it talks to Praxis through an issue in a private GitHub repository you own,
-so nothing on your computer listens on the network. See
+switch modes, run a plan, and read project files. The native Android app signs
+in with GitHub and talks to Praxis through an issue in a private GitHub
+repository you own, so nothing on your computer listens on the network. Its
+APK is published in the releases tagged `praxis-remote-android-…`. See
 [`docs/src/ai/praxis-remote.md`](./docs/src/ai/praxis-remote.md) for setup and
-the security model. The app's source is in [`remote-app/`](./remote-app/).
+the security model. The app's source is in [`remote-android/`](./remote-android/).
 
 ## Installation and updates
 
