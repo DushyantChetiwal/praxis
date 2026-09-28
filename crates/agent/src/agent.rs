@@ -9146,9 +9146,13 @@ mod internal_tests {
             2,
             "both branches should be in flight at the same time"
         );
-        let (left, right) = (&branches[0], &branches[1]);
-        assert!(left.1.contains("## Step 2: Left"), "{}", left.1);
-        assert!(right.1.contains("## Step 3: Right"), "{}", right.1);
+        let branch = |heading: &str| {
+            branches
+                .iter()
+                .find(|(_, brief)| brief.contains(heading))
+                .unwrap_or_else(|| panic!("no branch brief has {heading:?}"))
+        };
+        let (left, right) = (branch("## Step 2: Left"), branch("## Step 3: Right"));
         assert_ne!(
             left.0.thread_id, right.0.thread_id,
             "each branch runs in a thread of its own"
