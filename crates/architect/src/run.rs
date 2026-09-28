@@ -1408,6 +1408,7 @@ mod tests {
                 },
                 Decision::Done(outcome) => break outcome,
                 Decision::Run(_) => continue,
+                Decision::Fork { .. } => panic!("a single loop never forks"),
             }
         };
         assert_eq!(
