@@ -124,7 +124,11 @@ mod tests {
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
-        assert!(rendered.contains("You are the Zed coding agent"));
+        assert!(rendered.contains("You are the Praxis coding agent running inside Praxis"));
+        assert!(
+            !rendered.contains("You are the Zed"),
+            "the agent must not introduce itself as Zed's"
+        );
         assert!(rendered.contains("Today's Date: 2026-01-01"));
         assert!(rendered.contains("## Fixing Diagnostics"));
         assert!(rendered.contains("test-model"));

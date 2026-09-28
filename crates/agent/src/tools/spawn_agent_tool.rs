@@ -33,7 +33,7 @@ use crate::{AgentTool, ThreadEnvironment, ToolCallEventStream, ToolCapability, T
 /// - Reuse the returned session_id when you want to follow up on the same delegated subproblem instead of creating a duplicate session.
 ///
 /// ### Model selection
-/// - When the user requests a particular model or asks you to choose based on cost or capability, call `list_agents_and_models` first, then pass the exact `models[].id` from the native Zed agent entry (`is_native: true`) in `model`.
+/// - When the user requests a particular model or asks you to choose based on cost or capability, call `list_agents_and_models` first, then pass the exact `models[].id` from the native Praxis agent entry (`is_native: true`) in `model`.
 /// - Omit `model` to use the user's configured subagent model, or the parent model when no subagent model is configured.
 /// - Do not silently choose a different model when an explicit model is unavailable unless the user allowed fallback.
 /// - A resumed session keeps its existing model, so `model` cannot be combined with `session_id`.
@@ -53,7 +53,7 @@ pub struct SpawnAgentToolInput {
     #[serde(default, deserialize_with = "deserialize_session_id")]
     pub session_id: Option<acp::SessionId>,
     /// Optional model override. Pass the exact `models[].id` returned for the
-    /// native Zed agent (`is_native: true`) by `list_agents_and_models`.
+    /// native Praxis agent (`is_native: true`) by `list_agents_and_models`.
     /// Omit to preserve default behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
