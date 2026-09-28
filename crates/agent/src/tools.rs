@@ -309,12 +309,16 @@ mod tests {
         assert!(!tool_allowed_in_restricted_mode(FetchTool::NAME));
         assert!(!tool_allowed_in_restricted_mode(PullRequestTool::NAME));
         assert!(!tool_allowed_in_restricted_mode(TerminalTool::NAME));
+        // Stopping a task is part of terminal execution; status and waiting
+        // only read a task this thread already started.
+        assert!(!tool_allowed_in_restricted_mode(TerminalStopTool::NAME));
 
         // Every other built-in tool, and unknown (e.g. MCP) tools, are allowed.
         for name in ALL_TOOL_NAMES {
             let expected = *name != FetchTool::NAME
                 && *name != PullRequestTool::NAME
-                && *name != TerminalTool::NAME;
+                && *name != TerminalTool::NAME
+                && *name != TerminalStopTool::NAME;
             assert_eq!(
                 tool_allowed_in_restricted_mode(name),
                 expected,
