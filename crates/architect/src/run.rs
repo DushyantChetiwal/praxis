@@ -1957,7 +1957,7 @@ mod tests {
         let graph = nested_graph();
         let start = path(&["handlers", "respond"]);
         let mut run = PlanRun::start_at(&graph, &start).unwrap();
-        assert_eq!(run.decide(&graph), Decision::Run(start.clone()));
+        assert_eq!(run.decide(&graph), Decision::Run(start));
         assert_eq!(run.depth(), 2);
         assert_eq!(run.finish_step(&graph), Decision::Run(path(&["ship"])));
 
