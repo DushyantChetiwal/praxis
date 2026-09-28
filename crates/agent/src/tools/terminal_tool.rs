@@ -1,3 +1,7 @@
+use super::terminal_task_tool::{
+    DEFAULT_YIELD_MS, MAX_YIELD_MS, TerminalCleanup, TerminalCreation, TerminalTaskRegistry,
+    TerminalTaskReservation,
+};
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
 use futures::FutureExt as _;
@@ -8,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use settings::Settings;
 use std::{
     path::{Path, PathBuf},
-    rc::Rc,
+    rc::{Rc, Weak},
     sync::Arc,
     time::Duration,
 };
@@ -21,7 +25,8 @@ use crate::sandboxing::{
 };
 use crate::{AgentTool, ThreadEnvironment, ToolCallEventStream, ToolCapability, ToolInput};
 
-const COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
+pub(super) const COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
+const BACKGROUND_CAPTURE_LIMIT: u64 = 100 * 1024;
 
 /// Executes a shell one-liner and returns the combined output.
 ///
@@ -47,6 +52,10 @@ const COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
 /// - Prefer Git flags that avoid optional metadata writes when possible, such as `git --no-optional-locks status` instead of `git status`.
 /// - Always prepend `GIT_EDITOR=true ` to any git command that may invoke an editor, including `git rebase`, `git commit`, `git merge`, and `git tag`. Example: `GIT_EDITOR=true git rebase origin/main` (NOT `git rebase origin/main`).
 /// - For other commands that may open a pager or editor, set `PAGER=cat` and/or `EDITOR=true` similarly.
+///
+/// Background-capable execution captures at most the first 100 KiB of terminal
+/// history. Head/tail selections apply to that bounded capture, not the entire
+/// command output; selected output is further capped at 16 KiB. Truncation is reported.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct TerminalToolInput {
     /// The one-liner command to execute. Do not include shell substitutions or interpolations such as `$VAR`, `${VAR}`, `$(...)`, backticks, `$((...))`, `<(...)`, or `>(...)`; resolve those values first or ask the user for the literal value to use.
@@ -63,6 +72,15 @@ pub struct TerminalToolInput {
     /// Return only the last N lines of terminal output to the model after the command finishes. Do not pipe output to `tail`; use this parameter instead so the user can still see live output. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
     #[serde(default)]
     pub tail_lines: Option<usize>,
+    /// Foreground wait in milliseconds, 0 through 30000 inclusive; omitted/null
+    /// defaults to 10000. Zero returns immediately with a running task id. The
+    /// command's timeout_ms remains a hard total runtime limit after yielding.
+    /// Continue useful independent work after a running response, then use
+    /// terminal_wait when nothing useful remains; never shell sleep or busy-poll.
+    /// Without terminal lifecycle tools, execution waits for exit instead.
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 30000))]
+    pub yield_ms: Option<u64>,
 }
 
 /// Executes a shell one-liner and returns the combined output.
@@ -89,6 +107,10 @@ pub struct TerminalToolInput {
 /// - Prefer Git flags that avoid optional metadata writes when possible, such as `git --no-optional-locks status` instead of `git status`.
 /// - Always prepend `GIT_EDITOR=true ` to any git command that may invoke an editor, including `git rebase`, `git commit`, `git merge`, and `git tag`. Example: `GIT_EDITOR=true git rebase origin/main` (NOT `git rebase origin/main`).
 /// - For other commands that may open a pager or editor, set `PAGER=cat` and/or `EDITOR=true` similarly.
+///
+/// Background-capable execution captures at most the first 100 KiB of terminal
+/// history. Head/tail selections apply to that bounded capture, not the entire
+/// command output; selected output is further capped at 16 KiB. Truncation is reported.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SandboxedTerminalToolInput {
     /// The one-liner command to execute. Do not include shell substitutions or interpolations such as `$VAR`, `${VAR}`, `$(...)`, backticks, `$((...))`, `<(...)`, or `>(...)`; resolve those values first or ask the user for the literal value to use.
@@ -105,6 +127,15 @@ pub struct SandboxedTerminalToolInput {
     /// Return only the last N lines of terminal output to the model after the command finishes. Do not pipe output to `tail`; use this parameter instead so the user can still see live output. Avoid requesting too many lines, or the response may waste tokens or exceed the context window.
     #[serde(default)]
     pub tail_lines: Option<usize>,
+    /// Foreground wait in milliseconds, 0 through 30000 inclusive; omitted/null
+    /// defaults to 10000. Zero returns immediately with a running task id. The
+    /// command's timeout_ms remains a hard total runtime limit after yielding.
+    /// Continue useful independent work after a running response, then use
+    /// terminal_wait when nothing useful remains; never shell sleep or busy-poll.
+    /// Without terminal lifecycle tools, execution waits for exit instead.
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 30000))]
+    pub yield_ms: Option<u64>,
     /// Hosts the command needs outbound network access to.
     ///
     /// Sandboxed commands cannot reach the network by default. List the hosts
@@ -221,6 +252,7 @@ struct TerminalToolRequest {
     command: String,
     cd: String,
     timeout_ms: Option<u64>,
+    yield_ms: Option<u64>,
     selection: TerminalOutputSelection,
     sandbox: Option<TerminalSandboxInput>,
 }
@@ -231,6 +263,7 @@ impl From<TerminalToolInput> for TerminalToolRequest {
             command: input.command,
             cd: input.cd,
             timeout_ms: input.timeout_ms,
+            yield_ms: input.yield_ms,
             selection: TerminalOutputSelection {
                 head_lines: input.head_lines,
                 tail_lines: input.tail_lines,
@@ -246,6 +279,7 @@ impl From<SandboxedTerminalToolInput> for TerminalToolRequest {
             command: input.command,
             cd: input.cd,
             timeout_ms: input.timeout_ms,
+            yield_ms: input.yield_ms,
             selection: TerminalOutputSelection {
                 head_lines: input.head_lines,
                 tail_lines: input.tail_lines,
@@ -265,6 +299,7 @@ impl From<SandboxedTerminalToolInput> for TerminalToolRequest {
 pub struct TerminalTool {
     project: Entity<Project>,
     environment: Rc<dyn ThreadEnvironment>,
+    task_registry: Option<Weak<TerminalTaskRegistry>>,
 }
 
 impl TerminalTool {
@@ -272,13 +307,20 @@ impl TerminalTool {
         Self {
             project,
             environment,
+            task_registry: None,
         }
+    }
+
+    pub(crate) fn with_task_registry(mut self, registry: &Rc<TerminalTaskRegistry>) -> Self {
+        self.task_registry = Some(Rc::downgrade(registry));
+        self
     }
 }
 
 pub struct SandboxedTerminalTool {
     project: Entity<Project>,
     environment: Rc<dyn ThreadEnvironment>,
+    task_registry: Option<Weak<TerminalTaskRegistry>>,
 }
 
 impl SandboxedTerminalTool {
@@ -286,7 +328,13 @@ impl SandboxedTerminalTool {
         Self {
             project,
             environment,
+            task_registry: None,
         }
+    }
+
+    pub(crate) fn with_task_registry(mut self, registry: &Rc<TerminalTaskRegistry>) -> Self {
+        self.task_registry = Some(Rc::downgrade(registry));
+        self
     }
 }
 
@@ -322,11 +370,15 @@ impl AgentTool for TerminalTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
+        let reservation = reserve_terminal_launch(self.task_registry.as_ref());
         cx.spawn(async move |cx| {
+            let reservation = reservation?;
             let input = input.recv().await.map_err(|e| e.to_string())?;
             run_terminal_tool(
                 self.project.clone(),
                 self.environment.clone(),
+                self.task_registry.clone(),
+                reservation,
                 input.into(),
                 event_stream,
                 cx,
@@ -368,11 +420,15 @@ impl AgentTool for SandboxedTerminalTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
+        let reservation = reserve_terminal_launch(self.task_registry.as_ref());
         cx.spawn(async move |cx| {
+            let reservation = reservation?;
             let input = input.recv().await.map_err(|e| e.to_string())?;
             run_terminal_tool(
                 self.project.clone(),
                 self.environment.clone(),
+                self.task_registry.clone(),
+                reservation,
                 input.into(),
                 event_stream,
                 cx,
@@ -421,13 +477,86 @@ fn wsl_zed_release(_cx: &App) -> Option<(String, String)> {
     None
 }
 
+// Reserve synchronously when the tool is invoked, not on its first async poll:
+// Stop must also invalidate launches still waiting for their input or executor.
+fn reserve_terminal_launch(
+    registry: Option<&Weak<TerminalTaskRegistry>>,
+) -> Result<Option<TerminalTaskReservation>, String> {
+    registry
+        .map(|registry| {
+            registry
+                .upgrade()
+                .ok_or_else(|| "Terminal thread has been released".to_string())?
+                .reserve()
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
+}
+
 async fn run_terminal_tool(
     project: Entity<Project>,
     environment: Rc<dyn ThreadEnvironment>,
+    task_registry: Option<Weak<TerminalTaskRegistry>>,
+    reservation: Option<TerminalTaskReservation>,
     input: TerminalToolRequest,
     event_stream: ToolCallEventStream,
     cx: &mut AsyncApp,
 ) -> Result<String, String> {
+    let yield_ms = input.yield_ms.unwrap_or(DEFAULT_YIELD_MS);
+    if yield_ms > MAX_YIELD_MS {
+        return Err(format!("yield_ms must be between 0 and {MAX_YIELD_MS}"));
+    }
+    let reservation_cancelled = reservation.as_ref().map(TerminalTaskReservation::cancelled);
+    let reservation_cancelled = async move {
+        if let Some(cancelled) = reservation_cancelled {
+            cancelled.await;
+        } else {
+            futures::future::pending::<()>().await;
+        }
+    };
+    let prepared = futures::select_biased! {
+        _ = event_stream.cancelled_by_user().fuse() => return Err("Terminal launch cancelled".into()),
+        _ = reservation_cancelled.fuse() => return Err("Terminal launch cancelled".into()),
+        result = prepare_terminal_tool(project, environment, &input, &event_stream, reservation.as_ref(), cx).fuse() => result?,
+    };
+    let (terminal, sandbox_note) = match prepared {
+        std::ops::ControlFlow::Continue(terminal) => terminal,
+        std::ops::ControlFlow::Break(output) => return Ok(output),
+    };
+    finish_terminal_tool(
+        terminal,
+        task_registry,
+        reservation,
+        input,
+        sandbox_note,
+        event_stream,
+        yield_ms,
+        cx,
+    )
+    .await
+}
+
+fn check_terminal_launch(
+    reservation: Option<&TerminalTaskReservation>,
+    event_stream: &ToolCallEventStream,
+) -> Result<()> {
+    if event_stream.was_cancelled_by_user() {
+        anyhow::bail!("Terminal launch cancelled");
+    }
+    if let Some(reservation) = reservation {
+        reservation.check()?;
+    }
+    Ok(())
+}
+
+async fn prepare_terminal_tool(
+    project: Entity<Project>,
+    environment: Rc<dyn ThreadEnvironment>,
+    input: &TerminalToolRequest,
+    event_stream: &ToolCallEventStream,
+    reservation: Option<&TerminalTaskReservation>,
+    cx: &mut AsyncApp,
+) -> Result<std::ops::ControlFlow<String, (TerminalCleanup, Option<String>)>, String> {
     let selection = input.selection;
     let sandbox_input = input.sandbox.clone().unwrap_or_default();
 
@@ -676,9 +805,9 @@ async fn run_terminal_tool(
         {
             // Carry the underlying error so a prompt-delivery failure is
             // distinguishable from a genuine user abort.
-            return Ok(format!(
+            return Ok(std::ops::ControlFlow::Break(format!(
                 "Command cancelled: the user declined to run a command whose sandbox writes to a Windows drive ({error})."
-            ));
+            )));
         }
     }
 
@@ -699,13 +828,13 @@ async fn run_terminal_tool(
             cx.update(|cx| event_stream.authorize_sandbox(request.clone(), reason.to_string(), cx));
         if let Err(error) = approve.await {
             if want_unsandboxed {
-                return Ok(format!(
+                return Ok(std::ops::ControlFlow::Break(format!(
                     "Command cancelled: user denied permission to run outside the sandbox ({error})."
-                ));
+                )));
             }
-            return Ok(format!(
+            return Ok(std::ops::ControlFlow::Break(format!(
                 "Command cancelled: user denied the requested sandbox permissions ({error})."
-            ));
+            )));
         }
     }
 
@@ -809,11 +938,11 @@ async fn run_terminal_tool(
                             break None;
                         }
                         Ok(SandboxFallbackDecision::Deny) | Err(_) => {
-                            return Ok(format!(
+                            return Ok(std::ops::ControlFlow::Break(format!(
                                 "Command cancelled: the sandbox could not be created ({}) and \
                                  the user declined to run it without one.",
                                 error.user_facing_message()
-                            ));
+                            )));
                         }
                     }
                 }
@@ -849,7 +978,12 @@ async fn run_terminal_tool(
         None
     };
 
-    let output_byte_limit = if selection.is_enabled() {
+    check_terminal_launch(reservation, event_stream).map_err(|error| error.to_string())?;
+    let output_byte_limit = if reservation.is_some() {
+        // Bound backend capture as well as the model-facing selected output.
+        // Head/tail refer to this captured prefix, not an unbounded history.
+        Some(BACKGROUND_CAPTURE_LIMIT)
+    } else if selection.is_enabled() {
         None
     } else {
         Some(COMMAND_OUTPUT_LIMIT)
@@ -868,17 +1002,16 @@ async fn run_terminal_tool(
         let mut retries = 0usize;
         let mut effective_wrap = sandbox_wrap.clone();
         loop {
-            let error = match environment
-                .create_terminal(
-                    input.command.clone(),
-                    extra_env.clone(),
-                    working_dir.clone(),
-                    output_byte_limit,
-                    effective_wrap.clone(),
-                    cx,
-                )
-                .await
-            {
+            check_terminal_launch(reservation, event_stream).map_err(|error| error.to_string())?;
+            let creation = environment.create_terminal(
+                input.command.clone(),
+                extra_env.clone(),
+                working_dir.clone(),
+                output_byte_limit,
+                effective_wrap.clone(),
+                cx,
+            );
+            let error = match TerminalCreation::new(creation, cx).await {
                 Ok(terminal) => break terminal,
                 Err(error) => error,
             };
@@ -924,27 +1057,32 @@ async fn run_terminal_tool(
                     effective_wrap = None;
                 }
                 Ok(SandboxFallbackDecision::Deny) | Err(_) => {
-                    return Ok(format!(
+                    return Ok(std::ops::ControlFlow::Break(format!(
                         "Command cancelled: the sandbox could not be created ({}) and the \
                          user declined to run it without one.",
                         sandbox_error.user_facing_message()
-                    ));
+                    )));
                 }
             }
         }
     };
     #[cfg(not(target_os = "windows"))]
-    let terminal = environment
-        .create_terminal(
+    let terminal = {
+        let creation = environment.create_terminal(
             input.command.clone(),
             extra_env,
             working_dir.clone(),
             output_byte_limit,
             sandbox_wrap.clone(),
             cx,
-        )
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+        );
+        TerminalCreation::new(creation, cx)
+            .await
+            .map_err(|error| format!("{error:#}"))?
+    };
+    // Creation may already be ready when cancellation wins. The guard owns the
+    // handle before this check and before any UI update or registry insertion.
+    check_terminal_launch(reservation, event_stream).map_err(|error| error.to_string())?;
 
     // When sandboxing was active but the command ran without a sandbox (a
     // settings opt-out, a thread grant, or a sandbox-creation failure the user
@@ -1001,6 +1139,55 @@ async fn run_terminal_tool(
         event_stream.update_fields(fields);
     }
 
+    Ok(std::ops::ControlFlow::Continue((terminal, sandbox_note)))
+}
+
+async fn finish_terminal_tool(
+    mut terminal: TerminalCleanup,
+    task_registry: Option<Weak<TerminalTaskRegistry>>,
+    reservation: Option<TerminalTaskReservation>,
+    input: TerminalToolRequest,
+    sandbox_note: Option<String>,
+    event_stream: ToolCallEventStream,
+    yield_ms: u64,
+    cx: &mut AsyncApp,
+) -> Result<String, String> {
+    let selection = input.selection;
+    check_terminal_launch(reservation.as_ref(), &event_stream)
+        .map_err(|error| error.to_string())?;
+    if let (Some(registry), Some(reservation)) = (task_registry, reservation) {
+        let registry = registry
+            .upgrade()
+            .ok_or_else(|| "Terminal thread has been released".to_string())?;
+        let task = registry
+            .start(
+                reservation,
+                terminal.into_terminal(),
+                input.command,
+                selection,
+                sandbox_note,
+                input.timeout_ms,
+                &event_stream,
+                cx,
+            )
+            .map_err(|error| error.to_string())?;
+        drop(registry);
+        task.wait(yield_ms, cx).await;
+        if event_stream.was_cancelled_by_user() {
+            task.cancel();
+            if task.is_complete() {
+                return task.response(true, cx);
+            }
+            return Err(format!(
+                "Cancellation requested; terminal exit has not been confirmed.\n\n{}",
+                task.response(false, cx)?
+            ));
+        }
+        let response = task.response(true, cx)?;
+        task.background();
+        return Ok(response);
+    }
+
     let timeout = input.timeout_ms.map(Duration::from_millis);
 
     let mut timed_out = false;
@@ -1037,6 +1224,7 @@ async fn run_terminal_tool(
         }
     };
 
+    terminal.exited = true;
     let user_stopped_via_signal = user_stopped_via_signal || event_stream.was_cancelled_by_user();
     let user_stopped_via_terminal = terminal.was_stopped_by_user(cx).unwrap_or(false);
     let user_stopped = user_stopped_via_signal || user_stopped_via_terminal;
@@ -1197,9 +1385,9 @@ fn build_network_request(sandbox: &TerminalSandboxInput) -> Result<NetworkReques
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct TerminalOutputSelection {
-    head_lines: Option<usize>,
-    tail_lines: Option<usize>,
+pub(super) struct TerminalOutputSelection {
+    pub(super) head_lines: Option<usize>,
+    pub(super) tail_lines: Option<usize>,
 }
 
 impl TerminalOutputSelection {
@@ -1208,7 +1396,10 @@ impl TerminalOutputSelection {
     }
 }
 
-fn select_terminal_output_lines(output: &str, selection: TerminalOutputSelection) -> String {
+pub(super) fn select_terminal_output_lines(
+    output: &str,
+    selection: TerminalOutputSelection,
+) -> String {
     match (selection.head_lines, selection.tail_lines) {
         (None, None) => output.to_string(),
         (Some(head_lines), None) => output
@@ -1254,7 +1445,7 @@ fn wsl_interop_blocked(content: &str) -> bool {
     content.contains("UtilGetPpid") || content.contains("Failed to parse: /proc/1/stat")
 }
 
-fn process_content(
+pub(super) fn process_content(
     output: acp::TerminalOutputResponse,
     command: &str,
     timed_out: bool,
@@ -2428,6 +2619,7 @@ mod tests {
                     timeout_ms: None,
                     head_lines: Some(1),
                     tail_lines: Some(1),
+                    yield_ms: None,
                 }),
                 event_stream,
                 cx,

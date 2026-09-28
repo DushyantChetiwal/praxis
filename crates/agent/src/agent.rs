@@ -3631,26 +3631,17 @@ impl ThreadEnvironment for NativeThreadEnvironment {
             )
         });
 
-        let acp_thread = self.acp_thread.clone();
-        cx.spawn(async move |cx| {
-            let terminal = task?.await?;
-
-            let (drop_tx, drop_rx) = oneshot::channel();
-            let terminal_id = terminal.read_with(cx, |terminal, _cx| terminal.id().clone());
-
-            cx.spawn(async move |cx| {
-                drop_rx.await.ok();
-                acp_thread.update(cx, |thread, cx| thread.release_terminal(terminal_id, cx))
-            })
-            .detach();
-
-            let handle = AcpTerminalHandle {
-                terminal,
-                _drop_tx: Some(drop_tx),
-            };
-
-            Ok(Rc::new(handle) as _)
-        })
+        let task = match task {
+            Ok(task) => task,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        let creation = PendingNativeTerminal {
+            task,
+            acp_thread: self.acp_thread.clone(),
+            cx: cx.clone(),
+            received: false,
+        };
+        cx.spawn(async move |_cx| creation.into_handle().await)
     }
 
     fn create_subagent(
@@ -3848,9 +3839,72 @@ impl SubagentHandle for NativeSubagentHandle {
     }
 }
 
+// ACP registers the terminal before the native handle's task is polled. Own
+// the registration result immediately, so cancellation in that handoff cannot
+// leave a live terminal retained by AcpThread::terminals.
+struct PendingNativeTerminal {
+    task: Task<Result<Entity<acp_thread::Terminal>>>,
+    acp_thread: WeakEntity<AcpThread>,
+    cx: AsyncApp,
+    received: bool,
+}
+
+impl PendingNativeTerminal {
+    async fn into_handle(mut self) -> Result<Rc<dyn TerminalHandle>> {
+        let result = (&mut self.task).await;
+        self.received = true;
+        Ok(Rc::new(AcpTerminalHandle {
+            terminal: result?,
+            acp_thread: self.acp_thread.clone(),
+            cx: self.cx.clone(),
+        }))
+    }
+}
+
+impl Drop for PendingNativeTerminal {
+    fn drop(&mut self) {
+        if !self.received {
+            match (&mut self.task).now_or_never() {
+                Some(Ok(terminal)) => drop(AcpTerminalHandle {
+                    terminal,
+                    acp_thread: self.acp_thread.clone(),
+                    cx: self.cx.clone(),
+                }),
+                Some(Err(error)) => {
+                    log::debug!("Cancelled native terminal creation failed: {error:#}")
+                }
+                // Dropping the still-pending task cancels preparation. Do not
+                // detach it and allow a process to be launched after Stop.
+                None => {}
+            }
+        }
+    }
+}
+
 pub struct AcpTerminalHandle {
     terminal: Entity<acp_thread::Terminal>,
-    _drop_tx: Option<oneshot::Sender<()>>,
+    acp_thread: WeakEntity<AcpThread>,
+    cx: AsyncApp,
+}
+
+impl Drop for AcpTerminalHandle {
+    fn drop(&mut self) {
+        let terminal = self.terminal.clone();
+        let acp_thread = self.acp_thread.clone();
+        // Release outside any entity update that dropped the handle.
+        self.cx
+            .spawn(async move |cx| {
+                let id = terminal.read_with(cx, |terminal, _| terminal.id().clone());
+                if let Some(acp_thread) = acp_thread.upgrade() {
+                    acp_thread
+                        .update(cx, |thread, cx| thread.release_terminal(id, cx))
+                        .log_err();
+                } else {
+                    terminal.update(cx, |terminal, cx| terminal.kill(cx));
+                }
+            })
+            .detach();
+    }
 }
 
 impl TerminalHandle for AcpTerminalHandle {
@@ -4221,6 +4275,76 @@ mod internal_tests {
             // intentionally filtered while the model selection is applied.
             assert_eq!(thread.speed(), None);
         });
+    }
+
+    #[gpui::test]
+    async fn test_native_terminal_registration_handoff_is_cancellation_safe(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let (_connection, _agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        for receive_handle in [false, true] {
+            let id = acp::TerminalId::new(format!("registration-handoff-{receive_handle}"));
+            let lower = cx.new(|cx| {
+                terminal::TerminalBuilder::new_display_only(
+                    terminal::terminal_settings::CursorShape::default(),
+                    terminal::terminal_settings::AlternateScroll::On,
+                    None,
+                    0,
+                    cx.background_executor(),
+                    util::paths::PathStyle::local(),
+                )
+                .subscribe(cx)
+            });
+            let registration = cx.spawn({
+                let acp_thread = acp_thread.clone();
+                let id = id.clone();
+                async move |mut cx| {
+                    Ok(acp_thread.update(&mut cx, |thread, cx| {
+                        thread.register_terminal_created(
+                            id,
+                            "registration race".into(),
+                            None,
+                            Some(1024),
+                            lower,
+                            cx,
+                        )
+                    }))
+                }
+            });
+            let pending = PendingNativeTerminal {
+                task: registration,
+                acp_thread: acp_thread.downgrade(),
+                cx: cx.to_async(),
+                received: false,
+            };
+            // Run only registration, not the consumer that builds the native
+            // handle. This is the exact gap between the two native tasks.
+            cx.run_until_parked();
+            assert!(
+                acp_thread
+                    .read_with(cx, |thread, _| thread.terminal(id.clone()))
+                    .is_ok()
+            );
+            if receive_handle {
+                let handle = pending.into_handle().await.unwrap();
+                assert!(
+                    acp_thread
+                        .read_with(cx, |thread, _| thread.terminal(id.clone()))
+                        .is_ok()
+                );
+                drop(handle);
+            } else {
+                drop(pending.into_handle());
+            }
+            cx.run_until_parked();
+            assert!(
+                acp_thread
+                    .read_with(cx, |thread, _| thread.terminal(id.clone()))
+                    .is_err(),
+                "registered terminal must be released whether or not handle handoff was polled"
+            );
+        }
     }
 
     #[cfg(target_os = "macos")]

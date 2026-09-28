@@ -6540,6 +6540,64 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_terminal_bounded_capture_reports_live_and_cached_truncation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let project = Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+        let lower = cx.new(|cx| {
+            ::terminal::TerminalBuilder::new_display_only(
+                ::terminal::terminal_settings::CursorShape::default(),
+                ::terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        let terminal = cx.new(|cx| {
+            Terminal::new_display(
+                acp::TerminalId::new("bounded-capture"),
+                "bounded capture",
+                None,
+                Some(128),
+                lower.clone(),
+                language_registry,
+                cx,
+            )
+        });
+        let text = format!("{}\nLAST_VISIBLE_MARKER", "日".repeat(10_000));
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_display_output(text.as_bytes(), cx)
+        });
+        terminal.read_with(cx, |terminal, cx| {
+            let output = terminal.current_output(cx);
+            assert!(output.truncated);
+            assert!(output.output.len() <= 128);
+            assert!(output.exit_status.is_none());
+            assert!(lower.read(cx).get_content().contains("LAST_VISIBLE_MARKER"));
+        });
+        terminal.update(cx, |terminal, cx| {
+            terminal.finish_display(acp::TerminalExitStatus::new().exit_code(0), cx)
+        });
+        terminal.read_with(cx, |terminal, cx| {
+            let output = terminal.current_output(cx);
+            assert!(output.truncated);
+            assert!(output.output.len() <= 128);
+            assert_eq!(
+                output.exit_status.and_then(|status| status.exit_code),
+                Some(0)
+            );
+            let cached = terminal.output().unwrap();
+            assert_eq!(cached.original_content_len, 129);
+            assert!(cached.content.capacity() <= 128);
+            assert!(lower.read(cx).get_content().contains("LAST_VISIBLE_MARKER"));
+        });
+    }
+
+    #[gpui::test]
     async fn test_terminal_exit_preserves_visible_scrollback(cx: &mut gpui::TestAppContext) {
         init_test(cx);
 

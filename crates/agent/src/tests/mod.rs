@@ -73,6 +73,7 @@ pub(crate) fn release_dropped_entities(cx: &mut TestAppContext) {
 pub(crate) struct FakeTerminalHandle {
     killed: Arc<AtomicBool>,
     stopped_by_user: Arc<AtomicBool>,
+    exit_on_kill: bool,
     exit_sender: std::cell::RefCell<Option<futures::channel::oneshot::Sender<()>>>,
     wait_for_exit: Shared<Task<acp::TerminalExitStatus>>,
     output: acp::TerminalOutputResponse,
@@ -99,6 +100,7 @@ impl FakeTerminalHandle {
             stopped_by_user,
             exit_sender: std::cell::RefCell::new(Some(exit_sender)),
             wait_for_exit,
+            exit_on_kill: true,
             output: acp::TerminalOutputResponse::new("partial output".to_string(), false),
             id: acp::TerminalId::new("fake_terminal".to_string()),
         }
@@ -118,6 +120,7 @@ impl FakeTerminalHandle {
             stopped_by_user,
             exit_sender: std::cell::RefCell::new(Some(exit_sender)),
             wait_for_exit,
+            exit_on_kill: true,
             output: acp::TerminalOutputResponse::new("command output".to_string(), false),
             id: acp::TerminalId::new("fake_terminal".to_string()),
         }
@@ -158,7 +161,9 @@ impl crate::TerminalHandle for FakeTerminalHandle {
 
     fn kill(&self, _cx: &AsyncApp) -> Result<()> {
         self.killed.store(true, Ordering::SeqCst);
-        self.signal_exit();
+        if self.exit_on_kill {
+            self.signal_exit();
+        }
         Ok(())
     }
 
@@ -192,6 +197,8 @@ pub(crate) struct FakeThreadEnvironment {
     terminal_handle: Option<Rc<FakeTerminalHandle>>,
     subagent_handle: Option<Rc<FakeSubagentHandle>>,
     terminal_creations: Arc<AtomicUsize>,
+    terminal_spawns: Arc<AtomicUsize>,
+    terminal_creation_delay: Option<Duration>,
     terminal_output_limits: std::cell::RefCell<Vec<Option<u64>>>,
     subagent_models: std::cell::RefCell<Vec<Option<AgentModelId>>>,
 }
@@ -232,7 +239,7 @@ impl crate::ThreadEnvironment for FakeThreadEnvironment {
         _cwd: Option<std::path::PathBuf>,
         output_byte_limit: Option<u64>,
         _sandbox_wrap: Option<acp_thread::SandboxWrap>,
-        _cx: &mut AsyncApp,
+        cx: &mut AsyncApp,
     ) -> Task<Result<Rc<dyn crate::TerminalHandle>>> {
         self.terminal_creations.fetch_add(1, Ordering::SeqCst);
         self.terminal_output_limits
@@ -242,7 +249,15 @@ impl crate::ThreadEnvironment for FakeThreadEnvironment {
             .terminal_handle
             .clone()
             .expect("Terminal handle not available on FakeThreadEnvironment");
-        Task::ready(Ok(handle as Rc<dyn crate::TerminalHandle>))
+        let delay = self.terminal_creation_delay;
+        let spawns = self.terminal_spawns.clone();
+        cx.spawn(async move |cx| {
+            if let Some(delay) = delay {
+                cx.background_executor().timer(delay).await;
+            }
+            spawns.fetch_add(1, Ordering::SeqCst);
+            Ok(handle as Rc<dyn crate::TerminalHandle>)
+        })
     }
 
     fn create_subagent(
@@ -321,6 +336,546 @@ fn disable_sandboxing(cx: &mut TestAppContext) {
         settings.sandbox_permissions.allow_unsandboxed = true;
         agent_settings::AgentSettings::override_global(settings, cx);
     });
+}
+
+async fn run_terminal_lifecycle_tool(
+    thread: &Entity<Thread>,
+    name: &str,
+    input: serde_json::Value,
+    cx: &mut TestAppContext,
+) -> Result<String, String> {
+    let tool = thread.read_with(cx, |thread, cx| {
+        thread.enabled_tools(cx).get(name).cloned().unwrap()
+    });
+    let (stream, _events) = ToolCallEventStream::test();
+    match cx
+        .update(|cx| tool.run(ToolInput::resolved(input), stream, cx))
+        .await
+    {
+        Ok(output) => Ok(output.raw_output.as_str().unwrap().to_string()),
+        Err(output) => Err(output.raw_output.as_str().unwrap().to_string()),
+    }
+}
+
+fn background_task_id(response: &str) -> String {
+    response
+        .lines()
+        .find_map(|line| line.strip_prefix("task_id: "))
+        .unwrap()
+        .to_string()
+}
+
+#[gpui::test]
+#[allow(clippy::arc_with_non_send_sync)]
+async fn test_background_terminal_without_helpers_waits_foreground(cx: &mut TestAppContext) {
+    init_test(cx);
+    always_allow_tools(cx);
+    let project = Project::test(FakeFs::new(cx.executor()), [], cx).await;
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    let handle = environment.terminal_handle.clone().unwrap();
+    let (stream, _events) = ToolCallEventStream::test();
+    let mut launch = cx.update(|cx| {
+        Arc::new(TerminalTool::new(project, environment)).run(
+            ToolInput::resolved(TerminalToolInput {
+                command: "echo work".into(),
+                cd: ".".into(),
+                yield_ms: Some(0),
+                ..Default::default()
+            }),
+            stream,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    assert!((&mut launch).now_or_never().is_none());
+    assert!(!handle.was_killed());
+    handle.signal_exit();
+    let response = launch.await.unwrap();
+    assert!(!response.contains("task_id:"));
+}
+
+#[gpui::test]
+async fn test_background_terminal_foreground_cancel_preserves_output(cx: &mut TestAppContext) {
+    for exit_confirmed in [true, false] {
+        let ThreadTest { thread, .. } = setup(cx, TestModel::Fake).await;
+        always_allow_tools(cx);
+        disable_sandboxing(cx);
+        let environment = Rc::new(cx.update(|cx| {
+            let mut terminal = FakeTerminalHandle::new_never_exits(cx);
+            terminal.exit_on_kill = exit_confirmed;
+            FakeThreadEnvironment::default().with_terminal(terminal)
+        }));
+        let handle = environment.terminal_handle.clone().unwrap();
+        thread.update(cx, |thread, cx| thread.add_default_tools(environment, cx));
+        let tool = thread.read_with(cx, |thread, cx| {
+            thread.enabled_tools(cx).get("terminal").unwrap().clone()
+        });
+        let (stream, _events, mut cancellation) = ToolCallEventStream::test_with_cancellation();
+        let launch = cx.update(|cx| {
+            tool.run(
+                ToolInput::resolved(json!({
+                    "command": "echo work", "cd": ".", "yield_ms": 10,
+                })),
+                stream,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(!handle.was_killed());
+        cancellation.send(true).unwrap();
+        cx.run_until_parked();
+        assert!(handle.was_killed());
+        if !exit_confirmed {
+            cx.dispatcher
+                .scheduler()
+                .clock()
+                .advance(Duration::from_millis(10));
+            cx.run_until_parked();
+        }
+        let result = launch.await;
+        assert_eq!(result.is_ok(), exit_confirmed);
+        let output = match result {
+            Ok(output) | Err(output) => output.raw_output,
+        };
+        let output = output.as_str().unwrap();
+        assert!(output.contains("partial output"));
+        assert!(!output.contains("executed successfully"));
+        if exit_confirmed {
+            assert!(output.contains("user stopped"));
+        } else {
+            assert!(output.contains("exit has not been confirmed"));
+            assert!(output.contains("still_running: true"));
+        }
+        handle.signal_exit();
+        cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+async fn test_background_terminal_cancel_after_launch_return(cx: &mut TestAppContext) {
+    let ThreadTest { thread, .. } = setup(cx, TestModel::Fake).await;
+    always_allow_tools(cx);
+    disable_sandboxing(cx);
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    let handle = environment.terminal_handle.clone().unwrap();
+    thread.update(cx, |thread, cx| {
+        thread.add_default_tools(environment.clone(), cx)
+    });
+    let response = run_terminal_lifecycle_tool(
+        &thread,
+        "terminal",
+        json!({"command": "echo work", "cd": ".", "yield_ms": 0}),
+        cx,
+    )
+    .await
+    .unwrap();
+    assert!(response.contains("still_running: true"));
+    assert!(!handle.was_killed());
+    assert_eq!(environment.terminal_creation_count(), 1);
+    assert!(thread.read_with(cx, |thread, _| thread.is_turn_complete()));
+    thread.update(cx, |thread, cx| thread.cancel(cx)).await;
+    cx.run_until_parked();
+    assert!(handle.was_killed());
+    let response = run_terminal_lifecycle_tool(
+        &thread,
+        "terminal_status",
+        json!({"task_id": background_task_id(&response)}),
+        cx,
+    )
+    .await
+    .unwrap();
+    assert!(response.contains("still_running: false"));
+    assert!(response.contains("user stopped"));
+}
+
+#[gpui::test]
+async fn test_background_terminal_cancel_during_creation_prevents_late_spawn(
+    cx: &mut TestAppContext,
+) {
+    let ThreadTest { thread, .. } = setup(cx, TestModel::Fake).await;
+    always_allow_tools(cx);
+    disable_sandboxing(cx);
+    let environment = Rc::new(cx.update(|cx| FakeThreadEnvironment {
+        terminal_creation_delay: Some(Duration::from_secs(1)),
+        ..FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    thread.update(cx, |thread, cx| {
+        thread.add_default_tools(environment.clone(), cx)
+    });
+    let tool = thread.read_with(cx, |thread, cx| {
+        thread.enabled_tools(cx).get("terminal").unwrap().clone()
+    });
+    let (stream, _events) = ToolCallEventStream::test();
+    let queued_launch = cx.update(|cx| {
+        tool.clone().run(
+            ToolInput::resolved(json!({
+                "command": "echo work", "cd": ".", "yield_ms": 0,
+            })),
+            stream,
+            cx,
+        )
+    });
+    // Stop before the launch task has ever been polled.
+    thread.update(cx, |thread, cx| thread.cancel(cx)).await;
+    cx.run_until_parked();
+    assert!(queued_launch.await.is_err());
+    assert_eq!(environment.terminal_creation_count(), 0);
+
+    // This stream has no turn-cancellation sender. Explicit Stop must invalidate
+    // the reservation itself, including while create_terminal is suspended.
+    let (stream, _events) = ToolCallEventStream::test();
+    let launch = cx.update(|cx| {
+        tool.run(
+            ToolInput::resolved(json!({
+                "command": "echo work", "cd": ".", "yield_ms": 0,
+            })),
+            stream,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    assert_eq!(environment.terminal_creation_count(), 1);
+    assert_eq!(environment.terminal_spawns.load(Ordering::SeqCst), 0);
+    thread.update(cx, |thread, cx| thread.cancel(cx)).await;
+    cx.run_until_parked();
+    assert!(launch.await.is_err());
+    cx.dispatcher
+        .scheduler()
+        .clock()
+        .advance(Duration::from_secs(2));
+    cx.run_until_parked();
+    assert_eq!(environment.terminal_spawns.load(Ordering::SeqCst), 0);
+}
+
+#[gpui::test]
+async fn test_background_terminal_parent_stop_reaches_finished_children(cx: &mut TestAppContext) {
+    let ThreadTest {
+        thread: parent,
+        fake,
+        ..
+    } = setup(cx, TestModel::Fake).await;
+    always_allow_tools(cx);
+    disable_sandboxing(cx);
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    let handle = environment.terminal_handle.clone().unwrap();
+    let child = cx.new(|cx| {
+        let mut child = Thread::new_subagent(&parent, None, cx);
+        child.add_default_tools(environment, cx);
+        child
+    });
+    let child_id = child.read_with(cx, |child, _| child.id().clone());
+    parent.update(cx, |parent, _| {
+        parent.register_running_subagent(child.downgrade())
+    });
+    let response = run_terminal_lifecycle_tool(
+        &child,
+        "terminal",
+        json!({
+            "command": "echo child", "cd": ".", "yield_ms": 0,
+        }),
+        cx,
+    )
+    .await
+    .unwrap();
+    verify_thread_recovery(&child, &fake, cx).await;
+    parent.update(cx, |parent, cx| {
+        parent.unregister_running_subagent(&child_id, cx)
+    });
+    assert!(parent.read_with(cx, |parent, cx| parent.running_subagent_ids(cx).is_empty()));
+    assert!(!handle.was_killed());
+    // A new parent prompt must not propagate explicit Stop to the child.
+    verify_thread_recovery(&parent, &fake, cx).await;
+    assert!(!handle.was_killed());
+    parent.update(cx, |parent, cx| parent.cancel(cx)).await;
+    cx.run_until_parked();
+    assert!(handle.was_killed());
+    let status = run_terminal_lifecycle_tool(
+        &child,
+        "terminal_status",
+        json!({
+            "task_id": background_task_id(&response),
+        }),
+        cx,
+    )
+    .await
+    .unwrap();
+    assert!(status.contains("still_running: false"));
+}
+
+#[gpui::test]
+async fn test_background_terminal_thread_drop(cx: &mut TestAppContext) {
+    let ThreadTest { thread, .. } = setup(cx, TestModel::Fake).await;
+    always_allow_tools(cx);
+    disable_sandboxing(cx);
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    let handle = environment.terminal_handle.clone().unwrap();
+    thread.update(cx, |thread, cx| thread.add_default_tools(environment, cx));
+    let response = run_terminal_lifecycle_tool(
+        &thread,
+        "terminal",
+        json!({"command": "echo work", "cd": ".", "yield_ms": 0}),
+        cx,
+    )
+    .await
+    .unwrap();
+    assert!(response.contains("still_running: true"));
+    drop(thread);
+    release_dropped_entities(cx);
+    assert!(handle.was_killed());
+}
+
+#[gpui::test]
+async fn test_background_terminal_profiles_refresh_and_subagent_isolation(cx: &mut TestAppContext) {
+    let ThreadTest { thread, .. } = setup(cx, TestModel::Fake).await;
+    always_allow_tools(cx);
+    disable_sandboxing(cx);
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    let handle = environment.terminal_handle.clone().unwrap();
+    thread.update(cx, |thread, cx| {
+        thread.add_default_tools(environment.clone(), cx)
+    });
+    let response = run_terminal_lifecycle_tool(
+        &thread,
+        "terminal",
+        json!({"command": "echo work", "cd": ".", "yield_ms": 0}),
+        cx,
+    )
+    .await
+    .unwrap();
+    let task_id = background_task_id(&response);
+    for mode in [
+        SessionMode::Plan,
+        SessionMode::Architect,
+        SessionMode::Build,
+    ] {
+        thread.update(cx, |thread, cx| thread.set_session_mode(mode, cx));
+        thread.read_with(cx, |thread, cx| {
+            let tools = thread.enabled_tools(cx);
+            assert!(tools.contains_key("terminal_status"));
+            assert!(tools.contains_key("terminal_wait"));
+            assert_eq!(
+                tools.contains_key("terminal_stop"),
+                mode == SessionMode::Build
+            );
+            assert_eq!(tools.contains_key("terminal"), mode == SessionMode::Build);
+        });
+    }
+    let profile_id = thread.read_with(cx, |thread, _| thread.profile().clone());
+    for enabled in [false, true] {
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            let profile = settings.profiles.get_mut(&profile_id).unwrap();
+            profile.tools.insert("terminal".into(), enabled);
+            // Helpers cannot independently override the terminal profile switch.
+            for name in ["terminal_status", "terminal_wait", "terminal_stop"] {
+                profile.tools.insert(name.into(), !enabled);
+            }
+            AgentSettings::override_global(settings, cx);
+        });
+        thread.read_with(cx, |thread, cx| {
+            let tools = thread.enabled_tools(cx);
+            for name in [
+                "terminal",
+                "terminal_status",
+                "terminal_wait",
+                "terminal_stop",
+            ] {
+                assert_eq!(tools.contains_key(name), enabled);
+            }
+        });
+    }
+    thread.update(cx, |thread, cx| {
+        for name in ALL_TOOL_NAMES {
+            thread.remove_tool(name);
+        }
+        thread.remove_tool(SandboxedTerminalTool::NAME);
+        thread.add_default_tools(environment.clone(), cx);
+    });
+    let status =
+        run_terminal_lifecycle_tool(&thread, "terminal_status", json!({"task_id": task_id}), cx)
+            .await
+            .unwrap();
+    assert!(status.contains("still_running: true"));
+    assert_eq!(environment.terminal_creation_count(), 1);
+    let subagent = cx.new(|cx| {
+        let mut child = Thread::new_subagent(&thread, None, cx);
+        child.add_default_tools(environment, cx);
+        child
+    });
+    let result = run_terminal_lifecycle_tool(
+        &subagent,
+        "terminal_status",
+        json!({"task_id": task_id}),
+        cx,
+    )
+    .await;
+    assert!(result.unwrap_err().contains("Unknown terminal task"));
+    assert!(!handle.was_killed());
+    thread.update(cx, |thread, cx| thread.cancel(cx)).await;
+    cx.run_until_parked();
+    assert!(handle.was_killed());
+}
+
+#[gpui::test]
+async fn test_background_terminal_new_prompt_cancels_foreground_launch(cx: &mut TestAppContext) {
+    let ThreadTest {
+        thread,
+        model,
+        fake,
+        ..
+    } = setup(cx, TestModel::Fake).await;
+    always_allow_tools(cx);
+    disable_sandboxing(cx);
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    let handle = environment.terminal_handle.clone().unwrap();
+    let _events = thread
+        .update(cx, |thread, cx| {
+            thread.add_default_tools(environment.clone(), cx);
+            thread.send(ClientUserMessageId::new(), ["Run a command"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    fake.send_last_event(
+        &model,
+        LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+            id: "foreground".into(),
+            name: TerminalTool::NAME.into(),
+            raw_input: r#"{"command":"echo work","cd":".","yield_ms":30000}"#.into(),
+            input: language_model::LanguageModelToolUseInput::Json(
+                json!({"command": "echo work", "cd": ".", "yield_ms": 30000}),
+            ),
+            is_input_complete: true,
+            thought_signature: None,
+        }),
+    );
+    fake.end_last(&model);
+    cx.run_until_parked();
+    assert_eq!(environment.terminal_spawns.load(Ordering::SeqCst), 1);
+    assert!(!handle.was_killed());
+    verify_thread_recovery(&thread, &fake, cx).await;
+    cx.run_until_parked();
+    assert!(handle.was_killed());
+}
+
+#[gpui::test]
+async fn test_background_terminal_survives_next_turn_and_compaction(cx: &mut TestAppContext) {
+    let ThreadTest {
+        thread,
+        model,
+        fake,
+        ..
+    } = setup(cx, TestModel::Fake).await;
+    always_allow_tools(cx);
+    disable_sandboxing(cx);
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    let handle = environment.terminal_handle.clone().unwrap();
+    let events = thread
+        .update(cx, |thread, cx| {
+            thread.add_default_tools(environment, cx);
+            thread.send(
+                ClientUserMessageId::new(),
+                ["Start the command and leave it running"],
+                cx,
+            )
+        })
+        .unwrap();
+    cx.run_until_parked();
+    fake.send_last_event(
+        &model,
+        LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+            id: "background".into(),
+            name: TerminalTool::NAME.into(),
+            raw_input: r#"{"command":"echo work","cd":".","yield_ms":0}"#.into(),
+            input: language_model::LanguageModelToolUseInput::Json(
+                json!({"command": "echo work", "cd": ".", "yield_ms": 0}),
+            ),
+            is_input_complete: true,
+            thought_signature: None,
+        }),
+    );
+    fake.end_last(&model);
+    cx.run_until_parked();
+    let continuation = fake.pending_completions().pop().unwrap();
+    let task_id = continuation
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|content| {
+            if let MessageContent::ToolResult(result) = content {
+                Some(background_task_id(&result.text_contents()))
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    fake.send_last_text(&model, "The command is still running.");
+    fake.send_last_event(
+        &model,
+        LanguageModelCompletionEvent::Stop(StopReason::EndTurn),
+    );
+    fake.end_last(&model);
+    let events = events.collect().await;
+    assert_eq!(stop_events(events), vec![acp::StopReason::EndTurn]);
+    assert!(!handle.was_killed());
+    verify_thread_recovery(&thread, &fake, cx).await;
+    let status =
+        run_terminal_lifecycle_tool(&thread, "terminal_status", json!({"task_id": task_id}), cx)
+            .await
+            .unwrap();
+    assert!(status.contains("still_running: true"));
+
+    let compaction = thread
+        .update(cx, |thread, cx| {
+            thread.compact(ClientUserMessageId::new(), cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let request = fake.pending_completions().pop().unwrap();
+    assert_eq!(
+        request.intent,
+        Some(CompletionIntent::ThreadContextSummarization)
+    );
+    assert!(!handle.was_killed());
+    fake.send_text(&model, &request, "The terminal task is still running.");
+    fake.end_stream(&model, &request);
+    let compaction_events = compaction.collect().await;
+    assert_eq!(
+        stop_events(compaction_events),
+        vec![acp::StopReason::EndTurn]
+    );
+    let status =
+        run_terminal_lifecycle_tool(&thread, "terminal_status", json!({"task_id": task_id}), cx)
+            .await
+            .unwrap();
+    assert!(status.contains("still_running: true"));
+    assert!(!handle.was_killed());
+    handle.signal_exit();
+    let waited =
+        run_terminal_lifecycle_tool(&thread, "terminal_wait", json!({"task_id": task_id}), cx)
+            .await
+            .unwrap();
+    assert!(waited.contains("still_running: false"));
+    cx.run_until_parked();
+    assert!(thread.read_with(cx, |thread, _| thread.is_turn_complete()));
+    assert!(
+        fake.pending_completions().is_empty(),
+        "terminal completion must not start a model request"
+    );
+    assert!(!handle.was_killed());
 }
 
 #[gpui::test]

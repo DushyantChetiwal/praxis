@@ -5,7 +5,8 @@ use crate::{
     FindReferencesTool, GetCodeActionsTool, GitBranchesTool, GitDiffTool, GitRemotesTool,
     GitShowTool, GitStatusTool, GoToDefinitionTool, GrepTool, ListAgentsAndModelsTool,
     ListDirectoryTool, MovePathTool, ProjectSnapshot, PullRequestTool, ReadFileTool, RenameTool,
-    SandboxedTerminalTool, SpawnAgentTool, SystemPromptTemplate, Template, Templates, TerminalTool,
+    SandboxedTerminalTool, SpawnAgentTool, SystemPromptTemplate, Template, Templates,
+    TerminalStatusTool, TerminalStopTool, TerminalTaskRegistry, TerminalTool, TerminalWaitTool,
     ToolPermissionDecision, WebSearchTool, WriteFileTool, decide_permission_from_settings,
 };
 use acp_thread::{AgentModelId, ClientUserMessageId, MentionUri};
@@ -1615,6 +1616,7 @@ pub struct Thread {
     /// should not abandon work that is halfway through.
     architect_run: Option<ArchitectRun>,
     sandboxed_terminal_temp_dir: Option<PathBuf>,
+    terminal_tasks: Rc<TerminalTaskRegistry>,
     /// Sandbox permissions the user approved "for the rest of the thread".
     /// Shared with each tool call's event stream so repeated requests for
     /// already-granted permissions skip the approval prompt.
@@ -1652,6 +1654,10 @@ impl Thread {
             action_log,
             cx,
         );
+        parent_thread
+            .read(cx)
+            .terminal_tasks
+            .register_child(&thread.terminal_tasks);
         thread.subagent_context = Some(SubagentContext {
             parent_thread_id: parent_thread.read(cx).id().clone(),
             depth: parent_thread.read(cx).depth() + 1,
@@ -1796,6 +1802,7 @@ impl Thread {
             session_mode: Rc::new(Cell::new(SessionMode::default())),
             architect_run: None,
             sandboxed_terminal_temp_dir: None,
+            terminal_tasks: Rc::default(),
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::default())),
         }
     }
@@ -2188,6 +2195,7 @@ impl Thread {
             session_mode: Rc::new(Cell::new(session_mode)),
             architect_run: None,
             sandboxed_terminal_temp_dir: db_thread.sandboxed_terminal_temp_dir,
+            terminal_tasks: Rc::default(),
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::from_db(
                 &db_thread.sandbox_grants,
             ))),
@@ -2810,11 +2818,17 @@ impl Thread {
         ));
         // Register terminal tool variants; `enabled_tools` exposes the one
         // matching the current sandbox state to the model as `terminal`.
-        self.add_tool(TerminalTool::new(self.project.clone(), environment.clone()));
-        self.add_tool(SandboxedTerminalTool::new(
-            self.project.clone(),
-            environment.clone(),
-        ));
+        self.add_tool(
+            TerminalTool::new(self.project.clone(), environment.clone())
+                .with_task_registry(&self.terminal_tasks),
+        );
+        self.add_tool(
+            SandboxedTerminalTool::new(self.project.clone(), environment.clone())
+                .with_task_registry(&self.terminal_tasks),
+        );
+        self.add_tool(TerminalStatusTool::new(&self.terminal_tasks));
+        self.add_tool(TerminalWaitTool::new(&self.terminal_tasks));
+        self.add_tool(TerminalStopTool::new(&self.terminal_tasks));
         self.add_tool(WebSearchTool);
 
         self.add_tool(AskUserTool);
@@ -2928,9 +2942,20 @@ impl Thread {
     }
 
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        // Signal only: monitors kill outside this entity update, avoiding re-entry.
+        // This also applies when the launching turn has already finished.
+        self.terminal_tasks.cancel_all();
+        self.cancel_turn(cx)
+    }
+
+    // Replacing a turn cancels its foreground tools, not jobs that already
+    // yielded. Only explicit Stop (or thread teardown) cancels those jobs.
+    fn cancel_turn(&mut self, cx: &mut Context<Self>) -> Task<()> {
         for subagent in self.running_subagents.drain(..) {
             if let Some(subagent) = subagent.upgrade() {
-                subagent.update(cx, |thread, cx| thread.cancel(cx)).detach();
+                subagent
+                    .update(cx, |thread, cx| thread.cancel_turn(cx))
+                    .detach();
             }
         }
 
@@ -3220,7 +3245,7 @@ impl Thread {
         // start, mirroring `run_turn` so a stray completion can't race with the
         // compaction we're about to perform.
         self.flush_pending_message(cx);
-        self.cancel(cx).detach();
+        self.cancel_turn(cx).detach();
 
         let compaction = self.forced_compaction_target_ix().map(|request_end_ix| {
             self.advance_prompt_id();
@@ -3344,7 +3369,7 @@ impl Thread {
         // to avoid a race where the detached cancel task might flush the NEW
         // turn's pending message instead of the old one.
         self.flush_pending_message(cx);
-        self.cancel(cx).detach();
+        self.cancel_turn(cx).detach();
 
         let (events_tx, events_rx) = mpsc::unbounded::<Result<ThreadEvent>>();
         let event_stream = ThreadEventStream::new(events_tx);
@@ -5114,7 +5139,14 @@ impl Thread {
                     tool_name.as_ref(),
                     TerminalTool::NAME | SandboxedTerminalTool::NAME
                 );
-                let profile_tool_name = if terminal_variant {
+                // Lifecycle helpers are part of the terminal profile switch, not
+                // independently toggleable execution capabilities. The capability
+                // and restricted-workspace gates above still apply to each helper.
+                let terminal_helper = matches!(
+                    tool_name.as_ref(),
+                    TerminalStatusTool::NAME | TerminalWaitTool::NAME | TerminalStopTool::NAME
+                );
+                let profile_tool_name = if terminal_variant || terminal_helper {
                     TerminalTool::NAME
                 } else {
                     tool_name.as_ref()
@@ -6845,7 +6877,7 @@ impl ToolCallEventStream {
 
     /// Returns a future that resolves when the user cancels the tool call.
     /// Tools should select on this alongside their main work to detect user cancellation.
-    pub fn cancelled_by_user(&self) -> impl std::future::Future<Output = ()> + '_ {
+    pub fn cancelled_by_user(&self) -> impl std::future::Future<Output = ()> + use<> {
         let mut rx = self.cancellation_rx.clone();
         async move {
             loop {

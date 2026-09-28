@@ -1436,6 +1436,11 @@ mod tests {
             "read_file",
             "rename_symbol",
             "thinking",
+            // Lifecycle-only helpers for already-authorized terminals owned by
+            // this thread. They cannot launch commands or address arbitrary PIDs.
+            "terminal_status",
+            "terminal_wait",
+            "terminal_stop",
             // streaming_edit_file uses "edit_file" for permission lookups,
             // so its rules are configured under the edit_file entry.
             "streaming_edit_file",

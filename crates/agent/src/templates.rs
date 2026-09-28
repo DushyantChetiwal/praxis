@@ -189,6 +189,32 @@ mod tests {
     }
 
     #[test]
+    fn test_background_terminal_guidance_requires_wait_tool() {
+        let project = prompt_store::ProjectContext::default();
+        let render = |available_tools| {
+            SystemPromptTemplate {
+                project: &project,
+                available_tools,
+                model_name: None,
+                date: "2026-01-01".into(),
+                user_agents_md: None,
+                sandboxing: false,
+                is_linux: false,
+                is_windows: false,
+                plan_mode: false,
+                plan: None,
+            }
+            .render(&Templates::new())
+            .expect("system prompt should render")
+        };
+        let background = render(vec!["terminal".into(), "terminal_wait".into()]);
+        assert!(background.contains("## Background terminal tasks"));
+        assert!(background.contains("When nothing useful remains except waiting"));
+        assert!(background.contains("A wait expiring does not kill the process"));
+        assert!(!render(vec!["read_file".into()]).contains("## Background terminal tasks"));
+    }
+
+    #[test]
     fn test_system_prompt_renders_user_agents_md_before_project_rules() {
         use prompt_store::{ProjectContext, RulesFileContext, WorktreeContext};
         use util::rel_path::RelPath;

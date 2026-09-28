@@ -146,6 +146,17 @@ jobs:
       - name: Test Architect canvas support
         run: "cargo test --locked -p agent_ui --lib architect_ui::"
 
+      - name: Test background terminal execution and lifecycle
+        run: |
+          cargo test --locked -p agent --lib terminal_tasks_
+          cargo test --locked -p agent --lib test_background_terminal_
+          cargo test --locked -p agent --lib test_native_terminal_registration_handoff_is_cancellation_safe
+          cargo test --locked -p terminal --lib bounded_content
+          cargo test --locked -p acp_thread --lib test_terminal_bounded_capture_reports_live_and_cached_truncation
+          cargo test --locked -p agent --lib terminal_tool
+          cargo test --locked -p agent --lib built_in_tool_schemas_are_normalized
+          cargo test --locked -p settings_ui --lib test_all_tools_are_in_tool_info_or_excluded
+
       - name: Test question recommendations and countdowns
         run: |
           cargo test --locked -p agent --lib tools::ask_question_tool::tests::

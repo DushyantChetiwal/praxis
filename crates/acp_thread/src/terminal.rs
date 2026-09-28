@@ -427,6 +427,7 @@ pub struct TerminalOutput {
     pub ended_at: Instant,
     pub exit_status: acp::TerminalExitStatus,
     pub content: String,
+    /// Exact when untruncated; a lower bound when capture stops at its byte limit.
     pub original_content_len: usize,
     pub content_line_count: usize,
 }
@@ -639,22 +640,23 @@ impl Terminal {
 
     fn truncated_output(&self, cx: &App) -> (String, usize) {
         let terminal = self.terminal.read(cx);
-        let mut content = terminal.get_content();
-
-        let original_content_len = content.len();
-
-        if let Some(limit) = self.output_byte_limit
-            && content.len() > limit
-        {
-            let mut end_ix = limit.min(content.len());
-            while !content.is_char_boundary(end_ix) {
-                end_ix -= 1;
+        let (mut content, truncated) = terminal.get_content_with_limit(self.output_byte_limit);
+        let original_content_len = if truncated {
+            // Only a lower bound is needed to report truncation. Counting the
+            // full output would defeat bounded extraction on every status call.
+            self.output_byte_limit
+                .unwrap_or(content.len())
+                .saturating_add(1)
+        } else {
+            content.len()
+        };
+        if truncated {
+            // Preserve the existing preference for complete lines.
+            if let Some(end) = content.rfind('\n') {
+                content.truncate(end);
             }
-            // Don't truncate mid-line, clear the remainder of the last line
-            end_ix = content[..end_ix].rfind('\n').unwrap_or(end_ix);
-            content.truncate(end_ix);
+            content.shrink_to_fit();
         }
-
         (content, original_content_len)
     }
 
