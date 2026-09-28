@@ -50,11 +50,11 @@ Requests, answers and pairing travel as **comments on the gist**. The comments l
 
 Every blob is bound to where it belongs through its additional authenticated data (AAD), a UTF-8 string:
 
-| Blob | AAD |
-|---|---|
-| Snapshot in `state.json` | `praxis-remote/v2/state/<channel>/<phone_id>` |
-| Request | `praxis-remote/v2/request/<channel>/<phone_id>` |
-| Answer | `praxis-remote/v2/response/<channel>/<phone_id>/<request_id>` |
+| Blob                     | AAD                                                           |
+| ------------------------ | ------------------------------------------------------------- |
+| Snapshot in `state.json` | `praxis-remote/v2/state/<channel>/<phone_id>`                 |
+| Request                  | `praxis-remote/v2/request/<channel>/<phone_id>`               |
+| Answer                   | `praxis-remote/v2/response/<channel>/<phone_id>/<request_id>` |
 
 ## Pairing
 
@@ -122,17 +122,17 @@ The computer deletes comments by other accounts, and its own answers and finishe
 
 For checking an implementation. The phone's private key is `c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721`; the computer's is `1d9a8f1f4f3fc2a7f3b0e5e2c6e3c7b1a9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4`.
 
-| Value | |
-|---|---|
-| `channel` | `0123456789abcdef0123456789abcdef` |
-| `phone_id` | `fedcba9876543210fedcba9876543210` |
-| phone public | `BGD+1LolWp0xyWHrdMY1bWjASbiSO2H6bOZpYi5g8p+2eQP+EAi4vJmkGunpVii8ZPLxsgwtfp9Rd6PClNRGIpk=` |
-| computer public | `BB79lpmknsBRWuk+JOVoyVb/iHJBHpv3ntw3J4jmMZLPcet9LblSM21sa00e9K3he8jl0LJoH0KUdF0rVly6OYY=` |
-| `commit` | `OUHlaa0veVAxCFLJFkMhNYff3Kr3bKcvpSN+zQPJeLY=` |
-| `shared` (hex) | `e276d9ef83f4744188147d5ad3d2bc93a5bff1dbb1a079599e29b823154e85c7` |
-| `transcript` (hex) | `cfd62945d28a04d0bd609de1268684b94716abb7e19e9585bd8e4b73cc71748c` |
-| `key` (hex) | `da9dd9a4d0c328b1d923cc9b4635d7be4cba432a964aec4ca8a1300efacc6646` |
-| `code` | `807021` |
+| Value              |                                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------------ |
+| `channel`          | `0123456789abcdef0123456789abcdef`                                                         |
+| `phone_id`         | `fedcba9876543210fedcba9876543210`                                                         |
+| phone public       | `BGD+1LolWp0xyWHrdMY1bWjASbiSO2H6bOZpYi5g8p+2eQP+EAi4vJmkGunpVii8ZPLxsgwtfp9Rd6PClNRGIpk=` |
+| computer public    | `BB79lpmknsBRWuk+JOVoyVb/iHJBHpv3ntw3J4jmMZLPcet9LblSM21sa00e9K3he8jl0LJoH0KUdF0rVly6OYY=` |
+| `commit`           | `OUHlaa0veVAxCFLJFkMhNYff3Kr3bKcvpSN+zQPJeLY=`                                             |
+| `shared` (hex)     | `e276d9ef83f4744188147d5ad3d2bc93a5bff1dbb1a079599e29b823154e85c7`                         |
+| `transcript` (hex) | `cfd62945d28a04d0bd609de1268684b94716abb7e19e9585bd8e4b73cc71748c`                         |
+| `key` (hex)        | `da9dd9a4d0c328b1d923cc9b4635d7be4cba432a964aec4ca8a1300efacc6646`                         |
+| `code`             | `807021`                                                                                   |
 
 A request blob with nonce `000102030405060708090a0b`, AAD `praxis-remote/v2/request/0123456789abcdef0123456789abcdef/fedcba9876543210fedcba9876543210` and plain text `{"id":"r1","op":"status","args":{},"sent_at":"2026-01-01T00:00:00Z"}`:
 
