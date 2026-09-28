@@ -1,0 +1,168 @@
+package io.github.dushyantchetiwal.praxis.remote
+
+import androidx.compose.ui.graphics.ImageBitmap
+import io.github.dushyantchetiwal.praxis.remote.data.Device
+import io.github.dushyantchetiwal.praxis.remote.data.DirEntry
+import io.github.dushyantchetiwal.praxis.remote.data.FileContent
+import io.github.dushyantchetiwal.praxis.remote.data.ONLINE_THRESHOLD_MS
+import io.github.dushyantchetiwal.praxis.remote.data.Permission
+import io.github.dushyantchetiwal.praxis.remote.data.RepoInfo
+import io.github.dushyantchetiwal.praxis.remote.data.Snapshot
+import io.github.dushyantchetiwal.praxis.remote.data.Status
+import io.github.dushyantchetiwal.praxis.remote.data.ThreadItem
+import io.github.dushyantchetiwal.praxis.remote.data.ThreadView
+import io.github.dushyantchetiwal.praxis.remote.data.UpdateInfo
+import io.github.dushyantchetiwal.praxis.remote.data.WatchInfo
+import io.github.dushyantchetiwal.praxis.remote.data.WindowInfo
+
+enum class Screen { Loading, SignIn, Repos, Devices, Device, Settings }
+
+enum class Tab { Chat, Threads, Files }
+
+sealed interface FlowPhase {
+    data object Idle : FlowPhase
+    data object Requesting : FlowPhase
+    data class Code(val userCode: String, val verificationUri: String, val expiresAt: Long) : FlowPhase
+    data object Finishing : FlowPhase
+}
+
+data class SignInState(val phase: FlowPhase = FlowPhase.Idle, val message: String? = null)
+
+data class ReposState(
+    val loading: Boolean = false,
+    val loaded: Boolean = false,
+    val repos: List<RepoInfo> = emptyList(),
+    val noInstallations: Boolean = false,
+    val error: String? = null,
+    val checking: Boolean = false,
+    val manualError: String? = null,
+    val confirmPublic: RepoInfo? = null,
+)
+
+data class DevicesState(
+    val loading: Boolean = false,
+    val loaded: Boolean = false,
+    val devices: List<Device> = emptyList(),
+    val error: String? = null,
+)
+
+data class AppState(
+    val screen: Screen = Screen.Loading,
+    val settingsReturn: Screen = Screen.Devices,
+    val login: String? = null,
+    val avatar: ImageBitmap? = null,
+    val tokenExpiresAt: Long? = null,
+    val repo: String? = null,
+    val clientIdOverride: String = "",
+    val signIn: SignInState = SignInState(),
+    val repos: ReposState = ReposState(),
+    val devices: DevicesState = DevicesState(),
+    /** An update the user has not dismissed, for the banner. */
+    val update: UpdateInfo? = null,
+    /** The newest known update, dismissed or not, for Settings. */
+    val latestUpdate: UpdateInfo? = null,
+    val checkingUpdate: Boolean = false,
+)
+
+enum class OutboxState { Sending, Queued, Sent }
+
+/** A message shown optimistically until it appears in the transcript. */
+data class OutboxItem(
+    val id: Int,
+    val text: String,
+    val state: OutboxState,
+    val doneAt: Long,
+    val session: String?,
+    val baseIndex: Int,
+)
+
+/** A mode picked on the phone, shown until a snapshot confirms it. */
+data class ModeOverride(val window: Long?, val id: String, val expiresAt: Long)
+
+data class ThreadsState(
+    val loading: Boolean = false,
+    val items: List<ThreadItem>? = null,
+    val error: String? = null,
+    val opening: String? = null,
+)
+
+data class FilesState(
+    val loading: Boolean = false,
+    val path: String = "",
+    val entries: List<DirEntry>? = null,
+    val truncated: Boolean = false,
+    val error: String? = null,
+    val file: FileContent? = null,
+)
+
+data class Banner(val text: String, val error: Boolean)
+
+/** Everything about the selected device, mirroring the web app's state. */
+data class DeviceUi(
+    val device: Device? = null,
+    /** Whether the device's issue has been read at least once. */
+    val issueApplied: Boolean = false,
+    val snapshot: Snapshot? = null,
+    val status: Status? = null,
+    val windowId: Long? = null,
+    /** A thread pinned with open_thread; null follows the window's active thread. */
+    val watchSession: String? = null,
+    val thread: ThreadView? = null,
+    /** Whether [thread] reflects a snapshot for the current view. */
+    val threadKnown: Boolean = false,
+    val threadError: String? = null,
+    val modeOverride: ModeOverride? = null,
+    val tab: Tab = Tab.Chat,
+    val threads: ThreadsState = ThreadsState(),
+    val files: FilesState = FilesState(),
+    val outbox: List<OutboxItem> = emptyList(),
+    val answered: Set<String> = emptySet(),
+    val busyPermissions: Set<String> = emptySet(),
+    val lastContact: Long = 0L,
+    val banners: Map<String, Banner> = emptyMap(),
+    val stopping: Boolean = false,
+    val startingThread: Boolean = false,
+) {
+    fun currentWindow(): WindowInfo? = status?.windows?.find { it.id == windowId }
+
+    fun isGenerating(): Boolean =
+        thread?.status == "generating" || currentWindow()?.thread?.status == "generating"
+
+    fun pendingPermissions(): List<Permission> = currentWindow()?.thread?.pending.orEmpty()
+
+    fun visiblePermissions(): List<Permission> = pendingPermissions().filter { it.key !in answered }
+
+    fun currentModeId(now: Long): String? {
+        val override = modeOverride
+        if (override != null && override.window == windowId && override.expiresAt > now) return override.id
+        return currentWindow()?.thread?.mode?.current
+    }
+
+    /** Whether a snapshot's watch describes what the user is looking at. */
+    fun watchMatchesView(watch: WatchInfo?): Boolean {
+        if (watch == null) return false
+        val windowOk = if (watch.window == null) {
+            windowId == null || windowId == status?.windows?.firstOrNull()?.id
+        } else {
+            watch.window == windowId
+        }
+        // When following the active thread, accept whichever session the laptop reports.
+        val sessionOk = watchSession == null || watch.sessionId == watchSession
+        return windowOk && sessionOk
+    }
+
+    fun snapshotFresh(now: Long): Boolean {
+        val watch = snapshot?.watch ?: return false
+        val until = watch.until ?: return false
+        return until > now && watchMatchesView(watch)
+    }
+
+    fun isOnline(now: Long): Boolean {
+        val device = device ?: return false
+        // A successful round trip is proof of life even before the issue is re-read.
+        return device.seenRecently(now) || now - lastContact < ONLINE_THRESHOLD_MS
+    }
+
+    fun isOnline(other: Device, now: Long): Boolean =
+        other.seenRecently(now) || (other.number == device?.number && now - lastContact < ONLINE_THRESHOLD_MS)
+}

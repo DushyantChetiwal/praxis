@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Praxis Remote</string>
+
+    <!-- Common actions -->
+    <string name="action_back">Back</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_collapse">Collapse</string>
+    <string name="action_copy">Copy</string>
+    <string name="action_dismiss">Dismiss</string>
+    <string name="action_expand">Expand</string>
+    <string name="action_more">More options</string>
+    <string name="action_new_thread">New thread</string>
+    <string name="action_refresh">Refresh</string>
+    <string name="action_send">Send</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_switch_device">Switch device</string>
+    <string name="action_try_again">Try again</string>
+    <string name="label_current">Current</string>
+
+    <!-- Sign-in -->
+    <string name="signin_tagline">Drive the coding agent on your laptop from your phone, through a private GitHub repository.</string>
+    <string name="signin_button">Sign in with GitHub</string>
+    <string name="signin_explainer">You’ll get a short code to enter on github.com. Praxis Remote only sees the repositories you install its GitHub App on.</string>
+    <string name="signin_client_id">GitHub App client ID</string>
+    <string name="signin_client_id_help">This build has no client ID built in. Enter the client ID of your “Praxis Remote” GitHub App (it starts with “Iv”). Device flow must be enabled for the app.</string>
+    <string name="signin_client_id_override_help">Leave empty to use the client ID built into this app.</string>
+    <string name="signin_advanced">Advanced</string>
+    <string name="signin_need_client_id">Enter the GitHub App client ID first.</string>
+    <string name="signin_contacting">Contacting GitHub…</string>
+    <string name="signin_finishing">Signing in…</string>
+    <string name="signin_enter_code">Enter this code on GitHub</string>
+    <string name="signin_open_github">Open GitHub</string>
+    <string name="signin_code_help">Open %1$s, paste the code and approve Praxis Remote. “Open GitHub” copies the code for you.</string>
+    <string name="signin_waiting">Waiting for approval · code expires in %1$d:%2$02d</string>
+    <string name="signin_expired">GitHub no longer accepts your sign-in (it may have expired or been revoked). Sign in again.</string>
+
+    <!-- Device flow errors -->
+    <string name="flow_expired">The code expired before it was approved. Start again.</string>
+    <string name="flow_denied">Sign-in was cancelled on GitHub.</string>
+    <string name="flow_disabled">Device flow is turned off for this GitHub App. Turn on “Enable Device Flow” in the app’s settings on GitHub.</string>
+    <string name="flow_bad_client">GitHub doesn’t recognise that client ID. Check the GitHub App’s client ID.</string>
+    <string name="flow_error">GitHub sign-in failed: %1$s</string>
+    <string name="flow_unexpected">GitHub answered %1$d to the sign-in request.</string>
+
+    <!-- Repository picker -->
+    <string name="repos_title">Choose repository</string>
+    <string name="repos_intro">Praxis on your laptop and this app talk through issues in a private repository. Pick the repository the Praxis Remote GitHub App is installed on.</string>
+    <string name="repos_loading">Looking for repositories…</string>
+    <string name="repos_available">Repositories you’ve given the app</string>
+    <string name="repos_private">Private</string>
+    <string name="repos_public_warning">Public — anyone could read your prompts and code</string>
+    <string name="repos_none_title">No repository yet</string>
+    <string name="repos_none_installations">Install the “Praxis Remote” GitHub App on the private repository that Praxis on your laptop uses, then try again. Grant it access to that one repository only.</string>
+    <string name="repos_none_repos">The Praxis Remote GitHub App is installed, but not on any repository you can use. Add your private channel repository to the installation, then try again.</string>
+    <string name="repos_open_installations">Manage app installations</string>
+    <string name="repos_browse_apps">Open GitHub Apps</string>
+    <string name="repos_manual_title">Or enter it yourself</string>
+    <string name="repos_manual_label">owner/name</string>
+    <string name="repos_manual_use">Use this repository</string>
+    <string name="repos_manual_invalid">Enter the repository as owner/name.</string>
+    <string name="repos_manual_not_found">Repository not found, or the Praxis Remote app isn’t installed on it.</string>
+    <string name="repos_public_title">Use a public repository?</string>
+    <string name="repos_public_body">%1$s is public, so anyone could read your prompts, transcripts and code. Use a private repository instead.</string>
+    <string name="repos_public_confirm">Use anyway</string>
+
+    <!-- Devices -->
+    <string name="devices_title">Devices</string>
+    <string name="devices_loading">Looking for devices…</string>
+    <string name="devices_empty_title">No devices yet</string>
+    <string name="devices_empty_body">Turn on Remote in Praxis on your laptop. It opens an issue titled “%1$s” in %2$s.</string>
+    <string name="devices_error">Couldn’t load devices: %1$s</string>
+    <string name="devices_subtitle">%1$s · issue #%2$d</string>
+    <string name="presence_online">Online</string>
+    <string name="presence_last_seen">Last seen %1$s</string>
+    <string name="presence_never">Not seen yet</string>
+    <string name="presence_updated">Updated %1$s</string>
+    <string name="time_just_now">just now</string>
+    <string name="time_seconds_ago">%1$ds ago</string>
+
+    <!-- Device screen -->
+    <string name="tab_chat">Chat</string>
+    <string name="tab_threads">Threads</string>
+    <string name="tab_files">Files</string>
+    <string name="window_choose">Choose window</string>
+    <string name="window_untitled">Window %1$d</string>
+    <string name="banner_offline">Praxis on %1$s %2$s. Requests may time out.</string>
+    <string name="banner_offline_seen">was last seen %1$s</string>
+    <string name="banner_offline_never">hasn’t checked in yet</string>
+    <string name="banner_waiting">Waiting for live updates from Praxis… Showing the last published state.</string>
+    <string name="banner_issue_closed">Praxis closed issue #%1$d. Looking for the device again…</string>
+    <string name="banner_issue_gone">The issue for this device (#%1$d) is gone. Looking for it again…</string>
+    <string name="banner_poll_failed">Couldn’t check for updates: %1$s</string>
+    <string name="banner_watch_failed">Live updates unavailable: %1$s</string>
+
+    <!-- Chat -->
+    <string name="chat_no_device">No device selected</string>
+    <string name="chat_connecting">Connecting…</string>
+    <string name="chat_no_window">No Praxis window</string>
+    <string name="chat_untitled">Untitled thread</string>
+    <string name="chat_no_thread">No active thread</string>
+    <string name="chat_no_thread_body">Send a message to get started, or open one from Threads.</string>
+    <string name="chat_thread_error">Couldn’t load the thread</string>
+    <string name="chat_waiting_online">Waiting for Praxis to come online…</string>
+    <string name="chat_waiting">Waiting for Praxis…</string>
+    <string name="chat_loading_thread">Loading thread…</string>
+    <string name="chat_jump_to_bottom">Jump to latest</string>
+    <string name="status_working">Working…</string>
+    <string name="status_idle">Idle</string>
+    <plurals name="status_queued">
+        <item quantity="one">%d queued</item>
+        <item quantity="other">%d queued</item>
+    </plurals>
+    <plurals name="chat_earlier">
+        <item quantity="one">%d earlier entry not shown</item>
+        <item quantity="other">%d earlier entries not shown</item>
+    </plurals>
+    <string name="architect_title">Architect plan</string>
+    <string name="architect_step">Step %1$s of %2$d</string>
+    <plurals name="architect_planned">
+        <item quantity="one">%d step planned</item>
+        <item quantity="other">%d steps planned</item>
+    </plurals>
+    <string name="architect_run">Run plan</string>
+    <string name="permission_needed">Permission needed</string>
+    <string name="permission_tool_call">Tool call</string>
+    <string name="permission_show_details">Show details</string>
+    <string name="permission_hide_details">Hide details</string>
+    <string name="tool_completed">Completed</string>
+    <string name="tool_failed">Failed</string>
+    <string name="tool_waiting">Waiting for permission</string>
+    <string name="tool_rejected">Rejected</string>
+    <string name="tool_canceled">Canceled</string>
+    <string name="tool_pending">Pending</string>
+    <string name="outbox_sending">Sending…</string>
+    <string name="outbox_queued">Queued</string>
+    <string name="outbox_sent">Sent</string>
+    <string name="composer_placeholder">Message Praxis…</string>
+    <string name="toast_queued">Queued — Praxis will pick it up after the current turn.</string>
+    <string name="toast_stopping">Stopping…</string>
+    <string name="toast_new_thread">New thread started</string>
+    <string name="toast_running_plan">Running plan…</string>
+    <string name="toast_stopping_plan">Stopping plan…</string>
+    <string name="label_message_not_sent">Message not sent</string>
+    <string name="label_could_not_stop">Couldn’t stop</string>
+    <string name="label_could_not_start_thread">Couldn’t start a new thread</string>
+    <string name="label_could_not_change_mode">Couldn’t change mode</string>
+    <string name="label_could_not_answer">Couldn’t answer</string>
+    <string name="label_could_not_run_plan">Couldn’t run the plan</string>
+    <string name="label_could_not_open_thread">Couldn’t open thread</string>
+
+    <!-- Threads -->
+    <string name="threads_loading">Loading threads…</string>
+    <string name="threads_empty_title">No threads yet</string>
+    <string name="threads_empty_body">Start one from the Chat tab.</string>
+    <string name="threads_active">Active</string>
+
+    <!-- Files -->
+    <string name="files_projects">Projects</string>
+    <string name="files_loading">Loading…</string>
+    <string name="files_empty">This folder is empty.</string>
+    <string name="files_no_projects">No projects are open in this window.</string>
+    <string name="files_truncated_listing">Only the first 500 entries are shown.</string>
+    <string name="files_truncated">This file is large; only the beginning is shown.</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_account">Account</string>
+    <string name="settings_unknown_user">GitHub account</string>
+    <string name="settings_signed_in_with_github">Signed in with GitHub</string>
+    <string name="settings_token_expires">Your sign-in expires %1$s</string>
+    <string name="settings_token_expires_help">GitHub App user tokens expire unless “Expire user authorization tokens” is turned off in the app’s settings. When it expires you’ll be asked to sign in again.</string>
+    <string name="settings_sign_out">Sign out</string>
+    <string name="settings_sign_out_title">Sign out?</string>
+    <string name="settings_sign_out_body">This forgets your GitHub sign-in and the chosen repository on this phone. You can also revoke Praxis Remote at any time in your GitHub settings.</string>
+    <string name="settings_channel">Channel</string>
+    <string name="settings_channel_help">Repository used to talk to Praxis</string>
+    <string name="settings_device_issue">Selected device · issue #%1$d</string>
+    <string name="settings_switch_repo">Switch repository</string>
+    <string name="settings_none">None</string>
+    <string name="settings_app">App</string>
+    <string name="settings_version">Version %1$s (%2$d)</string>
+    <string name="settings_check_updates">Check for updates</string>
+    <string name="settings_client_id">GitHub App client ID: %1$s</string>
+    <string name="settings_privacy">All traffic goes from this phone straight to api.github.com; there is no other server. Transcripts and file contents pass through the repository’s issues, so keep it private.</string>
+
+    <!-- Updates -->
+    <string name="update_available">Update available</string>
+    <string name="update_download">Download</string>
+    <string name="update_found">Update available: %1$s</string>
+    <string name="update_none">You’re up to date.</string>
+
+    <!-- Errors -->
+    <string name="error_network">Can’t reach GitHub. Check your connection.</string>
+    <string name="error_not_signed_in">Not signed in.</string>
+    <string name="error_unauthorized">GitHub rejected your sign-in (401). It may have expired or been revoked.</string>
+    <string name="error_rate_limit">GitHub rate limit reached.</string>
+    <string name="error_rate_limit_until">GitHub rate limit reached. Try again after %1$s.</string>
+    <string name="error_forbidden">GitHub denied access (403)%1$s. Check that the Praxis Remote app is installed on the repository with Issues access.</string>
+    <string name="error_not_found">Not found (404). Check the repository and that the Praxis Remote app is installed on it.</string>
+    <string name="error_http">GitHub error %1$d%2$s</string>
+    <string name="error_no_comment">GitHub didn’t return the new comment.</string>
+    <string name="error_not_responding">Praxis on %1$s is not responding.</string>
+    <string name="error_request_removed">The request was removed before Praxis answered.</string>
+    <string name="error_unreadable_response">Praxis sent a response that couldn’t be read.</string>
+    <string name="error_wrong_response">Praxis answered a different request.</string>
+    <string name="error_no_device">No device selected.</string>
+    <string name="error_switched_device">Switched device.</string>
+    <string name="error_op_failed">Praxis couldn’t run “%1$s”.</string>
+    <string name="error_no_browser">No app can open this link.</string>
+</resources>

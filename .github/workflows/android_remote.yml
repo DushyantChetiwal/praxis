@@ -1,0 +1,128 @@
+# Builds the Praxis Remote Android app and publishes the signed APK as a
+# GitHub release tagged praxis-remote-android-<versionCode>, which the app's
+# update check looks for. The release is never marked latest: the desktop
+# updater reads its manifests from the latest release.
+name: Praxis Remote for Android
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "remote-android/**"
+      - ".github/workflows/android_remote.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "remote-android/**"
+      - ".github/workflows/android_remote.yml"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the signed APK as a release
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-remote-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build the APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PRAXIS_REMOTE_VERSION_CODE: ${{ github.run_number }}
+      PRAXIS_REMOTE_VERSION_NAME: 0.1.${{ github.run_number }}
+      PRAXIS_REMOTE_CLIENT_ID: ${{ vars.PRAXIS_REMOTE_CLIENT_ID }}
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Restore the signing key
+        id: signing
+        if: github.event_name != 'pull_request'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${KEYSTORE_BASE64}" ]]; then
+            echo "No signing key is configured; the APK will be unsigned." >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          keystore="${RUNNER_TEMP}/praxis-remote-release.jks"
+          printf '%s' "${KEYSTORE_BASE64}" | base64 --decode > "${keystore}"
+          echo "ANDROID_KEYSTORE_PATH=${keystore}" >> "${GITHUB_ENV}"
+          echo "signed=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Build the release APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: gradle -p remote-android --no-daemon assembleRelease lintRelease
+
+      - name: Name the APK
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          outputs=remote-android/app/build/outputs/apk/release
+          if [[ -f "${outputs}/app-release.apk" ]]; then
+            source="${outputs}/app-release.apk"
+            name="PraxisRemote-${PRAXIS_REMOTE_VERSION_NAME}.apk"
+          else
+            source="${outputs}/app-release-unsigned.apk"
+            name="PraxisRemote-${PRAXIS_REMOTE_VERSION_NAME}-unsigned.apk"
+          fi
+          mkdir -p apk
+          cp "${source}" "apk/${name}"
+          echo "path=apk/${name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: praxis-remote-android
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+
+      - name: Publish the release
+        if: >-
+          steps.signing.outputs.signed == 'true' &&
+          (github.event_name == 'push' ||
+           (github.event_name == 'workflow_dispatch' && inputs.publish))
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APK: ${{ steps.apk.outputs.path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="praxis-remote-android-${PRAXIS_REMOTE_VERSION_CODE}"
+          gh release create "${tag}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "Praxis Remote for Android ${PRAXIS_REMOTE_VERSION_NAME}" \
+            --notes "Praxis Remote for Android, built from ${GITHUB_SHA}. Install the APK on your phone; the app offers later versions itself." \
+            --latest=false \
+            "${APK}"
+          echo "Published ${tag}." >> "${GITHUB_STEP_SUMMARY}"

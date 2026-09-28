@@ -27,7 +27,8 @@
 //! be private and the token scoped to Issues on that repository alone. Files
 //! can be read remotely but never written: changes go through the agent.
 //!
-//! The app for the phone lives in `remote-app/` at the root of the repository.
+//! The Android app for the phone lives in `remote-android/` at the root of the
+//! repository.
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
