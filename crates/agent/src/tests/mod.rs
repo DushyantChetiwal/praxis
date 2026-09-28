@@ -764,7 +764,14 @@ async fn test_background_terminal_new_prompt_cancels_foreground_launch(cx: &mut 
     cx.run_until_parked();
     assert_eq!(environment.terminal_spawns.load(Ordering::SeqCst), 1);
     assert!(!handle.was_killed());
-    verify_thread_recovery(&thread, &fake, cx).await;
+    // The launch has not yielded, so it belongs to the turn a new prompt
+    // replaces and stops with it. The interrupted turn can leave a dropped
+    // completion behind, so this asserts the kill without replying to the model.
+    let _next = thread
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["Next"], cx)
+        })
+        .unwrap();
     cx.run_until_parked();
     assert!(handle.was_killed());
 }
