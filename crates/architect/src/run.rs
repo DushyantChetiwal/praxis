@@ -1780,9 +1780,7 @@ mod tests {
         assert_eq!(first, Decision::Run(path(&["outer", "split"])));
         let decision = run.finish_step(&graph);
         let Decision::Fork {
-            graph: at,
-            join,
-            ..
+            graph: at, join, ..
         } = &decision
         else {
             panic!("expected a fork inside the nested plan, got {decision:?}");
@@ -1834,11 +1832,7 @@ mod tests {
     fn a_limited_plain_loop_repeats_on_its_own_before_the_fork() {
         let mut graph = plain_graph(
             &["draft", "polish", "left", "right"],
-            &[
-                ("draft", "polish"),
-                ("polish", "left"),
-                ("polish", "right"),
-            ],
+            &[("draft", "polish"), ("polish", "left"), ("polish", "right")],
         );
         let mut again = ArchitectEdge::new("again", "polish", "draft");
         again.max_repeats = Some(1);

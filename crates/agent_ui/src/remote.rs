@@ -1237,8 +1237,7 @@ fn architect(
         agent::start_architect_run(thread, acp_thread, graph, cx)
             .map_err(|error| anyhow!("{error}"))?;
     } else if op == "resume" {
-        agent::resume_architect_run(thread, acp_thread, cx)
-            .map_err(|error| anyhow!("{error}"))?;
+        agent::resume_architect_run(thread, acp_thread, cx).map_err(|error| anyhow!("{error}"))?;
     } else if op == "pause" {
         agent::pause_architect_run(&thread, cx);
     } else {
