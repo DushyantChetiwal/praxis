@@ -31,6 +31,7 @@ use project::{
 use serde::{Deserialize, Serialize};
 use serde_json::to_string_pretty;
 use settings::{Settings, SettingsStore};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Formatter, Write};
@@ -437,6 +438,27 @@ pub enum ElicitationStoreEvent {
 #[derive(Default)]
 pub struct ElicitationStore {
     elicitations: Vec<Elicitation>,
+    question_timeouts: HashMap<ElicitationEntryId, QuestionTimeout>,
+}
+
+struct QuestionTimeout {
+    interacted: Rc<Cell<bool>>,
+    message: String,
+    recommendation: String,
+}
+
+impl QuestionTimeout {
+    fn message(&self, seconds: u64) -> String {
+        let status = if self.interacted.get() {
+            "Auto-answer paused; waiting for your answer.".to_string()
+        } else {
+            format!("Using the recommendation in {seconds}s unless you interact.")
+        };
+        format!(
+            "{}\n\nRecommendation: {}\n\n{status}",
+            self.message, self.recommendation
+        )
+    }
 }
 
 impl EventEmitter<ElicitationStoreEvent> for ElicitationStore {}
@@ -4107,6 +4129,167 @@ impl AcpThread {
 
         let task = ElicitationStore::response_task(response_rx, cx);
         Ok((id, task))
+    }
+
+    /// Only native ask_question requests opt into this timer. The caller must validate
+    /// the recommendation against the question schema before calling this method.
+    pub fn request_question_with_timeout(
+        &mut self,
+        mut request: acp::CreateElicitationRequest,
+        recommendation: acp::CreateElicitationResponse,
+        recommendation_label: String,
+        is_canceled: impl Fn() -> bool + 'static,
+        cx: &mut Context<Self>,
+    ) -> Result<
+        (
+            ElicitationEntryId,
+            Task<(acp::CreateElicitationResponse, bool)>,
+        ),
+        acp::Error,
+    > {
+        let executor = cx.background_executor().clone();
+        let deadline = executor.now() + Duration::from_secs(10);
+        let state = QuestionTimeout {
+            interacted: Rc::new(Cell::new(false)),
+            message: request.message.clone(),
+            recommendation: recommendation_label,
+        };
+        request.message = state.message(10);
+        let (id, response) = self.request_elicitation_with_id(request, cx)?;
+        let interacted = state.interacted.clone();
+        self.elicitations
+            .question_timeouts
+            .insert(id.clone(), state);
+        let timed_out = Rc::new(Cell::new(false));
+        let task_id = id.clone();
+        let weak_thread = cx.entity().downgrade();
+        let async_cx = cx.to_async();
+        let cleanup_executor = cx.foreground_executor().clone();
+        let cleanup_interacted = interacted.clone();
+        // Also cancel when the caller drops the task before its first poll. Defer
+        // entity mutation because a task can be dropped during a thread update.
+        let cleanup = util::defer(move || {
+            cleanup_interacted.set(true);
+            cleanup_executor
+                .spawn(async move {
+                    async_cx.update(|cx| {
+                        cx.defer(move |cx| {
+                            if let Some(thread) = weak_thread.upgrade() {
+                                thread.update(cx, |thread, cx| {
+                                    thread.elicitations.question_timeouts.remove(&task_id);
+                                    thread.cancel_elicitation(&task_id, cx);
+                                });
+                            }
+                        });
+                    });
+                })
+                .detach();
+        });
+        let task_id = id.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let _cleanup = cleanup;
+            let mut response = response.fuse();
+            loop {
+                if interacted.get() {
+                    return (response.await, false);
+                }
+                let remaining = deadline.saturating_duration_since(executor.now());
+                let tick = executor.timer(remaining.min(Duration::from_secs(1))).fuse();
+                futures::pin_mut!(tick);
+                futures::select_biased! {
+                    response = response => return (response, timed_out.get()),
+                    _ = tick => {}
+                }
+                let remaining = deadline.saturating_duration_since(executor.now());
+                if remaining.is_zero() {
+                    let id = task_id.clone();
+                    let timeout_result = timed_out.clone();
+                    // Let already queued input/cancellation effects win at the deadline.
+                    cx.update(|cx| {
+                        cx.defer(move |cx| {
+                            if let Some(thread) = this.upgrade() {
+                                thread.update(cx, |thread, cx| {
+                                    // The tool's cancellation waiter may not have been
+                                    // polled yet, so inspect its signal at commit time.
+                                    if is_canceled() {
+                                        thread.cancel_elicitation(&id, cx);
+                                        return;
+                                    }
+                                    let eligible = thread
+                                        .question_interaction_flag(&id)
+                                        .is_some_and(|flag| !flag.get())
+                                        && thread.elicitation(&id).is_some_and(|(_, entry)| {
+                                            matches!(
+                                                entry.status,
+                                                ElicitationStatus::Pending { .. }
+                                            )
+                                        });
+                                    if eligible {
+                                        timeout_result.set(true);
+                                        thread.respond_to_elicitation(&id, recommendation, cx);
+                                    }
+                                });
+                            }
+                        })
+                    });
+                    return (response.await, timed_out.get());
+                }
+                if let Err(error) = this.update(cx, |thread, cx| {
+                    thread.refresh_question_countdown(
+                        &task_id,
+                        remaining.as_secs_f64().ceil() as u64,
+                        cx,
+                    );
+                }) {
+                    log::debug!("Question thread disappeared: {error}");
+                    return (
+                        acp::CreateElicitationResponse::new(acp::ElicitationAction::Cancel),
+                        false,
+                    );
+                }
+            }
+        });
+        Ok((id, task))
+    }
+
+    /// Set this flag synchronously on input, before deferring any entity updates.
+    /// No flag exists for generic ACP forms or permission requests.
+    pub fn question_interaction_flag(&self, id: &ElicitationEntryId) -> Option<Rc<Cell<bool>>> {
+        self.elicitations
+            .question_timeouts
+            .get(id)
+            .map(|state| state.interacted.clone())
+    }
+
+    pub fn mark_question_interaction(&mut self, id: &ElicitationEntryId, cx: &mut Context<Self>) {
+        if let Some(flag) = self.question_interaction_flag(id) {
+            flag.set(true);
+            self.refresh_question_countdown(id, 0, cx);
+        }
+    }
+
+    fn refresh_question_countdown(
+        &mut self,
+        id: &ElicitationEntryId,
+        seconds: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.elicitations.question_timeouts.get(id) else {
+            return;
+        };
+        let message = state.message(seconds);
+        let Some(ix) = self.elicitation_entry_ix(id) else {
+            return;
+        };
+        let Some((_, entry)) = self.elicitations.elicitation_mut(id) else {
+            return;
+        };
+        if matches!(entry.status, ElicitationStatus::Pending { .. })
+            && entry.request.message != message
+        {
+            entry.request.message = message;
+            cx.emit(AcpThreadEvent::EntryUpdated(ix));
+        }
     }
 
     fn emit_elicitation_change(
@@ -9721,6 +9904,411 @@ mod tests {
                 [AgentThreadEntry::Elicitation(_)]
             ));
         });
+    }
+
+    fn request_timed_question(
+        thread: &Entity<AcpThread>,
+        cx: &mut TestAppContext,
+    ) -> (
+        ElicitationEntryId,
+        Task<(acp::CreateElicitationResponse, bool)>,
+    ) {
+        thread.update(cx, |thread, cx| {
+            thread
+                .request_question_with_timeout(
+                    acp::CreateElicitationRequest::new(
+                        acp::ElicitationFormMode::new(
+                            acp::ElicitationSessionScope::new(thread.session_id().clone()),
+                            acp::ElicitationSchema::new().string("answer", true),
+                        ),
+                        "Which database?",
+                    ),
+                    question_test_answer("postgres"),
+                    "PostgreSQL".into(),
+                    || false,
+                    cx,
+                )
+                .unwrap()
+        })
+    }
+
+    fn question_test_answer(value: &str) -> acp::CreateElicitationResponse {
+        acp::CreateElicitationResponse::new(acp::ElicitationAction::Accept(
+            acp::ElicitationAcceptAction::new().content(std::collections::BTreeMap::from([(
+                "answer".into(),
+                acp::ElicitationContentValue::from(value),
+            )])),
+        ))
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_without_ui(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (id, task) = request_timed_question(&thread, cx);
+        let updates = Rc::new(Cell::new(0));
+        let update_count = updates.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&thread, move |_, event, _| {
+                if matches!(event, AcpThreadEvent::EntryUpdated(_)) {
+                    update_count.set(update_count.get() + 1);
+                }
+            })
+        });
+        thread.read_with(cx, |thread, _| {
+            let message = &thread.elicitation(&id).unwrap().1.request.message;
+            assert!(message.contains("10s"));
+            assert!(message.contains("Recommendation: PostgreSQL"));
+        });
+        cx.run_until_parked();
+        for remaining in (1..10).rev() {
+            cx.executor().advance_clock(Duration::from_secs(1));
+            cx.run_until_parked();
+            thread.read_with(cx, |thread, _| {
+                let entry = thread.elicitation(&id).unwrap().1;
+                assert!(matches!(entry.status, ElicitationStatus::Pending { .. }));
+                assert!(entry.request.message.contains(&format!("{remaining}s")));
+            });
+        }
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let (response, timed_out) = task.await;
+        assert!(timed_out);
+        assert_eq!(response.action, question_test_answer("postgres").action);
+        assert_eq!(
+            updates.get(),
+            10,
+            "nine ticks and the normal response update"
+        );
+        thread.read_with(cx, |thread, _| {
+            assert!(matches!(
+                thread.elicitation(&id).unwrap().1.status,
+                ElicitationStatus::Accepted
+            ));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_starts_at_creation(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (id, task) = request_timed_question(&thread, cx);
+        // Unlike advance_clock, advancing the raw clock does not run tasks.
+        // The timer's first poll is therefore nine seconds after creation.
+        cx.dispatcher
+            .scheduler()
+            .clock()
+            .advance(Duration::from_secs(9));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert!(matches!(
+                thread.elicitation(&id).unwrap().1.status,
+                ElicitationStatus::Pending { .. }
+            ));
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        // Awaiting here could automatically advance the scheduler to a wrongly
+        // restarted deadline, hiding a timer that began at first poll instead.
+        let (response, timed_out) = task
+            .now_or_never()
+            .expect("must resolve ten seconds after creation, not after first poll");
+        assert!(timed_out);
+        assert_eq!(response.action, question_test_answer("postgres").action);
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_cancellation_signal_before_deadline(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let canceled = Rc::new(Cell::new(false));
+        let signal = canceled.clone();
+        let (id, task) = thread.update(cx, |thread, cx| {
+            thread
+                .request_question_with_timeout(
+                    acp::CreateElicitationRequest::new(
+                        acp::ElicitationFormMode::new(
+                            acp::ElicitationSessionScope::new(thread.session_id().clone()),
+                            acp::ElicitationSchema::new().string("answer", true),
+                        ),
+                        "Question",
+                    ),
+                    question_test_answer("postgres"),
+                    "PostgreSQL".into(),
+                    move || signal.get(),
+                    cx,
+                )
+                .unwrap()
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(9999));
+        canceled.set(true);
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        let (response, timed_out) = task.await;
+        assert!(!timed_out);
+        assert_eq!(response.action, acp::ElicitationAction::Cancel);
+        thread.read_with(cx, |thread, _| {
+            assert!(matches!(
+                thread.elicitation(&id).unwrap().1.status,
+                ElicitationStatus::Canceled
+            ));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_user_responses_before_deadline(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        for response in [
+            question_test_answer("sqlite"),
+            acp::CreateElicitationResponse::new(acp::ElicitationAction::Decline),
+            acp::CreateElicitationResponse::new(acp::ElicitationAction::Cancel),
+        ] {
+            let (id, task) = request_timed_question(&thread, cx);
+            cx.run_until_parked();
+            // advance_clock runs expired timers, so respond before the deadline.
+            cx.executor().advance_clock(Duration::from_millis(9999));
+            thread.update(cx, |thread, cx| {
+                thread.respond_to_elicitation(&id, response.clone(), cx)
+            });
+            cx.executor().advance_clock(Duration::from_millis(1));
+            cx.run_until_parked();
+            let (actual, timed_out) = task.await;
+            assert!(!timed_out);
+            assert_eq!(actual.action, response.action);
+        }
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_queued_input_at_deadline(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        for response in [
+            Some(question_test_answer("sqlite")),
+            Some(acp::CreateElicitationResponse::new(
+                acp::ElicitationAction::Decline,
+            )),
+            Some(acp::CreateElicitationResponse::new(
+                acp::ElicitationAction::Cancel,
+            )),
+            None, // Editing pauses rather than resolves the question.
+        ] {
+            let (id, task) = request_timed_question(&thread, cx);
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_secs(9));
+            // Reach the deadline without polling the expired timer. Queue input
+            // first on the same foreground executor: the scheduler preserves
+            // session FIFO order when it subsequently wakes the timeout task.
+            cx.dispatcher
+                .scheduler()
+                .clock()
+                .advance(Duration::from_secs(1));
+            let input_thread = thread.clone();
+            let input_id = id.clone();
+            let input_response = response.clone();
+            let input_task = cx.update(|cx| {
+                cx.spawn(async move |cx| {
+                    input_thread.update(cx, |thread, cx| {
+                        if let Some(response) = input_response {
+                            thread.respond_to_elicitation(&input_id, response, cx);
+                        } else {
+                            thread.mark_question_interaction(&input_id, cx);
+                        }
+                    });
+                })
+            });
+            thread.read_with(cx, |thread, _| {
+                assert!(matches!(
+                    thread.elicitation(&id).unwrap().1.status,
+                    ElicitationStatus::Pending { .. }
+                ));
+            });
+            cx.run_until_parked();
+            input_task
+                .now_or_never()
+                .expect("queued input must have run");
+            if response.is_none() {
+                thread.read_with(cx, |thread, _| {
+                    let entry = thread.elicitation(&id).unwrap().1;
+                    assert!(matches!(entry.status, ElicitationStatus::Pending { .. }));
+                    assert!(
+                        entry
+                            .request
+                            .message
+                            .contains("paused; waiting for your answer")
+                    );
+                });
+                thread.update(cx, |thread, cx| thread.cancel_elicitation(&id, cx));
+                cx.run_until_parked();
+            }
+            let (actual, timed_out) = task.now_or_never().expect("response must be delivered");
+            assert!(!timed_out);
+            assert_eq!(
+                actual.action,
+                response.map_or(acp::ElicitationAction::Cancel, |response| response.action)
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_committed_result_ignores_late_input(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (id, task) = request_timed_question(&thread, cx);
+        // This runs the timeout through resolution, not merely to readiness.
+        cx.executor().advance_clock(Duration::from_secs(10));
+        cx.run_until_parked();
+        let (actual, timed_out) = task.now_or_never().expect("timeout must have committed");
+        assert!(timed_out);
+        assert_eq!(actual.action, question_test_answer("postgres").action);
+        for response in [
+            question_test_answer("sqlite"),
+            acp::CreateElicitationResponse::new(acp::ElicitationAction::Decline),
+            acp::CreateElicitationResponse::new(acp::ElicitationAction::Cancel),
+        ] {
+            thread.update(cx, |thread, cx| {
+                thread.respond_to_elicitation(&id, response, cx);
+                thread.mark_question_interaction(&id, cx);
+                thread.cancel_elicitation(&id, cx);
+            });
+            thread.read_with(cx, |thread, _| {
+                assert!(matches!(
+                    thread.elicitation(&id).unwrap().1.status,
+                    ElicitationStatus::Accepted
+                ));
+            });
+        }
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_interaction_permanently_pauses(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (id, task) = request_timed_question(&thread, cx);
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(9999));
+        thread.update(cx, |thread, cx| thread.mark_question_interaction(&id, cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            let entry = thread.elicitation(&id).unwrap().1;
+            assert!(matches!(entry.status, ElicitationStatus::Pending { .. }));
+            assert!(
+                entry
+                    .request
+                    .message
+                    .contains("paused; waiting for your answer")
+            );
+        });
+        thread.update(cx, |thread, cx| {
+            thread.respond_to_elicitation(&id, question_test_answer("sqlite"), cx)
+        });
+        let (response, timed_out) = task.await;
+        assert!(!timed_out);
+        assert_eq!(response.action, question_test_answer("sqlite").action);
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_cancel_before_deadline(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (id, task) = request_timed_question(&thread, cx);
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(9999));
+        thread.update(cx, |thread, cx| thread.cancel_elicitation(&id, cx));
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        let (response, timed_out) = task.await;
+        assert!(!timed_out);
+        assert_eq!(response.action, acp::ElicitationAction::Cancel);
+    }
+
+    async fn assert_question_timeout_drop_cleans_up(cx: &mut TestAppContext, poll_first: bool) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (id, task) = request_timed_question(&thread, cx);
+        if poll_first {
+            cx.run_until_parked();
+        }
+        // Dropping inside an entity update must not re-enter the thread.
+        thread.update(cx, |_, _| drop(task));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert!(matches!(
+                thread.elicitation(&id).unwrap().1.status,
+                ElicitationStatus::Canceled
+            ));
+            assert!(thread.question_interaction_flag(&id).is_none());
+        });
+        cx.executor().advance_clock(Duration::from_secs(10));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert!(matches!(
+                thread.elicitation(&id).unwrap().1.status,
+                ElicitationStatus::Canceled
+            ));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_drop_before_first_poll(cx: &mut TestAppContext) {
+        assert_question_timeout_drop_cleans_up(cx, false).await;
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_drop_after_first_poll(cx: &mut TestAppContext) {
+        assert_question_timeout_drop_cleans_up(cx, true).await;
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_thread_gone(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let weak = thread.downgrade();
+        let (_, task) = request_timed_question(&thread, cx);
+        cx.run_until_parked();
+        cx.update(|_| drop(thread));
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none());
+        cx.executor().advance_clock(Duration::from_secs(10));
+        cx.run_until_parked();
+        let (response, timed_out) = task.await;
+        assert!(!timed_out);
+        assert_eq!(response.action, acp::ElicitationAction::Cancel);
+    }
+
+    #[gpui::test]
+    async fn test_question_legacy_elicitation_waits_without_timeout(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (id, task) = thread.update(cx, |thread, cx| {
+            thread
+                .request_elicitation_with_id(
+                    acp::CreateElicitationRequest::new(
+                        acp::ElicitationFormMode::new(
+                            acp::ElicitationSessionScope::new(thread.session_id().clone()),
+                            acp::ElicitationSchema::new().string("answer", true),
+                        ),
+                        "Manual question",
+                    ),
+                    cx,
+                )
+                .unwrap()
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.question_interaction_flag(&id).is_none());
+            assert!(matches!(
+                thread.elicitation(&id).unwrap().1.status,
+                ElicitationStatus::Pending { .. }
+            ));
+        });
+        thread.update(cx, |thread, cx| thread.cancel_elicitation(&id, cx));
+        assert_eq!(task.await.action, acp::ElicitationAction::Cancel);
     }
 
     #[gpui::test]

@@ -21,7 +21,9 @@ const ANSWER_FIELD: &str = "answer";
 /// Leave `options` empty for a free-text answer. Provide options for a
 /// single-select question, or set `allow_multiple` to let the user select more
 /// than one. Keep the options concise and use their descriptions to explain
-/// meaningful tradeoffs. Do not use this tool to request secrets.
+/// meaningful tradeoffs. Always supply a recommendation when it is safe to
+/// proceed automatically after 10 seconds without user interaction. Otherwise
+/// omit it and wait for a manual answer. Do not use this tool to request secrets.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct AskQuestionToolInput {
@@ -33,6 +35,13 @@ pub struct AskQuestionToolInput {
     /// Whether more than one option may be selected. This requires options.
     #[serde(default)]
     pub allow_multiple: bool,
+    /// Always supply a recommendation when it is safe to proceed without user input.
+    /// Use a string for free text/single select, or a nonempty array of unique option
+    /// values for multi select. After 10 seconds without interaction this answer is
+    /// used automatically. Omit only when no safe recommendation exists; then wait
+    /// for a manual answer. Never use this to authorize tools or exit plan mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<AskQuestionAnswer>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -47,7 +56,7 @@ pub struct AskQuestionOption {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum AskQuestionAnswer {
     Text(String),
@@ -58,6 +67,7 @@ pub enum AskQuestionAnswer {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum AskQuestionToolOutput {
     Answered { answer: AskQuestionAnswer },
+    TimedOut { answer: AskQuestionAnswer },
     Declined,
     Canceled,
     Error { error: String },
@@ -113,7 +123,52 @@ impl AskQuestionTool {
             }
         }
 
+        if let Some(recommendation) = &input.recommendation
+            && let AskQuestionToolOutput::Error { error } =
+                Self::response_output(&input, Self::answer_response(recommendation))
+        {
+            return Err(format!("Invalid recommendation: {error}"));
+        }
         Ok(input)
+    }
+
+    fn answer_response(answer: &AskQuestionAnswer) -> acp::CreateElicitationResponse {
+        let value = match answer {
+            AskQuestionAnswer::Text(value) => acp::ElicitationContentValue::String(value.clone()),
+            AskQuestionAnswer::Multiple(values) => {
+                acp::ElicitationContentValue::StringArray(values.clone())
+            }
+        };
+        acp::CreateElicitationResponse::new(acp::ElicitationAction::Accept(
+            acp::ElicitationAcceptAction::new().content(std::collections::BTreeMap::from([(
+                ANSWER_FIELD.to_string(),
+                value,
+            )])),
+        ))
+    }
+
+    fn recommendation_label(input: &AskQuestionToolInput, answer: &AskQuestionAnswer) -> String {
+        match answer {
+            AskQuestionAnswer::Text(value) => Self::display_value(input, value).to_string(),
+            AskQuestionAnswer::Multiple(values) => values
+                .iter()
+                .map(|value| Self::display_value(input, value))
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    }
+
+    fn resolved_output(
+        input: &AskQuestionToolInput,
+        response: acp::CreateElicitationResponse,
+        timed_out: bool,
+    ) -> AskQuestionToolOutput {
+        match Self::response_output(input, response) {
+            AskQuestionToolOutput::Answered { answer } if timed_out => {
+                AskQuestionToolOutput::TimedOut { answer }
+            }
+            output => output,
+        }
     }
 
     fn elicitation_options(input: &AskQuestionToolInput) -> Vec<acp::EnumOption> {
@@ -172,7 +227,7 @@ impl AskQuestionTool {
 
                 match (input.allow_multiple, answer) {
                     (false, acp::ElicitationContentValue::String(answer)) => {
-                        if answer.is_empty() {
+                        if answer.trim().is_empty() {
                             AskQuestionToolOutput::Error {
                                 error: "The submitted answer was empty.".into(),
                             }
@@ -259,6 +314,14 @@ impl AskQuestionTool {
                     format!("**Question:** {}\n\n**Answer:**\n{answers}", input.question),
                 )
             }
+            AskQuestionToolOutput::TimedOut { answer } => (
+                "Question timed out; used model recommendation",
+                format!(
+                    "**Question:** {}\n\nNo user interaction within 10 seconds. Used the model recommendation (not a user answer): {}",
+                    input.question,
+                    Self::recommendation_label(input, answer)
+                ),
+            ),
             AskQuestionToolOutput::Declined => (
                 "User declined the question",
                 format!("The user declined to answer: {}", input.question),
@@ -325,13 +388,26 @@ impl AgentTool for AskQuestionTool {
             let request = acp_thread.update(cx, |thread, cx| {
                 let scope = acp::ElicitationSessionScope::new(thread.session_id().clone())
                     .tool_call_id(tool_call_id);
-                thread.request_elicitation_with_id(
-                    acp::CreateElicitationRequest::new(
-                        acp::ElicitationFormMode::new(scope, schema),
-                        input.question.clone(),
-                    ),
-                    cx,
-                )
+                let request = acp::CreateElicitationRequest::new(
+                    acp::ElicitationFormMode::new(scope, schema),
+                    input.question.clone(),
+                );
+                if let Some(recommendation) = &input.recommendation {
+                    let cancellation_stream = event_stream.clone();
+                    thread.request_question_with_timeout(
+                        request,
+                        Self::answer_response(recommendation),
+                        Self::recommendation_label(&input, recommendation),
+                        move || cancellation_stream.was_cancelled_by_user(),
+                        cx,
+                    )
+                } else {
+                    thread
+                        .request_elicitation_with_id(request, cx)
+                        .map(|(id, response)| {
+                            (id, cx.spawn(async move |_, _| (response.await, false)))
+                        })
+                }
             });
             let (elicitation_id, response_task) = match request {
                 Ok(Ok(request)) => request,
@@ -352,21 +428,22 @@ impl AgentTool for AskQuestionTool {
             };
 
             let cancellation_stream = event_stream.clone();
-            let response = futures::select! {
-                response = response_task.fuse() => response,
+            let (response, timed_out) = futures::select_biased! {
                 _ = cancellation_stream.cancelled_by_user().fuse() => {
-                    acp_thread
-                        .update(cx, |thread, cx| {
-                            thread.cancel_elicitation(&elicitation_id, cx);
-                        })
-                        .ok();
+                    if let Err(error) = acp_thread.update(cx, |thread, cx| {
+                        thread.mark_question_interaction(&elicitation_id, cx);
+                        thread.cancel_elicitation(&elicitation_id, cx);
+                    }) {
+                        log::debug!("Question thread disappeared during cancellation: {error}");
+                    }
                     let output = AskQuestionToolOutput::Canceled;
                     Self::update_card(&input, &output, &event_stream);
                     return Err(output);
-                }
+                },
+                response = response_task.fuse() => response,
             };
 
-            let output = Self::response_output(&input, response);
+            let output = Self::resolved_output(&input, response, timed_out);
             Self::update_card(&input, &output, &event_stream);
             if matches!(&output, AskQuestionToolOutput::Error { .. }) {
                 Err(output)
@@ -406,6 +483,7 @@ mod tests {
             question: "Which database should the service use?".into(),
             options,
             allow_multiple,
+            recommendation: None,
         }
     }
 
@@ -418,6 +496,174 @@ mod tests {
             "the answer field must be required: {:?}",
             schema.required
         );
+    }
+
+    #[test]
+    fn recommendations_use_response_validation() {
+        let text = input(Vec::new(), false);
+        let single = input(
+            vec![option("postgres", "PostgreSQL"), option("sqlite", "SQLite")],
+            false,
+        );
+        let multiple = input(single.options.clone(), true);
+        for (base, answers) in [
+            (
+                text,
+                vec![
+                    (AskQuestionAnswer::Text("Use PostgreSQL".into()), true),
+                    (AskQuestionAnswer::Text("".into()), false),
+                    (AskQuestionAnswer::Text("  \n".into()), false),
+                    (AskQuestionAnswer::Multiple(vec!["postgres".into()]), false),
+                ],
+            ),
+            (
+                single,
+                vec![
+                    (AskQuestionAnswer::Text("postgres".into()), true),
+                    (AskQuestionAnswer::Text("unknown".into()), false),
+                    (AskQuestionAnswer::Text("PostgreSQL".into()), false),
+                    (AskQuestionAnswer::Multiple(vec!["postgres".into()]), false),
+                ],
+            ),
+            (
+                multiple,
+                vec![
+                    (
+                        AskQuestionAnswer::Multiple(vec!["postgres".into(), "sqlite".into()]),
+                        true,
+                    ),
+                    (AskQuestionAnswer::Multiple(vec![]), false),
+                    (
+                        AskQuestionAnswer::Multiple(vec!["postgres".into(), "postgres".into()]),
+                        false,
+                    ),
+                    (AskQuestionAnswer::Multiple(vec!["unknown".into()]), false),
+                    (AskQuestionAnswer::Multiple(vec!["".into()]), false),
+                    (AskQuestionAnswer::Text("postgres".into()), false),
+                ],
+            ),
+        ] {
+            for (answer, valid) in answers {
+                let mut input = base.clone();
+                input.recommendation = Some(answer.clone());
+                assert_eq!(
+                    AskQuestionTool::validate_input(input.clone()).is_ok(),
+                    valid,
+                    "{answer:?}"
+                );
+                assert_eq!(
+                    matches!(
+                        AskQuestionTool::response_output(
+                            &input,
+                            AskQuestionTool::answer_response(&answer)
+                        ),
+                        AskQuestionToolOutput::Answered { .. }
+                    ),
+                    valid
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_inputs_have_no_recommendation() {
+        for json in [
+            serde_json::json!({"question": "Which database?"}),
+            serde_json::json!({"question": "Which database?", "recommendation": null}),
+        ] {
+            let input =
+                AskQuestionTool::validate_input(serde_json::from_value(json).unwrap()).unwrap();
+            assert!(input.recommendation.is_none());
+        }
+    }
+
+    #[test]
+    fn timeout_output_is_not_a_user_answer() {
+        for (input, answer) in [
+            (
+                input(Vec::new(), false),
+                AskQuestionAnswer::Text("PostgreSQL".into()),
+            ),
+            (
+                input(vec![option("postgres", "PostgreSQL")], false),
+                AskQuestionAnswer::Text("postgres".into()),
+            ),
+            (
+                input(vec![option("postgres", "PostgreSQL")], true),
+                AskQuestionAnswer::Multiple(vec!["postgres".into()]),
+            ),
+        ] {
+            for timed_out in [false, true] {
+                let output = AskQuestionTool::resolved_output(
+                    &input,
+                    AskQuestionTool::answer_response(&answer),
+                    timed_out,
+                );
+                let expected = if timed_out {
+                    AskQuestionToolOutput::TimedOut {
+                        answer: answer.clone(),
+                    }
+                } else {
+                    AskQuestionToolOutput::Answered {
+                        answer: answer.clone(),
+                    }
+                };
+                assert_eq!(output, expected);
+                let json = serde_json::to_value(&output).unwrap();
+                assert_eq!(
+                    json["status"],
+                    if timed_out { "timed_out" } else { "answered" }
+                );
+                assert_eq!(
+                    serde_json::from_value::<AskQuestionToolOutput>(json).unwrap(),
+                    expected
+                );
+            }
+            assert_eq!(
+                AskQuestionTool::resolved_output(
+                    &input,
+                    acp::CreateElicitationResponse::new(acp::ElicitationAction::Cancel),
+                    true
+                ),
+                AskQuestionToolOutput::Canceled
+            );
+            assert_eq!(
+                AskQuestionTool::resolved_output(
+                    &input,
+                    acp::CreateElicitationResponse::new(acp::ElicitationAction::Decline),
+                    true
+                ),
+                AskQuestionToolOutput::Declined
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn timeout_card_identifies_model_recommendation(cx: &mut gpui::TestAppContext) {
+        let (stream, mut events) = ToolCallEventStream::test();
+        cx.update(|cx| {
+            AskQuestionTool::new(WeakEntity::new_invalid())
+                .replay(
+                    input(vec![option("postgres", "PostgreSQL")], false),
+                    AskQuestionToolOutput::TimedOut {
+                        answer: AskQuestionAnswer::Text("postgres".into()),
+                    },
+                    stream,
+                    cx,
+                )
+                .unwrap();
+        });
+        let fields = events.expect_update_fields().await;
+        assert_eq!(
+            fields.title.as_deref(),
+            Some("Question timed out; used model recommendation")
+        );
+        assert!(fields.content.unwrap().iter().any(|block| matches!(
+            block,
+            acp::ToolCallContent::Content(content) if matches!(&content.content,
+                acp::ContentBlock::Text(text) if text.text.contains("not a user answer") && text.text.contains("PostgreSQL")
+            )
+        )));
     }
 
     #[test]
