@@ -1,6 +1,6 @@
 # Praxis Remote protocol, version 2
 
-This is the wire format between Praxis on a computer (`crates/agent_ui/src/remote.rs`) and the Android app (`remote-android/`). Both must follow it exactly. [Praxis Remote](./praxis-remote.md) describes the feature itself.
+This is the wire format between Praxis on a computer (`crates/agent_ui/src/remote/`) and the Android app (`remote-android/`). Both must follow it exactly. [Praxis Remote](./praxis-remote.md) describes the feature itself.
 
 ## Goals
 
