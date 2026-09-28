@@ -92,6 +92,7 @@ rand.workspace = true
 release_channel.workspace = true
 remote.workspace = true
 remote_connection.workspace = true
+ring.workspace = true
 rope.workspace = true
 sandbox.workspace = true
 schemars.workspace = true

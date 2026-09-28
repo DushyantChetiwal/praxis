@@ -6,6 +6,7 @@ import io.github.dushyantchetiwal.praxis.remote.R
 import java.security.SecureRandom
 import java.time.Instant
 import java.time.OffsetDateTime
+import java.time.temporal.ChronoUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -22,18 +23,23 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
-// The protocol is defined by crates/agent_ui/src/remote.rs on the laptop side.
+// The protocol is docs/src/ai/praxis-remote-protocol.md (version 2); the
+// computer's side is crates/agent_ui/src/remote.rs.
 
-const val DEVICE_TITLE_PREFIX = "Praxis \u00b7 "
-private const val REQUEST_MARKER = "<!-- praxis-request -->"
-private val RESPONSE_MARKER_RE = Regex("""^\s*<!--\s*praxis-response\s+(\S+?)\s*-->""")
-private val DEVICE_META_RE = Regex("""<!--\s*praxis-device\s+([\s\S]*?)-->""")
-private val STATE_MARKER_RE = Regex("""<!--\s*praxis-state\s*-->""")
-private val REPO_RE = Regex("""^([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)$""")
+const val PROTOCOL = "praxis-remote/v2"
+const val META_FILE = "praxis-remote.json"
+const val STATE_FILE = "state.json"
+const val PAIR_HEADER = "$PROTOCOL pair"
+private const val REQUEST_HEADER = "$PROTOCOL request"
+private const val RESPONSE_HEADER = "$PROTOCOL response"
+private const val REJECTED_HEADER = "$PROTOCOL rejected"
+private val HEX32_RE = Regex("^[0-9a-f]{32}$")
 
 const val ONLINE_THRESHOLD_MS = 3 * 60_000L
-private const val REQUEST_POLL_MS = 1_500L
+const val COMMENT_POLL_MS = 1_500L
 private const val REQUEST_TIMEOUT_MS = 45_000L
+private const val GIST_PAGES = 3
+private const val GIST_PAGE_SIZE = 100
 
 // ---------------------------------------------------------------------------
 // JSON helpers (org.json turns JSON null into a "null" string if asked)
@@ -60,32 +66,42 @@ internal fun JSONArray.strings(): List<String> = (0 until length()).mapNotNull {
 fun parseTime(value: String?): Long? =
     value?.takeIf { it.isNotEmpty() }?.let { runCatching { OffsetDateTime.parse(it).toInstant().toEpochMilli() }.getOrNull() }
 
-/** The text from the first `{` to the last `}`, as both ends pull JSON out of a fenced block. */
+/** The text from the first `{` to the last `}`. */
 fun jsonObjectIn(text: String): String? {
     val start = text.indexOf('{')
     val end = text.lastIndexOf('}')
     return if (start >= 0 && end > start) text.substring(start, end + 1) else null
 }
 
-fun normalizeRepo(input: String): String? {
-    val cleaned = input.trim()
-        .replace(Regex("^https?://github\\.com/", RegexOption.IGNORE_CASE), "")
-        .replace(Regex("\\.git$", RegexOption.IGNORE_CASE), "")
-        .trimEnd('/')
-    return cleaned.takeIf { REPO_RE.matches(it) }
+fun isHexId(value: String?): Boolean = value != null && HEX32_RE.matches(value)
+
+/** A comment's first line and the rest, tolerating `\r\n` line ends. */
+internal fun splitComment(body: String): Pair<String, String> {
+    val text = body.replace("\r\n", "\n")
+    val newline = text.indexOf('\n')
+    return if (newline == -1) text.trim() to "" else text.substring(0, newline).trim() to text.substring(newline + 1)
 }
 
-fun repoPath(repo: String, suffix: String): String = "/repos/$repo$suffix"
+/** Whether a comment was written by [login] (any account when the login is unknown). */
+internal fun JSONObject.writtenBy(login: String?): Boolean =
+    login == null || obj("user")?.str("login")?.equals(login, ignoreCase = true) == true
 
 // ---------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------
 
-data class Device(val number: Long, val name: String, val startedAt: Long?, val lastSeen: Long?) {
+/** A computer running Praxis, found through the `praxis-remote.json` file of its gist. */
+data class Device(
+    val channel: String,
+    val gistId: String,
+    val name: String,
+    val startedAt: Long?,
+    val lastSeen: Long?,
+    /** Ids of the phones the computer has paired. */
+    val phones: List<String>,
+) {
     fun seenRecently(now: Long): Boolean = lastSeen != null && now - lastSeen < ONLINE_THRESHOLD_MS
 }
-
-data class RepoInfo(val fullName: String, val private: Boolean)
 
 data class WatchInfo(val window: Long?, val sessionId: String?, val until: Long?)
 
@@ -169,25 +185,24 @@ data class FileContent(val path: String, val truncated: Boolean, val size: Long?
 // Parsing
 // ---------------------------------------------------------------------------
 
-fun parseDevice(issue: JSONObject): Device? {
-    if (issue.has("pull_request")) return null
-    val title = issue.str("title") ?: return null
-    if (!title.startsWith(DEVICE_TITLE_PREFIX)) return null
-    val number = issue.long("number") ?: return null
-    val meta = issue.str("body")?.let { body ->
-        DEVICE_META_RE.find(body)?.groupValues?.get(1)?.trim()?.let { runCatching { JSONObject(it) }.getOrNull() }
-    }
-    val name = (meta?.str("device")?.takeIf { it.isNotBlank() } ?: title.removePrefix(DEVICE_TITLE_PREFIX))
-        .trim()
-        .ifEmpty { "Unnamed device" }
-    return Device(number, name, parseTime(meta?.str("started_at")), parseTime(meta?.str("last_seen")))
+/** A computer from its gist's `praxis-remote.json`, or null if it is not protocol version 2. */
+fun parseMeta(text: String?, gistId: String): Device? {
+    val o = text?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return null
+    if (o.str("protocol") != PROTOCOL) return null
+    val channel = o.str("channel")?.takeIf(::isHexId) ?: return null
+    return Device(
+        channel = channel,
+        gistId = gistId,
+        name = o.str("device")?.trim()?.takeIf { it.isNotEmpty() } ?: "Unnamed computer",
+        startedAt = parseTime(o.str("started_at")),
+        lastSeen = parseTime(o.str("last_seen")),
+        phones = o.arr("phones")?.strings().orEmpty(),
+    )
 }
 
-fun parseSnapshot(body: String?): Snapshot? {
-    if (body == null) return null
-    val marker = STATE_MARKER_RE.find(body) ?: return null
-    val json = jsonObjectIn(body.substring(marker.range.last + 1)) ?: return null
-    val o = runCatching { JSONObject(json) }.getOrNull() ?: return null
+/** A decrypted snapshot: `{updated_at, watch, status, thread, thread_error}`. */
+fun parseSnapshot(json: String?): Snapshot? {
+    val o = json?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return null
     return Snapshot(
         updatedAtRaw = o.str("updated_at"),
         updatedAt = parseTime(o.str("updated_at")),
@@ -294,14 +309,95 @@ fun parseFile(result: JSONObject?, requested: String): FileContent = FileContent
 )
 
 // ---------------------------------------------------------------------------
+// Gists
+// ---------------------------------------------------------------------------
+
+/** What a paired phone needs to talk to one computer. */
+class Link(
+    val gistId: String,
+    val channel: String,
+    val phoneId: String,
+    val key: ByteArray,
+    val deviceName: String,
+)
+
+/**
+ * One read of a computer's gist; [gist] is the cached copy when unchanged.
+ * [body] is the raw response, to tell versions apart: the ETag cache is shared
+ * with discovery, so `304` does not mean this caller has seen the version.
+ */
+class GistRead(val body: String?, val gist: JSONObject?, val device: Device?)
+
+/** Finds computers among the user's gists and reads their files. */
+class Gists(private val gh: GitHubClient) {
+    suspend fun read(gistId: String): GistRead {
+        val reply = gh.call("GET", "/gists/$gistId", conditional = true)
+        val gist = reply.obj()
+        val device = gist?.let { parseMeta(file(it, META_FILE), gistId) }
+        return GistRead(reply.body, gist, device)
+    }
+
+    /** A file's text, fetched from its `raw_url` when the API truncated it. */
+    suspend fun file(gist: JSONObject, name: String): String? {
+        val file = gist.obj("files")?.obj(name) ?: return null
+        val content = file.str("content")
+        if (content != null && !file.bool("truncated")) return content
+        val raw = file.str("raw_url") ?: return content
+        return gh.fetchRaw(raw)
+    }
+
+    /**
+     * Every computer in the user's gists, one per channel (the most recently
+     * seen). [known] gist ids are read too, in case they are past the pages listed.
+     */
+    suspend fun discover(known: Collection<String> = emptyList()): List<Device> {
+        val ids = LinkedHashSet<String>()
+        for (page in 1..GIST_PAGES) {
+            val list = gh.call("GET", "/gists?per_page=$GIST_PAGE_SIZE&page=$page", conditional = true).array() ?: break
+            for (gist in list.objects()) {
+                if (gist.obj("files")?.has(META_FILE) == true) gist.str("id")?.let(ids::add)
+            }
+            if (list.length() < GIST_PAGE_SIZE) break
+        }
+        ids += known
+        val found = mutableListOf<Device>()
+        for (id in ids) {
+            try {
+                read(id).device?.let(found::add)
+            } catch (e: ApiException) {
+                // Deleted since it was listed.
+                if (e.kind != ErrorKind.NotFound) throw e
+            }
+        }
+        return found.groupBy { it.channel }.values.map { copies -> copies.maxBy { it.lastSeen ?: 0L } }
+    }
+
+    /**
+     * This phone's snapshot from `state.json`, or null when the computer has
+     * not published one for it. Throws [CryptoException] if it does not decrypt.
+     */
+    suspend fun snapshot(gist: JSONObject, link: Link): Snapshot? {
+        val text = file(gist, STATE_FILE) ?: return null
+        val blob = runCatching { JSONObject(text) }.getOrNull()?.str(link.phoneId) ?: return null
+        val plain = RemoteCrypto.open(link.key, blob, RemoteCrypto.stateAad(link.channel, link.phoneId))
+        return parseSnapshot(String(plain, Charsets.UTF_8))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Requests
 // ---------------------------------------------------------------------------
 
 /**
- * Sends requests as comments on a device's issue and waits for Praxis to edit
- * each into its answer. Only one request is in flight at a time.
+ * Sends encrypted requests as comments on a computer's gist and waits for
+ * Praxis to edit each into its answer. Only one request is in flight at a time.
  */
-class RemoteChannel(context: Context, private val gh: GitHubClient) {
+class RemoteChannel(
+    context: Context,
+    private val gh: GitHubClient,
+    /** The signed-in account; only comments it wrote are trusted. */
+    private val login: () -> String?,
+) {
     private val context = context.applicationContext
     private val mutex = Mutex()
     private val random = SecureRandom()
@@ -322,31 +418,38 @@ class RemoteChannel(context: Context, private val gh: GitHubClient) {
         }
     }
 
-    /** Posts one request and returns the `{id, ok, result | error}` envelope. */
-    suspend fun exchange(repo: String, device: Device, op: String, args: JSONObject): JSONObject {
+    /**
+     * Posts one request and returns the `{id, ok, result | error}` envelope.
+     * Throws [ErrorKind.Unpaired] when the computer rejects this phone.
+     */
+    suspend fun exchange(link: Link, op: String, args: JSONObject): JSONObject {
         val id = newRequestId()
         val payload = JSONObject()
             .put("id", id)
             .put("op", op)
             .put("args", args)
-            .put("sent_at", Instant.now().toString())
-        val body = "$REQUEST_MARKER\n```json\n$payload\n```"
+            .put("sent_at", Instant.now().truncatedTo(ChronoUnit.SECONDS).toString())
+        val blob = RemoteCrypto.seal(
+            link.key,
+            payload.toString().toByteArray(Charsets.UTF_8),
+            RemoteCrypto.requestAad(link.channel, link.phoneId),
+        )
         val created = gh.call(
             "POST",
-            repoPath(repo, "/issues/${device.number}/comments"),
-            JSONObject().put("body", body),
+            "/gists/${link.gistId}/comments",
+            JSONObject().put("body", "$REQUEST_HEADER ${link.phoneId}\n$blob"),
         ).obj()
         val commentId = created?.long("id")
             ?: throw ApiException(ErrorKind.Http, context.getString(R.string.error_no_comment))
 
-        val path = repoPath(repo, "/issues/comments/$commentId")
+        val path = "/gists/${link.gistId}/comments/$commentId"
         val deadline = SystemClock.elapsedRealtime() + REQUEST_TIMEOUT_MS
         var finished = false
         try {
             while (SystemClock.elapsedRealtime() < deadline) {
-                delay(REQUEST_POLL_MS)
+                delay(COMMENT_POLL_MS)
                 val answer = try {
-                    pollComment(path)
+                    pollComment(path, link.phoneId)
                 } catch (e: ApiException) {
                     finished = e.status == 404 // Nothing left to delete.
                     throw e
@@ -354,22 +457,24 @@ class RemoteChannel(context: Context, private val gh: GitHubClient) {
                 if (answer != null) {
                     finished = true
                     background.launch { deleteQuietly(path) }
-                    return readEnvelope(answer, id)
+                    return readAnswer(answer, link, id)
                 }
             }
         } finally {
             gh.forget(path)
             if (!finished) withContext(NonCancellable) { deleteQuietly(path) }
         }
-        throw ApiException(ErrorKind.Timeout, context.getString(R.string.error_not_responding, device.name))
+        throw ApiException(ErrorKind.Timeout, context.getString(R.string.error_not_responding, link.deviceName))
     }
 
-    /** The comment's body once Praxis has answered, else null. */
-    private suspend fun pollComment(path: String): String? {
+    /** The comment once it is no longer our request (Praxis answered), else null. */
+    private suspend fun pollComment(path: String, phoneId: String): JSONObject? {
         return try {
             val reply = gh.call("GET", path, conditional = true)
-            val body = if (reply.changed) reply.obj()?.str("body").orEmpty() else ""
-            body.takeIf { RESPONSE_MARKER_RE.containsMatchIn(it) }
+            if (!reply.changed) return null
+            val comment = reply.obj() ?: return null
+            val (first, _) = splitComment(comment.str("body").orEmpty())
+            comment.takeIf { first != "$REQUEST_HEADER $phoneId" }
         } catch (e: ApiException) {
             when {
                 e.kind == ErrorKind.NotFound ->
@@ -384,22 +489,31 @@ class RemoteChannel(context: Context, private val gh: GitHubClient) {
         try {
             gh.call("DELETE", path, allow = setOf(404))
         } catch (_: ApiException) {
-            // Praxis ignores answered and stale requests, so a leftover is harmless.
+            // Praxis refuses stale requests and cleans up old comments, so a leftover is harmless.
         }
     }
 
-    private fun readEnvelope(body: String, id: String): JSONObject {
-        val markerId = RESPONSE_MARKER_RE.find(body)?.groupValues?.get(1)
-        val newline = body.indexOf('\n')
-        val rest = if (newline == -1) "" else body.substring(newline + 1)
-        val envelope = jsonObjectIn(rest)?.let { runCatching { JSONObject(it) }.getOrNull() }
-            ?: return failure(id, context.getString(R.string.error_unreadable_response))
-        val envelopeId = envelope.str("id")
-        return if (markerId == id && (envelopeId == null || envelopeId == id)) {
-            envelope
-        } else {
-            failure(id, context.getString(R.string.error_wrong_response))
+    private fun readAnswer(comment: JSONObject, link: Link, id: String): JSONObject {
+        if (!comment.writtenBy(login())) return failure(id, context.getString(R.string.error_unreadable_response))
+        val (first, rest) = splitComment(comment.str("body").orEmpty())
+        val words = first.split(' ').filter { it.isNotEmpty() }
+        if (words.size == 3 && "${words[0]} ${words[1]}" == REJECTED_HEADER && words[2] == link.phoneId) {
+            val reason = rest.trim().ifEmpty { context.getString(R.string.error_rejected_no_reason) }
+            throw ApiException(ErrorKind.Unpaired, context.getString(R.string.error_rejected, link.deviceName, reason))
         }
+        if (words.size != 4 || "${words[0]} ${words[1]}" != RESPONSE_HEADER || words[2] != link.phoneId) {
+            return failure(id, context.getString(R.string.error_unreadable_response))
+        }
+        if (words[3] != id) return failure(id, context.getString(R.string.error_wrong_response))
+        val plain = try {
+            RemoteCrypto.open(link.key, rest.trim(), RemoteCrypto.responseAad(link.channel, link.phoneId, id))
+        } catch (e: CryptoException) {
+            return failure(id, context.getString(R.string.error_undecryptable_response))
+        }
+        val envelope = runCatching { JSONObject(String(plain, Charsets.UTF_8)) }.getOrNull()
+            ?: return failure(id, context.getString(R.string.error_unreadable_response))
+        if (envelope.str("id") != id) return failure(id, context.getString(R.string.error_wrong_response))
+        return envelope
     }
 
     private fun failure(id: String, message: String): JSONObject =
@@ -411,3 +525,4 @@ class RemoteChannel(context: Context, private val gh: GitHubClient) {
         return "m${System.currentTimeMillis().toString(36)}-$hex"
     }
 }
+

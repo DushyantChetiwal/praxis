@@ -6,7 +6,6 @@ import io.github.dushyantchetiwal.praxis.remote.data.DirEntry
 import io.github.dushyantchetiwal.praxis.remote.data.FileContent
 import io.github.dushyantchetiwal.praxis.remote.data.ONLINE_THRESHOLD_MS
 import io.github.dushyantchetiwal.praxis.remote.data.Permission
-import io.github.dushyantchetiwal.praxis.remote.data.RepoInfo
 import io.github.dushyantchetiwal.praxis.remote.data.Snapshot
 import io.github.dushyantchetiwal.praxis.remote.data.Status
 import io.github.dushyantchetiwal.praxis.remote.data.ThreadItem
@@ -15,7 +14,7 @@ import io.github.dushyantchetiwal.praxis.remote.data.UpdateInfo
 import io.github.dushyantchetiwal.praxis.remote.data.WatchInfo
 import io.github.dushyantchetiwal.praxis.remote.data.WindowInfo
 
-enum class Screen { Loading, SignIn, Repos, Devices, Device, Settings }
+enum class Screen { Loading, SignIn, Devices, Pair, Device, Settings }
 
 enum class Tab { Chat, Threads, Files }
 
@@ -28,22 +27,31 @@ sealed interface FlowPhase {
 
 data class SignInState(val phase: FlowPhase = FlowPhase.Idle, val message: String? = null)
 
-data class ReposState(
-    val loading: Boolean = false,
-    val loaded: Boolean = false,
-    val repos: List<RepoInfo> = emptyList(),
-    val noInstallations: Boolean = false,
-    val error: String? = null,
-    val checking: Boolean = false,
-    val manualError: String? = null,
-    val confirmPublic: RepoInfo? = null,
-)
-
 data class DevicesState(
     val loading: Boolean = false,
     val loaded: Boolean = false,
     val devices: List<Device> = emptyList(),
+    /** Channels of the computers this phone is paired with. */
+    val paired: Set<String> = emptySet(),
+    /** Channels of computers that removed this phone since it paired. */
+    val unpairedByComputer: Set<String> = emptySet(),
     val error: String? = null,
+)
+
+sealed interface PairPhase {
+    /** Not started; the screen explains what will happen. */
+    data object Ready : PairPhase
+    /** Posting the request and waiting for the computer's key. */
+    data object Waiting : PairPhase
+    /** Both keys are known; the user compares [code] with the computer's. */
+    data class Code(val code: String) : PairPhase
+    data class Failed(val message: String) : PairPhase
+}
+
+data class PairingState(
+    val device: Device? = null,
+    val phase: PairPhase = PairPhase.Ready,
+    val startedAt: Long = 0L,
 )
 
 data class AppState(
@@ -52,11 +60,12 @@ data class AppState(
     val login: String? = null,
     val avatar: ImageBitmap? = null,
     val tokenExpiresAt: Long? = null,
-    val repo: String? = null,
     val clientIdOverride: String = "",
+    /** How this phone introduces itself when pairing. */
+    val phoneName: String = "",
     val signIn: SignInState = SignInState(),
-    val repos: ReposState = ReposState(),
     val devices: DevicesState = DevicesState(),
+    val pairing: PairingState = PairingState(),
     /** An update the user has not dismissed, for the banner. */
     val update: UpdateInfo? = null,
     /** The newest known update, dismissed or not, for Settings. */
@@ -100,8 +109,8 @@ data class Banner(val text: String, val error: Boolean)
 /** Everything about the selected device, mirroring the web app's state. */
 data class DeviceUi(
     val device: Device? = null,
-    /** Whether the device's issue has been read at least once. */
-    val issueApplied: Boolean = false,
+    /** Whether the computer's gist has been read at least once. */
+    val stateApplied: Boolean = false,
     val snapshot: Snapshot? = null,
     val status: Status? = null,
     val windowId: Long? = null,
@@ -159,10 +168,10 @@ data class DeviceUi(
 
     fun isOnline(now: Long): Boolean {
         val device = device ?: return false
-        // A successful round trip is proof of life even before the issue is re-read.
+        // A successful round trip is proof of life even before the gist is re-read.
         return device.seenRecently(now) || now - lastContact < ONLINE_THRESHOLD_MS
     }
 
     fun isOnline(other: Device, now: Long): Boolean =
-        other.seenRecently(now) || (other.number == device?.number && now - lastContact < ONLINE_THRESHOLD_MS)
+        other.seenRecently(now) || (other.channel == device?.channel && now - lastContact < ONLINE_THRESHOLD_MS)
 }

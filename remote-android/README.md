@@ -1,45 +1,55 @@
 # Praxis Remote for Android
 
-A native Android app (Kotlin, Jetpack Compose, Material 3) for driving the Praxis coding agent on your laptop from your
-phone. It speaks the protocol defined in `crates/agent_ui/src/remote.rs`: the phone and the laptop exchange messages
-through issues in a private GitHub repository, and nothing listens on the network.
+A native Android app (Kotlin, Jetpack Compose, Material 3) for following and steering the Praxis coding agent on your
+computer from your phone. It speaks protocol version 2, specified in
+[`docs/src/ai/praxis-remote-protocol.md`](../docs/src/ai/praxis-remote-protocol.md): the phone and the computer
+exchange end-to-end encrypted messages through a secret gist in the user's own GitHub account, and nothing listens
+on the network.
 
-- **Live state.** Each laptop keeps an issue titled `Praxis · <device>`. Its body carries a heartbeat
-  (`<!-- praxis-device {...} -->`) and a snapshot (`<!-- praxis-state -->`). While the app is in the foreground it
-  polls the selected device's issue every 3 seconds with `If-None-Match` (a `304` is free) and sends a `watch`
-  request so the laptop publishes snapshots. It renews the watch about every 4 minutes and stops in the background.
-- **Requests.** Commands are `<!-- praxis-request -->` comments. Praxis edits each one into a
-  `<!-- praxis-response <id> -->` answer. The app polls that comment every 1.5 seconds, then deletes it. Only one
-  request is in flight at a time, and a request times out after 45 seconds.
+- **Computers.** Praxis creates one secret gist per computer. The app lists the user's gists and shows those with a
+  `praxis-remote.json` file, with the computer's name, whether it is online, and whether this phone is paired.
+- **Pairing.** The phone and the computer agree a key (P-256 ECDH, HKDF-SHA-256) in one gist comment. Both show a
+  six-digit code, and the user approves the phone on the computer if they match. Keys stay in encrypted preferences.
+- **Live state.** The computer publishes one AES-256-GCM encrypted snapshot per paired phone in the gist's
+  `state.json`. While the app is in the foreground it reads the gist every 3 seconds with `If-None-Match` (a `304` is
+  free) and sends a `watch` request so the computer publishes snapshots. It renews the watch about every 4 minutes and
+  stops in the background.
+- **Requests.** Commands are encrypted `praxis-remote/v2 request` comments. Praxis edits each one into its encrypted
+  answer. The app polls that comment every 1.5 seconds, then deletes it. Only one request is in flight at a time, and a
+  request times out after 45 seconds.
 
-## One-time setup
+## Using it
 
-1. **Create a private repository** for the channel, for example `praxis-remote`. It can be empty.
-2. **Create a GitHub App** at <https://github.com/settings/apps/new>:
-   - _Name_: "Praxis Remote", or any other name. _Homepage URL_: any URL.
-   - Turn on **Enable Device Flow**. A callback URL isn't needed.
-   - Turn off **Expire user authorization tokens**. Otherwise you'll have to sign in again when the token expires,
-     about every 8 hours.
-   - Turn off _Webhook → Active_.
-   - _Repository permissions_: **Issues: Read and write**. _Metadata: Read-only_ is added automatically.
-   - _Where can this GitHub App be installed?_: **Only on this account**.
-   - After creating it, note the **Client ID**, which starts with `Iv`. You don't need a client secret.
-3. **Install the app** from its page (**Install App**) on **only** the channel repository.
-4. **Turn on Remote in Praxis** on your laptop and point it at the same repository. See `remote.rs`.
-5. **Sign in on the phone** with **Sign in with GitHub**, enter the code on github.com, and pick the repository.
-   If the app was built without a client ID, the sign-in screen asks for it.
+1. **Turn on Praxis Remote in Praxis** on your computer and sign in to GitHub there.
+2. **Sign in on the phone** with **Sign in with GitHub** and the same GitHub account, and enter the code on github.com.
+3. **Pick your computer** and pair: check that the code on the phone matches the one Praxis shows, then click Allow on
+   the computer.
 
-Praxis on the laptop only obeys comments written by the account that owns its token. With the GitHub App, the
-comments are posted as your own account, so the laptop must use a token for that same account.
+There is no repository to create and nothing to install on GitHub.
+
+## The GitHub App
+
+The app signs in with GitHub's device flow for a GitHub App, which needs only its client ID. To use your own app,
+create one at <https://github.com/settings/apps/new>:
+
+- _Name_: "Praxis Remote", or any other name. _Homepage URL_: any URL.
+- Turn on **Enable Device Flow**. A callback URL isn't needed. Turn off _Webhook → Active_.
+- _Account permissions_: **Gists: Read and write**. No repository permissions are needed, and the app doesn't need
+  to be installed anywhere: account permissions apply to user access tokens directly.
+- Note the **Client ID**, which starts with `Iv`. You don't need a client secret. User tokens expire after eight hours
+  and the app refreshes them on its own.
+
+Build with `PRAXIS_REMOTE_CLIENT_ID` set, or enter the client ID under **Advanced** on the sign-in screen.
 
 ## Building
 
-You need JDK 17+ and the Android SDK (compileSdk 35). There's no Gradle wrapper, so use Gradle 8.10.x:
+You need JDK 17+ and the Android SDK (compileSdk 35). There's no Gradle wrapper, so use Gradle 8.9 or newer (8.x):
 
 ```sh
-gradle -p remote-android assembleDebug    # app/build/outputs/apk/debug/app-debug.apk
-gradle -p remote-android assembleRelease  # app/build/outputs/apk/release/app-release.apk (signed)
-                                          # or app-release-unsigned.apk without signing variables
+gradle -p remote-android testDebugUnitTest  # protocol crypto against the spec's test vectors
+gradle -p remote-android assembleDebug      # app/build/outputs/apk/debug/app-debug.apk
+gradle -p remote-android assembleRelease    # app/build/outputs/apk/release/app-release.apk (signed)
+                                            # or app-release-unsigned.apk without signing variables
 ```
 
 All of these environment variables are optional:
@@ -57,12 +67,15 @@ the release's `.apk` asset is offered as the download.
 
 ## Layout
 
-| Path                    | Purpose                                                                                       |
-| ----------------------- | --------------------------------------------------------------------------------------------- |
-| `data/GitHubClient.kt`  | OkHttp client for `api.github.com`, with an ETag cache and friendly errors                    |
-| `data/DeviceFlow.kt`    | GitHub device flow sign-in (client ID only)                                                   |
-| `data/RemoteChannel.kt` | Protocol models, snapshot parsing, and the serialized request channel                         |
-| `data/Store.kt`         | Preferences; the token lives in `EncryptedSharedPreferences`                                  |
-| `data/Updates.kt`       | Release-based update check                                                                    |
-| `MainViewModel.kt`      | App state: polling, watch, outbox, and actions                                                |
-| `ui/`                   | Compose screens: sign-in, repository picker, devices, device (Chat, Threads, Files), settings |
+| Path                    | Purpose                                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------------------ |
+| `data/GitHubClient.kt`  | OkHttp client for `api.github.com`, with an ETag cache, token refresh and friendly errors  |
+| `data/DeviceFlow.kt`    | GitHub device flow sign-in and token refresh (client ID only)                              |
+| `data/Tokens.kt`        | Hands out the access token, refreshing it (one refresh at a time)                          |
+| `data/RemoteCrypto.kt`  | Protocol cryptography: P-256, HKDF, AES-GCM blobs (plain JVM, unit tested)                 |
+| `data/Pairing.kt`       | The phone's side of pairing                                                                |
+| `data/RemoteChannel.kt` | Protocol models, gist discovery, snapshot decryption, and the serialized request channel   |
+| `data/Store.kt`         | Preferences; tokens and pairing keys live in `EncryptedSharedPreferences`                  |
+| `data/Updates.kt`       | Release-based update check                                                                 |
+| `MainViewModel.kt`      | App state: computers, pairing, polling, watch, outbox, and actions                         |
+| `ui/`                   | Compose screens: sign-in, computers, pairing, computer (Chat, Threads, Files), settings    |

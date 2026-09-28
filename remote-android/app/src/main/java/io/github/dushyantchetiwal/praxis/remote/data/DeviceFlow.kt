@@ -13,6 +13,7 @@ import org.json.JSONObject
 /**
  * GitHub's device flow for a GitHub App, which needs only the client ID: the
  * user enters a short code at github.com while the app polls for the token.
+ * Tokens from the device flow are refreshed with the client ID alone too.
  */
 class DeviceFlow(context: Context, private val http: OkHttpClient) {
     private val context = context.applicationContext
@@ -81,6 +82,27 @@ class DeviceFlow(context: Context, private val http: OkHttpClient) {
         }
     }
 
+    /**
+     * Trades a refresh token for a new access token. A [FlowException] that is
+     * `transient` means GitHub could not be reached; any other means the
+     * refresh token is no longer accepted.
+     */
+    suspend fun refresh(clientId: String, refreshToken: String): Token {
+        val form = FormBody.Builder()
+            .add("client_id", clientId)
+            .add("grant_type", "refresh_token")
+            .add("refresh_token", refreshToken)
+            .build()
+        val json = post(ACCESS_TOKEN_URL, form)
+        val accessToken = json.optString("access_token")
+        if (accessToken.isEmpty()) throw FlowException(describe(json.optString("error"), json))
+        return Token(
+            accessToken = accessToken,
+            refreshToken = json.optString("refresh_token").takeIf { it.isNotEmpty() },
+            expiresInSeconds = json.optLong("expires_in", 0L).takeIf { it > 0L },
+        )
+    }
+
     private fun describe(error: String, json: JSONObject): String = when (error) {
         "expired_token" -> context.getString(R.string.flow_expired)
         "access_denied" -> context.getString(R.string.flow_denied)
@@ -103,6 +125,9 @@ class DeviceFlow(context: Context, private val http: OkHttpClient) {
             http.fetch(request)
         } catch (e: IOException) {
             throw FlowException(context.getString(R.string.error_network), transient = true)
+        }
+        if (response.code >= 500) {
+            throw FlowException(context.getString(R.string.flow_unexpected, response.code), transient = true)
         }
         val json = response.body?.let { runCatching { JSONObject(it) }.getOrNull() }
         if (json == null) {
