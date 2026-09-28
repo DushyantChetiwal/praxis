@@ -107,6 +107,12 @@ Executes shell commands and returns the combined output, creating a new shell pr
 
 ## Other Tools
 
+### `ask_question`
+
+Asks for a preference or missing requirement, with free text, a single choice, or multiple choices. When the agent supplies a valid recommendation, the question shows it with a **10-second countdown**. If you do not interact, Praxis uses that recommendation and continues; the conversation records this as an automatic recommendation, not as your answer.
+
+Typing, changing a selection, or submitting pauses automatic continuation for that question. Decline, Cancel, and stopping the agent never select the recommendation. Questions without a safe recommendation wait for a manual answer. This timeout applies only to `ask_question`, not to tool permissions or approval to leave Plan mode.
+
 ### `skill`
 
 Loads instructions from an available [Skill](./skills.md) so the agent can follow project-specific or workflow-specific guidance. Skills can also be invoked by you directly with slash commands.

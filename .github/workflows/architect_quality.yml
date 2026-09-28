@@ -146,6 +146,13 @@ jobs:
       - name: Test Architect canvas support
         run: "cargo test --locked -p agent_ui --lib architect_ui::"
 
+      - name: Test question recommendations and countdowns
+        run: |
+          cargo test --locked -p agent --lib tools::ask_question_tool::tests::
+          cargo test --locked -p agent --lib internal_tests::test_ask_question_uses_the_owning_session_elicitation -- --exact
+          cargo test --locked -p acp_thread --lib test_question_
+          cargo test --locked -p agent_ui --lib question_text_edits_ignore_defaults_and_preserve_edits
+
       - name: Test Praxis Remote
         run: "cargo test --locked -p agent_ui --lib remote::tests::"
 

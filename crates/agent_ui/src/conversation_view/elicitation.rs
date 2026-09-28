@@ -43,6 +43,7 @@ pub(crate) struct ElicitationFormState {
     fields: HashMap<String, ElicitationFieldState>,
     field_errors: HashMap<String, SharedString>,
     is_submitting: bool,
+    edit_subscriptions: Vec<gpui::Subscription>,
 }
 
 impl ElicitationFormState {
@@ -115,6 +116,29 @@ impl ElicitationFormState {
             fields,
             field_errors: HashMap::default(),
             is_submitting: false,
+            edit_subscriptions: Vec::new(),
+        }
+    }
+
+    pub(crate) fn observe_text_edits(&mut self, on_edit: Rc<dyn Fn(&mut App)>, cx: &mut App) {
+        for field in self.fields.values() {
+            let ElicitationFieldState::Text(editor) = field else {
+                continue;
+            };
+            // Defaults may have queued BufferEdited before we subscribed. Compare
+            // against the initialized text, rather than treating that as input.
+            let mut previous_text = editor.read(cx).text(cx);
+            let on_edit = on_edit.clone();
+            self.edit_subscriptions
+                .push(cx.subscribe(editor, move |editor, event, cx| {
+                    if matches!(event, editor::EditorEvent::BufferEdited) {
+                        let text = editor.read(cx).text(cx);
+                        if text != previous_text {
+                            previous_text = text;
+                            on_edit(cx);
+                        }
+                    }
+                }));
         }
     }
 
@@ -488,6 +512,42 @@ mod tests {
             });
             cx.run_until_parked();
         }
+    }
+
+    #[gpui::test]
+    fn question_text_edits_ignore_defaults_and_preserve_edits(cx: &mut TestAppContext) {
+        init_keyboard_test(cx);
+        let edited = Rc::new(std::cell::Cell::new(false));
+        let flag = edited.clone();
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut view = TestElicitationView::new(
+                acp::ElicitationSchema::new().property(
+                    "answer",
+                    acp::StringPropertySchema::new().default_value("initial"),
+                    true,
+                ),
+                window,
+                cx,
+            );
+            view.form_state
+                .observe_text_edits(Rc::new(move |_| flag.set(true)), cx);
+            view
+        });
+        cx.run_until_parked();
+        assert!(!edited.get(), "initial defaults must not pause the timer");
+        let editor = view.read_with(cx, |view, _| view.editor("answer"));
+        cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+        cx.simulate_input("edited");
+        cx.run_until_parked();
+        assert!(edited.get(), "BufferEdited must stop auto-answer");
+        let before = editor.read_with(cx, |editor, cx| editor.text(cx));
+        view.update(cx, |view, cx| {
+            view.elicitation.request.message =
+                "Recommendation: initial. Auto-answer paused; waiting for your answer.".into();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(editor.read_with(cx, |editor, cx| editor.text(cx)), before);
     }
 
     #[gpui::test]

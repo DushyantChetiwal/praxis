@@ -2652,8 +2652,11 @@ impl ThreadView {
             && let Some(schema) = schema
             && !self.elicitation_form_states.contains_key(&id)
         {
-            self.elicitation_form_states
-                .insert(id, ElicitationFormState::new(&schema, window, cx));
+            let mut form = ElicitationFormState::new(&schema, window, cx);
+            if let Some(on_interaction) = self.question_interaction_callback(&id, cx) {
+                form.observe_text_edits(on_interaction, cx);
+            }
+            self.elicitation_form_states.insert(id, form);
         } else if !is_pending {
             self.elicitation_form_states.remove(&id);
         }
@@ -2671,12 +2674,43 @@ impl ThreadView {
         self.elicitation_form_states.contains_key(id)
     }
 
+    fn question_interaction_callback(
+        &self,
+        id: &ElicitationEntryId,
+        cx: &App,
+    ) -> Option<Rc<dyn Fn(&mut App)>> {
+        let flag = self.thread.read(cx).question_interaction_flag(id)?;
+        let thread = self.thread.downgrade();
+        let id = id.clone();
+        Some(Rc::new(move |cx| {
+            // Stop the timer before deferring the notification. In particular,
+            // editor events can arrive while a thread observer is being handled.
+            if flag.replace(true) {
+                return;
+            }
+            let thread = thread.clone();
+            let id = id.clone();
+            cx.defer(move |cx| {
+                if let Some(thread) = thread.upgrade() {
+                    thread.update(cx, |thread, cx| thread.mark_question_interaction(&id, cx));
+                }
+            });
+        }))
+    }
+
+    fn mark_question_interaction(&self, id: &ElicitationEntryId, cx: &mut App) {
+        if let Some(callback) = self.question_interaction_callback(id, cx) {
+            callback(cx);
+        }
+    }
+
     fn submit_elicitation(
         &mut self,
         elicitation_id: ElicitationEntryId,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.mark_question_interaction(&elicitation_id, cx);
         let mode = self
             .thread
             .read(cx)
@@ -2798,6 +2832,7 @@ impl ThreadView {
         response: acp::CreateElicitationResponse,
         cx: &mut Context<Self>,
     ) {
+        self.mark_question_interaction(&elicitation_id, cx);
         let session_id = self.session_id.clone();
         self.elicitation_form_states.remove(&elicitation_id);
         self.conversation.update(cx, |conversation, cx| {
@@ -6761,6 +6796,7 @@ impl ThreadView {
                 let view = view.clone();
                 move |elicitation_id, field_name, value, cx| {
                     view.update(cx, |this, cx| {
+                        this.mark_question_interaction(&elicitation_id, cx);
                         if let Some(form) = this.elicitation_form_states.get_mut(&elicitation_id) {
                             form.set_boolean(&field_name, value);
                             cx.notify();
@@ -6773,6 +6809,7 @@ impl ThreadView {
                 let view = view.clone();
                 move |elicitation_id, field_name, value, cx| {
                     view.update(cx, |this, cx| {
+                        this.mark_question_interaction(&elicitation_id, cx);
                         if let Some(form) = this.elicitation_form_states.get_mut(&elicitation_id) {
                             form.set_single_select(&field_name, value);
                             cx.notify();
@@ -6783,6 +6820,7 @@ impl ThreadView {
             },
             move |elicitation_id, field_name, value, selected, cx| {
                 view.update(cx, |this, cx| {
+                    this.mark_question_interaction(&elicitation_id, cx);
                     if let Some(form) = this.elicitation_form_states.get_mut(&elicitation_id) {
                         form.set_multi_select(&field_name, value, selected);
                         cx.notify();

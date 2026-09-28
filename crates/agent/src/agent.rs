@@ -8446,6 +8446,7 @@ mod internal_tests {
                         },
                     ],
                     allow_multiple: false,
+                    recommendation: None,
                 }),
                 event_stream,
                 cx,
