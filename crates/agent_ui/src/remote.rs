@@ -1046,9 +1046,20 @@ fn architect_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
     let graph = thread.architect_graph()?;
     let run = thread.architect_run();
     let running = run.is_some_and(agent::ArchitectRun::is_running);
+    // Branches of a plan run side by side, so there can be several at once.
+    let running_steps: Vec<Value> = run
+        .filter(|run| run.is_running())
+        .map(|run| {
+            run.running_steps()
+                .iter()
+                .map(|step| json!({ "title": step.title.to_string(), "path": step.path }))
+                .collect()
+        })
+        .unwrap_or_default();
     Some(json!({
         "steps": graph.nodes.len(),
         "running": running,
+        "running_steps": running_steps,
         "current_step": run
             .filter(|run| run.is_running())
             .map(|run| run.current_title.to_string()),

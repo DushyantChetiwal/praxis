@@ -137,15 +137,35 @@ impl ArchitectPane {
             .unwrap_or_default()
     }
 
-    /// The step the run is carrying out, if one is. Only the leaf matters for
-    /// highlighting, since the canvas shows one level at a time.
-    pub(super) fn running_node<'a>(&self, cx: &'a App) -> Option<&'a NodeId> {
-        self.thread
-            .read(cx)
-            .architect_run()?
-            .current
-            .as_ref()?
-            .leaf()
+    /// The steps the run is carrying out, of which a fork has several. Only
+    /// the leaves matter for highlighting, since the canvas shows one level at
+    /// a time. Between steps, the step the run is deciding a way out of stays
+    /// highlighted.
+    pub(super) fn running_nodes(&self, cx: &App) -> Vec<NodeId> {
+        let Some(run) = self.thread.read(cx).architect_run() else {
+            return Vec::new();
+        };
+        let steps = run.running_steps();
+        if steps.is_empty() {
+            let current = run.current.as_ref().and_then(NodePath::leaf);
+            return current.cloned().into_iter().collect();
+        }
+        steps
+            .iter()
+            .filter_map(|step| step.path.leaf().cloned())
+            .collect()
+    }
+}
+
+/// "Step 4 · Write the tests" for one running step, "Running 3 steps" for
+/// several, and `None` once the run has ended.
+pub(crate) fn running_summary(run: &agent::ArchitectRun) -> Option<SharedString> {
+    if !run.is_running() {
+        return None;
+    }
+    match run.running_steps() {
+        [] | [_] => Some(format!("Step {} · {}", run.step_number, run.current_title).into()),
+        steps => Some(format!("Running {} steps", steps.len()).into()),
     }
 }
 

@@ -2621,7 +2621,7 @@ mod tests {
                 pane.is_running(cx),
                 "closing the canvas must not stop its run"
             );
-            assert_eq!(pane.running_node(cx), Some(&parent));
+            assert_eq!(pane.running_nodes(cx), vec![parent.clone()]);
         });
         reopened.update(cx, |pane, cx| pane.stop_run(cx));
         reopened.read_with(cx, |pane, cx| {
@@ -3196,14 +3196,18 @@ mod tests {
                 Some("https://example.com/workflows/architect-run".into()),
                 cx,
             );
-            thread.note_architect_run_position(
+            let visit = thread.note_architect_run_position(
                 NodePath::root(parent.clone()),
                 "Parent".into(),
                 1,
                 1,
                 cx,
             );
-            thread.finish_architect_run_step(Some("Validated the selected step output".into()), cx);
+            thread.finish_architect_run_step(
+                visit,
+                Some("Validated the selected step output".into()),
+                cx,
+            );
         });
         cx.run_until_parked();
         thread.read_with(cx, |thread, _| {

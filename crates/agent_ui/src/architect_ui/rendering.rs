@@ -371,18 +371,13 @@ impl ArchitectPane {
             1 => "Select the one thing that needs attention".into(),
             count => format!("Select the first of {count} things that need attention").into(),
         };
-        let run_status: Option<SharedString> =
-            self.thread
-                .read(cx)
-                .architect_run()
-                .and_then(|run| match &run.outcome {
-                    Some(outcome) => root.map(|root| outcome.summary(root).into()),
-                    // Loops can take a run past the number of steps, so no
-                    // total is shown for the step number to exceed.
-                    None => {
-                        Some(format!("Step {} · {}", run.step_number, run.current_title).into())
-                    }
-                });
+        let latest_run = self.thread.read(cx).architect_run();
+        let run_status: Option<SharedString> = latest_run.and_then(|run| match &run.outcome {
+            Some(outcome) => root.map(|root| outcome.summary(root).into()),
+            // Loops can take a run past the number of steps, so no total is
+            // shown for the step number to exceed.
+            None => super::run::running_summary(run),
+        });
 
         // One line, in the order the plan is read: where you are, what it is,
         // then what is being done to it.
@@ -890,7 +885,7 @@ impl ArchitectPane {
             Some(Selection::Node(id)) => Some(id),
             _ => None,
         };
-        let running = self.running_node(cx);
+        let running = self.running_nodes(cx);
         let run = self.thread.read(cx).architect_run();
         let run_active = self.is_running(cx);
         let failed_node = run.and_then(|run| match run.outcome.as_ref() {
@@ -1121,7 +1116,7 @@ impl ArchitectPane {
                                     let keyboard_id = node.id.clone();
                                     let is_selected = selected == Some(&node.id)
                                         || self.in_bulk_selection(&node.id);
-                                    let is_running = running == Some(&node.id);
+                                    let is_running = running.contains(&node.id);
                                     let is_failed = failed_node == Some(&node.id);
                                     let is_complete = node
                                         .result
@@ -1294,7 +1289,10 @@ impl ArchitectPane {
                 .root_graph(cx)
                 .map(|graph| outcome.summary(graph).into())
                 .unwrap_or_else(|| SharedString::from("Run finished")),
-            None => format!("Running {}", run.current_title).into(),
+            None => match run.running_steps() {
+                [] | [_] => format!("Running {}", run.current_title).into(),
+                steps => format!("Running {} steps", steps.len()).into(),
+            },
         };
         let succeeded = run.outcome.as_ref().is_some_and(RunOutcome::is_success);
         let cancelled = matches!(run.outcome.as_ref(), Some(RunOutcome::Cancelled));
@@ -1483,14 +1481,14 @@ impl ArchitectPane {
             (left, top, (right - left).max(0.0), (bottom - top).max(0.0))
         });
 
-        let running = self.running_node(cx).cloned();
+        let running = self.running_nodes(cx);
         let selected = match &self.selection {
             Some(Selection::Node(id)) => Some(id.clone()),
             _ => None,
         };
 
         let blocks = positions.into_iter().map(|(id, position)| {
-            let is_running = running.as_ref() == Some(&id);
+            let is_running = running.contains(&id);
             let is_selected = selected.as_ref() == Some(&id) || self.in_bulk_selection(&id);
             div()
                 .absolute()
@@ -1745,7 +1743,7 @@ impl ArchitectPane {
         // alone, so it is the one part given a colour of its own.
         let loop_color = cx.theme().status().warning.opacity(0.85);
 
-        let running = self.running_node(cx);
+        let running = self.running_nodes(cx);
         let mut curves = Vec::new();
         for edge in &graph.edges {
             let (Some(from), Some(to)) = (
@@ -1755,7 +1753,7 @@ impl ArchitectPane {
                 continue;
             };
             let selected = self.selection == Some(Selection::Edge(edge.id.clone()));
-            let active = running == Some(&edge.to);
+            let active = running.contains(&edge.to);
             let completed = graph
                 .node(&edge.from)
                 .and_then(|node| node.result.as_ref())
@@ -2099,7 +2097,12 @@ impl ArchitectPane {
         let Some(subplan) = node.subplan() else {
             return div().into_any();
         };
-        let running_here = self.thread.read(cx).architect_running_step().cloned();
+        let running_here: Vec<NodePath> = self
+            .thread
+            .read(cx)
+            .architect_running_steps()
+            .cloned()
+            .collect();
         let shown = subplan.nodes.len().min(EXPANDED_CHILD_LIMIT);
         let hidden = subplan.nodes.len() - shown;
         let drill_id = node.id.clone();
@@ -2127,7 +2130,7 @@ impl ArchitectPane {
                     .gap_1()
                     .children(subplan.nodes.iter().take(shown).enumerate().map(
                         |(child_ix, child)| {
-                            let child_running = running_here.as_ref().is_some_and(|path| {
+                            let child_running = running_here.iter().any(|path| {
                                 path.0.last() == Some(&child.id)
                                     && path.0.len() > self.focus.0.len()
                             });
@@ -2223,7 +2226,7 @@ impl ArchitectPane {
             || self.in_bulk_selection(&node.id);
         let hovered = self.hovered_node.as_ref() == Some(&node.id);
         let detailed = self.zoom >= DETAIL_ZOOM_THRESHOLD;
-        let running = self.running_node(cx) == Some(&node.id);
+        let running = self.running_nodes(cx).contains(&node.id);
         let run = self.thread.read(cx).architect_run();
         let run_active = run.is_some_and(agent::ArchitectRun::is_running);
         let failed =

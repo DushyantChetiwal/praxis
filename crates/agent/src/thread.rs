@@ -271,6 +271,9 @@ pub struct RunStep {
     /// The thread the step ran in, when it had one of its own, so what it did
     /// can be read afterwards.
     pub session_id: Option<acp::SessionId>,
+    /// The visit this entry records. Steps running side by side finish in any
+    /// order, so an entry is found by its visit rather than by being last.
+    visit: ArchitectStepVisitId,
     started_at: Instant,
     /// Set when the step ends, so a finished step stops counting up.
     elapsed: Option<Duration>,
@@ -281,16 +284,42 @@ impl RunStep {
         self.elapsed.is_none()
     }
 
+    pub fn visit(&self) -> ArchitectStepVisitId {
+        self.visit
+    }
+
+    fn close(&mut self) {
+        if self.is_running() {
+            self.elapsed = Some(self.started_at.elapsed());
+        }
+    }
+
     /// How long the step took, or has been going so far.
     pub fn elapsed(&self) -> Duration {
         self.elapsed.unwrap_or_else(|| self.started_at.elapsed())
     }
 }
 
+/// A step a run is carrying out right now. A fork runs several at once.
+pub struct RunningStep {
+    pub path: architect::NodePath,
+    pub title: SharedString,
+    pub visit: ArchitectStepVisitId,
+    step_thread: Option<WeakEntity<acp_thread::AcpThread>>,
+}
+
+impl RunningStep {
+    /// The thread the step runs in, when it has one of its own.
+    pub fn step_thread(&self) -> Option<Entity<acp_thread::AcpThread>> {
+        self.step_thread.as_ref().and_then(WeakEntity::upgrade)
+    }
+}
+
 /// A plan being carried out, and enough of its position to show progress
 /// wherever the user happens to be looking.
 pub struct ArchitectRun {
-    /// The step in progress, or `None` once the run has ended.
+    /// The step most recently started, or `None` once the run has ended. When
+    /// branches run side by side, see `running_steps` for all of them.
     pub current: Option<architect::NodePath>,
     /// The title of that step, kept alongside the path so that progress can be
     /// shown without walking the plan every frame.
@@ -305,9 +334,15 @@ pub struct ArchitectRun {
     /// Every step taken, in the order taken, including repeats. Kept after the
     /// run ends: what a run actually did is worth more once it is over.
     history: Vec<RunStep>,
-    /// The thread the current step runs in, when steps run in threads of their
-    /// own, so that stopping the run also stops that step's turn.
+    /// The steps in progress, in the order they started.
+    running: Vec<RunningStep>,
+    /// The thread the most recent step ran in, which is also where the
+    /// question deciding its way out is put.
     step_thread: Option<WeakEntity<acp_thread::AcpThread>>,
+    /// What the run needs to carry on: its position in every branch and the
+    /// turns it has in flight. Kept after a run is stopped, so that stopping
+    /// can cancel those turns and the run can be picked up again.
+    control: Option<Rc<RefCell<crate::architect_runner::RunState>>>,
     /// Dropping this stops the run at its next await point. Held here so that
     /// closing the canvas cannot abandon a run.
     _task: Task<()>,
@@ -326,8 +361,37 @@ impl ArchitectRun {
         self.remote_workflow_url.as_deref()
     }
 
+    /// Every step in progress, oldest first.
+    pub fn running_steps(&self) -> &[RunningStep] {
+        &self.running
+    }
+
+    /// The thread of the most recently started step that has one, or, between
+    /// steps, of the step that ran last.
     pub fn step_thread(&self) -> Option<Entity<acp_thread::AcpThread>> {
-        self.step_thread.as_ref().and_then(WeakEntity::upgrade)
+        self.running
+            .iter()
+            .rev()
+            .find_map(RunningStep::step_thread)
+            .or_else(|| self.step_thread.as_ref().and_then(WeakEntity::upgrade))
+    }
+
+    pub(crate) fn control(&self) -> Option<&Rc<RefCell<crate::architect_runner::RunState>>> {
+        self.control.as_ref()
+    }
+
+    fn close_running_steps(&mut self) {
+        for step in &mut self.history {
+            step.close();
+        }
+        self.running.clear();
+    }
+
+    fn history_entry_mut(&mut self, visit: ArchitectStepVisitId) -> Option<&mut RunStep> {
+        self.history
+            .iter_mut()
+            .rev()
+            .find(|step| step.visit == visit)
     }
 }
 
@@ -1601,10 +1665,11 @@ pub struct Thread {
     /// The Architect plan drafted in this thread. The conversation governs the
     /// plan, so the two live and die together.
     architect_graph: Option<architect::ArchitectGraph>,
-    /// The exact run visit `complete_step` may report on. Deliberately not
-    /// persisted: a run does not survive a restart. The unique visit id prevents
-    /// a late tool call from writing onto a later visit or a different step.
-    architect_active_visit: Option<ActiveArchitectStepVisit>,
+    /// The exact run visits `complete_step` may report on, one per step in
+    /// progress, oldest first. Deliberately not persisted: a run does not
+    /// survive a restart. The unique visit id prevents a late tool call from
+    /// writing onto a later visit or a different step.
+    architect_active_visits: Vec<ActiveArchitectStepVisit>,
     /// Whether the thread is planning or building.
     ///
     /// Shared, because the mode selector in the UI has to read it without an
@@ -1798,7 +1863,7 @@ impl Thread {
             running_subagents: Vec::new(),
             inherits_parent_model_settings: true,
             architect_graph: None,
-            architect_active_visit: None,
+            architect_active_visits: Vec::new(),
             session_mode: Rc::new(Cell::new(SessionMode::default())),
             architect_run: None,
             sandboxed_terminal_temp_dir: None,
@@ -2191,7 +2256,7 @@ impl Thread {
             running_subagents: Vec::new(),
             inherits_parent_model_settings: true,
             architect_graph: db_thread.architect_graph,
-            architect_active_visit: None,
+            architect_active_visits: Vec::new(),
             session_mode: Rc::new(Cell::new(session_mode)),
             architect_run: None,
             sandboxed_terminal_temp_dir: db_thread.sandboxed_terminal_temp_dir,
@@ -2380,16 +2445,30 @@ impl Thread {
             outcome: None,
             remote_workflow_url: None,
             history: Vec::new(),
+            running: Vec::new(),
             step_thread: None,
+            control: None,
             _task: task,
         });
+        self.architect_active_visits.clear();
         cx.notify();
     }
 
-    /// Records the thread the current step runs in. A step running in this
-    /// thread's own conversation has no separate thread to record.
+    /// Hands the run what it needs to be stopped and picked up again.
+    pub(crate) fn set_architect_run_control(
+        &mut self,
+        control: Rc<RefCell<crate::architect_runner::RunState>>,
+    ) {
+        if let Some(run) = self.architect_run.as_mut() {
+            run.control = Some(control);
+        }
+    }
+
+    /// Records the thread a step runs in. A step running in this thread's own
+    /// conversation has no separate thread to record.
     pub fn set_architect_run_step_thread(
         &mut self,
+        visit: ArchitectStepVisitId,
         step_thread: &Entity<acp_thread::AcpThread>,
         cx: &mut Context<Self>,
     ) {
@@ -2397,7 +2476,10 @@ impl Thread {
         let own_thread = session_id == self.id;
         if let Some(run) = self.architect_run.as_mut() {
             run.step_thread = Some(step_thread.downgrade());
-            if !own_thread && let Some(step) = run.history.last_mut() {
+            if let Some(step) = run.running.iter_mut().find(|step| step.visit == visit) {
+                step.step_thread = Some(step_thread.downgrade());
+            }
+            if !own_thread && let Some(step) = run.history_entry_mut(visit) {
                 step.session_id = Some(session_id);
             }
             cx.notify();
@@ -2425,7 +2507,11 @@ impl Thread {
         cx: &mut Context<Self>,
     ) -> ArchitectStepVisitId {
         let visit_id = ArchitectStepVisitId(Uuid::new_v4());
-        self.architect_active_visit = Some(ActiveArchitectStepVisit {
+        // A new visit to a step supersedes any earlier one still open, so a
+        // late report from that one cannot land on this.
+        self.architect_active_visits
+            .retain(|visit| visit.path != current);
+        self.architect_active_visits.push(ActiveArchitectStepVisit {
             id: visit_id,
             path: current.clone(),
             attempt,
@@ -2434,12 +2520,20 @@ impl Thread {
             run.current = Some(current.clone());
             run.current_title = current_title.clone();
             run.step_number = step_number;
+            run.running.retain(|step| step.path != current);
+            run.running.push(RunningStep {
+                path: current.clone(),
+                title: current_title.clone(),
+                visit: visit_id,
+                step_thread: None,
+            });
             run.history.push(RunStep {
                 path: current,
                 title: current_title,
                 attempt,
                 summary: None,
                 session_id: None,
+                visit: visit_id,
                 started_at: Instant::now(),
                 elapsed: None,
             });
@@ -2448,22 +2542,31 @@ impl Thread {
         visit_id
     }
 
-    /// Closes off the step the run is in, with whatever it reported.
+    /// Closes off a step the run is in, with whatever it reported.
     ///
     /// Kept separate from moving to the next step because a step can end without
     /// another following it, and a run that ended should not leave its last step
     /// counting up forever.
     pub fn finish_architect_run_step(
         &mut self,
+        visit: ArchitectStepVisitId,
         summary: Option<SharedString>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(run) = self.architect_run.as_mut()
-            && let Some(step) = run.history.last_mut()
-            && step.is_running()
-        {
-            step.elapsed = Some(step.started_at.elapsed());
-            step.summary = summary;
+        if let Some(run) = self.architect_run.as_mut() {
+            if let Some(step) = run.history_entry_mut(visit)
+                && step.is_running()
+            {
+                step.close();
+                step.summary = summary;
+            }
+            run.running.retain(|step| step.visit != visit);
+            // What is shown as the run's position stays on the latest step
+            // still going, or on this one while the run decides where next.
+            if let Some(latest) = run.running.last() {
+                run.current = Some(latest.path.clone());
+                run.current_title = latest.title.clone();
+            }
         }
         cx.notify();
     }
@@ -2471,16 +2574,16 @@ impl Thread {
     pub fn finish_architect_run(&mut self, outcome: architect::RunOutcome, cx: &mut Context<Self>) {
         if let Some(run) = self.architect_run.as_mut() {
             run.current = None;
+            // Only a run that was cut short can be picked up again.
+            if !outcome.is_resumable() {
+                run.control = None;
+            }
             run.outcome = Some(outcome);
             // A run cancelled mid-step leaves that step open, and a step that
             // never ends reads as one still running.
-            if let Some(step) = run.history.last_mut()
-                && step.is_running()
-            {
-                step.elapsed = Some(step.started_at.elapsed());
-            }
+            run.close_running_steps();
         }
-        self.architect_active_visit = None;
+        self.architect_active_visits.clear();
         cx.notify();
     }
 
@@ -2504,15 +2607,11 @@ impl Thread {
             if run.outcome.is_none() {
                 run.current = None;
                 run.outcome = Some(architect::RunOutcome::Cancelled);
-                if let Some(step) = run.history.last_mut()
-                    && step.is_running()
-                {
-                    step.elapsed = Some(step.started_at.elapsed());
-                }
+                run.close_running_steps();
             }
             run._task = Task::ready(());
         }
-        self.architect_active_visit = None;
+        self.architect_active_visits.clear();
         cx.notify();
     }
 
@@ -2540,20 +2639,24 @@ impl Thread {
         cx.notify();
     }
 
-    /// The step a run is carrying out, which is the step `complete_step` is
-    /// allowed to write a summary onto.
+    /// The step a run most recently started, which is the step an unbound
+    /// `complete_step` is allowed to write a summary onto.
     pub fn architect_running_step(&self) -> Option<&architect::NodePath> {
-        self.architect_active_visit
-            .as_ref()
-            .map(|visit| &visit.path)
+        self.architect_active_visits.last().map(|visit| &visit.path)
+    }
+
+    /// Every step a run is carrying out, oldest first.
+    pub fn architect_running_steps(&self) -> impl Iterator<Item = &architect::NodePath> {
+        self.architect_active_visits.iter().map(|visit| &visit.path)
     }
 
     pub fn architect_step_visit_id(&self) -> Option<ArchitectStepVisitId> {
-        self.architect_active_visit.as_ref().map(|visit| visit.id)
+        self.architect_active_visits.last().map(|visit| visit.id)
     }
 
-    pub fn clear_architect_step_visit(&mut self) {
-        self.architect_active_visit = None;
+    pub fn clear_architect_step_visit(&mut self, visit_id: ArchitectStepVisitId) {
+        self.architect_active_visits
+            .retain(|visit| visit.id != visit_id);
     }
 
     pub fn complete_architect_step_visit(
@@ -2562,13 +2665,14 @@ impl Thread {
         summary: String,
         cx: &mut Context<Self>,
     ) -> Result<(String, usize), ArchitectStepCompletionError> {
-        let visit = self
-            .architect_active_visit
-            .as_ref()
-            .ok_or(ArchitectStepCompletionError::NoActiveVisit)?;
-        if visit.id != visit_id {
-            return Err(ArchitectStepCompletionError::StaleVisit);
+        if self.architect_active_visits.is_empty() {
+            return Err(ArchitectStepCompletionError::NoActiveVisit);
         }
+        let visit = self
+            .architect_active_visits
+            .iter()
+            .find(|visit| visit.id == visit_id)
+            .ok_or(ArchitectStepCompletionError::StaleVisit)?;
         let path = visit.path.clone();
         let attempt = visit.attempt;
         let graph = self

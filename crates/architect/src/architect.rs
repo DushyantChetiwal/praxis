@@ -15,7 +15,7 @@ mod spec;
 pub use layout::{COLUMN_SPACING, Position, ROW_SPACING, layout_positions};
 pub use run::{
     Branch, Decision, MAX_NODE_VISITS, MAX_PLAN_DEPTH, MAX_RUN_STEPS, PlanRun, RunOutcome,
-    RunRefusal, branch_prompt, parse_verdict, step_prompt,
+    RunRefusal, branch_prompt, parallel_steps_prompt, parse_verdict, step_prompt,
 };
 pub use spec::compile_spec;
 
@@ -254,8 +254,9 @@ pub enum GraphProblem {
     EmptyCondition(EdgeId),
     /// A step still open for deliberation.
     Unlocked(NodeId),
-    /// A loop that always goes round again: every step in it has exactly one
-    /// way on, unconditional and unlimited, so a run could never leave it.
+    /// A loop that always goes round again: every step in it goes on only by
+    /// unconditional, unlimited connections, all of which a run takes, so it
+    /// could never leave the loop.
     EndlessLoop(NodeId),
     /// Something wrong inside a step's nested plan.
     InSubplan {
@@ -1417,24 +1418,25 @@ impl ArchitectGraph {
     }
 
     /// Where a run must go after this step, when it has no say in the matter:
-    /// no conditional way out, and a first plain connection with no repeat
-    /// limit. `None` whenever the run could go more than one way.
-    fn forced_successor(&self, id: &NodeId) -> Option<&NodeId> {
-        let mut first_plain = None;
-        // Not `edges_from`, whose result borrows `id`: the successor returned
-        // here has to outlive the id it was looked up by.
+    /// with no conditional way out, every plain connection without a repeat
+    /// limit is taken, since several plain connections run side by side.
+    /// Empty whenever a condition decides.
+    fn forced_successors(&self, id: &NodeId) -> Vec<&NodeId> {
+        let mut forced: Vec<&NodeId> = Vec::new();
+        // Not `edges_from`, whose result borrows `id`: the successors returned
+        // here have to outlive the id they were looked up by.
         for edge in self.edges.iter().filter(|edge| &edge.from == id) {
             if self.node(&edge.to).is_none() {
                 continue;
             }
             if !edge.condition.is_always() {
-                return None;
+                return Vec::new();
             }
-            first_plain.get_or_insert(edge);
+            if edge.max_repeats.is_none() && !forced.contains(&&edge.to) {
+                forced.push(&edge.to);
+            }
         }
-        first_plain
-            .filter(|edge| edge.max_repeats.is_none())
-            .map(|edge| &edge.to)
+        forced
     }
 
     /// Loops a run could never leave, each reported once by its first step in
@@ -1447,8 +1449,17 @@ impl ArchitectGraph {
             if unreachable.contains(&node.id) || in_reported_loop.contains(&node.id) {
                 continue;
             }
+            // Depth first along forced connections. A step with several of
+            // them forks, so a loop through any one of them is endless.
             let mut walk = vec![node.id.clone()];
-            while let Some(next) = walk.last().and_then(|id| self.forced_successor(id)) {
+            let mut pending = vec![self.forced_successors(&node.id).into_iter()];
+            let mut explored: HashSet<NodeId> = HashSet::default();
+            while let Some(successors) = pending.last_mut() {
+                let Some(next) = successors.next() else {
+                    pending.pop();
+                    explored.extend(walk.pop());
+                    continue;
+                };
                 if let Some(start) = walk.iter().position(|id| id == next) {
                     let cycle = &walk[start..];
                     let is_new = cycle.iter().all(|id| !in_reported_loop.contains(id));
@@ -1459,12 +1470,13 @@ impl ArchitectGraph {
                         loops.extend(first.cloned());
                     }
                     in_reported_loop.extend(cycle.iter().cloned());
-                    break;
+                    continue;
                 }
-                if walk.len() > self.nodes.len() {
-                    break;
+                if explored.contains(next) || walk.len() > self.nodes.len() {
+                    continue;
                 }
                 walk.push(next.clone());
+                pending.push(self.forced_successors(next).into_iter());
             }
         }
         loops

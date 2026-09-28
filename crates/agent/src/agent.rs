@@ -2249,13 +2249,14 @@ impl NativeAgentConnection {
     /// prompt already carries everything the step needs, including what earlier
     /// steps reported, so each step gets the whole context window to itself and
     /// the plan's conversation is not filled with every step's tool output. Its
-    /// `complete_step` writes to the plan's thread, which knows the step being
-    /// carried out. Registered as a subagent of the plan's session, so it is
-    /// saved, reopened, and deleted with it.
+    /// `complete_step` writes to the plan's thread, bound to this step's visit,
+    /// since other steps may be running alongside it. Registered as a subagent
+    /// of the plan's session, so it is saved, reopened, and deleted with it.
     pub fn create_architect_run_step_thread(
         &self,
         parent_session_id: &acp::SessionId,
         title: SharedString,
+        visit: crate::ArchitectStepVisitId,
         cx: &mut App,
     ) -> Result<Entity<AcpThread>> {
         let (parent_thread, project_id) = {
@@ -2280,7 +2281,8 @@ impl NativeAgentConnection {
             thread
         });
         thread.update(cx, |thread, _cx| {
-            thread.add_tool(CompleteStepTool::new(parent_thread.downgrade()));
+            let complete_step = CompleteStepTool::for_visit(parent_thread.downgrade(), visit);
+            thread.add_tool(complete_step);
         });
         self.0.update(cx, |agent, cx| -> Result<Entity<AcpThread>> {
             let acp_thread = agent.register_session(thread, project_id, cx);
@@ -8867,13 +8869,13 @@ mod internal_tests {
         let first = architect::NodePath(vec![architect::NodeId::from("first")]);
         let second = architect::NodePath(vec![architect::NodeId::from("second")]);
 
-        thread.update(cx, |thread, cx| {
+        let first_visit = thread.update(cx, |thread, cx| {
             thread.start_architect_run(first.clone(), "First".into(), Task::ready(()), cx);
             thread.set_architect_run_remote_workflow_url(
                 Some("https://example.com/workflows/architect-run".into()),
                 cx,
             );
-            thread.note_architect_run_position(first.clone(), "First".into(), 1, 1, cx);
+            thread.note_architect_run_position(first.clone(), "First".into(), 1, 1, cx)
         });
 
         thread.read_with(cx, |thread, _| {
@@ -8890,7 +8892,7 @@ mod internal_tests {
         });
 
         thread.update(cx, |thread, cx| {
-            thread.finish_architect_run_step(Some("wrote the migration".into()), cx);
+            thread.finish_architect_run_step(first_visit, Some("wrote the migration".into()), cx);
         });
 
         thread.read_with(cx, |thread, _| {
@@ -9077,6 +9079,130 @@ mod internal_tests {
                 thread.entries().is_empty(),
                 "a successful run leaves the plan's conversation untouched"
             );
+        });
+    }
+
+    /// The requests the fake model is answering that carry a step's brief,
+    /// oldest first.
+    fn pending_step_briefs(
+        fake: &FakeLanguageModelProvider,
+    ) -> Vec<(language_model::LanguageModelRequest, String)> {
+        fake.pending_completions()
+            .into_iter()
+            .filter_map(|request| {
+                let brief = request_texts_after_system(&request.messages).pop()?;
+                brief.contains("## Step").then_some((request, brief))
+            })
+            .collect()
+    }
+
+    /// start → left, start → right, left → join, right → join, all locked.
+    fn diamond_plan() -> architect::ArchitectGraph {
+        let mut graph = architect::ArchitectGraph::default();
+        let steps = [
+            ("start", "Start"),
+            ("left", "Left"),
+            ("right", "Right"),
+            ("join", "Join"),
+        ];
+        for (id, title) in steps {
+            let mut node = architect::ArchitectNode::new(id, title);
+            node.locked = true;
+            graph.add_node(node);
+        }
+        graph.connect("start", "left");
+        graph.connect("start", "right");
+        graph.connect("left", "join");
+        graph.connect("right", "join");
+        graph
+    }
+
+    #[gpui::test]
+    async fn test_parallel_branches_run_at_once_and_meet_at_the_join(cx: &mut TestAppContext) {
+        let fake = init_test(cx);
+        let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let model = fake.model("fake");
+        let graph = diamond_plan();
+        thread.update(cx, |thread, cx| {
+            thread.set_model(model.clone(), cx);
+            thread.set_architect_graph(Some(graph.clone()), cx);
+        });
+
+        cx.update(|cx| crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx))
+            .expect("a locked plan should start");
+        cx.run_until_parked();
+        let briefs = pending_step_briefs(&fake);
+        assert_eq!(briefs.len(), 1, "the plan starts with one step");
+        assert!(briefs[0].1.contains("## Step 1: Start"), "{}", briefs[0].1);
+        fake.send_text(&model, &briefs[0].0, "Started.");
+        fake.end_stream(&model, &briefs[0].0);
+        cx.run_until_parked();
+
+        let branches = pending_step_briefs(&fake);
+        assert_eq!(
+            branches.len(),
+            2,
+            "both branches should be in flight at the same time"
+        );
+        let (left, right) = (&branches[0], &branches[1]);
+        assert!(left.1.contains("## Step 2: Left"), "{}", left.1);
+        assert!(right.1.contains("## Step 3: Right"), "{}", right.1);
+        assert_ne!(
+            left.0.thread_id, right.0.thread_id,
+            "each branch runs in a thread of its own"
+        );
+        for (brief, alongside) in [(&left.1, "- Right"), (&right.1, "- Left")] {
+            assert!(
+                brief.contains("## Running at the same time") && brief.contains(alongside),
+                "a parallel step is told what runs alongside it: {brief}"
+            );
+            assert!(brief.contains("git commit"), "{brief}");
+        }
+        thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().expect("the run should be recorded");
+            assert_eq!(run.running_steps().len(), 2);
+            assert_eq!(thread.architect_running_steps().count(), 2);
+        });
+
+        fake.send_text(&model, &left.0, "Did the left side.");
+        fake.end_stream(&model, &left.0);
+        cx.run_until_parked();
+        let waiting = pending_step_briefs(&fake);
+        assert_eq!(waiting.len(), 1, "the join waits for the other branch");
+        assert!(
+            waiting[0].1.contains("## Step 3: Right"),
+            "{}",
+            waiting[0].1
+        );
+
+        fake.send_text(&model, &right.0, "Did the right side.");
+        fake.end_stream(&model, &right.0);
+        cx.run_until_parked();
+        let joined = pending_step_briefs(&fake);
+        assert_eq!(joined.len(), 1, "the join runs once both are done");
+        let join_brief = &joined[0].1;
+        assert!(join_brief.contains("## Step 4: Join"), "{join_brief}");
+        assert!(
+            join_brief.contains("Did the left side.") && join_brief.contains("Did the right side."),
+            "the join is told what both branches reported: {join_brief}"
+        );
+        assert!(!join_brief.contains("## Running at the same time"));
+        fake.send_text(&model, &joined[0].0, "Joined.");
+        fake.end_stream(&model, &joined[0].0);
+        cx.run_until_parked();
+
+        thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().expect("the run should be recorded");
+            assert_eq!(run.outcome, Some(architect::RunOutcome::Completed));
+            let titles: Vec<&str> = run.history().iter().map(|step| &*step.title).collect();
+            assert_eq!(titles, vec!["Start", "Left", "Right", "Join"]);
+            assert!(
+                run.history().iter().all(|step| step.session_id.is_some()),
+                "every step records the thread it ran in"
+            );
+            assert!(run.running_steps().is_empty());
         });
     }
 

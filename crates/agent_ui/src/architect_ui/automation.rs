@@ -104,10 +104,16 @@ impl ArchitectPane {
                 .as_ref()
                 .zip(root)
                 .map(|(outcome, root)| outcome.summary(root));
+            let running_steps: Vec<Value> = run
+                .running_steps()
+                .iter()
+                .map(|step| json!({ "title": step.title.to_string(), "path": step.path }))
+                .collect();
             json!({
                 "running": run.is_running(),
                 "step": run.step_number,
                 "current": run.current_title.to_string(),
+                "running_steps": running_steps,
                 "outcome": outcome,
             })
         });
