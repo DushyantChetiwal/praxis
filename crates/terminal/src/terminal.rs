@@ -64,14 +64,14 @@ use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
-    append_text_to_term, apply_config, clear_saved_screen, content_text, display_offset,
-    display_only_term_config, find_from_terminal_point, full_content_range, last_non_empty_lines,
-    make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
-    scroll_display, scroll_to_point, search_matches, selection_text, set_default_cursor_style,
-    set_selection as set_term_selection, shrink_to_used, spawn_event_loop,
-    toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
-    update_selection_to_vi_cursor, update_vi_cursor_for_scroll, used_lines, vi_goto_point,
-    vi_motion,
+    append_text_to_term, apply_config, clear_saved_screen, content_text, content_text_bounded,
+    display_offset, display_only_term_config, find_from_terminal_point, full_content_range,
+    last_non_empty_lines, make_content, new_term, open_pty, pty_options, pty_term_config, resize,
+    screen_lines, scroll_display, scroll_to_point, search_matches, selection_text,
+    set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
+    spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
+    update_selection as update_term_selection, update_selection_to_vi_cursor,
+    update_vi_cursor_for_scroll, used_lines, vi_goto_point, vi_motion,
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
@@ -2449,6 +2449,17 @@ impl Terminal {
     pub fn get_content(&self) -> String {
         let term = self.term.lock_unfair();
         content_text(&term)
+    }
+
+    /// Returns terminal text and whether output was omitted. With a byte limit,
+    /// extraction stops at the UTF-8 budget (plus one character of lookahead),
+    /// without allocating the full scrollback. Tabs are represented by their
+    /// displayed spaces. `None` preserves `get_content` behavior exactly.
+    pub fn get_content_with_limit(&self, byte_limit: Option<usize>) -> (String, bool) {
+        match byte_limit {
+            Some(limit) => content_text_bounded(&self.term.lock_unfair(), limit),
+            None => (self.get_content(), false),
+        }
     }
 
     pub fn last_n_non_empty_lines(&self, n: usize) -> Vec<String> {
@@ -4890,6 +4901,52 @@ mod tests {
             )
             .subscribe(cx)
         })
+    }
+
+    #[gpui::test]
+    fn test_bounded_content_matches_utf8_prefix_without_changing_scrollback(
+        cx: &mut TestAppContext,
+    ) {
+        for text in [
+            "first\nsecond\n".to_string(),
+            format!("{}\nEND", "long line ".repeat(4000)),
+            "日界e\u{301}🙂\n".repeat(1000),
+            format!("a{}\nEND", "\u{301}".repeat(20_000)),
+        ] {
+            let terminal = display_only_terminal(cx);
+            terminal.update(cx, |terminal, cx| {
+                terminal.write_output(text.as_bytes(), cx)
+            });
+            terminal.read_with(cx, |terminal, _| {
+                let full = terminal.get_content();
+                for limit in [0, 1, 2, 3, 5, 31, 100, full.len(), full.len() + 1] {
+                    let (bounded, truncated) = terminal.get_content_with_limit(Some(limit));
+                    let mut end = limit.min(full.len());
+                    while !full.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    assert_eq!(bounded, full[..end]);
+                    assert_eq!(truncated, full.len() > limit);
+                    assert!(bounded.len() <= limit);
+                }
+                assert_eq!(terminal.get_content_with_limit(None), (full.clone(), false));
+                assert_eq!(terminal.get_content(), full);
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn test_bounded_content_preserves_displayed_tab_spacing(cx: &mut TestAppContext) {
+        let terminal = display_only_terminal(cx);
+        terminal.update(cx, |terminal, cx| terminal.write_output(b"a\tb\n", cx));
+        terminal.read_with(cx, |terminal, _| {
+            let full = terminal.get_content();
+            assert!(full.contains('\t'));
+            let (bounded, truncated) = terminal.get_content_with_limit(Some(1024));
+            assert!(bounded.starts_with("a       b\n"));
+            assert!(!truncated);
+            assert_eq!(terminal.get_content_with_limit(None), (full, false));
+        });
     }
 
     fn raw_content(chunks: &[&[u8]], cx: &mut TestAppContext) -> Content {

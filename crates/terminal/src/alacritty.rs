@@ -18,7 +18,7 @@ use alacritty_terminal::{
     sync::FairMutex,
     term::{
         Config, Osc52, RenderableCursor, SEMANTIC_ESCAPE_CHARS, Term, TermMode,
-        cell::{Cell as AlacCell, Flags, Hyperlink as AlacHyperlink},
+        cell::{Cell as AlacCell, Flags, Hyperlink as AlacHyperlink, LineLength},
         search::{Match, RegexIter, RegexSearch},
     },
     tty,
@@ -935,6 +935,51 @@ pub(super) fn content_text(term: &Term<ZedListener>) -> String {
     term.bounds_to_string(start, end)
 }
 
+pub(super) fn content_text_bounded(term: &Term<ZedListener>, byte_limit: usize) -> (String, bool) {
+    let grid = term.grid();
+    let bottom = grid.bottommost_line().0;
+    let characters = (grid.topmost_line().0..=bottom).flat_map(|line| {
+        let row = &grid[Line(line)];
+        let length = row.line_length().0;
+        let wrapped = length > 0 && row[Column(length - 1)].flags.contains(Flags::WRAPLINE);
+        let newline = (line < bottom && !wrapped).then_some('\n');
+        (0..length)
+            .flat_map(move |column| {
+                let cell = &row[Column(column)];
+                let visible = !cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
+                // The grid already contains tab padding. Emit its visible spaces;
+                // copying a whole row through bounds_to_string would also copy an
+                // unbounded number of combining characters attached to one cell.
+                let character = if cell.c == '\t' { ' ' } else { cell.c };
+                visible.then_some(character).into_iter().chain(
+                    cell.zerowidth()
+                        .filter(|_| visible)
+                        .into_iter()
+                        .flatten()
+                        .copied(),
+                )
+            })
+            .chain(newline)
+    });
+    collect_content_prefix(characters, byte_limit)
+}
+
+fn collect_content_prefix(
+    characters: impl Iterator<Item = char>,
+    byte_limit: usize,
+) -> (String, bool) {
+    let mut content = String::with_capacity(byte_limit.min(4096));
+    for character in characters {
+        if character.len_utf8() > byte_limit - content.len() {
+            return (content, true);
+        }
+        content.push(character);
+    }
+    (content, false)
+}
+
 pub(super) fn total_lines(term: &Term<ZedListener>) -> usize {
     term.total_lines()
 }
@@ -1109,6 +1154,30 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn bounded_content_prefix_stops_after_one_character_of_lookahead() {
+        for (character, budget, expected_characters) in [('x', 64, 65), ('日', 7, 3), ('x', 0, 1)]
+        {
+            let visited = std::cell::Cell::new(0);
+            let characters = std::iter::repeat_with(|| {
+                visited.set(visited.get() + 1);
+                character
+            });
+            let (content, truncated) = collect_content_prefix(characters, budget);
+            assert!(truncated);
+            assert!(content.len() <= budget);
+            assert_eq!(visited.get(), expected_characters);
+        }
+        assert_eq!(
+            collect_content_prefix("日".chars(), 3),
+            ("日".into(), false)
+        );
+        assert_eq!(
+            collect_content_prefix("".chars(), 0),
+            (String::new(), false)
+        );
+    }
 
     #[test]
     fn terminal_hyperlink_from_alacritty_keeps_alacritty_storage() {

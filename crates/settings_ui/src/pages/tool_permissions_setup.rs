@@ -1436,6 +1436,11 @@ mod tests {
             "read_file",
             "rename_symbol",
             "thinking",
+            // Lifecycle-only helpers for already-authorized terminals owned by
+            // this thread. They cannot launch commands or address arbitrary PIDs.
+            "terminal_status",
+            "terminal_wait",
+            "terminal_stop",
             // streaming_edit_file uses "edit_file" for permission lookups,
             // so its rules are configured under the edit_file entry.
             "streaming_edit_file",
@@ -1448,6 +1453,9 @@ mod tests {
             // to the project until they do.
             "draft_plan",
             "refine_step",
+            // Records a finished step's summary on the plan while a run drives
+            // it; the step's own tool calls carry the permission checks.
+            "complete_step",
             // Presenting a plan always waits for the user's decision, so it has
             // no settings-driven permission rules.
             "exit_plan_mode",

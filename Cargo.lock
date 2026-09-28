@@ -309,6 +309,7 @@ dependencies = [
  "task",
  "telemetry",
  "tempfile",
+ "terminal",
  "text",
  "theme",
  "theme_settings",

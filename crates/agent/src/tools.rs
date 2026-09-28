@@ -31,6 +31,7 @@ mod rename_tool;
 mod skill_tool;
 mod spawn_agent_tool;
 mod symbol_locator;
+mod terminal_task_tool;
 mod terminal_tool;
 mod tool_permissions;
 mod web_search_tool;
@@ -108,6 +109,7 @@ pub use skill_tool::*;
 pub use spawn_agent_tool::*;
 pub use symbol_locator::*;
 
+pub use terminal_task_tool::*;
 pub use terminal_tool::*;
 pub use tool_permissions::*;
 pub use web_search_tool::*;
@@ -245,6 +247,9 @@ tools! {
     SkillTool,
     SpawnAgentTool,
     TerminalTool,
+    TerminalStatusTool,
+    TerminalStopTool,
+    TerminalWaitTool,
     WebSearchTool,
     WriteFileTool,
 }
@@ -304,12 +309,16 @@ mod tests {
         assert!(!tool_allowed_in_restricted_mode(FetchTool::NAME));
         assert!(!tool_allowed_in_restricted_mode(PullRequestTool::NAME));
         assert!(!tool_allowed_in_restricted_mode(TerminalTool::NAME));
+        // Stopping a task is part of terminal execution; status and waiting
+        // only read a task this thread already started.
+        assert!(!tool_allowed_in_restricted_mode(TerminalStopTool::NAME));
 
         // Every other built-in tool, and unknown (e.g. MCP) tools, are allowed.
         for name in ALL_TOOL_NAMES {
             let expected = *name != FetchTool::NAME
                 && *name != PullRequestTool::NAME
-                && *name != TerminalTool::NAME;
+                && *name != TerminalTool::NAME
+                && *name != TerminalStopTool::NAME;
             assert_eq!(
                 tool_allowed_in_restricted_mode(name),
                 expected,

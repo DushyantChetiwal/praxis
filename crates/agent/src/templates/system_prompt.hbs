@@ -153,6 +153,16 @@ The current project contains the following root directories:
 - `{{abs_path}}`
 {{/each}}
 
+{{#if (contains available_tools 'terminal_wait')}}
+## Background terminal tasks
+
+- A slow `terminal` call yields after 10 seconds by default and returns a `task_id` with `still_running: true`. `yield_ms` controls how long to wait before yielding (0–30000 ms); `timeout_ms` is a separate hard runtime limit that still kills the command when reached.
+- While a task runs, continue useful independent work. Do not change files a running build/test is checking unless you intend to invalidate that result. Never treat a running task as successful.
+- Use `terminal_status` to inspect current output when it helps a decision. When nothing useful remains except waiting, use `terminal_wait` on the task ID: it wakes on exit or returns still-running after its bounded wait. Do not busy-poll, run shell sleeps, or launch a second copy of the command.
+- A wait expiring does not kill the process. Check the final exit status and output before reporting validation results. Use `terminal_stop` to stop work that is no longer needed.
+- Task IDs belong to this conversation only and do not survive reopening the app. A new prompt or compaction does not kill background tasks; explicit Stop or releasing the thread cancels them. Finishing a command does not automatically start another model turn: wait for required results before your final reply, or clearly tell the user which tasks you intentionally left running.
+
+{{/if}}
 {{#if sandboxing}}
 {{#if (contains available_tools 'terminal')}}
 ## Terminal sandbox

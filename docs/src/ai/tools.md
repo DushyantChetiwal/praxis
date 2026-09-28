@@ -101,9 +101,25 @@ Creates a new file or overwrites an existing file with completely new contents.
 
 ### `terminal`
 
-Executes shell commands and returns the combined output, creating a new shell process for each invocation.
+Executes shell commands, creating a new shell process for each invocation. Fast commands return their final output. Commands still running after **10 seconds** return a task ID so the agent can continue independent work while the same process runs in the background. Set `yield_ms` between 0 and 30000 to change that foreground wait; zero yields immediately. `timeout_ms` remains a separate hard runtime limit and kills the process if reached, even after it has moved to the background.
 
-**Example:** After editing a Rust file, run `cargo test --package my_crate 2>&1 | tail -30` to confirm the changes don't break existing tests. Or run `git diff --stat` to review which files have been modified before wrapping up a task.
+The lifecycle tools below follow the profile's existing `terminal` switch; they need no separate configuration. Tasks belong to their conversation, survive subsequent prompts and compaction, and are canceled by explicit Stop or thread teardown. They are not restored after restarting the app. Completion updates the terminal UI but does not automatically start a new model turn.
+
+At most eight tasks can run per conversation, with up to 32 task records retained. Background-capable commands cap captured output at 100 KiB and selected model output at 16 KiB. Head/tail selection operates on the captured output, so truncated captures may not include the command's final lines.
+
+**Example:** Start a test command with a hard runtime limit and `tail_lines: 30`, then inspect unrelated code while it runs. When no independent work remains, call `terminal_wait` using the returned task ID and check the final output before claiming the tests passed.
+
+### `terminal_status`
+
+Returns a task's current bounded output, whether it is still running, and its exit status when available. This is a snapshot, not a wait; the agent should not repeatedly poll it while idle.
+
+### `terminal_wait`
+
+Waits for a task to finish without busy-polling. It returns immediately when the process exits, or reports that it is still running after the wait limit (30 seconds by default, configurable from 1 to 60000 milliseconds). **The wait limit does not kill the process.** This is the tool to use when the agent has nothing useful left to do except wait.
+
+### `terminal_stop`
+
+Stops an existing task in the same conversation and reports its output/status. It cannot execute a command or stop arbitrary system processes. Like terminal execution, it is unavailable in Plan, Architect, and restricted-workspace mode; status and waiting are read-only.
 
 ## Other Tools
 
