@@ -49,8 +49,10 @@ impl ArchitectPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Any selection made here replaces a selection of several steps.
+        // Any selection made here replaces a selection of several steps, and
+        // becomes where the outline's next Shift-click reaches from.
         self.bulk.clear();
+        self.outline_anchor = None;
         let selected_node = match &selection {
             Some(Selection::Node(id)) => Some(id.clone()),
             _ => None,

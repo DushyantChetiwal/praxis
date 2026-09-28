@@ -16,6 +16,7 @@ mod run;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use agent::Thread;
 use architect::{
@@ -26,8 +27,9 @@ use editor::Editor;
 use git_ui::git_panel::GitPanel;
 use gpui::{
     AnyWindowHandle, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    ScrollDelta, ScrollWheelEvent, Subscription, TaskExt as _, WeakEntity, Window, point, px,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels,
+    Point, ScrollDelta, ScrollWheelEvent, Subscription, Task, TaskExt as _, WeakEntity, Window,
+    point, px,
 };
 use project_panel::ProjectPanel;
 use settings::Settings as _;
@@ -50,7 +52,17 @@ const EXPANDED_CHILD_LIMIT: usize = 4;
 
 const MIN_ZOOM: f32 = 0.35;
 const MAX_ZOOM: f32 = 2.0;
+/// How far one press of a zoom button or key zooms.
+const ZOOM_STEP: f32 = 1.2;
+/// How much zoom a pixel of Ctrl- or Cmd-scrolling is worth. Applied as an
+/// exponent, so scrolling back the same distance returns to the same zoom, and
+/// a wheel notch is a modest step rather than a lurch.
+const SCROLL_ZOOM_RATE: f32 = 0.0025;
 const SCROLL_LINE_HEIGHT: f32 = 20.0;
+/// How long zooming or moving the view takes to settle.
+const CAMERA_ANIMATION: Duration = Duration::from_millis(200);
+/// How often a moving view is redrawn: about once a display frame.
+const CAMERA_FRAME: Duration = Duration::from_millis(16);
 const WORKSPACE_MODE_KEY_PREFIX: &str = "architect-workspace-mode";
 
 /// Below this, node text would be an unreadable smear, so nodes show their
@@ -110,6 +122,43 @@ enum HistoryDirection {
 enum Selection {
     Node(NodeId),
     Edge(EdgeId),
+}
+
+/// What part of the canvas is in view: how far it is panned and zoomed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Camera {
+    pan: Point<Pixels>,
+    zoom: f32,
+}
+
+/// The view gliding from one camera to another.
+///
+/// Zoom and pan are interpolated together with the same eased progress. The
+/// two ends of a zoom about some point agree on where that point is drawn, and
+/// a straight line between them keeps it there on every frame in between, so
+/// the point under the cursor stays under it without special handling.
+struct CameraAnimation {
+    from: Camera,
+    to: Camera,
+    started: Instant,
+}
+
+impl CameraAnimation {
+    /// Where the view is at `now`, and whether it has arrived.
+    fn at(&self, now: Instant) -> (Camera, bool) {
+        let elapsed = now.saturating_duration_since(self.started);
+        let progress = elapsed.as_secs_f32() / CAMERA_ANIMATION.as_secs_f32();
+        if progress >= 1.0 {
+            return (self.to, true);
+        }
+        // Ease out: quick to answer the input, gentle to land.
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        let camera = Camera {
+            pan: self.from.pan + (self.to.pan - self.from.pan) * eased,
+            zoom: self.from.zoom + (self.to.zoom - self.from.zoom) * eased,
+        };
+        (camera, false)
+    }
 }
 
 enum Interaction {
@@ -220,12 +269,21 @@ pub struct ArchitectPane {
     /// The canvas layer reports its bounds during paint; everything that
     /// converts between screen and canvas space needs them.
     viewport: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// What is on screen right now, mid-glide included, so hit-testing always
+    /// matches the frame the user is looking at.
     pan: Point<Pixels>,
     zoom: f32,
+    /// Set while the view glides to a new zoom or position.
+    camera_animation: Option<CameraAnimation>,
+    _camera_animation_task: Task<()>,
     selection: Option<Selection>,
     /// Steps selected together, in the order they were added. Only meaningful
     /// with two or more; `selection` is empty meanwhile.
     bulk: Vec<NodeId>,
+    /// The outline row a Shift-click selects from: the one last clicked there
+    /// without Shift. A selection made anywhere else clears it, and the range
+    /// then starts from what that selected.
+    outline_anchor: Option<NodeId>,
     inspector: Option<NodeInspector>,
     edge_inspector: Option<EdgeInspector>,
     interaction: Interaction,
@@ -330,8 +388,11 @@ impl ArchitectPane {
             viewport: Rc::new(Cell::new(None)),
             pan: point(px(0.0), px(0.0)),
             zoom: 1.0,
+            camera_animation: None,
+            _camera_animation_task: Task::ready(()),
             selection: None,
             bulk: Vec::new(),
+            outline_anchor: None,
             inspector: None,
             edge_inspector: None,
             interaction: Interaction::None,
@@ -549,6 +610,7 @@ impl ArchitectPane {
         self.focus = NodePath::default();
         self.selection = None;
         self.bulk.clear();
+        self.outline_anchor = None;
         self.inspector = None;
         self.edge_inspector = None;
         self.interaction = Interaction::None;
@@ -564,6 +626,7 @@ impl ArchitectPane {
         self.transient_return_focus = None;
         self.pan = point(px(0.0), px(0.0));
         self.zoom = 1.0;
+        self.camera_animation = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.undo_group = None;
@@ -1329,23 +1392,118 @@ impl ArchitectPane {
 
     // -- View controls --------------------------------------------------------
 
-    fn set_zoom(&mut self, zoom: f32, anchor: Option<Point<Pixels>>, cx: &mut Context<Self>) {
-        let previous = self.zoom;
-        self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-
-        // Keep whatever is under the cursor exactly where it is, so zooming
-        // feels like moving closer rather than like the graph sliding away.
-        if let Some((anchor, bounds)) = anchor.zip(self.viewport.get()) {
-            let centre = point(
-                anchor.x - bounds.origin.x - bounds.size.width / 2.0,
-                anchor.y - bounds.origin.y - bounds.size.height / 2.0,
-            );
-            let offset = centre - self.pan;
-            let ratio = self.zoom / previous;
-            self.pan += offset * (1.0 - ratio);
+    fn camera(&self) -> Camera {
+        Camera {
+            pan: self.pan,
+            zoom: self.zoom,
         }
+    }
 
+    /// Where the view is heading: the end of its glide, or where it is.
+    fn target_camera(&self) -> Camera {
+        self.camera_animation
+            .as_ref()
+            .map_or(self.camera(), |animation| animation.to)
+    }
+
+    /// Glides the view to `to`, starting from what is on screen, so a new
+    /// target mid-glide carries on from there rather than snapping back.
+    fn animate_camera(&mut self, to: Camera, cx: &mut Context<Self>) {
+        let to = Camera {
+            zoom: to.zoom.clamp(MIN_ZOOM, MAX_ZOOM),
+            ..to
+        };
+        if to == self.camera() {
+            self.camera_animation = None;
+            cx.notify();
+            return;
+        }
+        let executor = cx.background_executor().clone();
+        self.camera_animation = Some(CameraAnimation {
+            from: self.camera(),
+            to,
+            started: executor.now(),
+        });
+        // The first frame is timed from now rather than from whenever the task
+        // first runs, so frames and the animation keep the same clock.
+        let mut frame = executor.timer(CAMERA_FRAME);
+        self._camera_animation_task = cx.spawn(async move |this, cx| {
+            loop {
+                frame.await;
+                match this.update(cx, |this, cx| this.step_camera_animation(cx)) {
+                    Ok(true) => {}
+                    // Landed, or the canvas has closed.
+                    Ok(false) | Err(_) => break,
+                }
+                frame = executor.timer(CAMERA_FRAME);
+            }
+        });
         cx.notify();
+    }
+
+    /// Moves the view a frame along its glide, returning whether there is more
+    /// of it to come.
+    fn step_camera_animation(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(animation) = &self.camera_animation else {
+            return false;
+        };
+        let (camera, arrived) = animation.at(cx.background_executor().now());
+        self.pan = camera.pan;
+        self.zoom = camera.zoom;
+        if arrived {
+            self.camera_animation = None;
+        }
+        cx.notify();
+        !arrived
+    }
+
+    /// Jumps to the end of any glide, for callers that need the view where it
+    /// is going rather than where it is.
+    fn settle_camera(&mut self, cx: &mut Context<Self>) {
+        if let Some(animation) = self.camera_animation.take() {
+            self.pan = animation.to.pan;
+            self.zoom = animation.to.zoom;
+            cx.notify();
+        }
+    }
+
+    /// Scrolling and dragging move the view at once, under the hand. A glide
+    /// under way is carried along with it, so a zoom still settling lands
+    /// where the user has since moved the view.
+    fn pan_by(&mut self, delta: Point<Pixels>, cx: &mut Context<Self>) {
+        self.pan += delta;
+        if let Some(animation) = &mut self.camera_animation {
+            animation.from.pan += delta;
+            animation.to.pan += delta;
+        }
+        cx.notify();
+    }
+
+    /// Zooms to `zoom`, keeping whatever is under `anchor` exactly where it is,
+    /// so zooming feels like moving closer rather than like the graph sliding
+    /// away. Without an anchor, as for the buttons and keys, the middle of the
+    /// view stays put.
+    fn set_zoom(&mut self, zoom: f32, anchor: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+        let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        let centre = anchor
+            .zip(self.viewport.get())
+            .map_or(point(px(0.0), px(0.0)), |(anchor, bounds)| {
+                point(
+                    anchor.x - bounds.origin.x - bounds.size.width / 2.0,
+                    anchor.y - bounds.origin.y - bounds.size.height / 2.0,
+                )
+            });
+        // Measured from what is on screen, not from where a glide was heading,
+        // so the point kept still is the one the user sees under the cursor.
+        let ratio = zoom / self.zoom;
+        let pan = centre - (centre - self.pan) * ratio;
+        self.animate_camera(Camera { pan, zoom }, cx);
+    }
+
+    /// Zooms by `factor` from wherever the zoom is heading, so quick repeated
+    /// presses or scrolls add up instead of each starting over.
+    fn zoom_by(&mut self, factor: f32, anchor: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+        self.set_zoom(self.target_camera().zoom * factor, anchor, cx);
     }
 
     /// Frames the whole graph, which is the only reliable way back when someone
@@ -1396,11 +1554,10 @@ impl ArchitectPane {
             .min((f32::from(bounds.size.height) - MARGIN) / height)
             .clamp(MIN_ZOOM, 1.0);
 
-        self.zoom = zoom;
         let centre_x = (min_x + max_x) / 2.0;
         let centre_y = (min_y + max_y) / 2.0;
-        self.pan = point(px(-centre_x * zoom), px(-centre_y * zoom));
-        cx.notify();
+        let pan = point(px(-centre_x * zoom), px(-centre_y * zoom));
+        self.animate_camera(Camera { pan, zoom }, cx);
     }
 
     /// Selects something chosen away from the canvas, such as in the outline or
@@ -1444,9 +1601,19 @@ impl ArchitectPane {
         let Some((centre, width, height)) = target else {
             return;
         };
-        let screen = self.to_screen(centre);
-        let half_width = px(width * self.zoom / 2.0);
-        let half_height = px(height * self.zoom / 2.0);
+        // Judged by where the view is heading, so something already on its way
+        // into view is not sent after again.
+        let camera = self.target_camera();
+        let origin = point(
+            bounds.origin.x + bounds.size.width / 2.0 + camera.pan.x,
+            bounds.origin.y + bounds.size.height / 2.0 + camera.pan.y,
+        );
+        let screen = point(
+            origin.x + px(centre.x * camera.zoom),
+            origin.y + px(centre.y * camera.zoom),
+        );
+        let half_width = px(width * camera.zoom / 2.0);
+        let half_height = px(height * camera.zoom / 2.0);
         let visible = screen.x - half_width >= bounds.left()
             && screen.x + half_width <= bounds.right()
             && screen.y - half_height >= bounds.top()
@@ -1454,8 +1621,8 @@ impl ArchitectPane {
         if visible {
             return;
         }
-        self.pan = point(px(-centre.x * self.zoom), px(-centre.y * self.zoom));
-        cx.notify();
+        let pan = point(px(-centre.x * camera.zoom), px(-centre.y * camera.zoom));
+        self.animate_camera(Camera { pan, ..camera }, cx);
     }
 
     // -- Editing --------------------------------------------------------------
@@ -1828,20 +1995,20 @@ impl ArchitectPane {
                 ScrollDelta::Pixels(pixels) => f32::from(pixels.y),
                 ScrollDelta::Lines(lines) => lines.y * SCROLL_LINE_HEIGHT,
             };
-            let factor = if delta > 0.0 {
-                1.0 + delta.abs() * 0.006
-            } else {
-                1.0 / (1.0 + delta.abs() * 0.006)
-            };
-            self.set_zoom(self.zoom * factor, Some(event.position), cx);
+            self.zoom_by((delta * SCROLL_ZOOM_RATE).exp(), Some(event.position), cx);
         } else {
             let delta = match event.delta {
                 ScrollDelta::Pixels(pixels) => pixels,
                 ScrollDelta::Lines(lines) => lines.map(|value| px(value * SCROLL_LINE_HEIGHT)),
             };
-            self.pan += delta;
-            cx.notify();
+            self.pan_by(delta, cx);
         }
+    }
+
+    fn handle_pinch(&mut self, event: &PinchEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // Each step of a pinch arrives as the fraction to grow by.
+        let factor = (1.0 + event.delta).max(0.1);
+        self.zoom_by(factor, Some(event.position), cx);
     }
 
     fn handle_mouse_down(
@@ -1895,8 +2062,7 @@ impl ArchitectPane {
             Interaction::Panning { last } => {
                 let delta = event.position - *last;
                 *last = event.position;
-                self.pan += delta;
-                cx.notify();
+                self.pan_by(delta, cx);
             }
             Interaction::DraggingNode { id, grab } => {
                 let id = id.clone();
@@ -2012,6 +2178,9 @@ impl ArchitectPane {
     ) {
         let canvas_focused = self.focus_handle.is_focused(window);
         let modifiers = event.keystroke.modifiers;
+        // Zoom keys go without Ctrl or Cmd, which with these keys already
+        // resize the fonts everywhere in the workspace.
+        let zoom_key = canvas_focused && !modifiers.secondary() && !modifiers.alt;
         match event.keystroke.key.as_str() {
             "z" | "Z" if canvas_focused && modifiers.secondary() => {
                 let direction = if modifiers.shift {
@@ -2038,6 +2207,10 @@ impl ArchitectPane {
             "delete" | "backspace" if canvas_focused => self.delete_selection(window, cx),
             "down" | "right" if canvas_focused => self.select_adjacent_step(true, window, cx),
             "up" | "left" if canvas_focused => self.select_adjacent_step(false, window, cx),
+            "=" | "+" if zoom_key => self.zoom_by(ZOOM_STEP, None, cx),
+            "-" if zoom_key => self.zoom_by(1.0 / ZOOM_STEP, None, cx),
+            "0" if zoom_key => self.set_zoom(1.0, None, cx),
+            "1" | "!" if zoom_key && modifiers.shift => self.zoom_to_fit(cx),
             "enter" if canvas_focused => {
                 if self.selection.is_some() || self.has_bulk_selection() {
                     self.open_inspector_drawer(window, cx);
@@ -3531,5 +3704,269 @@ mod tests {
             architect.entity_id(),
             "reopening Architect should reattach the retained workspace surface"
         );
+    }
+
+    /// A plan thread of its own, for tests that only need the canvas.
+    struct TestPlan {
+        project: Entity<Project>,
+        thread: Entity<Thread>,
+        _connection: Rc<agent::NativeAgentConnection>,
+        _session: Entity<acp_thread::AcpThread>,
+    }
+
+    async fn test_plan(cx: &mut TestAppContext) -> TestPlan {
+        init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/", json!({ "a": {} })).await;
+        let project = Project::test(fs.clone(), [Path::new("/a")], cx).await;
+        let thread_store = cx.update(|cx| agent::ThreadStore::global(cx));
+        let native_agent = cx.update(|cx| {
+            agent::NativeAgent::new(thread_store, agent::Templates::new(), fs.clone(), cx)
+        });
+        let connection = Rc::new(agent::NativeAgentConnection(native_agent));
+        let session = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new("/a")]),
+                    cx,
+                )
+            })
+            .await
+            .expect("the Architect test session should open");
+        let session_id = session.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx
+            .update(|cx| connection.thread(&session_id, cx))
+            .expect("the native thread should exist");
+        TestPlan {
+            project,
+            thread,
+            _connection: connection,
+            _session: session,
+        }
+    }
+
+    #[gpui::test]
+    async fn canvas_zoom_glides_and_outline_clicks_follow_list_conventions(
+        cx: &mut TestAppContext,
+    ) {
+        fn near(a: Position, b: Position) -> bool {
+            (a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01
+        }
+
+        let plan = test_plan(cx).await;
+        let project = plan.project.clone();
+        let thread = plan.thread.clone();
+        let mut graph = ArchitectGraph::default();
+        for (index, id) in ["a", "b", "c", "d"].into_iter().enumerate() {
+            let mut node = ArchitectNode::new(id, format!("Step {index}"));
+            node.position = Some(Position {
+                x: index as f32 * 320.0,
+                y: 0.0,
+            });
+            graph.add_node(node);
+        }
+        graph.connect("a", "b");
+        graph.connect("b", "c");
+        graph.connect("c", "d");
+        thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
+
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.update_in(cx, |_workspace, window, cx| {
+            let workspace = cx.weak_entity();
+            cx.new(|cx| {
+                ArchitectPane::new(
+                    thread.clone(),
+                    workspace,
+                    None,
+                    Vec::new(),
+                    None,
+                    px(226.0),
+                    px(348.0),
+                    window,
+                    cx,
+                )
+            })
+        });
+        // The canvas reports its bounds when it is painted. Setting them here
+        // lets the view be driven without drawing it.
+        let viewport = Bounds::new(point(px(100.0), px(50.0)), size(px(1000.0), px(800.0)));
+        pane.update(cx, |pane, _| pane.viewport.set(Some(viewport)));
+
+        // Zooming at the cursor glides there, keeping what is under the cursor
+        // under it on every frame.
+        let cursor = point(px(340.0), px(260.0));
+        let under_cursor = pane.update(cx, |pane, cx| {
+            let under_cursor = pane.to_canvas(cursor);
+            pane.zoom_by(1.5, Some(cursor), cx);
+            assert_eq!(pane.zoom, 1.0, "a zoom starts from what is on screen");
+            under_cursor
+        });
+        cx.executor().advance_clock(CAMERA_ANIMATION / 2);
+        cx.run_until_parked();
+        let halfway = pane.read_with(cx, |pane, _| {
+            assert!(
+                pane.zoom > 1.0 && pane.zoom < 1.5,
+                "halfway through, the zoom is between its ends, not {}",
+                pane.zoom
+            );
+            assert!(
+                near(pane.to_canvas(cursor), under_cursor),
+                "the point under the cursor stays under it throughout"
+            );
+            pane.zoom
+        });
+
+        // Zooming again mid-glide carries on from what is on screen, towards a
+        // target that builds on the first.
+        pane.update(cx, |pane, cx| {
+            pane.zoom_by(1.2, Some(cursor), cx);
+            assert_eq!(
+                pane.zoom, halfway,
+                "a new zoom mid-glide carries on from what is on screen"
+            );
+        });
+        cx.executor().advance_clock(CAMERA_ANIMATION);
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| {
+            assert!(
+                (pane.zoom - 1.8).abs() < 1e-4,
+                "the second zoom should build on where the first was heading, not {}",
+                pane.zoom
+            );
+            assert!(near(pane.to_canvas(cursor), under_cursor));
+            assert!(
+                pane.camera_animation.is_none(),
+                "the glide stops once it lands"
+            );
+        });
+
+        // The buttons and keys zoom about the middle of the view, and no
+        // further than the limit.
+        let centre = viewport.center();
+        let under_centre = pane.update(cx, |pane, cx| {
+            let under_centre = pane.to_canvas(centre);
+            pane.zoom_by(10.0, None, cx);
+            under_centre
+        });
+        cx.executor().advance_clock(CAMERA_ANIMATION);
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| {
+            assert_eq!(pane.zoom, MAX_ZOOM);
+            assert!(near(pane.to_canvas(centre), under_centre));
+        });
+
+        // Fit glides too, and lands framing the whole plan: four steps 320
+        // apart and 280 wide, in a view 1000 wide less its margin.
+        pane.update(cx, |pane, cx| {
+            pane.zoom_to_fit(cx);
+            assert_eq!(pane.zoom, MAX_ZOOM, "fitting glides rather than jumps");
+        });
+        cx.executor().advance_clock(CAMERA_ANIMATION);
+        cx.run_until_parked();
+        let fitted = (1000.0 - 64.0) / 1240.0;
+        pane.read_with(cx, |pane, _| {
+            assert!((pane.zoom - fitted).abs() < 1e-4);
+            assert!((f32::from(pane.pan.x) + 480.0 * fitted).abs() < 0.01);
+            assert!(f32::from(pane.pan.y).abs() < 0.01);
+        });
+
+        // A drag mid-glide moves the view at once and carries the glide along.
+        pane.update(cx, |pane, cx| {
+            pane.set_zoom(1.0, None, cx);
+            pane.pan_by(point(px(30.0), px(-10.0)), cx);
+        });
+        cx.executor().advance_clock(CAMERA_ANIMATION);
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| {
+            assert_eq!(pane.zoom, 1.0);
+            assert!((f32::from(pane.pan.x) + 450.0).abs() < 0.01);
+            assert!((f32::from(pane.pan.y) + 10.0).abs() < 0.01);
+        });
+
+        let listed = pane.update(cx, |pane, cx| {
+            pane.graph(cx)
+                .map(ArchitectGraph::execution_order)
+                .unwrap_or_default()
+        });
+        assert_eq!(listed.len(), 4);
+        let [a, b, c, d] = [0, 1, 2, 3].map(|index| listed[index].clone());
+        let ctrl = Modifiers::secondary_key();
+        let shift = Modifiers::shift();
+        let ctrl_shift = Modifiers {
+            shift: true,
+            ..Modifiers::secondary_key()
+        };
+        pane.update_in(cx, |pane, window, cx| {
+            pane.click_outline_step(b.clone(), &listed, Modifiers::none(), window, cx);
+            assert_eq!(pane.selection, Some(Selection::Node(b.clone())));
+
+            pane.click_outline_step(d.clone(), &listed, ctrl, window, cx);
+            assert_eq!(
+                pane.bulk,
+                vec![b.clone(), d.clone()],
+                "Ctrl-click adds a step to the selection"
+            );
+            assert_eq!(pane.selection, None);
+            pane.click_outline_step(b.clone(), &listed, ctrl, window, cx);
+            assert_eq!(
+                pane.selection,
+                Some(Selection::Node(d.clone())),
+                "Ctrl-click takes a step back out, keeping the rest"
+            );
+            assert!(pane.bulk.is_empty());
+
+            pane.click_outline_step(c.clone(), &listed, shift, window, cx);
+            assert_eq!(
+                pane.bulk,
+                vec![b.clone(), c.clone()],
+                "Shift-click reaches from the row last clicked without Shift"
+            );
+
+            pane.click_outline_step(a.clone(), &listed, Modifiers::none(), window, cx);
+            pane.click_outline_step(c.clone(), &listed, shift, window, cx);
+            assert_eq!(pane.bulk, vec![a.clone(), b.clone(), c.clone()]);
+            assert_eq!(pane.selection, None);
+            pane.click_outline_step(b.clone(), &listed, shift, window, cx);
+            assert_eq!(
+                pane.bulk,
+                vec![a.clone(), b.clone()],
+                "another Shift-click reaches from the same row"
+            );
+            pane.click_outline_step(d.clone(), &listed, ctrl_shift, window, cx);
+            assert_eq!(
+                pane.bulk, listed,
+                "Ctrl and Shift together add the range to the selection"
+            );
+
+            pane.click_outline_step(d.clone(), &listed, Modifiers::none(), window, cx);
+            pane.click_outline_step(b.clone(), &listed, shift, window, cx);
+            assert_eq!(
+                pane.bulk,
+                vec![b.clone(), c.clone(), d.clone()],
+                "a range upwards is still in outline order"
+            );
+
+            pane.set_selection(Some(Selection::Node(c.clone())), window, cx);
+            pane.click_outline_step(a.clone(), &listed, shift, window, cx);
+            assert_eq!(
+                pane.bulk,
+                vec![a.clone(), b.clone(), c.clone()],
+                "a step selected on the canvas anchors the range"
+            );
+
+            pane.set_selection(None, window, cx);
+            pane.click_outline_step(b.clone(), &listed, shift, window, cx);
+            assert_eq!(
+                pane.selection,
+                Some(Selection::Node(b.clone())),
+                "with nothing to reach from, Shift-click selects the step alone"
+            );
+        });
     }
 }
