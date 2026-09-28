@@ -1485,14 +1485,15 @@ impl ArchitectPane {
     /// view stays put.
     fn set_zoom(&mut self, zoom: f32, anchor: Option<Point<Pixels>>, cx: &mut Context<Self>) {
         let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-        let centre = anchor
-            .zip(self.viewport.get())
-            .map_or(point(px(0.0), px(0.0)), |(anchor, bounds)| {
-                point(
-                    anchor.x - bounds.origin.x - bounds.size.width / 2.0,
-                    anchor.y - bounds.origin.y - bounds.size.height / 2.0,
-                )
-            });
+        let centre =
+            anchor
+                .zip(self.viewport.get())
+                .map_or(point(px(0.0), px(0.0)), |(anchor, bounds)| {
+                    point(
+                        anchor.x - bounds.origin.x - bounds.size.width / 2.0,
+                        anchor.y - bounds.origin.y - bounds.size.height / 2.0,
+                    )
+                });
         // Measured from what is on screen, not from where a glide was heading,
         // so the point kept still is the one the user sees under the cursor.
         let ratio = zoom / self.zoom;

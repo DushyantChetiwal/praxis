@@ -8,8 +8,8 @@ use architect::{
 use gpui::{
     App, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, Entity, EventEmitter,
     FocusHandle, Focusable, Hsla, MouseButton, MouseDownEvent, MouseUpEvent, PathBuilder, Pixels,
-    Render, SharedString, Size, Subscription, WeakEntity, Window, canvas, deferred, div, point,
-    px, size,
+    Render, SharedString, Size, Subscription, WeakEntity, Window, canvas, deferred, div, point, px,
+    size,
 };
 use ui::{ContextMenu, Divider, TintColor, Tooltip, prelude::*, right_click_menu};
 use util::ResultExt as _;
