@@ -193,6 +193,7 @@ impl ArchitectPane {
             }
             "select_all" => self.select_all_steps(window, cx),
             "bulk_lock" => self.lock_bulk_selection(true, cx),
+            "lock_all" => self.lock_all_steps(window, cx),
             "bulk_unlock" => self.lock_bulk_selection(false, cx),
             "bulk_delete" => self.delete_bulk_selection(window, cx),
             "undo" => self.step_history(HistoryDirection::Undo, window, cx),

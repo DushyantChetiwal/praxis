@@ -315,6 +315,7 @@ impl ArchitectPane {
             .map(ArchitectGraph::blocking_problems)
             .unwrap_or_default();
         let all_locked = step_count > 0 && locked_count == step_count;
+        let run_open_count = run_step_count.saturating_sub(run_locked_count);
         let ready_to_run = root.is_some_and(ArchitectGraph::is_fully_locked_deeply)
             && root.is_some_and(|root| root.blocking_problems().is_empty());
         let run_tooltip: SharedString = if ready_to_run {
@@ -591,6 +592,38 @@ impl ArchitectPane {
                                     this.watch_running_step(window, cx);
                                 })),
                         )
+                    })
+                    // Locking step by step, and inside every nested plan, is
+                    // a lot of clicks once a plan has been argued out.
+                    .when(!running && run_open_count > 0, |this| {
+                        let tooltip: SharedString = match run_open_count {
+                            1 => "Lock the last open step, wherever it is in the plan".into(),
+                            open => format!(
+                                "Lock the {open} open steps, including those in nested plans"
+                            )
+                            .into(),
+                        };
+                        this.child(if compact {
+                            IconButton::new("architect-lock-all-compact", IconName::Lock)
+                                .tab_index(0isize)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text(tooltip))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.lock_all_steps(window, cx);
+                                }))
+                                .into_any_element()
+                        } else {
+                            Button::new("architect-lock-all", "Lock All")
+                                .tab_index(0isize)
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Subtle)
+                                .start_icon(Icon::new(IconName::Lock).size(IconSize::XSmall))
+                                .tooltip(Tooltip::text(tooltip))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.lock_all_steps(window, cx);
+                                }))
+                                .into_any_element()
+                        })
                     })
                     // An empty plan has nothing to run; the empty state offers
                     // Start planning instead of a Run that can only refuse.
@@ -2755,9 +2788,9 @@ impl NodeMenu {
             };
             let can_change = !running && bulk.editable;
             context_menu
-                .when(can_change && bulk.lockable > 0, |this| {
+                .when(can_change && bulk.drafts > 0, |this| {
                     this.entry(
-                        format!("Lock {}", bulk::count_label(bulk.lockable)),
+                        format!("Lock {}", bulk::count_label(bulk.drafts)),
                         None,
                         action(|pane, _, cx| pane.lock_bulk_selection(true, cx)),
                     )
