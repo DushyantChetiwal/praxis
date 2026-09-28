@@ -627,8 +627,8 @@ impl AgentTool for GitShowTool {
                             let name = repository_name(&repository, cx);
                             let details = repository
                                 .update(cx, |repository, _cx| repository.show(revision.clone()));
-                            let diff = repository.update(cx, |repository, _cx| {
-                                repository.load_commit_diff(revision.clone(), false)
+                            let diff = repository.update(cx, |repository, cx| {
+                                repository.load_commit_diff(revision.clone(), false, cx)
                             });
                             (name, details, diff)
                         })
@@ -648,14 +648,9 @@ impl AgentTool for GitShowTool {
                     Ok(Err(error)) => return Err(format!("Could not inspect {revision}: {error}")),
                     Err(error) => return Err(format!("Could not inspect {revision}: {error}")),
                 };
-                let diff = diff
-                    .await
-                    .map_err(|error| {
-                        format!("Could not read changed files for {repository}: {error}")
-                    })?
-                    .map_err(|error| {
-                        format!("Could not read changed files for {repository}: {error}")
-                    })?;
+                let diff = diff.await.map_err(|error| {
+                    format!("Could not read changed files for {repository}: {error}")
+                })?;
 
                 writeln!(output, "# {repository}").unwrap();
                 writeln!(output, "Commit: {}", details.sha).unwrap();
