@@ -3761,7 +3761,7 @@ mod tests {
 
         let plan = test_plan(cx).await;
         let project = plan.project.clone();
-        let thread = plan.thread.clone();
+        let thread = plan.thread;
         let mut graph = ArchitectGraph::default();
         for (index, id) in ["a", "b", "c", "d"].into_iter().enumerate() {
             let mut node = ArchitectNode::new(id, format!("Step {index}"));
