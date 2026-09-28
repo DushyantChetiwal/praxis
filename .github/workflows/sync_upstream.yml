@@ -120,6 +120,28 @@ jobs:
             "--force-with-lease=refs/heads/main:${BASE_SHA}"
           echo "Promoted validated source ${STAGING_SHA}." >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Keep upstream's workflows switched off
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Upstream's own automation targets zed-industries. Only these run here.
+          keep=" architect_quality.yml bundle_fork.yml sync_upstream.yml recover_windows_symbols.yml "
+          gh workflow list --repo "${GITHUB_REPOSITORY}" --limit 500 --json id,path,state \
+            --jq '.[] | select(.state == "active") | "\(.id) \(.path)"' |
+            while read -r id path; do
+              case "${path}" in
+                .github/workflows/*) ;;
+                *) continue ;;
+              esac
+              name="${path##*/}"
+              if [[ "${keep}" != *" ${name} "* ]]; then
+                gh workflow disable "${id}" --repo "${GITHUB_REPOSITORY}"
+                echo "Switched off ${name}." >> "${GITHUB_STEP_SUMMARY}"
+              fi
+            done
+
       - name: Rebuild Windows and macOS
         if: github.event_name == 'schedule' || inputs.rebuild
         env:
