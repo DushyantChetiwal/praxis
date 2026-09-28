@@ -65,6 +65,11 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 ///
 /// ### Connections
 /// - Leave out `condition` when a step simply follows another.
+/// - Several connections without a condition out of one step run their
+///   branches at the same time, each in a conversation of its own, until they
+///   meet at a step every branch leads to, which then runs once. Draw steps side
+///   by side only when they work on separate parts of the project, since the
+///   branches share one working tree.
 /// - Use `objective` for an externally observable statement, such as whether a
 ///   command succeeded or a file exists. The current runner asks the model to
 ///   evaluate that statement from the step summary; it is not executable code.

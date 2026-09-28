@@ -3115,7 +3115,7 @@ mod tests {
     #[test]
     fn primary_actions_have_one_rendering_owner() {
         let source = include_str!("rendering.rs");
-        for suffix in ["fit", "run", "stop", "plan-conversation"] {
+        for suffix in ["fit", "run", "stop", "pause", "resume", "plan-conversation"] {
             let id = format!("\"architect-{suffix}\"");
             assert_eq!(
                 source.matches(&id).count(),
