@@ -613,15 +613,15 @@ impl ArchitectPane {
                         })
                     })
                     .child(
-                        Button::new("architect-open-code", "Code")
+                        Button::new("architect-open-code", "Editor View")
                             .tab_index(0isize)
                             .label_size(LabelSize::Small)
                             .style(ButtonStyle::Subtle)
                             .start_icon(Icon::new(IconName::Code).size(IconSize::XSmall))
                             .tooltip(|_window, cx| {
                                 Tooltip::for_action(
-                                    "Return to the Code workspace",
-                                    &crate::ToggleArchitectWorkspace,
+                                    "Switch to Editor View",
+                                    &crate::ToggleArchitectView,
                                     cx,
                                 )
                             })

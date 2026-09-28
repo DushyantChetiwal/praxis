@@ -11,15 +11,18 @@ planning. It is an independent product built on the open-source
 [Zed](https://github.com/zed-industries/zed) editor and is not affiliated with
 or endorsed by Zed Industries.
 
-## Architect workspace
+## Architect View
 
 Instead of treating an agent as a one-turn command box, Praxis makes planning a
-primary workspace. Work is drafted as a graph of explicit steps, constraints,
+primary view. Work is drafted as a graph of explicit steps, constraints,
 dependencies, conditions, loops, and expected hand-offs. Individual steps can
 be discussed and refined before the locked plan is executed.
 
-The alternate Code workspace retains the project tree, editor, terminal, Git
-panel, and overall plan conversation. Native threads have three modes: Plan
+Editor View is the familiar editor: project tree, editor, terminal, Git panel,
+and the overall plan conversation. Switch between the two with the Architect
+View button in the Agent panel, the Editor View button on the canvas, or
+`agent: toggle architect view`; opening a file from Architect View switches to
+Editor View with that file in front. Native threads have three modes: Plan
 researches with reviewed read capabilities and asks you to approve a plan
 before anything changes, as in Zed; Architect drafts the plan on the canvas
 with the same read-only boundary; and Build enables approved mutation and
@@ -28,7 +31,7 @@ execution tools.
 The main product additions live in:
 
 - `crates/architect` for the plan graph, compiler, persistence, and runner
-- `crates/agent_ui/src/architect_ui/` for the Architect workspace
+- `crates/agent_ui/src/architect_ui/` for Architect View
 - `crates/agent` and `crates/agent_ui` for tools and execution integration
 
 See [`docs/src/ai/architect-portfolio.md`](./docs/src/ai/architect-portfolio.md)

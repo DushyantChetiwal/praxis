@@ -762,7 +762,7 @@
       "ctrl-shift-g": "git_panel::ToggleFocus",
       "cmd-shift-d": "debug_panel::ToggleFocus",
       "cmd-?": "agent::ToggleFocus",
-      "cmd-alt-shift-a": "agent::ToggleArchitectWorkspace",
+      "cmd-alt-shift-a": "agent::ToggleArchitectView",
       "cmd-alt-s": "workspace::SaveAll",
       "cmd-k n": "encoding_selector::Toggle",
       "cmd-k m": "language_selector::Toggle",

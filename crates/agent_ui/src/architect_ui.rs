@@ -271,6 +271,9 @@ pub struct ArchitectPane {
 
     _thread_subscription: Subscription,
     _search_subscription: Subscription,
+    /// Watches for another item becoming active while Architect View owns the
+    /// workspace, so that opening a file switches to Editor View with it.
+    _workspace_subscription: Option<Subscription>,
     /// Follows the plan's conversation, so that a step thread asking for its
     /// parent (its Minimize button, or Go Back) brings the drawer back to
     /// the plan's own conversation. Kept with the id of the conversation it
@@ -302,6 +305,17 @@ impl ArchitectPane {
             editor
         });
         let search_subscription = cx.observe(&search_editor, |_, _, cx| cx.notify());
+        let workspace_subscription = workspace.upgrade().map(|workspace| {
+            cx.subscribe_in(
+                &workspace,
+                window,
+                |this, workspace, event: &workspace::Event, window, cx| {
+                    if matches!(event, workspace::Event::ActiveItemChanged) {
+                        this.switch_to_editor_for_opened_item(workspace, window, cx);
+                    }
+                },
+            )
+        });
         Self {
             thread,
             workspace,
@@ -343,6 +357,7 @@ impl ArchitectPane {
             next_undo_group: None,
             _thread_subscription: subscription,
             _search_subscription: search_subscription,
+            _workspace_subscription: workspace_subscription,
             plan_conversation_subscription: None,
         }
     }
@@ -700,8 +715,12 @@ impl ArchitectPane {
         }
     }
 
+    /// `opened_item`, when given, is something the user opened while Architect
+    /// View was showing; it stays active and focused instead of the item that
+    /// was active before Architect View opened.
     fn restore_code_surface(
         workspace: &mut Workspace,
+        opened_item: Option<Box<dyn workspace::item::ItemHandle>>,
         previous_code_item: Option<Box<dyn workspace::item::ItemHandle>>,
         code_docks: Vec<DockSnapshot>,
         last_code_focus: Option<FocusHandle>,
@@ -715,7 +734,10 @@ impl ArchitectPane {
         });
         Self::arrange_code_panels(workspace, window, cx);
 
-        let code_item = previous_code_item.or_else(|| {
+        let opened_focus = opened_item
+            .as_ref()
+            .map(|opened_item| opened_item.item_focus_handle(cx));
+        let code_item = opened_item.or(previous_code_item).or_else(|| {
             workspace
                 .items(cx)
                 .find(|item| item.downcast::<ArchitectPane>().is_none())
@@ -726,14 +748,23 @@ impl ArchitectPane {
         }
 
         Self::restore_code_docks(workspace, &code_docks, window, cx);
-        if let Some(last_code_focus) = last_code_focus {
-            last_code_focus.focus(window, cx);
+        if let Some(focus) = opened_focus.or(last_code_focus) {
+            focus.focus(window, cx);
         }
         Self::persist_mode(workspace, ArchitectWorkspaceMode::Code, cx);
     }
 
     pub fn activate_code(
         workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        Self::activate_code_with_item(workspace, None, window, cx);
+    }
+
+    fn activate_code_with_item(
+        workspace: &mut Workspace,
+        opened_item: Option<Box<dyn workspace::item::ItemHandle>>,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
@@ -763,8 +794,20 @@ impl ArchitectPane {
                     architect.last_code_focus.clone(),
                 )
             });
+        // An item opened into another pane (a split, say) leaves Architect's
+        // own pane zoomed with its tab strip hidden unless it is reset here.
+        if let Some(architect_pane) = &architect_pane
+            && architect_pane != workspace.active_pane()
+        {
+            architect_pane.update(cx, |pane, cx| {
+                pane.set_should_display_tab_bar(|_, cx| TabBarSettings::get_global(cx).show);
+                pane.zoom_out(&ZoomOut, window, cx);
+                cx.notify();
+            });
+        }
         Self::restore_code_surface(
             workspace,
+            opened_item,
             previous_code_item,
             code_docks,
             last_code_focus,
@@ -830,6 +873,59 @@ impl ArchitectPane {
         cx.notify();
     }
 
+    /// Opening a file, or anything else, while Architect View owns the
+    /// workspace means the user wants to see it. Left alone it would show in
+    /// Architect's zoomed pane with no tabs and no panels, so switch to Editor
+    /// View and keep it in front.
+    fn switch_to_editor_for_opened_item(
+        &mut self,
+        workspace: &Entity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mode != ArchitectWorkspaceMode::Architect {
+            return;
+        }
+        let architect_id = cx.entity().entity_id();
+        let opened_item = {
+            let workspace = workspace.read(cx);
+            // A canvas that is not in the workspace, such as one kept by the
+            // Agent panel, has no say over what the workspace shows.
+            if !workspace
+                .items(cx)
+                .any(|item| item.item_id() == architect_id)
+            {
+                return;
+            }
+            let Some(opened_item) = workspace
+                .active_item(cx)
+                .filter(|item| item.item_id() != architect_id)
+            else {
+                return;
+            };
+            opened_item.downgrade_item()
+        };
+        let architect = cx.weak_entity();
+        let workspace = workspace.downgrade();
+        window.defer(cx, move |window, cx| {
+            let still_architect = architect.upgrade().is_some_and(|architect| {
+                architect.read(cx).mode == ArchitectWorkspaceMode::Architect
+            });
+            if !still_architect {
+                return;
+            }
+            let Some(workspace) = workspace.upgrade() else {
+                return;
+            };
+            let Some(opened_item) = opened_item.upgrade() else {
+                return;
+            };
+            workspace.update(cx, |workspace, cx| {
+                Self::activate_code_with_item(workspace, Some(opened_item), window, cx);
+            });
+        });
+    }
+
     fn request_code_mode(&self, window: &mut Window, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
         window.defer(cx, move |window, cx| {
@@ -871,6 +967,7 @@ impl ArchitectPane {
                 workspace.update(cx, |workspace, cx| {
                     Self::restore_code_surface(
                         workspace,
+                        None,
                         previous_code_item,
                         code_docks,
                         last_code_focus,
@@ -2694,6 +2791,57 @@ mod tests {
             assert_eq!(architect.mode(), ArchitectWorkspaceMode::Architect);
             assert_eq!(architect.selection, Some(Selection::Node(parent.clone())));
             assert_eq!(architect.pan, point(px(72.0), px(-24.0)));
+        });
+
+        // Opening a file while Architect View is showing switches to Editor
+        // View with that file in front.
+        let opened = workspace.update_in(cx, |workspace, window, cx| {
+            let opened = cx.new(TestItem::new);
+            workspace.add_item_to_active_pane(Box::new(opened.clone()), None, true, window, cx);
+            opened
+        });
+        cx.run_until_parked();
+        let opened_focus = opened.read_with(cx, |opened, cx| opened.focus_handle(cx));
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert_eq!(
+                workspace.active_item_as::<TestItem>(cx),
+                Some(opened.clone()),
+                "the opened item should stay in front in Editor View"
+            );
+            assert!(
+                opened_focus.is_focused(window),
+                "the opened item should keep focus in Editor View"
+            );
+            assert!(
+                !workspace.active_pane().read(cx).is_zoomed(),
+                "Editor View should not leave the pane zoomed"
+            );
+            assert_eq!(
+                workspace.item_of_type::<ArchitectPane>(cx),
+                None,
+                "Editor View should detach Architect from the pane"
+            );
+        });
+        architect.read_with(cx, |architect, cx| {
+            assert_eq!(architect.mode(), ArchitectWorkspaceMode::Code);
+            assert!(
+                architect.allows_workspace_docks(cx),
+                "Editor View should re-enable the panels"
+            );
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.active_pane().update(cx, |pane, cx| {
+                pane.remove_item(opened.entity_id(), false, false, window, cx);
+            });
+            ArchitectPane::open(thread.clone(), workspace, window, cx);
+        });
+        cx.run_until_parked();
+        architect.read_with(cx, |architect, _| {
+            assert_eq!(
+                architect.mode(),
+                ArchitectWorkspaceMode::Architect,
+                "returning to Architect View must not bounce back to Editor View"
+            );
         });
 
         for _ in 0..3 {
