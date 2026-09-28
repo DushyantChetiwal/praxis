@@ -3836,7 +3836,7 @@ mod tests {
                 "a new zoom mid-glide carries on from what is on screen"
             );
         });
-        cx.executor().advance_clock(CAMERA_ANIMATION);
+        cx.executor().advance_clock(CAMERA_ANIMATION + CAMERA_FRAME);
         cx.run_until_parked();
         pane.read_with(cx, |pane, _| {
             assert!(
@@ -3859,7 +3859,7 @@ mod tests {
             pane.zoom_by(10.0, None, cx);
             under_centre
         });
-        cx.executor().advance_clock(CAMERA_ANIMATION);
+        cx.executor().advance_clock(CAMERA_ANIMATION + CAMERA_FRAME);
         cx.run_until_parked();
         pane.read_with(cx, |pane, _| {
             assert_eq!(pane.zoom, MAX_ZOOM);
@@ -3872,7 +3872,7 @@ mod tests {
             pane.zoom_to_fit(cx);
             assert_eq!(pane.zoom, MAX_ZOOM, "fitting glides rather than jumps");
         });
-        cx.executor().advance_clock(CAMERA_ANIMATION);
+        cx.executor().advance_clock(CAMERA_ANIMATION + CAMERA_FRAME);
         cx.run_until_parked();
         let fitted = (1000.0 - 64.0) / 1240.0;
         pane.read_with(cx, |pane, _| {
@@ -3886,7 +3886,7 @@ mod tests {
             pane.set_zoom(1.0, None, cx);
             pane.pan_by(point(px(30.0), px(-10.0)), cx);
         });
-        cx.executor().advance_clock(CAMERA_ANIMATION);
+        cx.executor().advance_clock(CAMERA_ANIMATION + CAMERA_FRAME);
         cx.run_until_parked();
         pane.read_with(cx, |pane, _| {
             assert_eq!(pane.zoom, 1.0);
