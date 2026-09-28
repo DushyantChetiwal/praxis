@@ -1453,6 +1453,9 @@ mod tests {
             // to the project until they do.
             "draft_plan",
             "refine_step",
+            // Records a finished step's summary on the plan while a run drives
+            // it; the step's own tool calls carry the permission checks.
+            "complete_step",
             // Presenting a plan always waits for the user's decision, so it has
             // no settings-driven permission rules.
             "exit_plan_mode",
