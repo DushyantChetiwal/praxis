@@ -646,6 +646,10 @@ fn affects_thread_metadata(event: &AcpThreadEvent) -> bool {
 
 pub enum AcpServerViewEvent {
     ActiveThreadChanged,
+    /// The view was asked to show one of its threads and did. Anything
+    /// showing these threads somewhere else, such as the canvas's
+    /// conversation drawer, can follow along.
+    NavigatedToThread(acp::SessionId),
 }
 
 impl EventEmitter<AcpServerViewEvent> for ConversationView {}
@@ -816,22 +820,29 @@ impl ConversationView {
             .and_then(|connected| connected.conversation.read(cx).updated_at)
     }
 
+    /// Shows one of this conversation's threads, returning whether it could:
+    /// a thread that was never loaded here, such as the parent of a thread
+    /// opened on its own, cannot be shown.
     pub fn navigate_to_thread(
         &mut self,
         session_id: acp::SessionId,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(connected) = self.as_connected_mut() else {
-            return;
+            return false;
         };
 
-        connected.navigate_to_thread(session_id);
+        let navigated = connected.navigate_to_thread(session_id.clone());
         if let Some(view) = self.active_thread() {
             view.read(cx).activation_focus_handle(cx).focus(window, cx);
         }
         cx.emit(AcpServerViewEvent::ActiveThreadChanged);
+        if navigated {
+            cx.emit(AcpServerViewEvent::NavigatedToThread(session_id));
+        }
         cx.notify();
+        navigated
     }
 
     pub fn set_work_dirs(&mut self, work_dirs: PathList, cx: &mut Context<Self>) {
@@ -895,10 +906,12 @@ impl ConnectedServerState {
             .map_or(false, |view| view.read(cx).thread_error.is_some())
     }
 
-    pub fn navigate_to_thread(&mut self, session_id: acp::SessionId) {
-        if self.threads.contains_key(&session_id) {
-            self.active_id = Some(session_id);
+    pub fn navigate_to_thread(&mut self, session_id: acp::SessionId) -> bool {
+        if !self.threads.contains_key(&session_id) {
+            return false;
         }
+        self.active_id = Some(session_id);
+        true
     }
 
     pub fn close_all_sessions(&self, cx: &mut App) -> Task<()> {
@@ -4618,6 +4631,60 @@ pub(crate) mod tests {
             assert!(view.activation_focus_handle(cx).is_focused(window));
             assert_eq!(view.list_state.item_count(), 0);
             assert!(view.thread.read(cx).notices().is_empty());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_navigating_reports_only_threads_it_can_show(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new().with_supports_load_session(true);
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection), cx).await;
+        add_to_workspace_with_size(conversation_view.clone(), true, cx);
+        let root_session_id = active_thread(&conversation_view, cx)
+            .read_with(cx, |view, cx| view.thread.read(cx).session_id().clone());
+        let step_session_id = acp::SessionId::new("step-session");
+        conversation_view.update_in(cx, |view, window, cx| {
+            view.load_subagent_session(
+                step_session_id.clone(),
+                root_session_id.clone(),
+                window,
+                cx,
+            )
+            .detach();
+        });
+        cx.run_until_parked();
+
+        let navigations = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let _subscription = cx.update(|_, cx| {
+            cx.subscribe(&conversation_view, {
+                let navigations = navigations.clone();
+                move |_, event: &AcpServerViewEvent, _| {
+                    if let AcpServerViewEvent::NavigatedToThread(session_id) = event {
+                        navigations.borrow_mut().push(session_id.clone());
+                    }
+                }
+            })
+        });
+        let not_loaded = acp::SessionId::new("not-loaded");
+        let results = conversation_view.update_in(cx, |view, window, cx| {
+            [
+                view.navigate_to_thread(step_session_id.clone(), window, cx),
+                view.navigate_to_thread(not_loaded.clone(), window, cx),
+                view.navigate_to_thread(root_session_id.clone(), window, cx),
+            ]
+        });
+        cx.run_until_parked();
+
+        assert_eq!(results, [true, false, true]);
+        assert_eq!(
+            *navigations.borrow(),
+            vec![step_session_id, root_session_id.clone()],
+            "a thread that is not loaded here must not be reported as shown"
+        );
+        active_thread(&conversation_view, cx).read_with(cx, |view, cx| {
+            assert_eq!(view.thread.read(cx).session_id(), &root_session_id);
         });
     }
 

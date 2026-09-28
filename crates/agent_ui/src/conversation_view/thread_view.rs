@@ -243,6 +243,29 @@ pub enum AcpThreadViewEvent {
     Interacted,
 }
 
+/// Opens a subagent's parent in the Agent panel. This is for a subagent
+/// thread opened on its own, such as from the thread history, whose parent
+/// was never loaded into the same conversation. Deferred, because it
+/// replaces the panel's view, which is the one being clicked.
+fn open_parent_thread_in_panel(
+    workspace: WeakEntity<Workspace>,
+    parent_session_id: acp::SessionId,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window.defer(cx, move |window, cx| {
+        let Some(workspace) = workspace.upgrade() else {
+            return;
+        };
+        let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) else {
+            return;
+        };
+        panel.update(cx, |panel, cx| {
+            panel.open_thread(parent_session_id, None, None, window, cx);
+        });
+    });
+}
+
 impl EventEmitter<AcpThreadViewEvent> for ThreadView {}
 
 /// `cat -n`-style numbered code block, already stripped of its line-number
@@ -4360,6 +4383,7 @@ impl ThreadView {
         let parent_session_id = self.thread.read(cx).parent_session_id()?.clone();
 
         let server_view = self.server_view.clone();
+        let workspace = self.workspace.clone();
         let thread = self.thread.clone();
         let is_done = thread.read(cx).status() == ThreadStatus::Idle;
         let is_canceled_or_failed = self.is_subagent_canceled_or_failed(cx);
@@ -4423,13 +4447,25 @@ impl ThreadView {
                                         .icon_size(IconSize::Small)
                                         .tooltip(Tooltip::text("Minimize Subagent"))
                                         .on_click(move |_, window, cx| {
-                                            let _ = server_view.update(cx, |server_view, cx| {
-                                                server_view.navigate_to_thread(
+                                            // A view that is gone cannot show the parent,
+                                            // which is the same as one that never loaded it.
+                                            let shown = server_view
+                                                .update(cx, |server_view, cx| {
+                                                    server_view.navigate_to_thread(
+                                                        parent_session_id.clone(),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                })
+                                                .unwrap_or(false);
+                                            if !shown {
+                                                open_parent_thread_in_panel(
+                                                    workspace.clone(),
                                                     parent_session_id.clone(),
                                                     window,
                                                     cx,
                                                 );
-                                            });
+                                            }
                                         }),
                                 ),
                         ),

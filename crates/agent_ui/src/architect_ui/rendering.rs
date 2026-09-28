@@ -2830,6 +2830,7 @@ impl Render for ArchitectPane {
         if self.mode != ArchitectWorkspaceMode::Architect {
             return div().size_full().into_any_element();
         }
+        self.follow_plan_conversation(cx);
 
         let has_plan = self.graph(cx).is_some_and(|graph| !graph.is_empty());
         let viewport_width = window.viewport_size().width;
