@@ -593,39 +593,44 @@ impl ArchitectPane {
         let Some(graph) = self.graph(cx) else {
             return;
         };
-        let locked = graph.node(&id).is_some_and(|node| node.locked);
-
-        // Settling a step that contains a plan would settle that plan too,
-        // which is not the user's to do from out here.
-        if !locked && !graph.can_lock(&id) {
-            self.report(
-                "This step contains a plan that is still being argued about. Lock every step \
-                 inside it first."
-                    .to_string(),
-                cx,
-            );
+        let Some(node) = graph.node(&id) else {
             return;
-        }
+        };
+        let locked = node.locked;
+        // Locking a step that holds a plan settles that plan with it, at every
+        // depth; unlocking reopens only the step itself.
+        let nested_open = node.subplan().map_or(0, |subplan| {
+            subplan
+                .step_count_deeply()
+                .saturating_sub(subplan.locked_step_count_deeply())
+        });
 
         let path = self.focus.child(id);
         let activity_path = path.clone();
-        if self.edit_checked(move |graph| graph.set_locked_at(&path, !locked), cx) {
-            self.record_activity(
-                Some(activity_path),
-                if locked {
-                    "Reopened this step for editing"
-                } else {
-                    "Marked this step as settled"
-                },
-                cx,
-            );
+        let changed = if locked {
+            self.edit_checked(move |graph| graph.set_locked_at(&path, false), cx)
+        } else {
+            self.edit_checked(move |graph| graph.lock_deeply_at(&path).map(|_| ()), cx)
+        };
+        if changed {
+            let activity = if locked {
+                "Reopened this step for editing".to_string()
+            } else if nested_open > 0 {
+                format!(
+                    "Marked this step and {} inside it as settled",
+                    super::bulk::count_label(nested_open)
+                )
+            } else {
+                "Marked this step as settled".to_string()
+            };
+            self.record_activity(Some(activity_path), activity, cx);
         }
         self.refresh_inspector(window, cx);
     }
 
     /// Rebuilds the inspector so its fields match the step again, which is what
     /// makes them go read-only the moment a step is locked.
-    fn refresh_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn refresh_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self
             .inspector
             .as_ref()
@@ -1571,6 +1576,7 @@ impl ArchitectPane {
             })
             .unwrap_or_default();
         let locked = node.locked;
+        let has_subplan = node.subplan().is_some_and(|subplan| !subplan.is_empty());
         let running = self.is_running(cx);
         let has_chat = node.chat.is_some();
         // A step nothing leads out of has nobody to hand anything to, so an
@@ -2507,6 +2513,9 @@ impl ArchitectPane {
                             .tooltip(Tooltip::text(if locked {
                                 "A locked step is settled, and the plan can only run once every \
                                  step is"
+                            } else if has_subplan {
+                                "Says this step and every step inside it are settled. Every step \
+                                 has to be locked before the plan can run."
                             } else {
                                 "Says this step is settled. Every step has to be locked before the \
                                  plan can run."

@@ -2435,8 +2435,21 @@ mod tests {
                 "a selection that was undone away is dropped"
             );
 
+            let child_locked = |pane: &ArchitectPane, cx: &Context<ArchitectPane>| {
+                pane.root_graph(cx)
+                    .and_then(|root| root.graph_at(&NodePath::root(parent.clone())))
+                    .and_then(|nested| nested.node(&child))
+                    .is_some_and(|node| node.locked)
+            };
             pane.toggle_lock(parent.clone(), window, cx);
+            assert!(
+                pane.root_graph(cx).unwrap().node(&parent).unwrap().locked,
+                "a step holding an open plan can be locked"
+            );
+            assert!(child_locked(pane, cx), "locking it locks the plan inside");
+            pane.step_history(HistoryDirection::Undo, window, cx);
             assert!(!pane.root_graph(cx).unwrap().node(&parent).unwrap().locked);
+            assert!(!child_locked(pane, cx), "one undo reopens both");
             pane.drill_into(parent.clone(), window, cx);
             assert_eq!(pane.focus, NodePath::root(parent.clone()));
             pane.toggle_lock(child.clone(), window, cx);
@@ -2492,6 +2505,19 @@ mod tests {
                 "locking several steps undoes as one change"
             );
             assert_eq!(pane.bulk.len(), 3, "undo keeps the steps selected");
+
+            pane.lock_all_steps(window, cx);
+            assert!(
+                pane.root_graph(cx).unwrap().is_fully_locked_deeply(),
+                "Lock All settles every step at every depth"
+            );
+            pane.step_history(HistoryDirection::Undo, window, cx);
+            assert!(
+                drafts
+                    .iter()
+                    .all(|id| !pane.root_graph(cx).unwrap().node(id).unwrap().locked),
+                "Lock All undoes as one change"
+            );
 
             let positions = |pane: &ArchitectPane, cx: &Context<ArchitectPane>| {
                 pane.bulk

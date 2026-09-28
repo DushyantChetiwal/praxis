@@ -1189,6 +1189,42 @@ impl ArchitectGraph {
         Ok(())
     }
 
+    /// Locks a step together with every step in its nested plans, so a step
+    /// holding a plan can be settled in one go. Returns how many steps changed.
+    ///
+    /// Like [`Self::set_locked_at`], it cannot reach through a locked
+    /// containing step. Unlocking goes through `set_locked_at`, which reopens
+    /// only the addressed step.
+    pub fn lock_deeply_at(&mut self, path: &NodePath) -> Result<usize, GraphMutationError> {
+        let (graph, id) = self.containing_graph_mut(path)?;
+        let node = graph
+            .node_mut(&id)
+            .ok_or_else(|| GraphMutationError::NodeNotFound { path: path.clone() })?;
+        let mut changed = usize::from(!node.locked);
+        node.locked = true;
+        if let Some(subplan) = node.subplan.as_deref_mut() {
+            changed += subplan.lock_all();
+        }
+        Ok(changed)
+    }
+
+    /// Locks every step here and in every nested plan. Returns how many steps
+    /// changed.
+    pub fn lock_all(&mut self) -> usize {
+        self.nodes
+            .iter_mut()
+            .map(|node| {
+                let changed = usize::from(!node.locked);
+                node.locked = true;
+                let nested = node
+                    .subplan
+                    .as_deref_mut()
+                    .map_or(0, ArchitectGraph::lock_all);
+                changed + nested
+            })
+            .sum()
+    }
+
     /// Resolves the plan containing a node and rejects traversal through a
     /// locked containing step.
     fn containing_graph_mut(
@@ -2065,6 +2101,80 @@ mod tests {
             .unwrap();
         graph.set_locked_at(&parent, true).unwrap();
         assert!(graph.node(&NodeId::from("parent")).unwrap().locked);
+    }
+
+    fn two_level_plan() -> ArchitectGraph {
+        let mut grandchild_plan = ArchitectGraph::default();
+        grandchild_plan.add_node(ArchitectNode::new("grandchild", "Grandchild"));
+        let mut child = ArchitectNode::new("child", "Child");
+        child.subplan = Some(Box::new(grandchild_plan));
+        let mut inner = ArchitectGraph::default();
+        inner.add_node(child);
+        inner.add_node(ArchitectNode::new("sibling", "Sibling"));
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.subplan = Some(Box::new(inner));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(parent);
+        graph.add_node(ArchitectNode::new("other", "Other"));
+        graph
+    }
+
+    #[test]
+    fn locking_deeply_settles_a_step_and_everything_inside_it() {
+        let mut graph = two_level_plan();
+        let parent = NodePath::from(NodeId::from("parent"));
+        graph
+            .set_locked_at(
+                &NodePath::from(vec!["parent".into(), "sibling".into()]),
+                true,
+            )
+            .unwrap();
+
+        assert_eq!(graph.lock_deeply_at(&parent), Ok(3));
+        let inner = graph.graph_at(&parent).unwrap();
+        assert!(inner.is_fully_locked_deeply());
+        assert!(graph.node(&NodeId::from("parent")).unwrap().locked);
+        assert!(
+            !graph.node(&NodeId::from("other")).unwrap().locked,
+            "steps outside the one locked are left alone"
+        );
+        assert_eq!(
+            graph.lock_deeply_at(&parent),
+            Ok(0),
+            "locking again changes nothing"
+        );
+
+        graph.set_locked_at(&parent, false).unwrap();
+        assert!(
+            graph.graph_at(&parent).unwrap().is_fully_locked_deeply(),
+            "unlocking reopens only the step itself"
+        );
+        assert_eq!(
+            graph.lock_deeply_at(&NodePath::from(vec!["other".into(), "missing".into()])),
+            Err(GraphMutationError::MissingSubplan {
+                path: NodePath::from(NodeId::from("other"))
+            })
+        );
+    }
+
+    #[test]
+    fn a_nested_step_cannot_be_locked_through_a_locked_parent() {
+        let mut graph = two_level_plan();
+        let parent = NodePath::from(NodeId::from("parent"));
+        graph.lock_deeply_at(&parent).unwrap();
+        let child = NodePath::from(vec!["parent".into(), "child".into()]);
+        assert_eq!(
+            graph.lock_deeply_at(&child),
+            Err(GraphMutationError::Locked { path: parent })
+        );
+    }
+
+    #[test]
+    fn lock_all_settles_every_step_at_every_depth() {
+        let mut graph = two_level_plan();
+        assert_eq!(graph.lock_all(), graph.step_count_deeply());
+        assert!(graph.is_fully_locked_deeply());
+        assert_eq!(graph.lock_all(), 0);
     }
 
     /// A settled plan, as it would be after the user argued the steps out and

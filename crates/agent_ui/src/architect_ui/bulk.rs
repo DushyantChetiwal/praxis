@@ -44,8 +44,6 @@ fn all_or_nothing(
 pub(super) struct BulkCounts {
     pub locked: usize,
     pub drafts: usize,
-    /// Drafts that can be locked now: not holding a plan still in draft.
-    pub lockable: usize,
     /// False inside a locked step, whose plan cannot be changed from here.
     pub editable: bool,
 }
@@ -85,9 +83,6 @@ impl ArchitectPane {
                 counts.locked += 1;
             } else {
                 counts.drafts += 1;
-                if graph.can_lock(&node.id) {
-                    counts.lockable += 1;
-                }
             }
         }
         counts
@@ -330,8 +325,41 @@ impl ArchitectPane {
         );
     }
 
-    /// Locks or unlocks every selected step that can be. A step holding a plan
-    /// that is still being drafted cannot be locked from here, as with one step.
+    /// Locks every step in the whole plan, at every depth, as one change to
+    /// undo. Whatever level is on screen, it is the plan that runs.
+    pub(super) fn lock_all_steps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.interaction = Interaction::None;
+        if self.is_running(cx) {
+            self.report("Stop the run before locking steps.".to_string(), cx);
+            return;
+        }
+        let open = self.root_graph(cx).map_or(0, |root| {
+            root.step_count_deeply()
+                .saturating_sub(root.locked_step_count_deeply())
+        });
+        if open == 0 {
+            return;
+        }
+        if self.edit_checked(
+            |root| {
+                root.lock_all();
+                Ok(())
+            },
+            cx,
+        ) {
+            self.record_activity(
+                None,
+                format!("Locked the {} still open", count_label(open)),
+                cx,
+            );
+        }
+        // An open inspector goes read-only with its step.
+        self.refresh_inspector(window, cx);
+    }
+
+    /// Locks or unlocks every selected step. As with one step, locking a step
+    /// that holds a plan locks that plan too, and unlocking reopens only the
+    /// selected steps themselves.
     pub(super) fn lock_bulk_selection(&mut self, lock: bool, cx: &mut Context<Self>) {
         self.interaction = Interaction::None;
         if self.is_running(cx) {
@@ -352,30 +380,25 @@ impl ArchitectPane {
         let Some(graph) = self.graph(cx) else {
             return;
         };
-        let mut changing = Vec::new();
-        let mut blocked = 0;
-        for id in &self.bulk {
-            let Some(node) = graph.node(id) else {
-                continue;
-            };
-            if node.locked == lock {
-                continue;
-            }
-            if lock && !graph.can_lock(id) {
-                blocked += 1;
-                continue;
-            }
-            changing.push(self.focus.child(id.clone()));
-        }
+        let changing: Vec<NodePath> = self
+            .bulk
+            .iter()
+            .filter(|id| graph.node(id).is_some_and(|node| node.locked != lock))
+            .map(|id| self.focus.child(id.clone()))
+            .collect();
 
         let count = changing.len();
         if count > 0
             && self.edit_checked(
                 move |graph| {
                     all_or_nothing(graph, |graph| {
-                        changing
-                            .iter()
-                            .try_for_each(|path| graph.set_locked_at(path, lock))
+                        changing.iter().try_for_each(|path| {
+                            if lock {
+                                graph.lock_deeply_at(path).map(|_| ())
+                            } else {
+                                graph.set_locked_at(path, false)
+                            }
+                        })
                     })
                 },
                 cx,
@@ -385,16 +408,6 @@ impl ArchitectPane {
             self.record_activity(
                 Some(self.focus.clone()),
                 format!("{verb} {} at once", count_label(count)),
-                cx,
-            );
-        }
-        if blocked > 0 {
-            self.report(
-                format!(
-                    "{} still {} a plan being drafted. Lock the steps inside first.",
-                    count_label(blocked),
-                    if blocked == 1 { "holds" } else { "hold" },
-                ),
                 cx,
             );
         }
@@ -503,7 +516,6 @@ impl ArchitectPane {
         let BulkCounts {
             locked,
             drafts,
-            lockable,
             editable,
         } = self.bulk_counts(cx);
         let can_change = !running && editable;
@@ -512,22 +524,17 @@ impl ArchitectPane {
         let actions = h_flex()
             .flex_wrap()
             .gap_1()
-            .when(lockable > 0, |this| {
+            .when(drafts > 0, |this| {
                 this.child(
                     Button::new("architect-bulk-lock", "Lock")
                         .tab_index(0isize)
                         .label_size(LabelSize::Small)
                         .style(ButtonStyle::Subtle)
                         .start_icon(Icon::new(IconName::Lock).size(IconSize::XSmall))
-                        .tooltip(Tooltip::text(if lockable < drafts {
-                            format!(
-                                "Settle {} of the drafts. The others still hold a plan in \
-                                 draft.",
-                                count_label(lockable)
-                            )
-                        } else {
-                            format!("Settle the {} still in draft", count_label(drafts))
-                        }))
+                        .tooltip(Tooltip::text(format!(
+                            "Settle the {} still in draft, with any plans inside them",
+                            count_label(drafts)
+                        )))
                         .on_click(cx.listener(|this, _, _, cx| this.lock_bulk_selection(true, cx))),
                 )
             })
