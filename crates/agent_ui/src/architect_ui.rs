@@ -2095,6 +2095,7 @@ mod tests {
     use util::path_list::PathList;
     use workspace::{
         Workspace,
+        dock::PanelButtons,
         item::{Item, test::TestItem},
     };
 
@@ -2685,6 +2686,15 @@ mod tests {
                 !architect.read(cx).allows_workspace_docks(cx),
                 "Architect must reject native dock actions before they mutate layout"
             );
+            let status_bar = workspace.status_bar().read(cx);
+            assert!(
+                status_bar.shows_item::<rendering::ArchitectStatusItem>(cx),
+                "Architect View should keep its own status item"
+            );
+            assert!(
+                !status_bar.shows_item::<PanelButtons>(cx),
+                "Architect View should hide the panel buttons it cannot use"
+            );
         });
 
         workspace.update_in(cx, |workspace, window, cx| {
@@ -2750,6 +2760,13 @@ mod tests {
                 workspace.active_item_as::<TestItem>(cx),
                 Some(code_item.clone()),
                 "Code mode should restore the exact native item"
+            );
+            assert!(
+                workspace
+                    .status_bar()
+                    .read(cx)
+                    .shows_item::<PanelButtons>(cx),
+                "Editor View should show the panel buttons again"
             );
             assert!(
                 code_focus.is_focused(window),

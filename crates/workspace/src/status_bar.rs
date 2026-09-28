@@ -56,6 +56,14 @@ pub trait StatusItemView: Render {
     /// that the status bar can show a "Hide Button" entry in its
     /// right-click menu.
     fn hide_setting(&self, cx: &App) -> Option<HideStatusItem>;
+
+    /// Whether this item stays visible while the active item has the whole
+    /// workspace to itself (it refuses docks, see
+    /// [`crate::item::Item::allows_workspace_docks`]). Most items act on
+    /// editors or panels, which cannot be reached then.
+    fn show_over_exclusive_item(&self, _cx: &App) -> bool {
+        false
+    }
 }
 
 trait StatusItemViewHandle: Send {
@@ -68,6 +76,7 @@ trait StatusItemViewHandle: Send {
     );
     fn item_type(&self) -> TypeId;
     fn hide_setting(&self, cx: &App) -> Option<HideStatusItem>;
+    fn show_over_exclusive_item(&self, cx: &App) -> bool;
 }
 
 #[derive(Default)]
@@ -192,6 +201,7 @@ impl StatusBar {
         sidebar: &SidebarStatus,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let exclusive = self.active_item_is_exclusive(cx);
         h_flex()
             .gap_1()
             .min_w_0()
@@ -200,9 +210,15 @@ impl StatusBar {
                 sidebar.show_toggle && !sidebar.open && sidebar.side == SidebarSide::Left,
                 |this| this.child(self.render_sidebar_toggle(sidebar, cx)),
             )
-            .children(self.left_items.iter().enumerate().map(|(index, item)| {
-                render_hideable_item("status-bar-left", index, item.as_ref(), cx)
-            }))
+            .children(
+                self.left_items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| !exclusive || item.show_over_exclusive_item(cx))
+                    .map(|(index, item)| {
+                        render_hideable_item("status-bar-left", index, item.as_ref(), cx)
+                    }),
+            )
     }
 
     fn render_right_tools(
@@ -210,6 +226,7 @@ impl StatusBar {
         sidebar: &SidebarStatus,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let exclusive = self.active_item_is_exclusive(cx);
         h_flex()
             .flex_shrink_0()
             .gap_1()
@@ -219,6 +236,7 @@ impl StatusBar {
                     .iter()
                     .enumerate()
                     .rev()
+                    .filter(|(_, item)| !exclusive || item.show_over_exclusive_item(cx))
                     .map(|(index, item)| {
                         render_hideable_item("status-bar-right", index, item.as_ref(), cx)
                     }),
@@ -364,6 +382,23 @@ impl StatusBar {
         cx.notify();
     }
 
+    /// Whether an item of type `T` is in the status bar and drawn right now.
+    pub fn shows_item<T: StatusItemView>(&self, cx: &App) -> bool {
+        let exclusive = self.active_item_is_exclusive(cx);
+        self.left_items
+            .iter()
+            .chain(&self.right_items)
+            .filter(|item| item.item_type() == TypeId::of::<T>())
+            .any(|item| !exclusive || item.show_over_exclusive_item(cx))
+    }
+
+    fn active_item_is_exclusive(&self, cx: &App) -> bool {
+        self.active_pane
+            .read(cx)
+            .active_item()
+            .is_some_and(|item| !item.allows_workspace_docks(cx))
+    }
+
     pub fn item_of_type<T: StatusItemView>(&self) -> Option<Entity<T>> {
         self.left_items
             .iter()
@@ -496,6 +531,10 @@ impl<T: StatusItemView> StatusItemViewHandle for Entity<T> {
 
     fn hide_setting(&self, cx: &App) -> Option<HideStatusItem> {
         self.read(cx).hide_setting(cx)
+    }
+
+    fn show_over_exclusive_item(&self, cx: &App) -> bool {
+        self.read(cx).show_over_exclusive_item(cx)
     }
 }
 

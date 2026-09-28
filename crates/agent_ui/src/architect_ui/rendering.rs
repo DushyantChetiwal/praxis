@@ -147,6 +147,10 @@ impl StatusItemView for ArchitectStatusItem {
     fn hide_setting(&self, _cx: &App) -> Option<HideStatusItem> {
         None
     }
+
+    fn show_over_exclusive_item(&self, _cx: &App) -> bool {
+        true
+    }
 }
 
 impl ArchitectPane {
