@@ -130,16 +130,10 @@ The workflow checks:
 A green Actions run is the validation record. The workflow's presence alone is
 not evidence that a revision passed.
 
-The workflow is maintained on the default `main` branch under the fork's
-workflow-only policy. Product code remains on `Enhanced_Agents`. Push and pull
-request runs validate the event revision; a manual dispatch defaults to the
-head of `Enhanced_Agents` and accepts an explicit source ref for a historical
-or diagnostic run.
-
-> **Note:** GitHub evaluates push workflows from the pushed branch and manual
-> workflows from the default branch. Keep the workflow file synchronized between
-> the workflow-only `main` branch and `Enhanced_Agents` without merging product
-> source into `main`.
+Product code and workflows both live on the default `main` branch. Push and
+pull request runs validate the event revision; a manual dispatch defaults to
+the head of `main` and accepts an explicit source ref for a historical or
+diagnostic run.
 
 ## Reproducible demo {#reproducible-demo}
 
@@ -204,9 +198,8 @@ factor for physical pixels when aiming a real pointer.
 
 ## Maintenance and distribution {#maintenance-and-distribution}
 
-The fork keeps product source on `Enhanced_Agents` and workflow definitions on
-the workflow-only default branch. `sync_upstream.yml` runs weekly and can also be
-dispatched manually. It fetches `zed-industries/zed`, merges `upstream/main`,
+The fork keeps product source and workflow definitions on the default `main`
+branch. `sync_upstream.yml` runs weekly and can also be dispatched manually. It fetches `zed-industries/zed`, merges `upstream/main`,
 runs package checks on GitHub, pushes only a successful merge, and dispatches
 `bundle_fork.yml` when a rebuild is requested.
 

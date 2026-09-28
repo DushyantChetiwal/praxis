@@ -1,6 +1,3 @@
-> [!IMPORTANT]
-> Remove this line to confirm you've reviewed this PR before submitting.
-
 <p align="center">
   <img src="docs/brand/praxis-banner.png" alt="Praxis — detailed and deterministic planning" width="420">
 </p>
@@ -58,6 +55,8 @@ repository's GitHub releases:
 - macOS Intel: `Praxis-x86_64.dmg`
 - Linux x86_64: `praxis-linux-x86_64.tar.gz`
 
+Download the latest build from [Releases](https://github.com/DushyantChetiwal/praxis/releases/latest).
+
 Installed **Praxis Dev** builds poll the repository's signed-hash update
 manifest and update through the in-app updater. Praxis uses its own application,
 installer, process, registry, bundle, and user-data identities, so it can remain
@@ -72,6 +71,9 @@ fixes, and other upstream internals therefore continue to flow into Praxis.
 Merge conflicts or quality failures stop promotion for manual resolution.
 
 ## Development
+
+`main` is the product branch. Changes land through pull requests, and every
+push and pull request to `main` runs the Architect quality workflow.
 
 Praxis retains Zed's internal crate names and most source identifiers to keep
 upstream merges reviewable. Platform builds and Rust validation run in GitHub

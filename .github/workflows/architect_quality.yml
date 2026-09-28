@@ -1,21 +1,20 @@
-# Fork-owned validation for Architect. Keep this workflow on the default main
-# branch; product source remains on Enhanced_Agents. Reusable callers pass an
-# exact staging SHA so automated syncs cannot publish unvalidated source.
+# Fork-owned validation for Praxis, which lives on main. Reusable callers pass
+# an exact staging SHA so automated syncs cannot publish unvalidated source.
 name: Architect quality
 
 on:
   push:
     branches:
-      - Enhanced_Agents
+      - main
   pull_request:
     branches:
-      - Enhanced_Agents
+      - main
   workflow_dispatch:
     inputs:
       source_ref:
         description: Branch, tag, or commit to validate
         required: true
-        default: Enhanced_Agents
+        default: main
         type: string
   workflow_call:
     inputs:

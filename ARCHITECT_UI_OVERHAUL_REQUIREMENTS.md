@@ -2,7 +2,7 @@
 
 Status: Complete; exact SHA green on all platforms, installed, update-safe, and runtime-verified on Windows
 Mockup: [`docs/architect-ui-overhaul.html`](docs/architect-ui-overhaul.html)
-Product branch: `Enhanced_Agents`
+Product branch: `main` (formerly `Enhanced_Agents`)
 Release source: `b7c639191da009b10775232504f1aa5d41741dd1`
 Quality workflow: [run 36290102420](https://github.com/DushyantChetiwal/praxis/actions/runs/36290102420) (successful)
 Bundle workflow: [run 36290651943](https://github.com/DushyantChetiwal/praxis/actions/runs/36290651943) (every platform built; publishing was refused and done manually from its artifacts)
@@ -589,9 +589,10 @@ these areas:
 - [x] **AUI-1202** Run `git diff --check` locally before each push.
 - [x] **AUI-1203** Do not run local Cargo, Rust compilation, Rust tests, Clippy,
       rustfmt, Rust Analyzer, or Rust diagnostics.
-- [x] **AUI-1204** Push implementation only to `Enhanced_Agents`.
-- [x] **AUI-1205** Keep `main` limited to workflow files if workflow changes are
-      required.
+- [x] **AUI-1204** Land implementation on `main` through pull requests. (Until
+      2026-09-28, implementation lived on `Enhanced_Agents`.)
+- [x] **AUI-1205** Keep workflow and product changes on the same branch, so
+      workflow files never need synchronizing between branches.
 - [x] **AUI-1206** Pass repository formatting checks in GitHub Actions.
 - [x] **AUI-1207** Pass focused Architect, workspace, project panel, Git panel,
       terminal panel, and agent panel tests in GitHub Actions.

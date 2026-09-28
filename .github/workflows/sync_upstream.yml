@@ -33,8 +33,12 @@ jobs:
       - name: Check out the Praxis branch
         uses: actions/checkout@v7
         with:
-          ref: Enhanced_Agents
+          ref: main
           fetch-depth: 0
+          # GitHub refuses GITHUB_TOKEN pushes that change workflow files,
+          # and upstream merges usually do. A token with the `workflow`
+          # permission in PRAXIS_SYNC_TOKEN lets them through.
+          token: ${{ secrets.PRAXIS_SYNC_TOKEN || github.token }}
 
       - name: Merge upstream Zed and push staging ref
         id: sync
@@ -97,8 +101,9 @@ jobs:
       - name: Check out the Praxis branch
         uses: actions/checkout@v7
         with:
-          ref: Enhanced_Agents
+          ref: main
           fetch-depth: 0
+          token: ${{ secrets.PRAXIS_SYNC_TOKEN || github.token }}
 
       - name: Fast-forward only the unchanged product branch
         env:
@@ -111,8 +116,8 @@ jobs:
           git fetch --no-tags origin "refs/heads/${STAGING_REF}"
           test "$(git rev-parse FETCH_HEAD)" = "${STAGING_SHA}"
           git push origin \
-            "${STAGING_SHA}:refs/heads/Enhanced_Agents" \
-            "--force-with-lease=refs/heads/Enhanced_Agents:${BASE_SHA}"
+            "${STAGING_SHA}:refs/heads/main" \
+            "--force-with-lease=refs/heads/main:${BASE_SHA}"
           echo "Promoted validated source ${STAGING_SHA}." >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Rebuild Windows and macOS

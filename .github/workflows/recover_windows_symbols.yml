@@ -1,0 +1,58 @@
+name: Recover Praxis Windows symbols
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Exact source revision whose cached symbols should be recovered
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Recover cached Windows PDBs
+    runs-on: windows-2022
+    env:
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+      PRAXIS_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
+    steps:
+      - name: Check out the built source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+
+      - name: Restore the Windows bundle cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bundle-windows-x86_64
+          save-if: false
+
+      - name: Relink Praxis with its PDB
+        shell: pwsh
+        run: |
+          . ./script/lib/workspace.ps1
+          ParseZedWorkspace
+          $env:ZED_RELEASE_CHANNEL = Get-Content crates/zed/RELEASE_CHANNEL
+          $env:RELEASE_CHANNEL = $env:ZED_RELEASE_CHANNEL
+          $env:GITHUB_RUN_NUMBER = "16"
+          rustup target add x86_64-pc-windows-msvc
+          cargo --config .cargo/bundle-config.toml build --release --package zed --target x86_64-pc-windows-msvc
+
+          $output = "target/x86_64-pc-windows-msvc/release"
+          Get-Item "$output/zed.exe", "$output/zed.pdb" |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize
+          Get-FileHash "$output/zed.exe" -Algorithm SHA256
+          Compress-Archive "$output/zed.exe", "$output/zed.pdb" target/Praxis-windows-x86_64.dbg.zip -Force
+
+      - name: Upload the recovered symbols
+        uses: actions/upload-artifact@v7
+        with:
+          name: praxis-windows-x86_64-symbols
+          path: target/Praxis-windows-x86_64.dbg.zip
+          if-no-files-found: error

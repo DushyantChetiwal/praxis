@@ -33,7 +33,7 @@ on:
       source_ref:
         description: Exact branch, tag, or commit to build
         required: true
-        default: Enhanced_Agents
+        default: main
         type: string
       build_macos:
         description: Build the macOS disk image
