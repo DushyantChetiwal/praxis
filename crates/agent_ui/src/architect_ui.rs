@@ -37,6 +37,7 @@ use workspace::{
 };
 
 use crate::AgentPanel;
+use crate::conversation_view::AcpServerViewEvent;
 use geometry::{
     EDGE_HIT_TOLERANCE, EXPANDED_NODE_HEIGHT, EXPANDED_NODE_WIDTH, EdgeCurve, NODE_HEIGHT,
     NODE_WIDTH, snap,
@@ -270,6 +271,11 @@ pub struct ArchitectPane {
 
     _thread_subscription: Subscription,
     _search_subscription: Subscription,
+    /// Follows the plan's conversation, so that a step thread asking for its
+    /// parent (its Minimize button, or Go Back) brings the drawer back to
+    /// the plan's own conversation. Kept with the id of the conversation it
+    /// follows, because the Agent panel can switch conversations.
+    plan_conversation_subscription: Option<(gpui::EntityId, Subscription)>,
 }
 
 impl ArchitectPane {
@@ -337,6 +343,7 @@ impl ArchitectPane {
             next_undo_group: None,
             _thread_subscription: subscription,
             _search_subscription: search_subscription,
+            plan_conversation_subscription: None,
         }
     }
 
@@ -1470,6 +1477,36 @@ impl ArchitectPane {
                 workspace.dismiss_toast(previous, cx);
             }
             workspace.show_toast(toast, cx);
+        });
+    }
+
+    /// Makes sure the drawer is following the conversation the Agent panel
+    /// is showing now. Called as the canvas renders, which is when it looks
+    /// that conversation up.
+    fn follow_plan_conversation(&mut self, cx: &mut Context<Self>) {
+        let conversation = self.plan_conversation_view(cx);
+        let followed = self
+            .plan_conversation_subscription
+            .as_ref()
+            .map(|(id, _)| *id);
+        if conversation.as_ref().map(|view| view.entity_id()) == followed {
+            return;
+        }
+        self.plan_conversation_subscription = conversation.map(|conversation| {
+            let subscription = cx.subscribe(
+                &conversation,
+                |this, conversation, event: &AcpServerViewEvent, cx| {
+                    let AcpServerViewEvent::NavigatedToThread(session_id) = event else {
+                        return;
+                    };
+                    if conversation.read(cx).root_session_id.as_ref() == Some(session_id) {
+                        this.plan_drawer_shows_plan = true;
+                        this.inspected_step_session = None;
+                        cx.notify();
+                    }
+                },
+            );
+            (conversation.entity_id(), subscription)
         });
     }
 

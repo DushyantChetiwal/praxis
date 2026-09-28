@@ -144,7 +144,9 @@ jobs:
           cargo test --locked -p agent --lib an_oversized_tool_result
 
       - name: Test Architect canvas support
-        run: "cargo test --locked -p agent_ui --lib architect_ui::"
+        run: |
+          cargo test --locked -p agent_ui --lib architect_ui::
+          cargo test --locked -p agent_ui --lib test_navigating_reports_only_threads_it_can_show
 
       - name: Test question recommendations and countdowns
         run: |
