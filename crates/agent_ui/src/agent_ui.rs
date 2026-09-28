@@ -338,6 +338,9 @@ actions!(
         /// Switches between Architect View and Editor View.
         #[action(deprecated_aliases = ["agent::ToggleArchitectWorkspace"])]
         ToggleArchitectView,
+        /// Opens Praxis Remote, to sign in and manage the phones that can
+        /// follow and steer the agent.
+        OpenPraxisRemote,
     ]
 );
 
@@ -744,6 +747,14 @@ pub fn init(
              _window: &mut Window,
              cx: &mut Context<Workspace>| {
                 import_threads_from_other_channels(workspace, cx);
+            },
+        );
+        workspace.register_action(
+            |workspace: &mut Workspace,
+             _: &OpenPraxisRemote,
+             window: &mut Window,
+             cx: &mut Context<Workspace>| {
+                remote::PraxisRemoteModal::toggle(workspace, window, cx);
             },
         );
     })

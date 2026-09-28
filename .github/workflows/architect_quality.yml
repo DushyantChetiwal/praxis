@@ -167,7 +167,7 @@ jobs:
           cargo test --locked -p agent_ui --lib question_text_edits_ignore_defaults_and_preserve_edits
 
       - name: Test Praxis Remote
-        run: "cargo test --locked -p agent_ui --lib remote::tests::"
+        run: "cargo test --locked -p agent_ui --lib remote::"
 
   updater-tests:
     name: Auto-update integrity tests

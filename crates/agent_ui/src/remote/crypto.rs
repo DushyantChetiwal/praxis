@@ -62,6 +62,19 @@ impl PairingKey {
         self.agree(phone_public, &transcript)
     }
 
+    /// The phone's side of [`Self::agree_with_phone`], for tests that play
+    /// the phone.
+    #[cfg(test)]
+    pub(super) fn agree_with_desktop(
+        self,
+        channel: &str,
+        phone_id: &str,
+        desktop_public: &[u8],
+    ) -> Result<PairingSecrets> {
+        let transcript = transcript_hash(channel, phone_id, &self.public, desktop_public);
+        self.agree(desktop_public, &transcript)
+    }
+
     fn agree(self, peer_public: &[u8], transcript: &[u8]) -> Result<PairingSecrets> {
         if peer_public.len() != PUBLIC_KEY_LEN {
             bail!("the other side's key is not a P-256 public key");
@@ -246,14 +259,17 @@ mod tests {
     // From the test vectors in docs/src/ai/praxis-remote-protocol.md.
     const CHANNEL: &str = "0123456789abcdef0123456789abcdef";
     const PHONE_ID: &str = "fedcba9876543210fedcba9876543210";
-    const PHONE_PUBLIC: &str = "BGD+1LolWp0xyWHrdMY1bWjASbiSO2H6bOZpYi5g8p+2eQP+EAi4vJmkGunpVii8ZPLxsgwtfp9Rd6PClNRGIpk=";
-    const DESKTOP_PUBLIC: &str = "BB79lpmknsBRWuk+JOVoyVb/iHJBHpv3ntw3J4jmMZLPcet9LblSM21sa00e9K3he8jl0LJoH0KUdF0rVly6OYY=";
+    const PHONE_PUBLIC: &str =
+        "BGD+1LolWp0xyWHrdMY1bWjASbiSO2H6bOZpYi5g8p+2eQP+EAi4vJmkGunpVii8ZPLxsgwtfp9Rd6PClNRGIpk=";
+    const DESKTOP_PUBLIC: &str =
+        "BB79lpmknsBRWuk+JOVoyVb/iHJBHpv3ntw3J4jmMZLPcet9LblSM21sa00e9K3he8jl0LJoH0KUdF0rVly6OYY=";
     const COMMIT: &str = "OUHlaa0veVAxCFLJFkMhNYff3Kr3bKcvpSN+zQPJeLY=";
     const SHARED: &str = "e276d9ef83f4744188147d5ad3d2bc93a5bff1dbb1a079599e29b823154e85c7";
     const TRANSCRIPT: &str = "cfd62945d28a04d0bd609de1268684b94716abb7e19e9585bd8e4b73cc71748c";
     const KEY: &str = "da9dd9a4d0c328b1d923cc9b4635d7be4cba432a964aec4ca8a1300efacc6646";
     const CODE: &str = "807021";
-    const PLAINTEXT: &str = r#"{"id":"r1","op":"status","args":{},"sent_at":"2026-01-01T00:00:00Z"}"#;
+    const PLAINTEXT: &str =
+        r#"{"id":"r1","op":"status","args":{},"sent_at":"2026-01-01T00:00:00Z"}"#;
     const BLOB: &str = "AAECAwQFBgcICQoLUqeO9tn6GdeJsQhhTZTZJ534qUbzV9GRWtzN83LowPpUOoA3QnYETibYcB6JwcZqAKMwPp0/eA4COaYU6ZzNZ95NG59AAfXNKN8SIyHZ302C2I4Z";
 
     fn hex(text: &str) -> Vec<u8> {

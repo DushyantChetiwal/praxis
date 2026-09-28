@@ -533,6 +533,7 @@ dependencies = [
  "remote",
  "remote_connection",
  "reqwest_client",
+ "ring",
  "rope",
  "sandbox",
  "schemars 1.0.4",

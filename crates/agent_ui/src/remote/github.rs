@@ -22,6 +22,9 @@ pub(super) const CLIENT_ID: &str = match option_env!("PRAXIS_REMOTE_CLIENT_ID") 
 };
 
 const API: &str = "https://api.github.com";
+/// Full URLs are only followed under this, so that neither a `Link` header
+/// nor a mistake can send the token to a host that merely starts the same.
+const API_PREFIX: &str = "https://api.github.com/";
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const MAX_RESPONSE_BYTES: u64 = 8_000_000;
@@ -101,7 +104,8 @@ pub(super) fn is_signed_out(error: &anyhow::Error) -> bool {
 pub(super) async fn start_device_flow(http: &Arc<dyn HttpClient>) -> Result<DeviceCode> {
     let body = post_form(http, DEVICE_CODE_URL, &[("client_id", CLIENT_ID)]).await?;
     if let Some(error) = body.get("error").and_then(Value::as_str) {
-        bail!("GitHub would not start the sign-in: {}", describe(error, &body));
+        let reason = describe(error, &body);
+        bail!("GitHub would not start the sign-in: {reason}");
     }
     let text = |key: &str| {
         body.get(key)
@@ -114,7 +118,11 @@ pub(super) async fn start_device_flow(http: &Arc<dyn HttpClient>) -> Result<Devi
         user_code: text("user_code")?,
         verification_uri: text("verification_uri")
             .unwrap_or_else(|_| "https://github.com/login/device".to_string()),
-        interval: body.get("interval").and_then(Value::as_u64).unwrap_or(5).max(1),
+        interval: body
+            .get("interval")
+            .and_then(Value::as_u64)
+            .unwrap_or(5)
+            .max(1),
         expires_in: body
             .get("expires_in")
             .and_then(Value::as_u64)
@@ -151,7 +159,8 @@ pub(super) async fn await_device_token(
         if body.get("access_token").is_some() {
             return Tokens::from_grant(&body);
         }
-        match body.get("error").and_then(Value::as_str).unwrap_or_default() {
+        let error = body.get("error").and_then(Value::as_str);
+        match error.unwrap_or_default() {
             "authorization_pending" => {}
             "slow_down" => {
                 interval = body
@@ -175,11 +184,9 @@ pub(super) async fn refresh(http: &Arc<dyn HttpClient>, refresh_token: &str) -> 
     ];
     let body = post_form(http, ACCESS_TOKEN_URL, &form).await?;
     if let Some(error) = body.get("error").and_then(Value::as_str) {
-        return Err(SignedOut(format!(
-            "GitHub no longer accepts this computer's sign-in ({}); sign in again",
-            describe(error, &body)
-        ))
-        .into());
+        let reason = describe(error, &body);
+        let message = format!("GitHub refused the sign-in ({reason}); sign in again");
+        return Err(SignedOut(message).into());
     }
     Tokens::from_grant(&body)
 }
@@ -188,7 +195,7 @@ fn describe(error: &str, body: &Value) -> String {
     match error {
         "expired_token" => "the code expired".to_string(),
         "access_denied" => "it was cancelled".to_string(),
-        "device_flow_disabled" => "the Praxis Remote app does not allow signing in this way".into(),
+        "device_flow_disabled" => "the Praxis Remote app does not allow device sign-in".into(),
         "incorrect_client_credentials" | "unauthorized_client" => {
             "the Praxis Remote app was not recognized".to_string()
         }
@@ -289,20 +296,21 @@ impl Api {
         body: Option<Value>,
         etag: Option<&str>,
     ) -> Result<Reply> {
-        let url = if path.starts_with(API) {
+        let url = if path.starts_with(API_PREFIX) {
             path.to_string()
         } else if path.starts_with('/') {
             format!("{API}{path}")
         } else {
             bail!("refusing to call {path:?}, which is not part of GitHub's API");
         };
+        let authorization = format!("Bearer {}", self.tokens.access_token);
         let mut request = Request::builder()
             .method(method.clone())
             .uri(url)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", "Praxis")
-            .header("Authorization", format!("Bearer {}", self.tokens.access_token))
+            .header("Authorization", authorization)
             .follow_redirects(http_client::RedirectPolicy::NoFollow);
         if let Some(etag) = etag {
             request = request.header("If-None-Match", etag);
@@ -387,11 +395,12 @@ impl Api {
 fn last_page(link: &str) -> Option<String> {
     link.split(',').find_map(|part| {
         let (url, params) = part.split_once(';')?;
-        if !params.split(';').any(|param| param.trim() == "rel=\"last\"") {
+        let mut params = params.split(';').map(str::trim);
+        if !params.any(|param| param == "rel=\"last\"") {
             return None;
         }
         let url = url.trim().strip_prefix('<')?.strip_suffix('>')?;
-        url.starts_with(API).then(|| url.to_string())
+        url.starts_with(API_PREFIX).then(|| url.to_string())
     })
 }
 
@@ -409,6 +418,10 @@ mod tests {
             Some("https://api.github.com/gists/1/comments?page=3")
         );
         assert_eq!(last_page("<https://evil.example/x>; rel=\"last\""), None);
+        assert_eq!(
+            last_page("<https://api.github.com.evil.example/x>; rel=\"last\""),
+            None
+        );
         assert_eq!(last_page("<https://api.github.com/x>; rel=\"next\""), None);
     }
 
