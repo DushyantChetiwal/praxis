@@ -298,6 +298,9 @@ impl ArchitectPane {
             "stop" => self.stop_run(cx),
             op => return Err(anyhow!("unknown Architect op {op:?}")),
         }
+        // The state reports where steps are drawn so a real mouse can be aimed
+        // at them, which only holds once the view has stopped moving.
+        self.settle_camera(cx);
         Ok(self.automation_state(cx))
     }
 }

@@ -1,11 +1,12 @@
-//! Working on several steps at once. Shift-click a step, or shift-drag a
-//! rectangle over empty canvas, to gather steps; then lock, unlock, delete, or
-//! drag them together. Each of those is one change to undo.
+//! Working on several steps at once. Shift-click a step, shift-drag a
+//! rectangle over empty canvas, or Ctrl- (Cmd- on macOS) and Shift-click rows
+//! in the outline, to gather steps; then lock, unlock, delete, or drag them
+//! together. Each of those is one change to undo.
 
 use std::collections::HashSet;
 
 use architect::{ArchitectGraph, GraphMutationError, NodeId, NodePath, Position};
-use gpui::{AnyElement, Context, Pixels, Point, SharedString, Window, px};
+use gpui::{AnyElement, Context, Modifiers, Pixels, Point, SharedString, Window, px};
 use ui::{Tooltip, prelude::*};
 
 use super::geometry::snap;
@@ -180,6 +181,62 @@ impl ArchitectPane {
             ids.push(id);
         }
         self.set_bulk_selection(ids, window, cx);
+    }
+
+    /// A click on a row of the outline, following the conventions of lists
+    /// everywhere: alone it selects just that step; with Ctrl (Cmd on macOS)
+    /// it adds the step to the selection or takes it back out; with Shift it
+    /// selects every step listed from the anchor to this one, adding them to
+    /// the selection if Ctrl is held too.
+    pub(super) fn click_outline_step(
+        &mut self,
+        id: NodeId,
+        listed: &[NodeId],
+        modifiers: Modifiers,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let anchor = if modifiers.shift {
+            self.outline_range_anchor(listed)
+        } else {
+            None
+        };
+        let clicked = listed.iter().position(|row| row == &id);
+        if let Some((anchor, clicked)) = anchor.zip(clicked) {
+            let mut ids = if modifiers.secondary() {
+                self.selected_steps()
+            } else {
+                Vec::new()
+            };
+            ids.extend_from_slice(&listed[anchor.min(clicked)..=anchor.max(clicked)]);
+            self.set_bulk_selection(ids, window, cx);
+            // Selecting cleared the anchor, but the next Shift-click should
+            // still reach from the same place.
+            self.outline_anchor = Some(listed[anchor].clone());
+        } else if modifiers.secondary() {
+            self.toggle_in_bulk_selection(id.clone(), window, cx);
+            self.outline_anchor = Some(id.clone());
+        } else {
+            self.select_and_reveal(Selection::Node(id.clone()), window, cx);
+            self.outline_anchor = Some(id);
+            return;
+        }
+        if self.selected_steps().contains(&id) {
+            self.reveal(&Selection::Node(id), cx);
+        }
+    }
+
+    /// Where in `listed` a Shift-click in the outline reaches from: the row
+    /// last clicked there, or failing that the step selected some other way.
+    fn outline_range_anchor(&self, listed: &[NodeId]) -> Option<usize> {
+        let selected = match &self.selection {
+            Some(Selection::Node(id)) => Some(id),
+            _ => None,
+        };
+        [self.outline_anchor.as_ref(), selected, self.bulk.last()]
+            .into_iter()
+            .flatten()
+            .find_map(|anchor| listed.iter().position(|id| id == anchor))
     }
 
     pub(super) fn select_all_steps(&mut self, window: &mut Window, cx: &mut Context<Self>) {
