@@ -1059,6 +1059,8 @@ fn architect_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
     Some(json!({
         "steps": graph.nodes.len(),
         "running": running,
+        "paused": run.is_some_and(agent::ArchitectRun::is_paused),
+        "can_resume": run.is_some_and(agent::ArchitectRun::can_resume),
         "running_steps": running_steps,
         "current_step": run
             .filter(|run| run.is_running())
@@ -1202,13 +1204,14 @@ fn architect(
     window: &mut gpui::Window,
     cx: &mut App,
 ) -> Result<Value> {
-    if !matches!(op, "run" | "stop") {
-        bail!("Praxis Remote can only \"run\" or \"stop\" a plan");
+    if !matches!(op, "run" | "pause" | "resume" | "stop") {
+        bail!("Praxis Remote can only \"run\", \"pause\", \"resume\", or \"stop\" a plan");
     }
-    // Stopping through the canvas records it in the plan's activity. Starting
-    // goes through the runner directly, since the canvas only shows why a run
-    // could not start, and the phone needs to be told.
-    if op == "stop"
+    // Pausing and stopping through the canvas records it in the plan's
+    // activity. Starting and resuming go through the runner directly, since
+    // the canvas only shows why a run could not start, and the phone needs to
+    // be told.
+    if matches!(op, "pause" | "stop")
         && let Some(pane) = architect_pane(workspace.read(cx), cx)
     {
         pane.update(cx, |pane, cx| {
@@ -1233,6 +1236,11 @@ fn architect(
             .context("the conversation has no plan")?;
         agent::start_architect_run(thread, acp_thread, graph, cx)
             .map_err(|error| anyhow!("{error}"))?;
+    } else if op == "resume" {
+        agent::resume_architect_run(thread, acp_thread, cx)
+            .map_err(|error| anyhow!("{error}"))?;
+    } else if op == "pause" {
+        agent::pause_architect_run(&thread, cx);
     } else {
         agent::stop_architect_run(&thread, Some(&acp_thread), cx);
     }

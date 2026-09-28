@@ -9207,6 +9207,150 @@ mod internal_tests {
     }
 
     #[gpui::test]
+    async fn test_a_paused_run_lets_its_steps_finish_and_resumes_where_it_was(
+        cx: &mut TestAppContext,
+    ) {
+        let fake = init_test(cx);
+        let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let model = fake.model("fake");
+        let graph = diamond_plan();
+        thread.update(cx, |thread, cx| {
+            thread.set_model(model.clone(), cx);
+            thread.set_architect_graph(Some(graph.clone()), cx);
+        });
+
+        cx.update(|cx| crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx))
+            .expect("a locked plan should start");
+        cx.run_until_parked();
+        let start = pending_step_briefs(&fake);
+        fake.send_text(&model, &start[0].0, "Started.");
+        fake.end_stream(&model, &start[0].0);
+        cx.run_until_parked();
+        let branches = pending_step_briefs(&fake);
+        assert_eq!(branches.len(), 2);
+
+        cx.update(|cx| crate::pause_architect_run(&thread, cx));
+        thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().expect("the run should be recorded");
+            assert!(run.is_paused() && run.is_running() && run.can_resume());
+            assert_eq!(
+                run.running_steps().len(),
+                2,
+                "pausing leaves the steps under way running"
+            );
+        });
+        for (request, _) in &branches {
+            fake.send_text(&model, request, "Did a branch.");
+            fake.end_stream(&model, request);
+        }
+        cx.run_until_parked();
+        assert!(
+            pending_step_briefs(&fake).is_empty(),
+            "a paused run starts no new step"
+        );
+        thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().expect("the run should be recorded");
+            assert!(run.is_paused() && run.running_steps().is_empty());
+            assert_eq!(run.history().len(), 3);
+        });
+
+        cx.update(|cx| crate::resume_architect_run(thread.clone(), acp_thread.clone(), cx))
+            .expect("a paused run should resume");
+        cx.run_until_parked();
+        let joined = pending_step_briefs(&fake);
+        assert_eq!(joined.len(), 1, "resuming carries on with the join");
+        assert!(joined[0].1.contains("## Step 4: Join"), "{}", joined[0].1);
+        fake.send_text(&model, &joined[0].0, "Joined.");
+        fake.end_stream(&model, &joined[0].0);
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().expect("the run should be recorded");
+            assert_eq!(run.outcome, Some(architect::RunOutcome::Completed));
+            assert!(!run.is_paused() && !run.can_resume());
+        });
+    }
+
+    #[gpui::test]
+    async fn test_a_stopped_run_resumes_at_the_step_it_was_on(cx: &mut TestAppContext) {
+        let fake = init_test(cx);
+        let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let model = fake.model("fake");
+        let mut graph = architect::ArchitectGraph::default();
+        for (id, title) in [("first", "First"), ("second", "Second")] {
+            let mut node = architect::ArchitectNode::new(id, title);
+            node.locked = true;
+            graph.add_node(node);
+        }
+        graph.connect("first", "second");
+        thread.update(cx, |thread, cx| {
+            thread.set_model(model.clone(), cx);
+            thread.set_architect_graph(Some(graph.clone()), cx);
+        });
+
+        cx.update(|cx| crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx))
+            .expect("a locked plan should start");
+        cx.run_until_parked();
+        let first = pending_step_briefs(&fake);
+        fake.send_text(&model, &first[0].0, "Did the first step.");
+        fake.end_stream(&model, &first[0].0);
+        cx.run_until_parked();
+        assert!(
+            pending_step_briefs(&fake)
+                .iter()
+                .any(|(_, brief)| brief.contains("## Step 2: Second")),
+            "the second step should be under way"
+        );
+
+        cx.update(|cx| crate::stop_architect_run(&thread, Some(&acp_thread), cx));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().expect("the run should be recorded");
+            assert_eq!(run.outcome, Some(architect::RunOutcome::Cancelled));
+            assert!(run.can_resume(), "a stopped run can be picked up again");
+        });
+
+        cx.update(|cx| crate::resume_architect_run(thread.clone(), acp_thread.clone(), cx))
+            .expect("a stopped run should resume");
+        cx.run_until_parked();
+        let resumed: Vec<_> = pending_step_briefs(&fake)
+            .into_iter()
+            .filter(|(_, brief)| brief.contains("## Step 3: Second"))
+            .collect();
+        assert_eq!(
+            resumed.len(),
+            1,
+            "the interrupted step runs again, not the plan from the start"
+        );
+        assert!(
+            resumed[0].1.contains("Did the first step."),
+            "what the finished step reported is kept: {}",
+            resumed[0].1
+        );
+        fake.send_text(&model, &resumed[0].0, "Did the second step.");
+        fake.end_stream(&model, &resumed[0].0);
+        cx.run_until_parked();
+
+        thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().expect("the run should be recorded");
+            assert_eq!(run.outcome, Some(architect::RunOutcome::Completed));
+            let steps: Vec<(&str, usize)> = run
+                .history()
+                .iter()
+                .map(|step| (&*step.title, step.attempt))
+                .collect();
+            assert_eq!(
+                steps,
+                vec![("First", 1), ("Second", 1), ("Second", 2)],
+                "the interrupted step is counted as another attempt"
+            );
+        });
+    }
+
+    #[gpui::test]
     async fn test_step_completion_is_idempotent_and_rejects_stale_visits(cx: &mut TestAppContext) {
         init_test(cx);
         let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
@@ -9272,6 +9416,67 @@ mod internal_tests {
                 .expect("the second visit should have its report");
             assert_eq!(result.summary, "second visit");
             assert_eq!(result.attempt, 2);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_steps_running_at_once_each_report_on_their_own_visit(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let left = architect::NodePath::root(architect::NodeId::from("left"));
+        let right = architect::NodePath::root(architect::NodeId::from("right"));
+        let mut graph = architect::ArchitectGraph::default();
+        graph.add_node(architect::ArchitectNode::new("left", "Left"));
+        graph.add_node(architect::ArchitectNode::new("right", "Right"));
+
+        thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(graph), cx);
+            thread.start_architect_run(left.clone(), "Left".into(), Task::ready(()), cx);
+            let left_visit =
+                thread.note_architect_run_position(left.clone(), "Left".into(), 1, 1, cx);
+            let right_visit =
+                thread.note_architect_run_position(right.clone(), "Right".into(), 2, 1, cx);
+            assert_eq!(thread.architect_running_steps().count(), 2);
+
+            assert_eq!(
+                thread.complete_architect_step_visit(right_visit, "right report".into(), cx),
+                Ok(("Right".into(), 1))
+            );
+            assert_eq!(
+                thread.complete_architect_step_visit(left_visit, "left report".into(), cx),
+                Ok(("Left".into(), 1)),
+                "a step running alongside another still reports on its own visit"
+            );
+            let summary = |path: &architect::NodePath| {
+                thread
+                    .architect_graph()
+                    .and_then(|graph| graph.node_at(path))
+                    .and_then(|node| node.result.as_ref())
+                    .map(|result| result.summary.clone())
+            };
+            assert_eq!(summary(&left).as_deref(), Some("left report"));
+            assert_eq!(summary(&right).as_deref(), Some("right report"));
+
+            assert!(thread.clear_architect_step_visit(left_visit));
+            thread.finish_architect_run_step(left_visit, Some("left report".into()), cx);
+            assert_eq!(
+                thread.complete_architect_step_visit(left_visit, "late".into(), cx),
+                Err(crate::ArchitectStepCompletionError::StaleVisit),
+                "a finished visit cannot be reported on while another is running"
+            );
+
+            let run = thread.architect_run().expect("the run should be recorded");
+            assert_eq!(run.running_steps().len(), 1);
+            assert_eq!(run.current.as_ref(), Some(&right));
+            assert_eq!(run.current_title.as_ref(), "Right");
+            let running: Vec<bool> = run.history().iter().map(RunStep::is_running).collect();
+            assert_eq!(
+                running,
+                vec![false, true],
+                "finishing one step leaves the other going"
+            );
         });
     }
 

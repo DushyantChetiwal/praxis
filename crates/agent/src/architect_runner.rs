@@ -7,6 +7,7 @@ use architect::{
     ArchitectGraph, Branch, Decision, MAX_RUN_STEPS, NodePath, PlanRun, RunOutcome, RunRefusal,
 };
 use futures::FutureExt as _;
+use futures::channel::oneshot;
 use futures::future::{LocalBoxFuture, join_all};
 use gpui::{App, AsyncApp, Context, Entity, SharedString, WeakEntity};
 
@@ -16,6 +17,8 @@ use crate::{ArchitectRun, ArchitectStepVisitId, NativeAgentConnection, SessionMo
 pub enum ArchitectRunStartError {
     AlreadyRunning,
     Refused(RunRefusal),
+    /// There is no paused, stopped, or failed run to pick up.
+    NotResumable,
 }
 
 impl std::fmt::Display for ArchitectRunStartError {
@@ -30,6 +33,9 @@ impl std::fmt::Display for ArchitectRunStartError {
             }
             Self::Refused(refusal @ RunRefusal::NoSuchStep(_)) => {
                 write!(formatter, "The run cannot start there: {refusal}.")
+            }
+            Self::NotResumable => {
+                formatter.write_str("There is no paused or interrupted run to resume.")
             }
         }
     }
@@ -58,9 +64,15 @@ pub(crate) struct RunState {
     /// Steps started so far across every lane. It numbers them, and bounds the
     /// whole run however many ways it forks.
     steps: usize,
-    in_flight: Vec<(usize, Entity<AcpThread>)>,
+    // Weak, as everything here is, because the thread keeps this after a run
+    // is stopped, and a strong conversation would keep that thread alive.
+    in_flight: Vec<(usize, WeakEntity<AcpThread>)>,
     /// Set once a lane fails, so the others stop instead of carrying on.
     halted: bool,
+    /// While set, no lane starts a new turn.
+    paused: bool,
+    /// Lanes held back by the pause, woken when the run is resumed.
+    waiters: Vec<oneshot::Sender<()>>,
 }
 
 impl RunState {
@@ -72,7 +84,44 @@ impl RunState {
             steps: 0,
             in_flight: Vec::new(),
             halted: false,
+            paused: false,
+            waiters: Vec::new(),
         }
+    }
+
+    pub(crate) fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Readies a run that was stopped or failed to carry on from where it
+    /// was. The plan may have been edited in the meantime, so the current
+    /// plan is taken up as long as it is still ready to run and still has
+    /// every step the run was on. Steps that were cut off part way are started
+    /// over as new attempts; everything the run had finished is kept.
+    fn prepare_resume(&mut self, graph: ArchitectGraph) -> Result<(), ArchitectRunStartError> {
+        let problems = graph.blocking_problems();
+        if !problems.is_empty() {
+            return Err(RunRefusal::NotReady(problems).into());
+        }
+        for lane in &self.lanes {
+            if let Decision::Run(path) = &lane.next
+                && graph.node_at(path).is_none()
+            {
+                return Err(RunRefusal::NoSuchStep(path.clone()).into());
+            }
+        }
+        self.graph = graph;
+        self.halted = false;
+        self.paused = false;
+        self.in_flight.clear();
+        self.waiters.clear();
+        for lane in &mut self.lanes {
+            if lane.interrupted {
+                lane.interrupted = false;
+                lane.next = lane.run.retry_step(&self.graph);
+            }
+        }
+        Ok(())
     }
 
     /// The steps other lanes are carrying out, or are about to, which a step
@@ -91,7 +140,10 @@ impl RunState {
 
     /// Hands over every turn in flight, for stopping them.
     pub(crate) fn take_in_flight(&mut self) -> Vec<Entity<AcpThread>> {
-        self.in_flight.drain(..).map(|(_, turn)| turn).collect()
+        self.in_flight
+            .drain(..)
+            .filter_map(|(_, turn)| turn.upgrade())
+            .collect()
     }
 }
 
@@ -103,9 +155,12 @@ struct Lane {
     next: Decision,
     /// The lanes running the branches of the fork this lane is waiting on.
     children: Vec<usize>,
+    /// Whether the step `next` names was started and never finished, so a run
+    /// picked up again counts running it once more as another attempt.
+    interrupted: bool,
     /// Where the lane's latest step ran. The question deciding its way out is
     /// put there, because that conversation saw the work it is about.
-    last_step_thread: Option<Entity<AcpThread>>,
+    last_step_thread: Option<WeakEntity<AcpThread>>,
 }
 
 impl Lane {
@@ -115,6 +170,7 @@ impl Lane {
             run,
             next,
             children: Vec::new(),
+            interrupted: false,
             last_step_thread: None,
         }
     }
@@ -128,7 +184,30 @@ impl Lane {
 pub fn start_architect_run(
     thread: Entity<Thread>,
     acp_thread: Entity<AcpThread>,
+    graph: ArchitectGraph,
+    cx: &mut App,
+) -> Result<(), ArchitectRunStartError> {
+    start_run(thread, acp_thread, graph, None, cx)
+}
+
+/// Starts a run at one step of the plan, at any depth, instead of at its
+/// entry. What every step last reported is kept, so the steps from there on
+/// are told what the steps before them did.
+pub fn start_architect_run_from(
+    thread: Entity<Thread>,
+    acp_thread: Entity<AcpThread>,
+    graph: ArchitectGraph,
+    from: NodePath,
+    cx: &mut App,
+) -> Result<(), ArchitectRunStartError> {
+    start_run(thread, acp_thread, graph, Some(from), cx)
+}
+
+fn start_run(
+    thread: Entity<Thread>,
+    acp_thread: Entity<AcpThread>,
     mut graph: ArchitectGraph,
+    from: Option<NodePath>,
     cx: &mut App,
 ) -> Result<(), ArchitectRunStartError> {
     if thread
@@ -139,15 +218,25 @@ pub fn start_architect_run(
         return Err(ArchitectRunStartError::AlreadyRunning);
     }
 
-    let plan_run = PlanRun::start(&graph)?;
+    let plan_run = match &from {
+        Some(from) => PlanRun::start_at(&graph, from)?,
+        None => PlanRun::start(&graph)?,
+    };
     let first_step = plan_run.current();
     let first_title = step_title(&graph, &first_step);
 
-    // A run must not inherit summaries from an earlier attempt. Clear both the
-    // immutable run snapshot and the live graph that complete_step writes into.
-    graph.clear_results();
+    // A run from the start must not inherit summaries from an earlier attempt.
+    // Clear both the immutable run snapshot and the live graph that
+    // complete_step writes into. A run started part way keeps them, since the
+    // steps it skips are what the steps it runs build on.
+    let fresh = from.is_none();
+    if fresh {
+        graph.clear_results();
+    }
     thread.update(cx, |thread, cx| {
-        thread.update_architect_graph(|graph| graph.clear_results(), cx);
+        if fresh {
+            thread.update_architect_graph(|graph| graph.clear_results(), cx);
+        }
         thread.set_session_mode(SessionMode::Build, cx);
     });
 
@@ -157,6 +246,74 @@ pub fn start_architect_run(
     thread.update(cx, |thread, cx| {
         thread.start_architect_run(first_step, first_title, task, cx);
         thread.set_architect_run_control(state);
+    });
+    Ok(())
+}
+
+/// Pauses a run: no lane starts another step or question, and the turns
+/// already under way are left to finish. The run then waits, keeping its
+/// place in every branch, until it is resumed.
+pub fn pause_architect_run(thread: &Entity<Thread>, cx: &mut App) {
+    let Some(run) = thread.read(cx).architect_run() else {
+        return;
+    };
+    let Some(control) = run.control().filter(|_| run.is_running()).cloned() else {
+        return;
+    };
+    control.borrow_mut().paused = true;
+    thread.update(cx, |_thread, cx| cx.notify());
+}
+
+/// Picks a run up where it left off. A paused run carries on. A run that was
+/// stopped or failed starts again from the steps it was on, each counted as a
+/// new attempt, keeping what every step before them reported.
+pub fn resume_architect_run(
+    thread: Entity<Thread>,
+    acp_thread: Entity<AcpThread>,
+    cx: &mut App,
+) -> Result<(), ArchitectRunStartError> {
+    let run = thread
+        .read(cx)
+        .architect_run()
+        .ok_or(ArchitectRunStartError::NotResumable)?;
+    let control = run
+        .control()
+        .cloned()
+        .ok_or(ArchitectRunStartError::NotResumable)?;
+
+    if run.is_running() {
+        let waiters = {
+            let mut state = control.borrow_mut();
+            if !state.paused {
+                return Err(ArchitectRunStartError::AlreadyRunning);
+            }
+            state.paused = false;
+            std::mem::take(&mut state.waiters)
+        };
+        for waiter in waiters {
+            if waiter.send(()).is_err() {
+                log::debug!("Architect: a paused lane stopped waiting before the run resumed");
+            }
+        }
+        thread.update(cx, |_thread, cx| cx.notify());
+        return Ok(());
+    }
+
+    if !run.outcome.as_ref().is_some_and(RunOutcome::is_resumable) {
+        return Err(ArchitectRunStartError::NotResumable);
+    }
+    let graph = thread
+        .read(cx)
+        .architect_graph()
+        .cloned()
+        .ok_or(ArchitectRunStartError::NotResumable)?;
+    control.borrow_mut().prepare_resume(graph)?;
+
+    let driver = Driver::new(&thread, acp_thread, control, cx);
+    let task = cx.spawn(async move |cx| driver.run_to_end(cx).await);
+    thread.update(cx, |thread, cx| {
+        thread.set_session_mode(SessionMode::Build, cx);
+        thread.reopen_architect_run(task, cx);
     });
     Ok(())
 }
@@ -260,6 +417,10 @@ impl Driver {
                 return RunOutcome::Cancelled;
             }
             let next = self.state.borrow().lanes[lane].next.clone();
+            let starts_turn = matches!(next, Decision::Run(_) | Decision::Ask(_));
+            if starts_turn && let Some(outcome) = self.wait_while_paused().await {
+                return outcome;
+            }
             let next = match next {
                 Decision::Run(node) => self.run_step(lane, node, cx).await,
                 Decision::Ask(branch) => self.decide_branch(lane, branch, cx).await,
@@ -291,7 +452,9 @@ impl Driver {
             }
             state.steps += 1;
             let step_number = state.steps;
-            let run = &state.lanes[lane].run;
+            let current = &mut state.lanes[lane];
+            current.interrupted = true;
+            let run = &current.run;
             let attempt = node.leaf().map(|id| run.attempt(id)).unwrap_or(1);
             let title = step_title(&state.graph, &node);
             let prompt = architect::step_prompt(&state.graph, &node, step_number, attempt);
@@ -360,14 +523,13 @@ impl Driver {
         self.update_thread(cx, |thread, cx| {
             thread.set_architect_run_step_thread(visit, &step_thread, cx);
         })?;
-        self.state.borrow_mut().lanes[lane].last_step_thread = Some(step_thread.clone());
+        self.state.borrow_mut().lanes[lane].last_step_thread = Some(step_thread.downgrade());
 
         self.begin_turn(lane, &step_thread);
         let sent = send_and_wait(&step_thread, prompt, cx).await;
         let halted = self.end_turn(lane);
-        self.update_thread(cx, |thread, _cx| {
-            thread.clear_architect_step_visit(visit);
-        })?;
+        let reported_on_visit =
+            self.update_thread(cx, |thread, _cx| thread.clear_architect_step_visit(visit))?;
         if let Err(error) = sent {
             if halted {
                 self.finish_visit(visit, None, cx)?;
@@ -377,7 +539,13 @@ impl Driver {
             return Err(self.fail_step(visit, message, cx));
         }
 
-        let reported = self.read_thread(cx, |thread, _| reported_summary(thread, &node, attempt))?;
+        // Only a report made on this visit counts. The step may still carry
+        // one from an earlier run, which says nothing about this one.
+        let reported = if reported_on_visit {
+            self.read_thread(cx, |thread, _| reported_summary(thread, &node))?
+        } else {
+            None
+        };
         let summary = match reported {
             Some(summary) => summary,
             // Another lane failed and stopped this step before it reported,
@@ -417,7 +585,9 @@ impl Driver {
         if let Some(step) = state.graph.node_at_mut(&node) {
             step.result = Some(architect::StepResult { summary, attempt });
         }
-        Ok(state.lanes[lane].run.finish_step(&state.graph))
+        let current = &mut state.lanes[lane];
+        current.interrupted = false;
+        Ok(current.run.finish_step(&state.graph))
     }
 
     /// Puts the question deciding a way out of the lane's last step to the
@@ -430,8 +600,9 @@ impl Driver {
     ) -> Result<Decision, RunOutcome> {
         let (prompt, asked) = {
             let state = self.state.borrow();
-            let asked = match &state.lanes[lane].last_step_thread {
-                Some(thread) => thread.clone(),
+            let last_step_thread = state.lanes[lane].last_step_thread.as_ref();
+            let asked = match last_step_thread.and_then(WeakEntity::upgrade) {
+                Some(thread) => thread,
                 None => self.plan_thread.clone(),
             };
             (architect::branch_prompt(&state.graph, &branch), asked)
@@ -520,9 +691,31 @@ impl Driver {
         }
     }
 
+    /// Holds a lane back while the run is paused. Turns already under way are
+    /// left alone; this only keeps new ones from starting.
+    async fn wait_while_paused(&self) -> Option<RunOutcome> {
+        loop {
+            let resumed = {
+                let mut state = self.state.borrow_mut();
+                if state.halted {
+                    return Some(RunOutcome::Cancelled);
+                }
+                if !state.paused {
+                    return None;
+                }
+                let (sender, receiver) = oneshot::channel();
+                state.waiters.push(sender);
+                receiver
+            };
+            if resumed.await.is_err() {
+                return Some(RunOutcome::Cancelled);
+            }
+        }
+    }
+
     fn begin_turn(&self, lane: usize, thread: &Entity<AcpThread>) {
         let mut state = self.state.borrow_mut();
-        state.in_flight.push((lane, thread.clone()));
+        state.in_flight.push((lane, thread.downgrade()));
     }
 
     /// Notes that a lane's turn ended, and says whether the run was halted
@@ -617,13 +810,12 @@ fn combine(outcomes: Vec<RunOutcome>) -> RunOutcome {
     }
 }
 
-/// What a step reported through `complete_step` on this attempt, if anything.
-fn reported_summary(thread: &Thread, node: &NodePath, attempt: usize) -> Option<String> {
+/// What a step reported through `complete_step`, if anything.
+fn reported_summary(thread: &Thread, node: &NodePath) -> Option<String> {
     thread
         .architect_graph()
         .and_then(|graph| graph.node_at(node))
         .and_then(|step| step.result.as_ref())
-        .filter(|result| result.attempt == attempt)
         .map(|result| result.summary.trim().to_string())
         .filter(|summary| !summary.is_empty())
 }

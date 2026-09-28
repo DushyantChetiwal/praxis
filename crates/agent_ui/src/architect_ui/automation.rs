@@ -111,6 +111,8 @@ impl ArchitectPane {
                 .collect();
             json!({
                 "running": run.is_running(),
+                "paused": run.is_paused(),
+                "can_resume": run.can_resume(),
                 "step": run.step_number,
                 "current": run.current_title.to_string(),
                 "running_steps": running_steps,
@@ -287,6 +289,12 @@ impl ArchitectPane {
             }
             "code" | "editor" => self.request_code_mode(window, cx),
             "run" => self.run(cx),
+            "run_from" => {
+                let path = self.focus.child(node(args)?);
+                self.run_from(path, cx);
+            }
+            "pause" => self.pause_run(cx),
+            "resume" => self.resume_run(cx),
             "stop" => self.stop_run(cx),
             op => return Err(anyhow!("unknown Architect op {op:?}")),
         }

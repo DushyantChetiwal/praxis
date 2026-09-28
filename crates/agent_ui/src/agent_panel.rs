@@ -5898,6 +5898,9 @@ impl AgentPanel {
         }
 
         fn running_label(run: &agent::ArchitectRun) -> String {
+            if run.is_paused() {
+                return "Run paused".to_string();
+            }
             match run.running_steps().len() {
                 0 | 1 => format!("Running step {}", run.step_number),
                 count => format!("Running {count} steps"),

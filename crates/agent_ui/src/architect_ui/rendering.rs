@@ -335,6 +335,13 @@ impl ArchitectPane {
         };
 
         let running = self.is_running(cx);
+        let paused = self.is_paused(cx);
+        let can_resume = self.can_resume(cx);
+        let resume_tooltip = if running {
+            "Carry on from where the run paused"
+        } else {
+            "Carry on from the steps the run stopped on, keeping what earlier steps reported"
+        };
         // A step running in a thread of its own can only be followed, or its
         // requests allowed, from that thread's conversation.
         let watch_step = running && self.run_step_session(cx).is_some();
@@ -409,7 +416,9 @@ impl ArchitectPane {
         // Whether the plan has started is, like readiness, about the whole
         // plan: an empty sub-plan inside a drafted plan is not "Not started".
         let empty = run_step_count == 0 && !running;
-        let readiness = if running {
+        let readiness = if paused {
+            "Paused"
+        } else if running {
             "Running"
         } else if ready_to_run {
             "Ready to run"
@@ -620,6 +629,32 @@ impl ArchitectPane {
                                 .into_any_element()
                         })
                     })
+                    .when(running && !paused, |this| {
+                        this.child(
+                            Button::new("architect-pause", "Pause")
+                                .tab_index(0isize)
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Subtle)
+                                .start_icon(Icon::new(IconName::DebugPause).size(IconSize::XSmall))
+                                .tooltip(Tooltip::text(
+                                    "Start no more steps; the steps running now finish first",
+                                ))
+                                .on_click(cx.listener(|this, _, _, cx| this.pause_run(cx))),
+                        )
+                    })
+                    .when(can_resume, |this| {
+                        this.child(
+                            Button::new("architect-resume", "Resume")
+                                .tab_index(0isize)
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Tinted(TintColor::Accent))
+                                .start_icon(
+                                    Icon::new(IconName::DebugContinue).size(IconSize::XSmall),
+                                )
+                                .tooltip(Tooltip::text(resume_tooltip))
+                                .on_click(cx.listener(|this, _, _, cx| this.resume_run(cx))),
+                        )
+                    })
                     // An empty plan has nothing to run; the empty state offers
                     // Start planning instead of a Run that can only refuse.
                     .when(running || run_step_count > 0, |this| {
@@ -630,7 +665,7 @@ impl ArchitectPane {
                                 .style(ButtonStyle::Tinted(TintColor::Warning))
                                 .start_icon(Icon::new(IconName::Stop).size(IconSize::XSmall))
                                 .tooltip(Tooltip::text(
-                                    "Stop the run and the turn it is waiting on",
+                                    "Stop the run and every turn it is waiting on",
                                 ))
                                 .on_click(cx.listener(|this, _, _, cx| this.stop_run(cx)))
                         } else {
@@ -1289,6 +1324,7 @@ impl ArchitectPane {
                 .root_graph(cx)
                 .map(|graph| outcome.summary(graph).into())
                 .unwrap_or_else(|| SharedString::from("Run finished")),
+            None if run.is_paused() => super::run::running_summary(run).unwrap_or_default(),
             None => match run.running_steps() {
                 [] | [_] => format!("Running {}", run.current_title).into(),
                 steps => format!("Running {} steps", steps.len()).into(),
@@ -2751,6 +2787,15 @@ impl NodeMenu {
                     None,
                     action(|pane, id, window, cx| pane.discuss_node(id, window, cx)),
                 )
+                // Only a settled step can be run, and only while nothing else
+                // is running.
+                .when(can_edit && menu.locked, |this| {
+                    this.entry(
+                        "Run From Here",
+                        None,
+                        action(|pane, id, _, cx| pane.run_from(pane.focus.child(id), cx)),
+                    )
+                })
                 .when(can_edit, |this| {
                     this.entry(
                         format!("Duplicate ({DUPLICATE_SHORTCUT})"),

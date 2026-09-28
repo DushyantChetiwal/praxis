@@ -376,6 +376,28 @@ impl ArchitectRun {
             .or_else(|| self.step_thread.as_ref().and_then(WeakEntity::upgrade))
     }
 
+    /// Whether the run is paused, or pausing: it starts nothing new until it is
+    /// resumed, though steps already under way may still be finishing.
+    pub fn is_paused(&self) -> bool {
+        let paused = self
+            .control
+            .as_ref()
+            .is_some_and(|control| control.borrow().is_paused());
+        paused && self.is_running()
+    }
+
+    /// Whether Resume can pick the run up where it left off: it is paused, or
+    /// it was stopped or failed part way through.
+    pub fn can_resume(&self) -> bool {
+        let Some(control) = self.control.as_ref() else {
+            return false;
+        };
+        match &self.outcome {
+            None => control.borrow().is_paused(),
+            Some(outcome) => outcome.is_resumable(),
+        }
+    }
+
     pub(crate) fn control(&self) -> Option<&Rc<RefCell<crate::architect_runner::RunState>>> {
         self.control.as_ref()
     }
@@ -403,6 +425,9 @@ struct ActiveArchitectStepVisit {
     id: ArchitectStepVisitId,
     path: architect::NodePath,
     attempt: usize,
+    /// Whether `complete_step` reported on this visit. A step can carry a
+    /// result from an earlier run, which is not a report on this one.
+    reported: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2454,6 +2479,16 @@ impl Thread {
         cx.notify();
     }
 
+    /// Carries on a run that was stopped or failed, with a new task and the
+    /// history it had so far.
+    pub(crate) fn reopen_architect_run(&mut self, task: Task<()>, cx: &mut Context<Self>) {
+        if let Some(run) = self.architect_run.as_mut() {
+            run.outcome = None;
+            run._task = task;
+            cx.notify();
+        }
+    }
+
     /// Hands the run what it needs to be stopped and picked up again.
     pub(crate) fn set_architect_run_control(
         &mut self,
@@ -2515,6 +2550,7 @@ impl Thread {
             id: visit_id,
             path: current.clone(),
             attempt,
+            reported: false,
         });
         if let Some(run) = self.architect_run.as_mut() {
             run.current = Some(current.clone());
@@ -2654,9 +2690,15 @@ impl Thread {
         self.architect_active_visits.last().map(|visit| visit.id)
     }
 
-    pub fn clear_architect_step_visit(&mut self, visit_id: ArchitectStepVisitId) {
+    /// Ends a visit, saying whether `complete_step` reported on it.
+    pub fn clear_architect_step_visit(&mut self, visit_id: ArchitectStepVisitId) -> bool {
+        let reported = self
+            .architect_active_visits
+            .iter()
+            .any(|visit| visit.id == visit_id && visit.reported);
         self.architect_active_visits
             .retain(|visit| visit.id != visit_id);
+        reported
     }
 
     pub fn complete_architect_step_visit(
@@ -2670,7 +2712,7 @@ impl Thread {
         }
         let visit = self
             .architect_active_visits
-            .iter()
+            .iter_mut()
             .find(|visit| visit.id == visit_id)
             .ok_or(ArchitectStepCompletionError::StaleVisit)?;
         let path = visit.path.clone();
@@ -2684,6 +2726,7 @@ impl Thread {
             .ok_or(ArchitectStepCompletionError::MissingStep)?;
         node.result = Some(architect::StepResult { summary, attempt });
         let title = node.title.clone();
+        visit.reported = true;
         self.updated_at = Utc::now();
         cx.notify();
         Ok((title, attempt))
