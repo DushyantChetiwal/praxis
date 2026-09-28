@@ -438,7 +438,7 @@ mod tests {
 
         let expiring = Tokens {
             expires_at: Some(Utc::now().timestamp() + 60),
-            ..tokens.clone()
+            ..tokens
         };
         assert!(expiring.needs_refresh());
 

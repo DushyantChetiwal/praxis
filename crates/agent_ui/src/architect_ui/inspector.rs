@@ -1580,7 +1580,7 @@ impl ArchitectPane {
         let locked = node.locked;
         let has_subplan = node.subplan().is_some_and(|subplan| !subplan.is_empty());
         let running = self.is_running(cx);
-        let run_from_path = node_path.clone();
+        let run_from_path = node_path;
         let has_chat = node.chat.is_some();
         // A step nothing leads out of has nobody to hand anything to, so an
         // empty capture there is a decision rather than an oversight.
