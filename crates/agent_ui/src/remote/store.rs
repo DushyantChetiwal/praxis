@@ -62,8 +62,8 @@ pub(super) fn load_state() -> Result<Option<LocalState>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
     };
-    let state = serde_json::from_str(&contents)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let state =
+        serde_json::from_str(&contents).with_context(|| format!("parsing {}", path.display()))?;
     Ok(Some(state))
 }
 

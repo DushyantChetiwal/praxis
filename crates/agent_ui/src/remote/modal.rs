@@ -82,7 +82,8 @@ impl PraxisRemoteModal {
             .child(muted(PERMISSION_TEXT))
             .into_any_element();
         let on_cancel = cx.listener(|this, _: &ClickEvent, _, cx| {
-            this.remote.update(cx, |remote, cx| remote.cancel_sign_in(cx));
+            this.remote
+                .update(cx, |remote, cx| remote.cancel_sign_in(cx));
         });
         let cancel = Button::new("praxis-remote-cancel", "Cancel").on_click(on_cancel);
         let copy = Button::new("praxis-remote-copy-code", "Copy Code and Open GitHub")
@@ -115,7 +116,8 @@ impl PraxisRemoteModal {
             ModalFooter::new().end_slot(self.turn_off_button(cx))
         } else {
             let on_cancel = cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.remote.update(cx, |remote, cx| remote.cancel_sign_in(cx));
+                this.remote
+                    .update(cx, |remote, cx| remote.cancel_sign_in(cx));
             });
             let cancel = Button::new("praxis-remote-cancel", "Cancel").on_click(on_cancel);
             ModalFooter::new().end_slot(cancel)
@@ -193,7 +195,8 @@ impl PraxisRemoteModal {
         let phone_id = phone.id.clone();
         let on_unpair = cx.listener(move |this, _: &ClickEvent, _, cx| {
             let phone_id = phone_id.clone();
-            this.remote.update(cx, |remote, cx| remote.unpair(phone_id, cx));
+            this.remote
+                .update(cx, |remote, cx| remote.unpair(phone_id, cx));
         });
         let unpair = Button::new(("praxis-remote-unpair", index), "Unpair").on_click(on_unpair);
         let name = v_flex()

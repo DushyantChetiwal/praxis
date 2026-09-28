@@ -36,7 +36,9 @@ use agent_client_protocol::schema::v1 as acp;
 use anyhow::{Context as _, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc;
-use gpui::{App, AppContext as _, AsyncApp, Context, Entity, Global, Task, TaskExt as _, WeakEntity};
+use gpui::{
+    App, AppContext as _, AsyncApp, Context, Entity, Global, Task, TaskExt as _, WeakEntity,
+};
 use http_client::HttpClient;
 use serde_json::{Value, json};
 use util::ResultExt as _;
@@ -98,7 +100,10 @@ enum RemoteStatus {
     Offline(String),
     /// Praxis Remote stopped. `sign_in` says whether signing in again is the
     /// way out, as opposed to retrying.
-    Failed { reason: String, sign_in: bool },
+    Failed {
+        reason: String,
+        sign_in: bool,
+    },
 }
 
 /// Praxis Remote's state for the whole app, and whatever it is running:

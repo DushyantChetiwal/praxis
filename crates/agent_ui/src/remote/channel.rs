@@ -18,11 +18,11 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use util::ResultExt as _;
 
-use crate::automation::workspace_windows;
 use super::crypto::{self, Key, PROTOCOL, PairingKey, PairingSecrets};
 use super::github::{self, Api, SignedOut, Tokens};
 use super::store::{self, LocalState, PhoneInfo, Secrets};
 use super::{PraxisRemote, RemoteStatus, Watch, handle, resolve_device_name, snapshot, status};
+use crate::automation::workspace_windows;
 
 const META_FILE: &str = "praxis-remote.json";
 const STATE_FILE: &str = "state.json";
@@ -1186,7 +1186,10 @@ struct Comment {
 
 #[derive(Debug, PartialEq)]
 enum CommentKind {
-    Request { phone_id: String, blob: String },
+    Request {
+        phone_id: String,
+        blob: String,
+    },
     /// A response or a rejection, written by this computer.
     Answer,
     Pair(Map<String, Value>),
@@ -1295,7 +1298,10 @@ enum Opened {
         id: String,
         reason: String,
     },
-    Accepted { key: Key, request: RequestPayload },
+    Accepted {
+        key: Key,
+        request: RequestPayload,
+    },
 }
 
 /// Request ids this computer has seen, per phone, for as long as a request
