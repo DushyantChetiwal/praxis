@@ -30,7 +30,7 @@ pub enum PullRequestSection {
 /// Pass the browser URL of the PR/MR. The summary is always returned. Use `sections`
 /// to request changed files, discussion comments, reviews/approvals, or checks/pipelines.
 /// Public repositories need no token. Private GitHub repositories require `GITHUB_TOKEN`;
-/// private GitLab projects require `GITLAB_TOKEN` in Zed's environment.
+/// private GitLab projects require `GITLAB_TOKEN` in Praxis's environment.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PullRequestToolInput {
     /// A `https://github.com/<owner>/<repo>/pull/<number>` or GitLab
