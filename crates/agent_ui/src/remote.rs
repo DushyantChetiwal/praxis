@@ -1,39 +1,33 @@
-//! Praxis Remote: controlling Praxis from a phone through a GitHub issue.
+//! Praxis Remote: following and steering the agent from an Android phone.
 //!
-//! It is off unless `remote/config.json` exists in the app's data directory:
+//! Nothing listens on the network, and there is nothing to set up beyond
+//! signing in. Praxis signs in to the user's GitHub account with the device
+//! flow and keeps a secret gist there as the channel to their phones:
 //!
-//! ```json
-//! { "repository": "owner/praxis-remote", "token": "github_pat_…", "device_name": "Laptop" }
-//! ```
+//! - The gist's `praxis-remote.json` names this computer and says when it was
+//!   last seen. Its `state.json` holds a snapshot of what Praxis is doing
+//!   (windows, the watched conversation, what is waiting for approval),
+//!   encrypted separately for each paired phone. It is refreshed every
+//!   minute, and every few seconds while a phone is watching.
+//! - A phone sends an encrypted request as a comment on the gist. Praxis
+//!   carries it out and answers by editing that comment, which the phone then
+//!   deletes.
+//! - A phone pairs through a comment too, agreeing a key with this computer,
+//!   and is only accepted once the user allows it here after comparing a code
+//!   shown on both screens.
 //!
-//! Only `repository` is required. Without a `token`, `PRAXIS_REMOTE_TOKEN` or
-//! the GitHub CLI's login (`gh auth token`) is used. Without a `device_name`,
-//! the computer's name is.
-//!
-//! Nothing listens on the network. Praxis keeps one open issue per computer in
-//! that repository, titled `Praxis · <device>`:
-//!
-//! - The issue body carries a heartbeat and a snapshot of what Praxis is doing
-//!   (windows, the active conversation, what is waiting for approval). It is
-//!   refreshed every minute, and every few seconds while a phone is watching.
-//!   A phone polls it with `If-None-Match`, which costs nothing when unchanged.
-//! - A phone sends a request as a comment on the issue. Praxis polls the
-//!   comments the same way, carries the request out and answers by editing
-//!   that comment, which the phone then deletes.
-//!
-//! Only comments written by the account that owns the token are obeyed, and
-//! requests older than a few minutes are refused rather than replayed. Anyone
-//! who can write as that account can drive the agent, so the repository should
-//! be private and the token scoped to Issues on that repository alone. Files
-//! can be read remotely but never written: changes go through the agent.
-//!
-//! The Android app for the phone lives in `remote-android/` at the root of the
-//! repository.
+//! `docs/src/ai/praxis-remote-protocol.md` specifies the wire format, which
+//! the Android app in `remote-android/` follows as well. Files can be read
+//! remotely but never written: changes go through the agent.
 
-use std::collections::HashSet;
+mod channel;
+mod crypto;
+mod github;
+mod modal;
+mod store;
+
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use acp_thread::{
     AgentThreadEntry, PermissionOptions, SelectedPermissionOutcome, ThreadStatus, ToolCallStatus,
@@ -41,11 +35,13 @@ use acp_thread::{
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::{Context as _, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
-use futures::AsyncReadExt as _;
-use gpui::{App, AsyncApp, Entity, Task, TaskExt as _};
-use http_client::{AsyncBody, HttpClient, HttpRequestExt as _, Method, Request, StatusCode};
-use serde::Deserialize;
+use futures::channel::mpsc;
+use gpui::{
+    App, AppContext as _, AsyncApp, Context, Entity, Global, Task, TaskExt as _, WeakEntity,
+};
+use http_client::HttpClient;
 use serde_json::{Value, json};
+use util::ResultExt as _;
 use util::rel_path::RelPath;
 use workspace::{MultiWorkspace, Workspace};
 
@@ -54,177 +50,204 @@ use crate::conversation_view::{ConversationView, ThreadView};
 use crate::thread_metadata_store::ThreadMetadataStore;
 use crate::{AgentPanel, NewThread};
 
-const TITLE_PREFIX: &str = "Praxis · ";
-const DEVICE_MARKER: &str = "<!-- praxis-device ";
-const STATE_MARKER: &str = "<!-- praxis-state -->";
-const REQUEST_MARKER: &str = "<!-- praxis-request -->";
-const RESPONSE_MARKER: &str = "<!-- praxis-response ";
+pub(crate) use modal::PraxisRemoteModal;
+use store::PhoneInfo;
 
-const POLL_INTERVAL: Duration = Duration::from_secs(3);
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
-/// How often a changing snapshot is republished while a phone watches. Each
-/// write counts against GitHub's limit on content changes, which the phone's
-/// requests share, so this stays well under it.
-const WATCHED_PUBLISH_INTERVAL: Duration = Duration::from_secs(10);
-/// How soon after a request the snapshot may be republished, so the phone
-/// sees the effect of what it asked for quickly.
-const SETTLE_DELAY: Duration = Duration::from_secs(3);
-const ERROR_BACKOFF: Duration = Duration::from_secs(60);
-const DEFAULT_WATCH_SECONDS: i64 = 300;
-const MAX_WATCH_SECONDS: i64 = 900;
-/// Requests sent while Praxis was not running are refused, not replayed.
-const MAX_REQUEST_AGE_SECONDS: i64 = 300;
-/// GitHub refuses issue and comment bodies over 65,536 characters.
-const MAX_BODY_LEN: usize = 64_000;
-const MAX_RESPONSE_BYTES: u64 = 8_000_000;
 const TRANSCRIPT_BUDGET: usize = 36_000;
+/// What each transcript entry costs besides its text, once it is JSON.
+const ENTRY_OVERHEAD: usize = 64;
 const ENTRY_LIMIT: usize = 6_000;
 const PERMISSION_DETAIL_LIMIT: usize = 4_000;
-const FILE_LIMIT: usize = 40_000;
+const FILE_LIMIT: usize = 20_000;
+/// What a file's content may take once escaped as JSON, which leaves room
+/// for the rest of the answer in the 46,000 bytes an answer may have.
+const FILE_JSON_BUDGET: usize = 40_000;
 const MAX_FILE_BYTES: u64 = 2_000_000;
 const MAX_DIR_ENTRIES: usize = 500;
+/// What a directory listing's entries may take once they are JSON.
+const DIR_JSON_BUDGET: usize = 40_000;
 const MAX_THREADS: usize = 30;
 
-#[derive(Deserialize)]
-struct Config {
-    repository: String,
-    #[serde(default)]
-    token: Option<String>,
-    #[serde(default)]
-    device_name: Option<String>,
-}
-
 pub fn init(cx: &mut App) {
-    let config_path = paths::data_dir().join("remote").join("config.json");
-    if !config_path.is_file() {
-        return;
-    }
-    let http = cx.http_client();
-    cx.spawn(async move |cx| {
-        if let Err(error) = run(config_path, http, cx).await {
-            log::error!("Praxis Remote stopped: {error:#}");
+    let remote = cx.new(|_| PraxisRemote::new());
+    cx.set_global(GlobalPraxisRemote(remote.clone()));
+    remote.update(cx, |remote, cx| remote.start(false, cx));
+
+    cx.background_spawn(async {
+        if store::legacy_config_path().is_file() {
+            log::warn!(
+                "Praxis Remote no longer uses {}; sign in from \"Praxis Remote…\" and pair \
+                 your phone again",
+                store::legacy_config_path().display()
+            );
         }
     })
     .detach();
 }
 
-async fn run(config_path: PathBuf, http: Arc<dyn HttpClient>, cx: &mut AsyncApp) -> Result<()> {
-    let Some(config) = cx
-        .background_executor()
-        .spawn(async move { read_config(&config_path) })
-        .await?
-    else {
-        return Ok(());
-    };
-    validate_repository(&config.repository)?;
-    // On macOS and Linux the login shell's environment, and with it `gh` on
-    // the `PATH`, may only arrive a little after startup.
-    let token = loop {
-        match resolve_token(config.token.as_deref()).await {
-            Ok(token) => break token,
-            Err(error) => {
-                log::warn!("Praxis Remote has no GitHub token yet, retrying: {error:#}");
-                cx.background_executor().timer(ERROR_BACKOFF).await;
-            }
-        }
-    };
-    let device = resolve_device_name(config.device_name.as_deref()).await;
-    let github = GitHub {
-        http,
-        token,
-        repository: config.repository,
-    };
+/// What Praxis Remote is doing, as its modal shows it.
+#[derive(Clone, Debug, PartialEq)]
+enum RemoteStatus {
+    Off,
+    /// Waiting for the user to enter `user_code` at `verification_uri`.
+    SigningIn {
+        user_code: String,
+        verification_uri: String,
+    },
+    Connecting,
+    Connected,
+    /// GitHub cannot be reached for now; Praxis keeps trying.
+    Offline(String),
+    /// Praxis Remote stopped. `sign_in` says whether signing in again is the
+    /// way out, as opposed to retrying.
+    Failed {
+        reason: String,
+        sign_in: bool,
+    },
+}
 
-    let mut remote = loop {
-        match Remote::connect(&github, &device).await {
-            Ok(remote) => break remote,
-            Err(error) => {
-                log::warn!("Praxis Remote could not reach GitHub, retrying: {error:#}");
-                cx.background_executor().timer(ERROR_BACKOFF).await;
-            }
-        }
-    };
-    log::info!(
-        "Praxis Remote enabled for {} through issue #{} in {}",
-        remote.device,
-        remote.issue,
-        github.repository
-    );
+/// Praxis Remote's state for the whole app, and whatever it is running:
+/// signing in, the channel, or turning off.
+pub(crate) struct PraxisRemote {
+    status: RemoteStatus,
+    login: Option<String>,
+    device: Option<String>,
+    phones: Vec<PhoneInfo>,
+    commands: Option<mpsc::UnboundedSender<channel::Command>>,
+    _task: Option<Task<()>>,
+}
 
-    loop {
-        let result = match remote.answer_requests(&github, cx).await {
-            Ok(()) => remote.publish(&github, cx).await,
-            Err(error) => Err(error),
+struct GlobalPraxisRemote(Entity<PraxisRemote>);
+
+impl Global for GlobalPraxisRemote {}
+
+impl PraxisRemote {
+    fn new() -> Self {
+        Self {
+            status: RemoteStatus::Off,
+            login: None,
+            device: None,
+            phones: Vec::new(),
+            commands: None,
+            _task: None,
+        }
+    }
+
+    fn global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalPraxisRemote>()
+            .map(|global| global.0.clone())
+    }
+
+    /// Runs the channel, after signing in first if `sign_in` is set. Without
+    /// it, the channel stops at once unless Praxis Remote was set up before.
+    fn start(&mut self, sign_in: bool, cx: &mut Context<Self>) {
+        let (sender, commands) = mpsc::unbounded();
+        self.commands = Some(sender.clone());
+        if sign_in {
+            self.status = RemoteStatus::Connecting;
+        }
+        cx.notify();
+        let http = cx.http_client();
+        self._task = Some(cx.spawn(async move |this, cx| {
+            if sign_in {
+                if let Err(error) = sign_in_with_github(&this, &http, cx).await {
+                    log::warn!("Praxis Remote could not sign in: {error:#}");
+                    this.update(cx, |this, cx| {
+                        this.status = RemoteStatus::Failed {
+                            reason: format!("Could not sign in: {error:#}"),
+                            sign_in: true,
+                        };
+                        cx.notify();
+                    })
+                    .log_err();
+                    return;
+                }
+            }
+            channel::run(this, http, sender, commands, cx).await;
+        }));
+    }
+
+    fn sign_in(&mut self, cx: &mut Context<Self>) {
+        self.start(true, cx);
+    }
+
+    fn retry(&mut self, cx: &mut Context<Self>) {
+        self.start(false, cx);
+    }
+
+    fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        self._task = None;
+        self.commands = None;
+        self.status = if self.login.is_some() {
+            RemoteStatus::Failed {
+                reason: "Praxis Remote is signed out. Sign in again to reconnect.".into(),
+                sign_in: true,
+            }
+        } else {
+            RemoteStatus::Off
         };
-        match result {
-            Ok(()) => {
-                if remote.failing {
-                    log::info!("Praxis Remote reached GitHub again");
-                    remote.failing = false;
-                }
-                cx.background_executor().timer(POLL_INTERVAL).await;
-            }
-            Err(error) => {
-                if !remote.failing {
-                    log::warn!("Praxis Remote could not reach GitHub: {error:#}");
-                    remote.failing = true;
-                }
-                cx.background_executor().timer(ERROR_BACKOFF).await;
-            }
+        cx.notify();
+    }
+
+    /// Stops the channel and forgets everything: the gist, the sign-in and
+    /// every paired phone.
+    fn turn_off(&mut self, cx: &mut Context<Self>) {
+        self.commands = None;
+        self.status = RemoteStatus::Off;
+        self.login = None;
+        self.device = None;
+        self.phones.clear();
+        cx.notify();
+        let http = cx.http_client();
+        // Replacing the task stops the channel first.
+        self._task = Some(cx.spawn(async move |_, cx| {
+            channel::forget_everything(http, cx).await;
+        }));
+    }
+
+    fn unpair(&mut self, phone_id: String, cx: &mut Context<Self>) {
+        self.phones.retain(|phone| phone.id != phone_id);
+        cx.notify();
+        let command = channel::Command::Unpair(phone_id.clone());
+        let sent = self
+            .commands
+            .as_ref()
+            .is_some_and(|commands| commands.unbounded_send(command).is_ok());
+        if !sent {
+            // The channel is not running, so the phone is removed from what
+            // it would load next time.
+            cx.spawn(async move |_, cx| channel::forget_phone(phone_id, cx).await)
+                .detach_and_log_err(cx);
         }
     }
 }
 
-fn read_config(path: &Path) -> Result<Option<Config>> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
-    };
-    let config = serde_json_lenient::from_str(&contents)
-        .with_context(|| format!("parsing {}", path.display()))?;
-    Ok(Some(config))
+async fn sign_in_with_github(
+    this: &WeakEntity<PraxisRemote>,
+    http: &Arc<dyn HttpClient>,
+    cx: &mut AsyncApp,
+) -> Result<()> {
+    let code = github::start_device_flow(http).await?;
+    this.update(cx, |this, cx| {
+        this.status = RemoteStatus::SigningIn {
+            user_code: code.user_code.clone(),
+            verification_uri: code.verification_uri.clone(),
+        };
+        cx.notify();
+    })?;
+    let executor = cx.background_executor().clone();
+    let tokens = github::await_device_token(http, &code, &executor).await?;
+    this.update(cx, |this, cx| {
+        this.status = RemoteStatus::Connecting;
+        cx.notify();
+    })?;
+    let login = github::Api::new(http.clone(), tokens.clone())
+        .login()
+        .await?;
+    channel::remember_sign_in(login, tokens, cx).await
 }
 
-fn validate_repository(repository: &str) -> Result<()> {
-    let valid_part = |part: &str| {
-        !part.is_empty()
-            && !part.chars().all(|c| c == '.')
-            && part
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    };
-    match repository.split_once('/') {
-        Some((owner, name)) if valid_part(owner) && valid_part(name) => Ok(()),
-        _ => bail!("\"repository\" must look like \"owner/name\", not {repository:?}"),
-    }
-}
-
-async fn resolve_token(configured: Option<&str>) -> Result<String> {
-    if let Some(token) = configured.map(str::trim).filter(|token| !token.is_empty()) {
-        return Ok(token.to_string());
-    }
-    if let Ok(token) = std::env::var("PRAXIS_REMOTE_TOKEN")
-        && !token.trim().is_empty()
-    {
-        return Ok(token.trim().to_string());
-    }
-    let output = util::command::new_command("gh")
-        .args(["auth", "token"])
-        .output()
-        .await
-        .context("no token is configured and the GitHub CLI could not be run")?;
-    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !output.status.success() || token.is_empty() {
-        bail!("no token is configured and the GitHub CLI is not signed in");
-    }
-    Ok(token)
-}
-
-async fn resolve_device_name(configured: Option<&str>) -> String {
-    if let Some(name) = configured.map(str::trim).filter(|name| !name.is_empty()) {
-        return name.to_string();
-    }
+async fn resolve_device_name() -> String {
     for variable in ["COMPUTERNAME", "HOSTNAME"] {
         if let Ok(name) = std::env::var(variable)
             && !name.trim().is_empty()
@@ -245,118 +268,6 @@ async fn resolve_device_name(configured: Option<&str>) -> String {
     "Computer".to_string()
 }
 
-struct GitHub {
-    http: Arc<dyn HttpClient>,
-    token: String,
-    repository: String,
-}
-
-struct Reply {
-    status: StatusCode,
-    etag: Option<String>,
-    body: Value,
-}
-
-impl GitHub {
-    async fn call(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<Value>,
-        etag: Option<&str>,
-    ) -> Result<Reply> {
-        let mut request = Request::builder()
-            .method(method.clone())
-            .uri(format!("https://api.github.com{path}"))
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", "Praxis")
-            .header("Authorization", format!("Bearer {}", self.token))
-            .follow_redirects(http_client::RedirectPolicy::NoFollow);
-        if let Some(etag) = etag {
-            request = request.header("If-None-Match", etag);
-        }
-        let body = match body {
-            Some(body) => {
-                request = request.header("Content-Type", "application/json");
-                AsyncBody::from(serde_json::to_vec(&body)?)
-            }
-            None => AsyncBody::default(),
-        };
-        let mut response = self.http.send(request.body(body)?).await?;
-        let status = response.status();
-        let etag = response
-            .headers()
-            .get("etag")
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        let mut bytes = Vec::new();
-        response
-            .body_mut()
-            .take(MAX_RESPONSE_BYTES)
-            .read_to_end(&mut bytes)
-            .await?;
-
-        if status == StatusCode::NOT_MODIFIED {
-            return Ok(Reply {
-                status,
-                etag,
-                body: Value::Null,
-            });
-        }
-        if !status.is_success() {
-            let message = match serde_json::from_slice::<Value>(&bytes) {
-                Ok(body) => body
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                Err(_) => truncate(&String::from_utf8_lossy(&bytes), 500),
-            };
-            return Err(GitHubError {
-                status,
-                message: format!(
-                    "GitHub answered {} to {method} {path}: {message}",
-                    status.as_u16()
-                ),
-            }
-            .into());
-        }
-        let body = if bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes)
-                .with_context(|| format!("GitHub's answer to {method} {path} was not JSON"))?
-        };
-        Ok(Reply { status, etag, body })
-    }
-
-    fn repo_path(&self, suffix: &str) -> String {
-        format!("/repos/{}/{suffix}", self.repository)
-    }
-}
-
-/// A call GitHub refused, keeping the status for the callers that care which.
-#[derive(Debug)]
-struct GitHubError {
-    status: StatusCode,
-    message: String,
-}
-
-impl std::fmt::Display for GitHubError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for GitHubError {}
-
-fn github_status(error: &anyhow::Error) -> Option<StatusCode> {
-    error
-        .downcast_ref::<GitHubError>()
-        .map(|error| error.status)
-}
-
 /// What the phone asked to watch, and until when.
 #[derive(Clone, Debug, PartialEq)]
 struct Watch {
@@ -375,453 +286,9 @@ impl Watch {
     }
 }
 
-struct Remote {
-    device: String,
-    login: String,
-    issue: u64,
-    started_at: DateTime<Utc>,
-    comments_etag: Option<String>,
-    answered: HashSet<u64>,
-    /// Answers GitHub refused to take, retried before anything new is read,
-    /// since the request they answer has already been carried out.
-    unsent: Vec<(u64, String)>,
-    watch: Option<Watch>,
-    /// The last snapshot written, without its timestamp, to tell whether
-    /// anything changed since.
-    published: Option<String>,
-    published_at: Option<Instant>,
-    /// Set by a request whose effect the phone should see soon.
-    settle_at: Option<Instant>,
-    /// Set by a new watch, which always deserves a fresh snapshot.
-    publish_now: bool,
-    failing: bool,
-}
-
-impl Remote {
-    async fn connect(github: &GitHub, device: &str) -> Result<Self> {
-        let user = github.call(Method::GET, "/user", None, None).await?;
-        let login = user
-            .body
-            .get("login")
-            .and_then(Value::as_str)
-            .context("GitHub did not say who the token belongs to")?
-            .to_string();
-        let issue = find_or_create_issue(github, device, &login).await?;
-        Ok(Self {
-            device: device.to_string(),
-            login,
-            issue,
-            started_at: Utc::now(),
-            comments_etag: None,
-            answered: HashSet::default(),
-            unsent: Vec::new(),
-            watch: None,
-            published: None,
-            published_at: None,
-            settle_at: None,
-            publish_now: true,
-            failing: false,
-        })
-    }
-
-    async fn answer_requests(&mut self, github: &GitHub, cx: &mut AsyncApp) -> Result<()> {
-        while let Some((comment_id, body)) = self.unsent.first().cloned() {
-            send_answer(github, comment_id, body).await?;
-            self.unsent.remove(0);
-        }
-
-        // The newest comments across the repository, so that a new request is
-        // always on the first page however many older comments pile up.
-        let path = github.repo_path("issues/comments?sort=created&direction=desc&per_page=100");
-        let reply = github
-            .call(Method::GET, &path, None, self.comments_etag.as_deref())
-            .await?;
-        if reply.status == StatusCode::NOT_MODIFIED {
-            return Ok(());
-        }
-
-        let issue_suffix = format!("/issues/{}", self.issue);
-        let mut comments = reply.body.as_array().cloned().unwrap_or_default();
-        comments.reverse();
-        for comment in comments {
-            let on_this_issue = comment
-                .get("issue_url")
-                .and_then(Value::as_str)
-                .is_some_and(|url| url.ends_with(&issue_suffix));
-            if !on_this_issue {
-                continue;
-            }
-            let Some(request) = PendingRequest::from_comment(&comment) else {
-                continue;
-            };
-            if self.answered.contains(&request.comment_id) {
-                continue;
-            }
-            if !request.author.eq_ignore_ascii_case(&self.login) {
-                log::warn!(
-                    "Praxis Remote ignored a request from {}, who does not own the token",
-                    request.author
-                );
-                self.answered.insert(request.comment_id);
-                continue;
-            }
-            self.answered.insert(request.comment_id);
-
-            let answer = self.answer(&request, cx).await;
-            let body = response_body(&request.id, answer);
-            if let Err(error) = send_answer(github, request.comment_id, body.clone()).await {
-                self.unsent.push((request.comment_id, body));
-                return Err(error);
-            }
-        }
-        // Only once every request on the page is answered, so that a failure
-        // part way through is not hidden behind an unchanged page.
-        self.comments_etag = reply.etag;
-        Ok(())
-    }
-
-    async fn answer(&mut self, request: &PendingRequest, cx: &mut AsyncApp) -> Result<Value> {
-        let parsed = request
-            .parsed
-            .as_ref()
-            .map_err(|error| anyhow!("{error}"))?;
-        let created_at = request
-            .created_at
-            .context("GitHub did not say when the request was sent")?;
-        let age = Utc::now().signed_duration_since(created_at).num_seconds();
-        if age > MAX_REQUEST_AGE_SECONDS {
-            bail!(
-                "this request was sent {} minutes ago, while Praxis was not running on {}; \
-                 send it again",
-                age / 60,
-                self.device
-            );
-        }
-        self.settle_at = Some(Instant::now() + SETTLE_DELAY);
-        match parsed.op.as_str() {
-            "batch" => {
-                let requests = parsed
-                    .args
-                    .get("requests")
-                    .and_then(Value::as_array)
-                    .context("expected \"requests\"")?;
-                let mut results = Vec::with_capacity(requests.len());
-                for item in requests {
-                    let op = item.get("op").and_then(Value::as_str).unwrap_or_default();
-                    let args = item.get("args").cloned().unwrap_or(Value::Null);
-                    let result = if op == "batch" {
-                        Err(anyhow!("a batch cannot contain another batch"))
-                    } else {
-                        self.answer_op(op, &args, cx).await
-                    };
-                    results.push(match result {
-                        Ok(result) => json!({ "ok": true, "result": result }),
-                        Err(error) => json!({ "ok": false, "error": format!("{error:#}") }),
-                    });
-                }
-                Ok(json!({ "results": results }))
-            }
-            op => self.answer_op(op, &parsed.args, cx).await,
-        }
-    }
-
-    async fn answer_op(&mut self, op: &str, args: &Value, cx: &mut AsyncApp) -> Result<Value> {
-        if op == "watch" {
-            let seconds = args
-                .get("seconds")
-                .and_then(Value::as_i64)
-                .unwrap_or(DEFAULT_WATCH_SECONDS)
-                .clamp(1, MAX_WATCH_SECONDS);
-            let watch = Watch {
-                window: args.get("window").and_then(Value::as_u64),
-                session_id: args
-                    .get("session_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                until: Utc::now() + chrono::Duration::seconds(seconds),
-            };
-            let until = watch.until.to_rfc3339();
-            self.watch = Some(watch);
-            self.publish_now = true;
-            return Ok(json!({ "until": until }));
-        }
-        let device = self.device.clone();
-        let task = cx.update(|cx| handle(op, args, &device, cx));
-        task.await
-    }
-
-    async fn publish(&mut self, github: &GitHub, cx: &mut AsyncApp) -> Result<()> {
-        let now = Utc::now();
-        if self.watch.as_ref().is_some_and(|watch| watch.until <= now) {
-            self.watch = None;
-        }
-        let since_published = self.published_at.map(|at| at.elapsed());
-        let heartbeat_due = since_published.is_none_or(|elapsed| elapsed >= HEARTBEAT_INTERVAL);
-        if self.watch.is_none() && !heartbeat_due && !self.publish_now {
-            return Ok(());
-        }
-
-        let watch = self.watch.clone();
-        let device = self.device.clone();
-        let state = cx.update(|cx| snapshot(&device, watch.as_ref(), cx));
-        let fingerprint = state.to_string();
-        let changed = self.published.as_deref() != Some(fingerprint.as_str());
-        let settled = self.settle_at.is_some_and(|at| Instant::now() >= at);
-        let gap = if settled {
-            SETTLE_DELAY
-        } else {
-            WATCHED_PUBLISH_INTERVAL
-        };
-        let due = self.publish_now
-            || heartbeat_due
-            || (changed && since_published.is_none_or(|elapsed| elapsed >= gap));
-        if !due {
-            return Ok(());
-        }
-
-        let body = issue_body(&self.device, self.started_at, now, state);
-        let path = github.repo_path(&format!("issues/{}", self.issue));
-        let patch = json!({ "body": body, "state": "open" });
-        match github.call(Method::PATCH, &path, Some(patch), None).await {
-            Ok(_) => {}
-            Err(error) if is_gone(&error) => {
-                self.recreate_issue(github).await?;
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        }
-        self.published = Some(fingerprint);
-        self.published_at = Some(Instant::now());
-        self.publish_now = false;
-        if settled {
-            self.settle_at = None;
-        }
-        Ok(())
-    }
-
-    async fn recreate_issue(&mut self, github: &GitHub) -> Result<()> {
-        log::info!("Praxis Remote's issue is gone; opening a new one");
-        self.issue = find_or_create_issue(github, &self.device, &self.login).await?;
-        self.comments_etag = None;
-        self.publish_now = true;
-        Ok(())
-    }
-}
-
-fn is_gone(error: &anyhow::Error) -> bool {
-    matches!(
-        github_status(error),
-        Some(StatusCode::NOT_FOUND | StatusCode::GONE)
-    )
-}
-
-/// Answers a request by replacing the comment that carried it.
-async fn send_answer(github: &GitHub, comment_id: u64, body: String) -> Result<()> {
-    let path = github.repo_path(&format!("issues/comments/{comment_id}"));
-    match github
-        .call(Method::PATCH, &path, Some(json!({ "body": body })), None)
-        .await
-    {
-        Ok(_) => Ok(()),
-        // The phone gave up and removed its request.
-        Err(error) if is_gone(&error) => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-async fn find_or_create_issue(github: &GitHub, device: &str, login: &str) -> Result<u64> {
-    let title = format!("{TITLE_PREFIX}{device}");
-    for state in ["open", "closed"] {
-        let path = github.repo_path(&format!(
-            "issues?state={state}&creator={login}&per_page=100&sort=updated"
-        ));
-        let reply = github.call(Method::GET, &path, None, None).await?;
-        let existing = reply.body.as_array().and_then(|issues| {
-            issues.iter().find_map(|issue| {
-                let is_pull_request = issue.get("pull_request").is_some();
-                let matches = issue.get("title").and_then(Value::as_str) == Some(title.as_str());
-                (matches && !is_pull_request)
-                    .then(|| issue.get("number").and_then(Value::as_u64))
-                    .flatten()
-            })
-        });
-        if let Some(number) = existing {
-            return Ok(number);
-        }
-    }
-    let now = Utc::now();
-    let body = issue_body(device, now, now, json!({}));
-    let reply = github
-        .call(
-            Method::POST,
-            &github.repo_path("issues"),
-            Some(json!({ "title": title, "body": body })),
-            None,
-        )
-        .await?;
-    reply
-        .body
-        .get("number")
-        .and_then(Value::as_u64)
-        .context("GitHub did not say which issue it opened")
-}
-
-#[derive(Deserialize)]
-struct RequestPayload {
-    id: String,
-    op: String,
-    #[serde(default)]
-    args: Value,
-}
-
-struct PendingRequest {
-    comment_id: u64,
-    author: String,
-    created_at: Option<DateTime<Utc>>,
-    /// The request's id, echoed in the answer so the phone can match it.
-    id: String,
-    parsed: Result<RequestPayload, String>,
-}
-
-impl PendingRequest {
-    /// The request a comment carries, or `None` for any other comment,
-    /// including one that has already been answered.
-    fn from_comment(comment: &Value) -> Option<Self> {
-        let body = comment.get("body").and_then(Value::as_str)?;
-        let rest = body.trim_start().strip_prefix(REQUEST_MARKER)?;
-        let comment_id = comment.get("id").and_then(Value::as_u64)?;
-        let author = comment
-            .get("user")
-            .and_then(|user| user.get("login"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let created_at = comment
-            .get("created_at")
-            .and_then(Value::as_str)
-            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
-            .map(|at| at.with_timezone(&Utc));
-        let parsed = parse_request(rest);
-        let id = match &parsed {
-            Ok(payload) => payload.id.clone(),
-            Err(_) => String::from("unknown"),
-        };
-        Some(Self {
-            comment_id,
-            author,
-            created_at,
-            id,
-            parsed,
-        })
-    }
-}
-
-fn parse_request(text: &str) -> Result<RequestPayload, String> {
-    let json = json_object_in(text).ok_or("the request has no JSON in it")?;
-    let payload: RequestPayload =
-        serde_json::from_str(json).map_err(|error| format!("the request is not valid: {error}"))?;
-    if !is_valid_request_id(&payload.id) {
-        return Err("the request id may only use letters, digits, '-' and '_'".into());
-    }
-    Ok(payload)
-}
-
-fn is_valid_request_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-}
-
-/// The text from the first `{` to the last `}`, which is how both ends pull
-/// the JSON out of a fenced block without caring about the fence itself.
-fn json_object_in(text: &str) -> Option<&str> {
-    let start = text.find('{')?;
-    let end = text.rfind('}')?;
-    (start < end).then(|| &text[start..=end])
-}
-
-fn response_body(id: &str, answer: Result<Value>) -> String {
-    let id = if is_valid_request_id(id) {
-        id
-    } else {
-        "unknown"
-    };
-    let mut payload = match answer {
-        Ok(result) => json!({ "id": id, "ok": true, "result": result }),
-        Err(error) => json!({ "id": id, "ok": false, "error": format!("{error:#}") }),
-    }
-    .to_string();
-    if payload.len() > MAX_BODY_LEN {
-        payload = json!({
-            "id": id,
-            "ok": false,
-            "error": format!("the answer was too large to send ({} bytes)", payload.len()),
-        })
-        .to_string();
-    }
-    format!("{RESPONSE_MARKER}{id} -->\n```json\n{payload}\n```\n")
-}
-
-fn issue_body(
-    device: &str,
-    started_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-    mut snapshot: Value,
-) -> String {
-    let meta = json!({
-        "version": 1,
-        "device": device,
-        "started_at": started_at.to_rfc3339(),
-        "last_seen": now.to_rfc3339(),
-    })
-    .to_string()
-    // Only ever inside JSON strings, so escaping it keeps the JSON the same
-    // while stopping a device name from closing the comment around it.
-    .replace('>', "\\u003e");
-    if let Some(object) = snapshot.as_object_mut() {
-        object.insert("updated_at".into(), json!(now.to_rfc3339()));
-    }
-    let build = |state: &Value| {
-        format!(
-            "{DEVICE_MARKER}{meta} -->\n\
-             Praxis on **{device}** is controlled from Praxis Remote through this issue. \
-             Requests arrive as comments and are answered in place. Keep this repository \
-             private, and do not edit this issue by hand.\n\n\
-             {STATE_MARKER}\n```json\n{state}\n```\n"
-        )
-    };
-    let body = build(&snapshot);
-    if body.len() <= MAX_BODY_LEN {
-        return body;
-    }
-    // A transcript is fitted to the budget before it gets here, so this only
-    // guards against a snapshot that is unexpectedly large in other ways.
-    if let Some(object) = snapshot.as_object_mut() {
-        object.insert("thread".into(), Value::Null);
-        object.insert(
-            "thread_error".into(),
-            json!("the conversation was too large to show"),
-        );
-    }
-    let body = build(&snapshot);
-    if body.len() <= MAX_BODY_LEN {
-        return body;
-    }
-    build(&json!({
-        "updated_at": now.to_rfc3339(),
-        "watch": null,
-        "status": null,
-        "thread": null,
-        "thread_error": "what Praxis is doing was too large to show",
-    }))
-}
-
-/// What the phone sees without asking: every window, and the conversation it
-/// is watching.
-fn snapshot(device: &str, watch: Option<&Watch>, cx: &mut App) -> Value {
-    let status = status(device, cx);
+/// What a phone sees without asking: every window, which `status` has
+/// already described, and the conversation it is watching.
+fn snapshot(status: &Value, watch: Option<&Watch>, cx: &mut App) -> Value {
     let (thread, thread_error) = match watch {
         Some(watch) => {
             let args = json!({ "session_id": watch.session_id });
@@ -1046,9 +513,22 @@ fn architect_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
     let graph = thread.architect_graph()?;
     let run = thread.architect_run();
     let running = run.is_some_and(agent::ArchitectRun::is_running);
+    // Branches of a plan run side by side, so there can be several at once.
+    let running_steps: Vec<Value> = run
+        .filter(|run| run.is_running())
+        .map(|run| {
+            run.running_steps()
+                .iter()
+                .map(|step| json!({ "title": step.title.to_string(), "path": step.path }))
+                .collect()
+        })
+        .unwrap_or_default();
     Some(json!({
         "steps": graph.nodes.len(),
         "running": running,
+        "paused": run.is_some_and(agent::ArchitectRun::is_paused),
+        "can_resume": run.is_some_and(agent::ArchitectRun::can_resume),
+        "running_steps": running_steps,
         "current_step": run
             .filter(|run| run.is_running())
             .map(|run| run.current_title.to_string()),
@@ -1191,13 +671,14 @@ fn architect(
     window: &mut gpui::Window,
     cx: &mut App,
 ) -> Result<Value> {
-    if !matches!(op, "run" | "stop") {
-        bail!("Praxis Remote can only \"run\" or \"stop\" a plan");
+    if !matches!(op, "run" | "pause" | "resume" | "stop") {
+        bail!("Praxis Remote can only \"run\", \"pause\", \"resume\", or \"stop\" a plan");
     }
-    // Stopping through the canvas records it in the plan's activity. Starting
-    // goes through the runner directly, since the canvas only shows why a run
-    // could not start, and the phone needs to be told.
-    if op == "stop"
+    // Pausing and stopping through the canvas records it in the plan's
+    // activity. Starting and resuming go through the runner directly, since
+    // the canvas only shows why a run could not start, and the phone needs to
+    // be told.
+    if matches!(op, "pause" | "stop")
         && let Some(pane) = architect_pane(workspace.read(cx), cx)
     {
         pane.update(cx, |pane, cx| {
@@ -1222,6 +703,10 @@ fn architect(
             .context("the conversation has no plan")?;
         agent::start_architect_run(thread, acp_thread, graph, cx)
             .map_err(|error| anyhow!("{error}"))?;
+    } else if op == "resume" {
+        agent::resume_architect_run(thread, acp_thread, cx).map_err(|error| anyhow!("{error}"))?;
+    } else if op == "pause" {
+        agent::pause_architect_run(&thread, cx);
     } else {
         agent::stop_architect_run(&thread, Some(&acp_thread), cx);
     }
@@ -1316,10 +801,12 @@ fn thread(workspace: &Entity<Workspace>, args: &Value, cx: &App) -> Result<Value
         if text.is_empty() {
             continue;
         }
-        if text.len() > budget && !entries.is_empty() {
+        // Counted as JSON, since that is what has to fit in one comment.
+        let cost = json_len(&text) + ENTRY_OVERHEAD;
+        if cost > budget && !entries.is_empty() {
             break;
         }
-        budget = budget.saturating_sub(text.len());
+        budget = budget.saturating_sub(cost);
         entries.push(json!({
             "index": index,
             "role": role,
@@ -1382,6 +869,11 @@ fn truncate(text: &str, limit: usize) -> String {
         end -= 1;
     }
     format!("{}…", &text[..end])
+}
+
+/// How many bytes `text` takes as a JSON string.
+fn json_len(text: &str) -> usize {
+    serde_json::to_string(text).map_or(text.len(), |json| json.len())
 }
 
 /// Splits a path the phone names, such as `project/src/main.rs`, into the
@@ -1490,13 +982,20 @@ fn list_dir(roots: &[(String, PathBuf)], path: &str) -> Result<Value> {
             .cmp(a_dir)
             .then_with(|| a_name.to_lowercase().cmp(&b_name.to_lowercase()))
     });
-    let truncated = entries.len() > MAX_DIR_ENTRIES;
-    let entries: Vec<Value> = entries
-        .into_iter()
-        .take(MAX_DIR_ENTRIES)
-        .map(|(dir, name)| json!({ "path": format!("{display}/{name}"), "name": name, "dir": dir }))
-        .collect();
-    Ok(json!({ "path": display, "entries": entries, "truncated": truncated }))
+    let total = entries.len();
+    let mut budget = DIR_JSON_BUDGET;
+    let mut listed = Vec::new();
+    for (dir, name) in entries {
+        let entry = json!({ "path": format!("{display}/{name}"), "name": name, "dir": dir });
+        let cost = entry.to_string().len() + 1;
+        if listed.len() == MAX_DIR_ENTRIES || cost > budget {
+            break;
+        }
+        budget -= cost;
+        listed.push(entry);
+    }
+    let truncated = listed.len() < total;
+    Ok(json!({ "path": display, "entries": listed, "truncated": truncated }))
 }
 
 fn read_file(roots: &[(String, PathBuf)], path: &str) -> Result<Value> {
@@ -1514,10 +1013,22 @@ fn read_file(roots: &[(String, PathBuf)], path: &str) -> Result<Value> {
         bail!("{display} is not a text file");
     }
     let text = String::from_utf8_lossy(&bytes);
-    let content = truncate(&text, FILE_LIMIT);
+    // Escaping makes some text longer (quotes, backslashes, control
+    // characters), and the answer has to fit in one comment.
+    let mut limit = FILE_LIMIT;
+    let mut content = truncate(&text, limit);
+    loop {
+        let escaped = json_len(&content);
+        if escaped <= FILE_JSON_BUDGET {
+            break;
+        }
+        // In proportion, which is exact for text that escapes evenly.
+        limit = (limit * FILE_JSON_BUDGET / escaped).min(limit.saturating_sub(1));
+        content = truncate(&text, limit);
+    }
     Ok(json!({
         "path": display,
-        "truncated": content.len() < text.len(),
+        "truncated": text.len() > limit,
         "size": metadata.len(),
         "content": content,
     }))
@@ -1526,128 +1037,6 @@ fn read_file(roots: &[(String, PathBuf)], path: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn comment(body: &str, login: &str) -> Value {
-        json!({
-            "id": 7,
-            "body": body,
-            "user": { "login": login },
-            "created_at": "2026-01-01T00:00:00Z",
-        })
-    }
-
-    #[test]
-    fn a_request_comment_is_read_and_anything_else_is_ignored() {
-        let request = PendingRequest::from_comment(&comment(
-            "<!-- praxis-request -->\n```json\n{\"id\":\"a1\",\"op\":\"status\",\"args\":{}}\n```",
-            "someone",
-        ))
-        .expect("a request comment");
-        assert_eq!(request.comment_id, 7);
-        assert_eq!(request.author, "someone");
-        assert_eq!(request.id, "a1");
-        assert_eq!(request.parsed.as_ref().map(|p| p.op.as_str()), Ok("status"));
-
-        let answered = response_body("a1", Ok(json!({ "done": true })));
-        assert!(PendingRequest::from_comment(&comment(&answered, "someone")).is_none());
-        assert!(PendingRequest::from_comment(&comment("Looks good!", "someone")).is_none());
-    }
-
-    #[test]
-    fn a_malformed_request_is_answered_with_the_reason() {
-        let request =
-            PendingRequest::from_comment(&comment("<!-- praxis-request -->\nnot json", "someone"))
-                .expect("still a request");
-        assert!(request.parsed.is_err());
-        assert_eq!(request.id, "unknown");
-
-        let unsafe_id = PendingRequest::from_comment(&comment(
-            "<!-- praxis-request -->\n{\"id\":\"x --> <b>\",\"op\":\"status\"}",
-            "someone",
-        ))
-        .expect("still a request");
-        assert!(
-            unsafe_id.parsed.is_err(),
-            "an id must not be able to end the marker"
-        );
-    }
-
-    #[test]
-    fn an_answer_carries_its_id_and_parses_back() {
-        let body = response_body("r-9", Ok(json!({ "queued": false })));
-        assert!(body.starts_with("<!-- praxis-response r-9 -->"));
-        let payload: Value =
-            serde_json::from_str(json_object_in(&body).expect("json")).expect("valid json");
-        assert_eq!(payload["id"], "r-9");
-        assert_eq!(payload["ok"], true);
-        assert_eq!(payload["result"]["queued"], false);
-
-        let body = response_body("r-9", Err(anyhow!("no window")));
-        let payload: Value =
-            serde_json::from_str(json_object_in(&body).expect("json")).expect("valid json");
-        assert_eq!(payload["ok"], false);
-        assert_eq!(payload["error"], "no window");
-    }
-
-    #[test]
-    fn an_oversized_answer_is_replaced_by_an_error() {
-        let body = response_body(
-            "big",
-            Ok(json!({ "content": "x".repeat(MAX_BODY_LEN * 2) })),
-        );
-        assert!(body.len() < MAX_BODY_LEN);
-        let payload: Value =
-            serde_json::from_str(json_object_in(&body).expect("json")).expect("valid json");
-        assert_eq!(payload["ok"], false);
-    }
-
-    #[test]
-    fn the_issue_body_carries_the_heartbeat_and_the_snapshot() {
-        let now = Utc::now();
-        let body = issue_body("Laptop", now, now, json!({ "status": { "windows": [] } }));
-        let device_line = body.lines().next().expect("a first line");
-        assert!(device_line.starts_with(DEVICE_MARKER));
-        assert!(device_line.contains("\"device\":\"Laptop\""));
-        let (_, state) = body.split_once(STATE_MARKER).expect("a state marker");
-        let state: Value =
-            serde_json::from_str(json_object_in(state).expect("json")).expect("valid json");
-        assert_eq!(state["status"]["windows"], json!([]));
-        assert!(state["updated_at"].is_string());
-
-        let huge = json!({ "thread": { "text": "x".repeat(MAX_BODY_LEN * 2) } });
-        let body = issue_body("Laptop", now, now, huge);
-        assert!(body.len() <= MAX_BODY_LEN);
-        assert!(body.contains("too large to show"));
-
-        let huge_status = json!({ "status": { "text": "x".repeat(MAX_BODY_LEN * 2) } });
-        let body = issue_body("Laptop", now, now, huge_status);
-        assert!(body.len() <= MAX_BODY_LEN);
-        assert!(body.contains("too large to show"));
-    }
-
-    #[test]
-    fn a_device_name_cannot_close_the_heartbeat_comment() {
-        let now = Utc::now();
-        let body = issue_body("evil --> <b>", now, now, json!({}));
-        let device_line = body.lines().next().expect("a first line");
-        let meta = device_line
-            .strip_prefix(DEVICE_MARKER)
-            .and_then(|rest| rest.strip_suffix(" -->"))
-            .expect("one comment on the line");
-        assert!(!meta.contains("-->"));
-        let meta: Value = serde_json::from_str(meta).expect("still valid json");
-        assert_eq!(meta["device"], "evil --> <b>");
-    }
-
-    #[test]
-    fn only_owner_slash_name_repositories_are_accepted() {
-        assert!(validate_repository("someone/praxis-remote").is_ok());
-        assert!(validate_repository("someone").is_err());
-        assert!(validate_repository("someone/../x").is_err());
-        assert!(validate_repository("a/b?c").is_err());
-        assert!(validate_repository("someone/..").is_err());
-        assert!(validate_repository("../..").is_err());
-    }
 
     #[test]
     fn paths_name_a_project_and_cannot_climb_out_of_it() {
@@ -1706,5 +1095,40 @@ mod tests {
     fn truncation_keeps_whole_characters() {
         assert_eq!(truncate("héllo", 2), "h…");
         assert_eq!(truncate("short", 10), "short");
+    }
+
+    #[test]
+    fn a_file_answer_fits_in_one_comment_however_it_escapes() {
+        let temp = tempfile::tempdir().expect("a temporary directory");
+        let root = temp.path().join("app");
+        std::fs::create_dir_all(&root).expect("create");
+        std::fs::write(root.join("quotes.txt"), "\"".repeat(FILE_LIMIT)).expect("write");
+        std::fs::write(root.join("controls.txt"), "\u{1}".repeat(FILE_LIMIT)).expect("write");
+        let roots = vec![("app".to_string(), root)];
+
+        for name in ["app/quotes.txt", "app/controls.txt"] {
+            let file = read_file(&roots, name).expect("reads");
+            let content = file["content"].as_str().expect("content");
+            assert!(json_len(content) <= FILE_JSON_BUDGET, "{name}");
+            assert_eq!(file["truncated"], true, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_long_directory_listing_is_cut_to_fit_in_one_comment() {
+        let temp = tempfile::tempdir().expect("a temporary directory");
+        let root = temp.path().join("app");
+        std::fs::create_dir_all(&root).expect("create");
+        for index in 0..400 {
+            let name = format!("{index:03}-{}", "n".repeat(100));
+            std::fs::write(root.join(name), "").expect("write");
+        }
+        let roots = vec![("app".to_string(), root)];
+
+        let listing = list_dir(&roots, "app").expect("lists");
+        assert_eq!(listing["truncated"], true);
+        assert!(listing["entries"].to_string().len() <= DIR_JSON_BUDGET + 2);
+        let first = format!("000-{}", "n".repeat(100));
+        assert_eq!(listing["entries"][0]["name"], first);
     }
 }

@@ -23,8 +23,10 @@ import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Web
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -39,6 +41,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -63,6 +66,7 @@ import io.github.dushyantchetiwal.praxis.remote.data.WindowInfo
 @Composable
 fun DeviceScreen(state: AppState, ui: DeviceUi, busy: Int, vm: MainViewModel, snackbar: SnackbarHostState) {
     var menu by remember { mutableStateOf(false) }
+    var confirmUnpair by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -104,6 +108,11 @@ fun DeviceScreen(state: AppState, ui: DeviceUi, busy: Int, vm: MainViewModel, sn
                                 onClick = { menu = false; vm.leaveDevice() },
                             )
                             DropdownMenuItem(
+                                text = { Text(stringResource(R.string.action_unpair)) },
+                                leadingIcon = { Icon(Icons.Outlined.LinkOff, contentDescription = null) },
+                                onClick = { menu = false; confirmUnpair = true },
+                            )
+                            DropdownMenuItem(
                                 text = { Text(stringResource(R.string.settings_title)) },
                                 leadingIcon = { Icon(Icons.Outlined.Settings, contentDescription = null) },
                                 onClick = { menu = false; vm.openSettings() },
@@ -139,6 +148,25 @@ fun DeviceScreen(state: AppState, ui: DeviceUi, busy: Int, vm: MainViewModel, sn
             }
         }
     }
+
+    if (confirmUnpair) {
+        UnpairDialog(ui.device?.name.orEmpty(), onDismiss = { confirmUnpair = false }) {
+            confirmUnpair = false
+            vm.unpairCurrent()
+        }
+    }
+}
+
+@Composable
+fun UnpairDialog(deviceName: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Outlined.LinkOff, contentDescription = null) },
+        title = { Text(stringResource(R.string.unpair_title)) },
+        text = { Text(stringResource(R.string.unpair_body, deviceName)) },
+        confirmButton = { TextButton(onClick = onConfirm) { Text(stringResource(R.string.unpair_confirm)) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) } },
+    )
 }
 
 @Composable
@@ -198,7 +226,7 @@ private fun DeviceHeader(state: AppState, ui: DeviceUi, vm: MainViewModel) {
             val seen = device.lastSeen?.let { stringResource(R.string.banner_offline_seen, relativeTime(context, it, now)) }
                 ?: stringResource(R.string.banner_offline_never)
             add(Banner(stringResource(R.string.banner_offline, device.name, seen), error = false))
-        } else if (device != null && ui.issueApplied && !ui.snapshotFresh(now)) {
+        } else if (device != null && ui.stateApplied && !ui.snapshotFresh(now)) {
             add(Banner(stringResource(R.string.banner_waiting), error = false))
         }
         addAll(ui.banners.values)

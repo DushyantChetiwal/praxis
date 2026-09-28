@@ -6,7 +6,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
+use crate::{
+    AgentTool, ArchitectStepVisitId, Thread, ToolCallEventStream, ToolCapability, ToolInput,
+};
 
 /// Report what you did in the step of the plan you have just finished.
 ///
@@ -51,16 +53,32 @@ impl From<CompleteStepToolOutput> for LanguageModelToolResultContent {
 
 /// Writes a step's summary onto the plan.
 ///
-/// Which step that is comes from the thread rather than from the model: the run
-/// sets it before each step and clears it afterwards. Letting the model name the
-/// step would let a confused one overwrite the summary of work it never did.
+/// Which step that is comes from the run rather than from the model: a step's
+/// own thread is given a tool bound to that step's visit, and otherwise the
+/// plan's thread says which step it is running. Letting the model name the step
+/// would let a confused one overwrite the summary of work it never did.
 pub struct CompleteStepTool {
     thread: WeakEntity<Thread>,
+    visit: Option<ArchitectStepVisitId>,
 }
 
 impl CompleteStepTool {
+    /// Reports on whichever step the plan's thread most recently started, for
+    /// steps carried out in the plan's own conversation, one at a time.
     pub fn new(thread: WeakEntity<Thread>) -> Self {
-        Self { thread }
+        Self {
+            thread,
+            visit: None,
+        }
+    }
+
+    /// Reports on one visit of one step. Several steps can be running at once,
+    /// so a step's own thread has to say which of them it is.
+    pub fn for_visit(thread: WeakEntity<Thread>, visit: ArchitectStepVisitId) -> Self {
+        Self {
+            thread,
+            visit: Some(visit),
+        }
     }
 }
 
@@ -92,10 +110,13 @@ impl AgentTool for CompleteStepTool {
         _event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        let visit_id = match self
-            .thread
-            .read_with(cx, |thread, _cx| thread.architect_step_visit_id())
-        {
+        let visit = match self.visit {
+            Some(visit) => Ok(Some(visit)),
+            None => self
+                .thread
+                .read_with(cx, |thread, _cx| thread.architect_step_visit_id()),
+        };
+        let visit_id = match visit {
             Ok(Some(visit_id)) => visit_id,
             Ok(None) => {
                 return Task::ready(Err(CompleteStepToolOutput::Error {

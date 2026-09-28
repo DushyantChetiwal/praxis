@@ -33,13 +33,23 @@ impl ArchitectPane {
     /// Execution policy lives in `agent::start_architect_run`; this pane only
     /// supplies the owning conversation and presents start failures.
     pub(super) fn run(&mut self, cx: &mut Context<Self>) {
+        self.start_run(None, cx);
+    }
+
+    /// Starts a run at one step, keeping what the steps before it reported.
+    pub(super) fn run_from(&mut self, path: NodePath, cx: &mut Context<Self>) {
+        self.start_run(Some(path), cx);
+    }
+
+    fn start_run(&mut self, from: Option<NodePath>, cx: &mut Context<Self>) {
         if self.is_running(cx) {
             return;
         }
         let run_starting = RunStartingGuard::new(&self.run_starting);
 
         // A run always covers the whole plan, even when started from inside a
-        // nested one: what is on screen is a viewpoint, not a scope.
+        // nested one: what is on screen is a viewpoint, not a scope. Started
+        // from a step, it goes on from there to the end of the whole plan.
         let Some(graph) = self.root_graph(cx).cloned() else {
             return;
         };
@@ -53,7 +63,14 @@ impl ArchitectPane {
             return;
         };
 
-        if let Err(error) = agent::start_architect_run(self.thread.clone(), acp_thread, graph, cx) {
+        let thread = self.thread.clone();
+        let started = match &from {
+            Some(path) => {
+                agent::start_architect_run_from(thread, acp_thread, graph, path.clone(), cx)
+            }
+            None => agent::start_architect_run(thread, acp_thread, graph, cx),
+        };
+        if let Err(error) = started {
             drop(run_starting);
             self.record_activity(None, format!("Run could not start: {error}"), cx);
             self.report(error.to_string(), cx);
@@ -61,8 +78,58 @@ impl ArchitectPane {
         }
 
         drop(run_starting);
-        self.record_activity(None, "Started the plan run", cx);
+        match from {
+            Some(path) => {
+                let title = self.step_title(&path, cx);
+                self.record_activity(Some(path), format!("Started the run at {title}"), cx);
+            }
+            None => self.record_activity(None, "Started the plan run", cx),
+        }
         cx.notify();
+    }
+
+    /// Lets the steps under way finish, and starts no more until resumed.
+    pub(super) fn pause_run(&mut self, cx: &mut Context<Self>) {
+        agent::pause_architect_run(&self.thread, cx);
+        self.record_activity(None, "Paused the plan run", cx);
+        cx.notify();
+    }
+
+    /// Carries on a paused run, or picks up a stopped or failed one from the
+    /// steps it was on.
+    pub(super) fn resume_run(&mut self, cx: &mut Context<Self>) {
+        let Some(acp_thread) = self.plan_acp_thread(cx) else {
+            self.report(
+                "Architect needs the conversation that owns this plan to be open in the agent \
+                 panel."
+                    .to_string(),
+                cx,
+            );
+            return;
+        };
+        if let Err(error) = agent::resume_architect_run(self.thread.clone(), acp_thread, cx) {
+            self.record_activity(None, format!("Run could not resume: {error}"), cx);
+            self.report(error.to_string(), cx);
+            return;
+        }
+        self.record_activity(None, "Resumed the plan run", cx);
+        cx.notify();
+    }
+
+    pub(super) fn is_paused(&self, cx: &App) -> bool {
+        self.thread
+            .read(cx)
+            .architect_run()
+            .is_some_and(agent::ArchitectRun::is_paused)
+    }
+
+    pub(super) fn can_resume(&self, cx: &App) -> bool {
+        !self.run_starting.get()
+            && self
+                .thread
+                .read(cx)
+                .architect_run()
+                .is_some_and(agent::ArchitectRun::can_resume)
     }
 
     /// The title of a step, for showing progress without walking the plan.
@@ -137,15 +204,43 @@ impl ArchitectPane {
             .unwrap_or_default()
     }
 
-    /// The step the run is carrying out, if one is. Only the leaf matters for
-    /// highlighting, since the canvas shows one level at a time.
-    pub(super) fn running_node<'a>(&self, cx: &'a App) -> Option<&'a NodeId> {
-        self.thread
-            .read(cx)
-            .architect_run()?
-            .current
-            .as_ref()?
-            .leaf()
+    /// The steps the run is carrying out, of which a fork has several. Only
+    /// the leaves matter for highlighting, since the canvas shows one level at
+    /// a time. Between steps, the step the run is deciding a way out of stays
+    /// highlighted.
+    pub(super) fn running_nodes(&self, cx: &App) -> Vec<NodeId> {
+        let Some(run) = self.thread.read(cx).architect_run() else {
+            return Vec::new();
+        };
+        let steps = run.running_steps();
+        if steps.is_empty() {
+            let current = run.current.as_ref().and_then(NodePath::leaf);
+            return current.cloned().into_iter().collect();
+        }
+        steps
+            .iter()
+            .filter_map(|step| step.path.leaf().cloned())
+            .collect()
+    }
+}
+
+/// "Step 4 · Write the tests" for one running step, "Running 3 steps" for
+/// several, whether a pause is still waiting on steps, and `None` once the run
+/// has ended.
+pub(crate) fn running_summary(run: &agent::ArchitectRun) -> Option<SharedString> {
+    if !run.is_running() {
+        return None;
+    }
+    if run.is_paused() {
+        return Some(match run.running_steps().len() {
+            0 => "Paused".into(),
+            1 => "Pausing once the running step finishes".into(),
+            count => format!("Pausing once {count} running steps finish").into(),
+        });
+    }
+    match run.running_steps() {
+        [] | [_] => Some(format!("Step {} · {}", run.step_number, run.current_title).into()),
+        steps => Some(format!("Running {} steps", steps.len()).into()),
     }
 }
 

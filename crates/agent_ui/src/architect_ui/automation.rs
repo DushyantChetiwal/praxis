@@ -104,10 +104,18 @@ impl ArchitectPane {
                 .as_ref()
                 .zip(root)
                 .map(|(outcome, root)| outcome.summary(root));
+            let running_steps: Vec<Value> = run
+                .running_steps()
+                .iter()
+                .map(|step| json!({ "title": step.title.to_string(), "path": step.path }))
+                .collect();
             json!({
                 "running": run.is_running(),
+                "paused": run.is_paused(),
+                "can_resume": run.can_resume(),
                 "step": run.step_number,
                 "current": run.current_title.to_string(),
+                "running_steps": running_steps,
                 "outcome": outcome,
             })
         });
@@ -281,9 +289,18 @@ impl ArchitectPane {
             }
             "code" | "editor" => self.request_code_mode(window, cx),
             "run" => self.run(cx),
+            "run_from" => {
+                let path = self.focus.child(node(args)?);
+                self.run_from(path, cx);
+            }
+            "pause" => self.pause_run(cx),
+            "resume" => self.resume_run(cx),
             "stop" => self.stop_run(cx),
             op => return Err(anyhow!("unknown Architect op {op:?}")),
         }
+        // The state reports where steps are drawn so a real mouse can be aimed
+        // at them, which only holds once the view has stopped moving.
+        self.settle_camera(cx);
         Ok(self.automation_state(cx))
     }
 }

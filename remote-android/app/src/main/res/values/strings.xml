@@ -14,16 +14,16 @@
     <string name="action_refresh">Refresh</string>
     <string name="action_send">Send</string>
     <string name="action_stop">Stop</string>
-    <string name="action_switch_device">Switch device</string>
+    <string name="action_switch_device">Switch computer</string>
     <string name="action_try_again">Try again</string>
-    <string name="label_current">Current</string>
+    <string name="action_unpair">Unpair this computer</string>
 
     <!-- Sign-in -->
-    <string name="signin_tagline">Drive the coding agent on your laptop from your phone, through a private GitHub repository.</string>
+    <string name="signin_tagline">Follow and steer the coding agent on your computer from your phone, end-to-end encrypted.</string>
     <string name="signin_button">Sign in with GitHub</string>
-    <string name="signin_explainer">You’ll get a short code to enter on github.com. Praxis Remote only sees the repositories you install its GitHub App on.</string>
+    <string name="signin_explainer">You’ll get a short code to enter on github.com. Sign in with the same GitHub account as Praxis on your computer. There’s no repository to create and nothing to install on GitHub.</string>
     <string name="signin_client_id">GitHub App client ID</string>
-    <string name="signin_client_id_help">This build has no client ID built in. Enter the client ID of your “Praxis Remote” GitHub App (it starts with “Iv”). Device flow must be enabled for the app.</string>
+    <string name="signin_client_id_help">This build has no client ID built in. Enter the client ID of your “Praxis Remote” GitHub App (it starts with “Iv”). The app needs Device Flow turned on and the account permission Gists: Read and write.</string>
     <string name="signin_client_id_override_help">Leave empty to use the client ID built into this app.</string>
     <string name="signin_advanced">Advanced</string>
     <string name="signin_need_client_id">Enter the GitHub App client ID first.</string>
@@ -33,7 +33,7 @@
     <string name="signin_open_github">Open GitHub</string>
     <string name="signin_code_help">Open %1$s, paste the code and approve Praxis Remote. “Open GitHub” copies the code for you.</string>
     <string name="signin_waiting">Waiting for approval · code expires in %1$d:%2$02d</string>
-    <string name="signin_expired">GitHub no longer accepts your sign-in (it may have expired or been revoked). Sign in again.</string>
+    <string name="signin_expired">GitHub no longer accepts your sign-in and it couldn’t be renewed (it may have been revoked). Sign in again.</string>
 
     <!-- Device flow errors -->
     <string name="flow_expired">The code expired before it was approved. Start again.</string>
@@ -43,34 +43,44 @@
     <string name="flow_error">GitHub sign-in failed: %1$s</string>
     <string name="flow_unexpected">GitHub answered %1$d to the sign-in request.</string>
 
-    <!-- Repository picker -->
-    <string name="repos_title">Choose repository</string>
-    <string name="repos_intro">Praxis on your laptop and this app talk through issues in a private repository. Pick the repository the Praxis Remote GitHub App is installed on.</string>
-    <string name="repos_loading">Looking for repositories…</string>
-    <string name="repos_available">Repositories you’ve given the app</string>
-    <string name="repos_private">Private</string>
-    <string name="repos_public_warning">Public — anyone could read your prompts and code</string>
-    <string name="repos_none_title">No repository yet</string>
-    <string name="repos_none_installations">Install the “Praxis Remote” GitHub App on the private repository that Praxis on your laptop uses, then try again. Grant it access to that one repository only.</string>
-    <string name="repos_none_repos">The Praxis Remote GitHub App is installed, but not on any repository you can use. Add your private channel repository to the installation, then try again.</string>
-    <string name="repos_open_installations">Manage app installations</string>
-    <string name="repos_browse_apps">Open GitHub Apps</string>
-    <string name="repos_manual_title">Or enter it yourself</string>
-    <string name="repos_manual_label">owner/name</string>
-    <string name="repos_manual_use">Use this repository</string>
-    <string name="repos_manual_invalid">Enter the repository as owner/name.</string>
-    <string name="repos_manual_not_found">Repository not found, or the Praxis Remote app isn’t installed on it.</string>
-    <string name="repos_public_title">Use a public repository?</string>
-    <string name="repos_public_body">%1$s is public, so anyone could read your prompts, transcripts and code. Use a private repository instead.</string>
-    <string name="repos_public_confirm">Use anyway</string>
+    <!-- Computers -->
+    <string name="devices_title">Computers</string>
+    <string name="devices_signed_in_as">GitHub: %1$s</string>
+    <string name="devices_loading">Looking for computers…</string>
+    <string name="devices_empty_title">No computers yet</string>
+    <string name="devices_empty_body">Turn on Praxis Remote in Praxis on your computer, signed in to GitHub as %1$s. It shows up here within a minute.</string>
+    <string name="devices_empty_body_generic">Turn on Praxis Remote in Praxis on your computer, signed in with the same GitHub account as this phone. It shows up here within a minute.</string>
+    <string name="devices_error">Couldn’t load computers: %1$s</string>
+    <string name="devices_subtitle">%1$s · %2$s</string>
+    <string name="devices_paired">Paired</string>
+    <string name="devices_not_paired">Not paired · tap to pair</string>
+    <string name="devices_unpaired_by_computer">Unpaired on the computer · tap to pair again</string>
 
-    <!-- Devices -->
-    <string name="devices_title">Devices</string>
-    <string name="devices_loading">Looking for devices…</string>
-    <string name="devices_empty_title">No devices yet</string>
-    <string name="devices_empty_body">Turn on Remote in Praxis on your laptop. It opens an issue titled “%1$s” in %2$s.</string>
-    <string name="devices_error">Couldn’t load devices: %1$s</string>
-    <string name="devices_subtitle">%1$s · issue #%2$d</string>
+    <!-- Pairing -->
+    <string name="pair_title">Pair with %1$s</string>
+    <string name="pair_intro">Pairing lets this phone follow and control Praxis on %1$s. Everything they exchange is encrypted with a key only the two of them know.</string>
+    <string name="pair_steps">Praxis on the computer will ask whether to allow this phone and show a 6-digit code. You’ll check that it matches the code shown here.</string>
+    <string name="pair_phone_name">This phone will appear as “%1$s”.</string>
+    <string name="pair_offline">%1$s %2$s. Praxis has to be running there to pair.</string>
+    <string name="pair_start">Start pairing</string>
+    <string name="pair_start_anyway">Pair anyway</string>
+    <string name="pair_waiting">Waiting for Praxis on %1$s…</string>
+    <string name="pair_waiting_help">Keep Praxis open on the computer. This request expires in %1$d:%2$02d.</string>
+    <string name="pair_code_title">Pairing code</string>
+    <string name="pair_code_check">Check that Praxis on %1$s shows the same code, then click Allow there.</string>
+    <string name="pair_code_mismatch">If the codes are different, click Deny on the computer and cancel here.</string>
+    <string name="pair_waiting_approval">Waiting for approval · %1$d:%2$02d left</string>
+    <string name="pair_done">Paired with %1$s</string>
+    <string name="pair_denied">Pairing was denied on %1$s.</string>
+    <string name="pair_expired">The pairing request expired. Try again.</string>
+    <string name="pair_invalid">Praxis on %1$s couldn’t verify this pairing request. Try again.</string>
+    <string name="pair_timed_out">%1$s didn’t finish pairing within 5 minutes. Make sure Praxis is running there and try again.</string>
+    <string name="pair_removed">The pairing request was removed before it finished. Try again.</string>
+    <string name="unpaired_by_computer">Praxis on %1$s unpaired this phone. Pair again to use it.</string>
+    <string name="unpair_done">Unpaired %1$s</string>
+    <string name="unpair_title">Unpair this computer?</string>
+    <string name="unpair_body">This phone forgets its key for %1$s and asks Praxis there to remove it. You can pair again at any time.</string>
+    <string name="unpair_confirm">Unpair</string>
     <string name="presence_online">Online</string>
     <string name="presence_last_seen">Last seen %1$s</string>
     <string name="presence_never">Not seen yet</string>
@@ -88,13 +98,13 @@
     <string name="banner_offline_seen">was last seen %1$s</string>
     <string name="banner_offline_never">hasn’t checked in yet</string>
     <string name="banner_waiting">Waiting for live updates from Praxis… Showing the last published state.</string>
-    <string name="banner_issue_closed">Praxis closed issue #%1$d. Looking for the device again…</string>
-    <string name="banner_issue_gone">The issue for this device (#%1$d) is gone. Looking for it again…</string>
+    <string name="banner_channel_gone">Can’t find the channel for %1$s. Looking for it again…</string>
+    <string name="banner_state_unreadable">Couldn’t decrypt the state from %1$s. If this continues, unpair and pair again.</string>
     <string name="banner_poll_failed">Couldn’t check for updates: %1$s</string>
     <string name="banner_watch_failed">Live updates unavailable: %1$s</string>
 
     <!-- Chat -->
-    <string name="chat_no_device">No device selected</string>
+    <string name="chat_no_device">No computer selected</string>
     <string name="chat_connecting">Connecting…</string>
     <string name="chat_no_window">No Praxis window</string>
     <string name="chat_untitled">Untitled thread</string>
@@ -169,20 +179,19 @@
     <string name="settings_unknown_user">GitHub account</string>
     <string name="settings_signed_in_with_github">Signed in with GitHub</string>
     <string name="settings_token_expires">Your sign-in expires %1$s</string>
-    <string name="settings_token_expires_help">GitHub App user tokens expire unless “Expire user authorization tokens” is turned off in the app’s settings. When it expires you’ll be asked to sign in again.</string>
+    <string name="settings_token_expires_help">Praxis Remote renews your sign-in before it expires. If GitHub stops accepting it, you’ll be asked to sign in again.</string>
     <string name="settings_sign_out">Sign out</string>
     <string name="settings_sign_out_title">Sign out?</string>
-    <string name="settings_sign_out_body">This forgets your GitHub sign-in and the chosen repository on this phone. You can also revoke Praxis Remote at any time in your GitHub settings.</string>
-    <string name="settings_channel">Channel</string>
-    <string name="settings_channel_help">Repository used to talk to Praxis</string>
-    <string name="settings_device_issue">Selected device · issue #%1$d</string>
-    <string name="settings_switch_repo">Switch repository</string>
+    <string name="settings_sign_out_body">This forgets your GitHub sign-in and every pairing on this phone, so you’ll need to pair with your computers again. You can also revoke Praxis Remote at any time in your GitHub settings.</string>
+    <string name="settings_pairing">Pairing</string>
+    <string name="settings_phone_help">How this phone appears on your computers</string>
+    <string name="settings_selected_computer">Selected computer · paired</string>
     <string name="settings_none">None</string>
     <string name="settings_app">App</string>
     <string name="settings_version">Version %1$s (%2$d)</string>
     <string name="settings_check_updates">Check for updates</string>
     <string name="settings_client_id">GitHub App client ID: %1$s</string>
-    <string name="settings_privacy">All traffic goes from this phone straight to api.github.com; there is no other server. Transcripts and file contents pass through the repository’s issues, so keep it private.</string>
+    <string name="settings_privacy">All traffic goes from this phone straight to GitHub; there is no other server. Praxis and this phone talk through a secret gist in your GitHub account, and everything in it is end-to-end encrypted with the key agreed when you paired, so neither GitHub nor anyone with the gist’s link can read your prompts, transcripts or code.</string>
 
     <!-- Updates -->
     <string name="update_available">Update available</string>
@@ -196,16 +205,20 @@
     <string name="error_unauthorized">GitHub rejected your sign-in (401). It may have expired or been revoked.</string>
     <string name="error_rate_limit">GitHub rate limit reached.</string>
     <string name="error_rate_limit_until">GitHub rate limit reached. Try again after %1$s.</string>
-    <string name="error_forbidden">GitHub denied access (403)%1$s. Check that the Praxis Remote app is installed on the repository with Issues access.</string>
-    <string name="error_not_found">Not found (404). Check the repository and that the Praxis Remote app is installed on it.</string>
+    <string name="error_forbidden">GitHub denied access (403)%1$s. Check that the Praxis Remote GitHub App has the Gists (read and write) permission.</string>
+    <string name="error_not_found">Not found on GitHub (404).</string>
     <string name="error_http">GitHub error %1$d%2$s</string>
     <string name="error_no_comment">GitHub didn’t return the new comment.</string>
     <string name="error_not_responding">Praxis on %1$s is not responding.</string>
     <string name="error_request_removed">The request was removed before Praxis answered.</string>
     <string name="error_unreadable_response">Praxis sent a response that couldn’t be read.</string>
     <string name="error_wrong_response">Praxis answered a different request.</string>
-    <string name="error_no_device">No device selected.</string>
-    <string name="error_switched_device">Switched device.</string>
+    <string name="error_undecryptable_response">Praxis sent an answer that couldn’t be decrypted.</string>
+    <string name="error_rejected">Praxis on %1$s refused this phone: %2$s. Pair again to continue.</string>
+    <string name="error_rejected_no_reason">no reason given</string>
+    <string name="error_not_paired">This phone isn’t paired with %1$s.</string>
+    <string name="error_no_device">No computer selected.</string>
+    <string name="error_switched_device">Switched computer.</string>
     <string name="error_op_failed">Praxis couldn’t run “%1$s”.</string>
     <string name="error_no_browser">No app can open this link.</string>
 </resources>

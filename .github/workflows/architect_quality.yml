@@ -134,6 +134,10 @@ jobs:
           cargo test --locked -p agent --lib internal_tests::test_a_reopened_step_thread_gets_its_tool_back -- --exact
           cargo test --locked -p agent --lib internal_tests::test_a_run_records_the_steps_it_took -- --exact
           cargo test --locked -p agent --lib internal_tests::test_each_run_step_runs_in_a_thread_of_its_own -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_parallel_branches_run_at_once_and_meet_at_the_join -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_a_paused_run_lets_its_steps_finish_and_resumes_where_it_was -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_a_stopped_run_resumes_at_the_step_it_was_on -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_steps_running_at_once_each_report_on_their_own_visit -- --exact
           cargo test --locked -p agent --lib internal_tests::test_step_completion_is_idempotent_and_rejects_stale_visits -- --exact
           cargo test --locked -p agent --lib db::tests::test_architect_graph_roundtrips_through_save_load -- --exact
 
@@ -167,7 +171,7 @@ jobs:
           cargo test --locked -p agent_ui --lib question_text_edits_ignore_defaults_and_preserve_edits
 
       - name: Test Praxis Remote
-        run: "cargo test --locked -p agent_ui --lib remote::tests::"
+        run: "cargo test --locked -p agent_ui --lib remote::"
 
   updater-tests:
     name: Auto-update integrity tests

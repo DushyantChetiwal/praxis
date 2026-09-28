@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use architect::{
     ArchitectGraph, ArchitectNode, EdgeCondition, GraphProblem, NodeId, NodePath, Position,
@@ -7,7 +8,8 @@ use architect::{
 use gpui::{
     App, Bounds, ClickEvent, Context, CursorStyle, DragMoveEvent, Entity, EventEmitter,
     FocusHandle, Focusable, Hsla, MouseButton, MouseDownEvent, MouseUpEvent, PathBuilder, Pixels,
-    Render, SharedString, Subscription, WeakEntity, Window, canvas, deferred, div, point, px,
+    Render, SharedString, Size, Subscription, WeakEntity, Window, canvas, deferred, div, point, px,
+    size,
 };
 use ui::{ContextMenu, Divider, TintColor, Tooltip, prelude::*, right_click_menu};
 use util::ResultExt as _;
@@ -19,9 +21,9 @@ use workspace::{
 use super::bulk::{self, BulkCounts};
 use super::geometry::{EdgeCurve, NODE_WIDTH, paint_curve};
 use super::{
-    ArchitectPane, ArchitectWorkspaceMode, DETAIL_ZOOM_THRESHOLD, DUPLICATE_SHORTCUT,
+    ArchitectPane, ArchitectWorkspaceMode, Camera, DETAIL_ZOOM_THRESHOLD, DUPLICATE_SHORTCUT,
     EXPANDED_CHILD_LIMIT, HistoryDirection, Interaction, MAX_ZOOM, MIN_ZOOM, REDO_SHORTCUT,
-    Selection, UNDO_SHORTCUT,
+    Selection, UNDO_SHORTCUT, ZOOM_STEP,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +63,99 @@ fn node_intersects_viewport(
         && top + height >= -overscan
         && left <= viewport_width + overscan
         && top <= viewport_height + overscan
+}
+
+/// The words in a step's header row, for judging whether they fit its card.
+struct HeaderText<'a> {
+    number: &'a str,
+    title: &'a str,
+    status: &'a str,
+    /// A running or finished step leads its title with an icon.
+    icon: bool,
+}
+
+/// Which of a step's header labels to draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HeaderFit {
+    /// The step number and title, which go together or not at all.
+    title: bool,
+    /// The status word at the far end. The card's border already tells most
+    /// of the same story, so it is the first to go.
+    status: bool,
+}
+
+/// A title cut shorter than this, plus its ellipsis, says nothing a bare card
+/// does not.
+const MIN_TITLE_CHARS: usize = 6;
+
+/// Estimates which header labels fit on a card drawn at `card` size.
+///
+/// Labels stay a readable size at every zoom while the card around them
+/// shrinks, so far enough out they would be clipped to a sliver or spill past
+/// the card. A card with nothing on it reads better than one with a fragment,
+/// and the glyph-width estimate is plenty to decide by without laying the text
+/// out.
+fn header_fit(
+    header: &HeaderText,
+    card: Size<Pixels>,
+    rem_size: Pixels,
+    detailed: bool,
+) -> HeaderFit {
+    let rem = f32::from(rem_size);
+    // The card's 2px border and `p_2` padding, the rows' `gap_1`, and the
+    // label and icon sizes, as `render_node` draws them.
+    let inset = (2.0 + rem * 0.5) * 2.0;
+    let gap = rem * 0.25;
+    let title_size = rem * if detailed { 14.0 / 16.0 } else { 12.0 / 16.0 };
+    let small_size = rem * 10.0 / 16.0;
+    let icon_size = rem * 12.0 / 16.0;
+    // Labels take the inherited line height, which is about 1.6 em.
+    let line_height = title_size * 1.6;
+
+    let width = f32::from(card.width) - inset;
+    let height = f32::from(card.height) - inset;
+    let hidden = HeaderFit {
+        title: false,
+        status: false,
+    };
+    if height < line_height {
+        return hidden;
+    }
+
+    let shortest_title: String = if header.title.chars().count() <= MIN_TITLE_CHARS {
+        header.title.to_string()
+    } else {
+        header
+            .title
+            .chars()
+            .take(MIN_TITLE_CHARS)
+            .chain(['…'])
+            .collect()
+    };
+    let mut needed = estimated_text_width(header.number, small_size)
+        + gap
+        + estimated_text_width(&shortest_title, title_size);
+    if header.icon {
+        needed += icon_size + gap;
+    }
+    if needed > width {
+        return hidden;
+    }
+    needed += gap + estimated_text_width(header.status, small_size);
+    HeaderFit {
+        title: true,
+        status: needed <= width,
+    }
+}
+
+/// Roughly how wide `text` is at `font_size`: proportional UI fonts average a
+/// little over half an em a glyph, and wide scripts such as CJK a whole one.
+fn estimated_text_width(text: &str, font_size: f32) -> f32 {
+    let ems: f32 = text
+        .chars()
+        .map(|glyph| if glyph >= '\u{1100}' { 1.0 } else { 0.55 })
+        .sum();
+    ems * font_size
 }
 
 /// The draggable boundaries between the Architect regions.
@@ -335,6 +430,13 @@ impl ArchitectPane {
         };
 
         let running = self.is_running(cx);
+        let paused = self.is_paused(cx);
+        let can_resume = self.can_resume(cx);
+        let resume_tooltip = if running {
+            "Carry on from where the run paused"
+        } else {
+            "Carry on from the steps the run stopped on, keeping what earlier steps reported"
+        };
         // A step running in a thread of its own can only be followed, or its
         // requests allowed, from that thread's conversation.
         let watch_step = running && self.run_step_session(cx).is_some();
@@ -371,18 +473,13 @@ impl ArchitectPane {
             1 => "Select the one thing that needs attention".into(),
             count => format!("Select the first of {count} things that need attention").into(),
         };
-        let run_status: Option<SharedString> =
-            self.thread
-                .read(cx)
-                .architect_run()
-                .and_then(|run| match &run.outcome {
-                    Some(outcome) => root.map(|root| outcome.summary(root).into()),
-                    // Loops can take a run past the number of steps, so no
-                    // total is shown for the step number to exceed.
-                    None => {
-                        Some(format!("Step {} · {}", run.step_number, run.current_title).into())
-                    }
-                });
+        let latest_run = self.thread.read(cx).architect_run();
+        let run_status: Option<SharedString> = latest_run.and_then(|run| match &run.outcome {
+            Some(outcome) => root.map(|root| outcome.summary(root).into()),
+            // Loops can take a run past the number of steps, so no total is
+            // shown for the step number to exceed.
+            None => super::run::running_summary(run),
+        });
 
         // One line, in the order the plan is read: where you are, what it is,
         // then what is being done to it.
@@ -414,7 +511,9 @@ impl ArchitectPane {
         // Whether the plan has started is, like readiness, about the whole
         // plan: an empty sub-plan inside a drafted plan is not "Not started".
         let empty = run_step_count == 0 && !running;
-        let readiness = if running {
+        let readiness = if paused {
+            "Paused"
+        } else if running {
             "Running"
         } else if ready_to_run {
             "Ready to run"
@@ -625,6 +724,32 @@ impl ArchitectPane {
                                 .into_any_element()
                         })
                     })
+                    .when(running && !paused, |this| {
+                        this.child(
+                            Button::new("architect-pause", "Pause")
+                                .tab_index(0isize)
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Subtle)
+                                .start_icon(Icon::new(IconName::DebugPause).size(IconSize::XSmall))
+                                .tooltip(Tooltip::text(
+                                    "Start no more steps; the steps running now finish first",
+                                ))
+                                .on_click(cx.listener(|this, _, _, cx| this.pause_run(cx))),
+                        )
+                    })
+                    .when(can_resume, |this| {
+                        this.child(
+                            Button::new("architect-resume", "Resume")
+                                .tab_index(0isize)
+                                .label_size(LabelSize::Small)
+                                .style(ButtonStyle::Tinted(TintColor::Accent))
+                                .start_icon(
+                                    Icon::new(IconName::DebugContinue).size(IconSize::XSmall),
+                                )
+                                .tooltip(Tooltip::text(resume_tooltip))
+                                .on_click(cx.listener(|this, _, _, cx| this.resume_run(cx))),
+                        )
+                    })
                     // An empty plan has nothing to run; the empty state offers
                     // Start planning instead of a Run that can only refuse.
                     .when(running || run_step_count > 0, |this| {
@@ -635,7 +760,7 @@ impl ArchitectPane {
                                 .style(ButtonStyle::Tinted(TintColor::Warning))
                                 .start_icon(Icon::new(IconName::Stop).size(IconSize::XSmall))
                                 .tooltip(Tooltip::text(
-                                    "Stop the run and the turn it is waiting on",
+                                    "Stop the run and every turn it is waiting on",
                                 ))
                                 .on_click(cx.listener(|this, _, _, cx| this.stop_run(cx)))
                         } else {
@@ -833,6 +958,8 @@ impl ArchitectPane {
             .cloned()
             .collect();
         let no_search_results = !query.is_empty() && ordered_nodes.is_empty();
+        // The rows as listed, which is the order a Shift-click selects along.
+        let listed: Rc<[NodeId]> = ordered_nodes.iter().map(|node| node.id.clone()).collect();
         // Numbered by place in the whole plan, so a search narrows the list
         // without renumbering the steps it keeps.
         let step_numbers: HashMap<NodeId, usize> = all_ordered_nodes
@@ -890,7 +1017,7 @@ impl ArchitectPane {
             Some(Selection::Node(id)) => Some(id),
             _ => None,
         };
-        let running = self.running_node(cx);
+        let running = self.running_nodes(cx);
         let run = self.thread.read(cx).architect_run();
         let run_active = self.is_running(cx);
         let failed_node = run.and_then(|run| match run.outcome.as_ref() {
@@ -1118,10 +1245,11 @@ impl ArchitectPane {
                                     let has_nested = node.has_subplan();
                                     let loop_target = loop_targets.contains(&node.id);
                                     let click_id = node.id.clone();
+                                    let listed = listed.clone();
                                     let keyboard_id = node.id.clone();
                                     let is_selected = selected == Some(&node.id)
                                         || self.in_bulk_selection(&node.id);
-                                    let is_running = running == Some(&node.id);
+                                    let is_running = running.contains(&node.id);
                                     let is_failed = failed_node == Some(&node.id);
                                     let is_complete = node
                                         .result
@@ -1202,19 +1330,13 @@ impl ArchitectPane {
                                         ))
                                         .on_click(cx.listener(
                                             move |this, event: &ClickEvent, window, cx| {
-                                                if event.modifiers().shift {
-                                                    this.toggle_in_bulk_selection(
-                                                        click_id.clone(),
-                                                        window,
-                                                        cx,
-                                                    );
-                                                } else {
-                                                    this.select_and_reveal(
-                                                        Selection::Node(click_id.clone()),
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }
+                                                this.click_outline_step(
+                                                    click_id.clone(),
+                                                    &listed,
+                                                    event.modifiers(),
+                                                    window,
+                                                    cx,
+                                                );
                                             },
                                         ))
                                         .child(
@@ -1294,7 +1416,11 @@ impl ArchitectPane {
                 .root_graph(cx)
                 .map(|graph| outcome.summary(graph).into())
                 .unwrap_or_else(|| SharedString::from("Run finished")),
-            None => format!("Running {}", run.current_title).into(),
+            None if run.is_paused() => super::run::running_summary(run).unwrap_or_default(),
+            None => match run.running_steps() {
+                [] | [_] => format!("Running {}", run.current_title).into(),
+                steps => format!("Running {} steps", steps.len()).into(),
+            },
         };
         let succeeded = run.outcome.as_ref().is_some_and(RunOutcome::is_success);
         let cancelled = matches!(run.outcome.as_ref(), Some(RunOutcome::Cancelled));
@@ -1483,14 +1609,14 @@ impl ArchitectPane {
             (left, top, (right - left).max(0.0), (bottom - top).max(0.0))
         });
 
-        let running = self.running_node(cx).cloned();
+        let running = self.running_nodes(cx);
         let selected = match &self.selection {
             Some(Selection::Node(id)) => Some(id.clone()),
             _ => None,
         };
 
         let blocks = positions.into_iter().map(|(id, position)| {
-            let is_running = running.as_ref() == Some(&id);
+            let is_running = running.contains(&id);
             let is_selected = selected.as_ref() == Some(&id) || self.in_bulk_selection(&id);
             div()
                 .absolute()
@@ -1535,8 +1661,9 @@ impl ArchitectPane {
                         let top = f32::from(bounds.bottom()) - INSET - HEIGHT;
                         let x = min_x + (f32::from(event.position.x) - left - PADDING) / scale;
                         let y = min_y + (f32::from(event.position.y) - top - TOP) / scale;
-                        this.pan = point(px(-x * this.zoom), px(-y * this.zoom));
-                        cx.notify();
+                        let zoom = this.target_camera().zoom;
+                        let pan = point(px(-x * zoom), px(-y * zoom));
+                        this.animate_camera(Camera { pan, zoom }, cx);
                     }),
                 )
                 .when_some(visible, |this, (left, top, width, height)| {
@@ -1578,7 +1705,10 @@ impl ArchitectPane {
     /// the edge is exactly when a user does not know which way to scroll, so the
     /// percentage doubles as a button back to a known state.
     fn render_zoom_control(&self, cx: &mut Context<Self>) -> AnyElement {
-        let zoom = self.zoom;
+        // The buttons stop where the zoom is heading, so they are not left
+        // enabled for a limit a glide is already on its way to.
+        let zoom = self.target_camera().zoom;
+        let percentage = format!("{:.0}%", self.zoom * 100.0);
 
         h_flex()
             .absolute()
@@ -1599,18 +1729,18 @@ impl ArchitectPane {
                     .tab_index(0isize)
                     .icon_size(IconSize::XSmall)
                     .disabled(zoom <= MIN_ZOOM + f32::EPSILON)
-                    .tooltip(Tooltip::text("Zoom out"))
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.set_zoom(zoom / 1.2, None, cx)),
-                    ),
+                    .tooltip(Tooltip::text("Zoom out (-)"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.zoom_by(1.0 / ZOOM_STEP, None, cx);
+                    })),
             )
             .child(
-                Button::new("architect-zoom-reset", format!("{:.0}%", zoom * 100.0))
+                Button::new("architect-zoom-reset", percentage)
                     .tab_index(0isize)
                     .label_size(LabelSize::XSmall)
                     .color(Color::Muted)
                     .style(ButtonStyle::Subtle)
-                    .tooltip(Tooltip::text("Back to actual size"))
+                    .tooltip(Tooltip::text("Back to actual size (0)"))
                     .on_click(cx.listener(|this, _, _, cx| this.set_zoom(1.0, None, cx))),
             )
             .child(
@@ -1619,7 +1749,7 @@ impl ArchitectPane {
                     .label_size(LabelSize::XSmall)
                     .style(ButtonStyle::Subtle)
                     .start_icon(Icon::new(IconName::Maximize).size(IconSize::XSmall))
-                    .tooltip(Tooltip::text("Fit the whole plan in view"))
+                    .tooltip(Tooltip::text("Fit the whole plan in view (Shift+1)"))
                     .on_click(cx.listener(|this, _, _, cx| this.zoom_to_fit(cx))),
             )
             .child(
@@ -1627,10 +1757,10 @@ impl ArchitectPane {
                     .tab_index(0isize)
                     .icon_size(IconSize::XSmall)
                     .disabled(zoom >= MAX_ZOOM - f32::EPSILON)
-                    .tooltip(Tooltip::text("Zoom in"))
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.set_zoom(zoom * 1.2, None, cx)),
-                    ),
+                    .tooltip(Tooltip::text("Zoom in (+)"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.zoom_by(ZOOM_STEP, None, cx);
+                    })),
             )
             .into_any()
     }
@@ -1745,7 +1875,7 @@ impl ArchitectPane {
         // alone, so it is the one part given a colour of its own.
         let loop_color = cx.theme().status().warning.opacity(0.85);
 
-        let running = self.running_node(cx);
+        let running = self.running_nodes(cx);
         let mut curves = Vec::new();
         for edge in &graph.edges {
             let (Some(from), Some(to)) = (
@@ -1755,7 +1885,7 @@ impl ArchitectPane {
                 continue;
             };
             let selected = self.selection == Some(Selection::Edge(edge.id.clone()));
-            let active = running == Some(&edge.to);
+            let active = running.contains(&edge.to);
             let completed = graph
                 .node(&edge.from)
                 .and_then(|node| node.result.as_ref())
@@ -2000,7 +2130,7 @@ impl ArchitectPane {
             .collect()
     }
 
-    fn render_nodes(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_nodes(&self, rem_size: Pixels, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(bounds) = self.viewport.get() else {
             return Vec::new();
         };
@@ -2061,7 +2191,7 @@ impl ArchitectPane {
                     running,
                     bulk: bulk_menu.filter(|_| self.in_bulk_selection(&node.id)),
                 };
-                let card = self.render_node(ix, step_number, node, problem, cx);
+                let card = self.render_node(ix, step_number, node, problem, rem_size, cx);
                 let pane = pane.clone();
 
                 // The menu sizes its hit area from its child, and an absolutely
@@ -2099,7 +2229,12 @@ impl ArchitectPane {
         let Some(subplan) = node.subplan() else {
             return div().into_any();
         };
-        let running_here = self.thread.read(cx).architect_running_step().cloned();
+        let running_here: Vec<NodePath> = self
+            .thread
+            .read(cx)
+            .architect_running_steps()
+            .cloned()
+            .collect();
         let shown = subplan.nodes.len().min(EXPANDED_CHILD_LIMIT);
         let hidden = subplan.nodes.len() - shown;
         let drill_id = node.id.clone();
@@ -2127,7 +2262,7 @@ impl ArchitectPane {
                     .gap_1()
                     .children(subplan.nodes.iter().take(shown).enumerate().map(
                         |(child_ix, child)| {
-                            let child_running = running_here.as_ref().is_some_and(|path| {
+                            let child_running = running_here.iter().any(|path| {
                                 path.0.last() == Some(&child.id)
                                     && path.0.len() > self.focus.0.len()
                             });
@@ -2214,6 +2349,7 @@ impl ArchitectPane {
         step_number: usize,
         node: ArchitectNode,
         problem: Option<&'static str>,
+        rem_size: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let invalid = problem.is_some();
@@ -2223,7 +2359,7 @@ impl ArchitectPane {
             || self.in_bulk_selection(&node.id);
         let hovered = self.hovered_node.as_ref() == Some(&node.id);
         let detailed = self.zoom >= DETAIL_ZOOM_THRESHOLD;
-        let running = self.running_node(cx) == Some(&node.id);
+        let running = self.running_nodes(cx).contains(&node.id);
         let run = self.thread.read(cx).architect_run();
         let run_active = run.is_some_and(agent::ArchitectRun::is_running);
         let failed =
@@ -2294,6 +2430,41 @@ impl ArchitectPane {
         // else about it, so it is marked in the title rather than in the chips.
         let done = has_summary && !running;
         let queued = run_active && !running && !done && !failed;
+        let status = if running {
+            "running"
+        } else if failed {
+            "failed"
+        } else if done {
+            "completed"
+        } else if queued {
+            "queued"
+        } else if node.locked {
+            "settled"
+        } else {
+            "draft"
+        };
+        let status_color = if running {
+            Color::Info
+        } else if failed {
+            Color::Error
+        } else if done || node.locked {
+            Color::Success
+        } else {
+            Color::Muted
+        };
+        let number = format!("{step_number:02}");
+        let (card_width, card_height) = self.node_size(&node);
+        let header = header_fit(
+            &HeaderText {
+                number: &number,
+                title: &node.title,
+                status,
+                icon: running || done,
+            },
+            size(px(card_width * self.zoom), px(card_height * self.zoom)),
+            rem_size,
+            detailed,
+        );
 
         div()
             .id(("architect-node", ix))
@@ -2390,11 +2561,13 @@ impl ArchitectPane {
                                     .gap_1()
                                     .min_w_0()
                                     .overflow_hidden()
-                                    .child(
-                                        Label::new(format!("{step_number:02}"))
-                                            .size(LabelSize::XSmall)
-                                            .color(Color::Muted),
-                                    )
+                                    .when(header.title, |this| {
+                                        this.child(
+                                            Label::new(number)
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        )
+                                    })
                                     .when(running, |this| {
                                         this.child(
                                             Icon::new(IconName::PlayFilled)
@@ -2409,15 +2582,17 @@ impl ArchitectPane {
                                                 .color(Color::Success),
                                         )
                                     })
-                                    .child(
-                                        Label::new(node.title.clone())
-                                            .size(if detailed {
-                                                LabelSize::Default
-                                            } else {
-                                                LabelSize::Small
-                                            })
-                                            .truncate(),
-                                    ),
+                                    .when(header.title, |this| {
+                                        this.child(
+                                            Label::new(node.title.clone())
+                                                .size(if detailed {
+                                                    LabelSize::Default
+                                                } else {
+                                                    LabelSize::Small
+                                                })
+                                                .truncate(),
+                                        )
+                                    }),
                             )
                             .child(
                                 h_flex()
@@ -2454,33 +2629,13 @@ impl ArchitectPane {
                                             ),
                                         )
                                     })
-                                    .child(
-                                        Label::new(if running {
-                                            "running"
-                                        } else if failed {
-                                            "failed"
-                                        } else if done {
-                                            "completed"
-                                        } else if queued {
-                                            "queued"
-                                        } else if node.locked {
-                                            "settled"
-                                        } else {
-                                            "draft"
-                                        })
-                                        .size(LabelSize::XSmall)
-                                        .color(
-                                            if running {
-                                                Color::Info
-                                            } else if failed {
-                                                Color::Error
-                                            } else if done || node.locked {
-                                                Color::Success
-                                            } else {
-                                                Color::Muted
-                                            },
-                                        ),
-                                    ),
+                                    .when(header.status, |this| {
+                                        this.child(
+                                            Label::new(status)
+                                                .size(LabelSize::XSmall)
+                                                .color(status_color),
+                                        )
+                                    }),
                             ),
                     )
                     .when(detailed, |this| {
@@ -2635,12 +2790,13 @@ impl ArchitectPane {
         &self,
         has_plan: bool,
         show_navigation: bool,
+        rem_size: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let command_bar = self.render_canvas_command_bar(show_navigation, cx);
         let edges = self.render_edges(cx);
         let edge_labels = self.render_edge_labels(cx);
-        let nodes = self.render_nodes(cx);
+        let nodes = self.render_nodes(rem_size, cx);
         let minimap = self.render_minimap(cx);
         let zoom_control = self.render_zoom_control(cx);
         let marquee = self.render_marquee(cx);
@@ -2666,6 +2822,7 @@ impl ArchitectPane {
                         _ => CursorStyle::ClosedHand,
                     })
                     .on_scroll_wheel(cx.listener(Self::handle_scroll))
+                    .on_pinch(cx.listener(Self::handle_pinch))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
                     .on_mouse_move(cx.listener(Self::handle_mouse_move))
@@ -2748,6 +2905,15 @@ impl NodeMenu {
                     None,
                     action(|pane, id, window, cx| pane.discuss_node(id, window, cx)),
                 )
+                // Only a settled step can be run, and only while nothing else
+                // is running.
+                .when(can_edit && menu.locked, |this| {
+                    this.entry(
+                        "Run From Here",
+                        None,
+                        action(|pane, id, _, cx| pane.run_from(pane.focus.child(id), cx)),
+                    )
+                })
                 .when(can_edit, |this| {
                     this.entry(
                         format!("Duplicate ({DUPLICATE_SHORTCUT})"),
@@ -2887,8 +3053,12 @@ impl Render for ArchitectPane {
         };
         let header = self.render_plan_header(matches!(layout, ArchitectLayout::Compact), cx);
         let run_bar = self.render_run_bar(cx);
-        let graph =
-            self.render_graph_workspace(has_plan, matches!(layout, ArchitectLayout::Compact), cx);
+        let graph = self.render_graph_workspace(
+            has_plan,
+            matches!(layout, ArchitectLayout::Compact),
+            window.rem_size(),
+            cx,
+        );
         let outline = inline_outline.then(|| self.render_outline(outline_width, cx));
         let inspector = inline_inspector
             .then(|| self.render_inspector(inspector_width, cx))
@@ -3062,12 +3232,13 @@ impl Item for ArchitectPane {
 
 #[cfg(test)]
 mod tests {
+    use super::super::geometry::NODE_HEIGHT;
     use super::*;
 
     #[test]
     fn primary_actions_have_one_rendering_owner() {
         let source = include_str!("rendering.rs");
-        for suffix in ["fit", "run", "stop", "plan-conversation"] {
+        for suffix in ["fit", "run", "stop", "pause", "resume", "plan-conversation"] {
             let id = format!("\"architect-{suffix}\"");
             assert_eq!(
                 source.matches(&id).count(),
@@ -3144,6 +3315,64 @@ mod tests {
             viewport_width,
             viewport_height,
         ));
+    }
+
+    #[test]
+    fn header_text_is_hidden_rather_than_clipped_when_the_card_is_too_small() {
+        let header = HeaderText {
+            number: "01",
+            title: "Implement the parser",
+            status: "completed",
+            icon: false,
+        };
+        let card = |zoom: f32| size(px(NODE_WIDTH * zoom), px(NODE_HEIGHT * zoom));
+        let rem = px(16.0);
+        let everything = HeaderFit {
+            title: true,
+            status: true,
+        };
+        let nothing = HeaderFit {
+            title: false,
+            status: false,
+        };
+
+        assert_eq!(header_fit(&header, card(1.0), rem, true), everything);
+        assert_eq!(
+            header_fit(&header, card(0.35), rem, false),
+            HeaderFit {
+                title: true,
+                status: false,
+            },
+            "a small card drops the status word first, leaving its room to the title"
+        );
+        assert_eq!(
+            header_fit(&header, card(0.35), px(24.0), false),
+            nothing,
+            "with a larger interface font the same card cannot hold a line of it"
+        );
+        assert_eq!(
+            header_fit(&header, size(px(60.0), px(60.0)), rem, false),
+            nothing,
+            "a card too narrow for even a few letters of the title shows none"
+        );
+        assert_eq!(
+            header_fit(&header, size(px(280.0), px(30.0)), rem, false),
+            nothing,
+            "a card too short for a line of text shows none"
+        );
+
+        // A wide script needs more room than the same number of Latin letters.
+        let narrow = size(px(100.0), px(60.0));
+        let latin = HeaderText {
+            title: "Parsers",
+            ..header
+        };
+        let cjk = HeaderText {
+            title: "解析器の実装",
+            ..header
+        };
+        assert!(header_fit(&latin, narrow, rem, false).title);
+        assert!(!header_fit(&cjk, narrow, rem, false).title);
     }
 
     #[test]

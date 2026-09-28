@@ -50,9 +50,9 @@ use crate::{
 };
 use crate::{
     AgentDiffPane, ConversationView, CopyThreadToClipboard, Follow, LoadThreadFromClipboard,
-    NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, RenameSelectedThread,
-    ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell, ShowAllSidebarThreadMetadata,
-    ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
+    NewTerminalThread, NewThread, OpenActiveThreadAsMarkdown, OpenAgentDiff, OpenPraxisRemote,
+    RenameSelectedThread, ResetFastModeWarnings, ResetTrialEndUpsell, ResetTrialUpsell,
+    ShowAllSidebarThreadMetadata, ShowThreadMetadata, ToggleNewThreadMenu, ToggleOptionsMenu,
     conversation_view::{
         AcpThreadViewEvent, RootThreadUpdated, ThreadView, reset_fast_mode_warnings,
     },
@@ -5766,6 +5766,7 @@ impl AgentPanel {
 
                         menu = menu
                             .action("Settings", Box::new(OpenSettings))
+                            .action("Praxis Remote…", Box::new(OpenPraxisRemote))
                             .separator()
                             .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
 
@@ -5897,10 +5898,26 @@ impl AgentPanel {
             this.defer_open_architect_workspace(window, cx);
         }
 
+        fn running_label(run: &agent::ArchitectRun) -> String {
+            if run.is_paused() {
+                return "Run paused".to_string();
+            }
+            match run.running_steps().len() {
+                0 | 1 => format!("Running step {}", run.step_number),
+                count => format!("Running {count} steps"),
+            }
+        }
+
         /// The names of the steps leading to the one running, so a step inside a
         /// sub-plan says which step it is inside rather than appearing to be a
         /// top-level step of a plan that does not list it.
         fn step_trail(graph: &architect::ArchitectGraph, run: &agent::ArchitectRun) -> String {
+            // Branches running side by side are listed rather than traced.
+            let running = run.running_steps();
+            if running.len() > 1 {
+                let titles: Vec<&str> = running.iter().map(|step| &*step.title).collect();
+                return titles.join(", ");
+            }
             let Some(path) = run.current.as_ref() else {
                 return run.current_title.to_string();
             };
@@ -5983,9 +6000,7 @@ impl AgentPanel {
                                 // Loops can take a run past the number of steps, so
                                 // the step taken is shown without a total to exceed.
                                 Label::new(match run {
-                                    Some(run) if running => {
-                                        format!("Running step {}", run.step_number)
-                                    }
+                                    Some(run) if running => running_label(run),
                                     _ if step_count == 0 => "Plan not started".to_string(),
                                     _ => "Plan drafted".to_string(),
                                 })

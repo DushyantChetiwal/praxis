@@ -87,24 +87,40 @@ A plan cannot run until every step is locked and the canvas reports no problems,
 
 ## Running a plan
 
-Press **Run**. The plan is carried out in the conversation that owns it, and the canvas highlights the step currently in progress.
+Press **Run**. The plan is carried out in the conversation that owns it, and the canvas highlights every step currently in progress.
 
 The run proceeds as follows:
 
 1. The step's goal, rules and capture are sent to the agent, along with the summaries of the steps feeding into it. The agent is not shown later steps, because a model that can see step 4 tends to start on it while it is still meant to be doing step 3.
 2. If the step contains a plan of its own, the run descends into it and works through it before the step counts as done.
 3. When the turn finishes, each conditional connection out of that step is put to the agent as a yes-or-no question on its own. The answer is read back by Zed, not acted on by the model.
-4. The first condition answered `YES` decides where the run goes next. If every condition is answered `NO`, the run takes the plain unconditional connection out of the step, if there is one. If there is none, the plan is complete.
+4. The first condition answered `YES` decides where the run goes next. If every condition is answered `NO`, the run takes the plain unconditional connections out of the step: one is simply followed, and several run as [parallel branches](#parallel-branches). If there is none, the plan is complete. A plain connection that loops back with a repeat limit is taken on its own until its repeats are spent.
 
 Because Zed holds the position in the graph, a model cannot quietly decide it has done enough and leave a retry loop early.
 
 Every step runs as an ordinary turn, so tool permissions, sandboxing, and cancellation all behave exactly as they do when you type a message yourself.
 
+### Parallel branches {#parallel-branches}
+
+When a step has several plain connections out of it, every branch runs at the same time, each step in a conversation of its own. The branches meet at their join: the step every branch can reach that the slowest branch reaches soonest. Each branch stops short of the join, and once all of them have finished the join runs once, told what every branch reported. Branches that never meet run to their ends, and the plan then carries on as if that level had run out of steps.
+
+The branches share your working tree, so each parallel step is told which steps are running alongside it and asked to keep to its own work, leave alone what those steps own, and avoid commands that act on the whole repository, such as committing or formatting everything, unless its step needs them. If one branch fails, the others are stopped and the run ends with that failure.
+
+Agents other than Zed's own run every step in the plan's conversation, so there the branches run one after another.
+
+### Pausing and resuming
+
+**Pause** starts no new steps and lets the steps already running finish, then waits. **Resume** carries on from exactly where the run paused.
+
+A run that was stopped or that failed can also be resumed. The steps it was on run again, each counted as another attempt, and everything earlier steps reported is kept. **Run** always starts again from the beginning with a clean slate. Runs are kept in memory only, so a run cannot be resumed after Zed restarts.
+
+To start part way through, choose **Run From Here** on a step's right-click menu, or the play button in its inspector. The run starts at that step, even inside a nested plan, and the steps before it are not run again: what they last reported is what the later steps are told.
+
 ### Stopping a run
 
-**Stop** ends the run and cancels the turn it is waiting on. A run is also stopped automatically when a plan is looping without ever reaching an end:
+**Stop** ends the run and cancels every turn it is waiting on. A run is also stopped automatically when a plan is looping without ever reaching an end:
 
-- after 200 steps in total, counting every level, or
+- after 200 steps in total, counting every level and every branch, or
 - after any single step has been entered 25 times, or
 - if plans turn out to nest more than 5 deep.
 
@@ -112,7 +128,7 @@ When that happens the agent is told which step kept repeating and asked to expla
 
 ### Editing a plan mid-run
 
-A run carries out the plan as it was when you pressed **Run**. Editing the canvas or a step's chat while a run is in flight does not change the run already in progress, so that it is always possible to say afterwards what was actually carried out. Stop the run and start it again to pick up your changes.
+A run carries out the plan as it was when you pressed **Run**. Editing the canvas or a step's chat while a run is in flight does not change the run already in progress, so that it is always possible to say afterwards what was actually carried out. Stop the run and start it again to pick up your changes. **Resume** also picks them up, as long as the plan still has every step the run was on.
 
 ## Related settings
 

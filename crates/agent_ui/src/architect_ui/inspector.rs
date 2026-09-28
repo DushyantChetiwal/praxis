@@ -49,8 +49,10 @@ impl ArchitectPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Any selection made here replaces a selection of several steps.
+        // Any selection made here replaces a selection of several steps, and
+        // becomes where the outline's next Shift-click reaches from.
         self.bulk.clear();
+        self.outline_anchor = None;
         let selected_node = match &selection {
             Some(Selection::Node(id)) => Some(id.clone()),
             _ => None,
@@ -1578,6 +1580,7 @@ impl ArchitectPane {
         let locked = node.locked;
         let has_subplan = node.subplan().is_some_and(|subplan| !subplan.is_empty());
         let running = self.is_running(cx);
+        let run_from_path = node_path;
         let has_chat = node.chat.is_some();
         // A step nothing leads out of has nobody to hand anything to, so an
         // empty capture there is a decision rather than an oversight.
@@ -1670,7 +1673,24 @@ impl ArchitectPane {
                                         } else {
                                             Color::Muted
                                         }),
-                                ),
+                                )
+                                .when(locked && !running, |this| {
+                                    this.child(
+                                        IconButton::new(
+                                            "architect-run-from-step",
+                                            IconName::PlayOutlined,
+                                        )
+                                        .tab_index(0isize)
+                                        .icon_size(IconSize::XSmall)
+                                        .tooltip(Tooltip::text(
+                                            "Run the plan from this step, keeping what earlier \
+                                             steps reported",
+                                        ))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.run_from(run_from_path.clone(), cx);
+                                        })),
+                                    )
+                                }),
                         ),
                 )
                 .child(

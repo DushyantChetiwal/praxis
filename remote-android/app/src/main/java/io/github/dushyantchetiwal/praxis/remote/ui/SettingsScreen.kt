@@ -21,8 +21,8 @@ import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.Lock
-import androidx.compose.material.icons.outlined.SwapHoriz
+import androidx.compose.material.icons.outlined.LinkOff
+import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -67,6 +67,7 @@ import java.util.Date
 fun SettingsScreen(state: AppState, ui: DeviceUi, vm: MainViewModel, snackbar: SnackbarHostState) {
     val context = LocalContext.current
     var confirmSignOut by remember { mutableStateOf(false) }
+    var confirmUnpair by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -133,26 +134,26 @@ fun SettingsScreen(state: AppState, ui: DeviceUi, vm: MainViewModel, snackbar: S
                 }
             }
 
-            Section(stringResource(R.string.settings_channel)) {
+            Section(stringResource(R.string.settings_pairing)) {
                 ListItem(
-                    leadingContent = { Icon(Icons.Outlined.Lock, contentDescription = null) },
-                    headlineContent = { Text(state.repo ?: stringResource(R.string.settings_none)) },
-                    supportingContent = { Text(stringResource(R.string.settings_channel_help)) },
+                    leadingContent = { Icon(Icons.Outlined.PhoneAndroid, contentDescription = null) },
+                    headlineContent = { Text(state.phoneName) },
+                    supportingContent = { Text(stringResource(R.string.settings_phone_help)) },
                     colors = transparentItem(),
                 )
                 ui.device?.let { device ->
                     ListItem(
                         leadingContent = { Icon(Icons.Outlined.Computer, contentDescription = null) },
                         headlineContent = { Text(device.name) },
-                        supportingContent = { Text(stringResource(R.string.settings_device_issue, device.number)) },
+                        supportingContent = { Text(stringResource(R.string.settings_selected_computer)) },
                         colors = transparentItem(),
                     )
-                }
-                Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    OutlinedButton(onClick = vm::switchRepo, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Outlined.SwapHoriz, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(stringResource(R.string.settings_switch_repo))
+                    Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                        OutlinedButton(onClick = { confirmUnpair = true }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Outlined.LinkOff, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(stringResource(R.string.action_unpair))
+                        }
                     }
                 }
             }
@@ -213,6 +214,13 @@ fun SettingsScreen(state: AppState, ui: DeviceUi, vm: MainViewModel, snackbar: S
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 4.dp),
             )
+        }
+    }
+
+    if (confirmUnpair) {
+        UnpairDialog(ui.device?.name.orEmpty(), onDismiss = { confirmUnpair = false }) {
+            confirmUnpair = false
+            vm.unpairCurrent()
         }
     }
 
