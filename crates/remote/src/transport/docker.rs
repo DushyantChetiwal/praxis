@@ -215,9 +215,10 @@ impl DockerExecConnection {
             .remote_platform
             .context("No remote platform defined; cannot proceed.")?;
 
+        let expected_commit = commit.as_ref().map(AppCommitSha::full);
         let version_str = match release_channel {
             ReleaseChannel::Nightly => {
-                let commit = commit.map(|s| s.full()).unwrap_or_default();
+                let commit = expected_commit.clone().unwrap_or_default();
                 format!("{}-{}", version, commit)
             }
             ReleaseChannel::Dev => "build".to_string(),
@@ -239,7 +240,13 @@ impl DockerExecConnection {
                 &["version"],
             )
             .await
-            .is_ok();
+            .is_ok_and(|installed_version| {
+                super::installed_remote_server_is_current(
+                    release_channel,
+                    &installed_version,
+                    expected_commit.as_deref(),
+                )
+            });
         #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
         if let Some(remote_server_path) = super::build_remote_server_from_source(
             &remote_platform,
@@ -275,15 +282,9 @@ impl DockerExecConnection {
         }
 
         let wanted_version = cx.update(|cx| match release_channel {
-            ReleaseChannel::Nightly => Ok(None),
-            ReleaseChannel::Dev => {
-                anyhow::bail!(
-                    "ZED_BUILD_REMOTE_SERVER is not set and no remote server exists at ({:?})",
-                    dst_path
-                )
-            }
-            _ => Ok(Some(AppVersion::global(cx))),
-        })?;
+            ReleaseChannel::Nightly | ReleaseChannel::Dev => None,
+            _ => Some(AppVersion::global(cx)),
+        });
 
         let tmp_path_gz = paths::remote_server_dir_relative().join(
             RelPath::from_unix_str(&format!(

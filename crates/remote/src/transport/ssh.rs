@@ -14,7 +14,7 @@ use futures::{
 use gpui::{App, AppContext as _, AsyncApp, Task};
 use parking_lot::Mutex;
 use paths::remote_server_dir_relative;
-use release_channel::{AppVersion, ReleaseChannel};
+use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
 use rpc::proto::Envelope;
 use semver::Version;
 pub use settings::SshPortForwardOption;
@@ -854,6 +854,7 @@ impl SshRemoteConnection {
         let dst_path =
             paths::remote_server_dir_relative().join(RelPath::from_unix_str(&binary_name).unwrap());
 
+        let expected_commit = cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full()));
         let binary_exists_on_server = self
             .socket
             .run_command(
@@ -863,7 +864,13 @@ impl SshRemoteConnection {
                 true,
             )
             .await
-            .is_ok();
+            .is_ok_and(|installed_version| {
+                super::installed_remote_server_is_current(
+                    release_channel,
+                    &installed_version,
+                    expected_commit.as_deref(),
+                )
+            });
 
         #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
         if let Some(remote_server_path) = super::build_remote_server_from_source(
@@ -894,15 +901,9 @@ impl SshRemoteConnection {
         }
 
         let wanted_version = cx.update(|cx| match release_channel {
-            ReleaseChannel::Nightly => Ok(None),
-            ReleaseChannel::Dev => {
-                anyhow::bail!(
-                    "ZED_BUILD_REMOTE_SERVER is not set and no remote server exists at ({:?})",
-                    dst_path
-                )
-            }
-            _ => Ok(Some(AppVersion::global(cx))),
-        })?;
+            ReleaseChannel::Nightly | ReleaseChannel::Dev => None,
+            _ => Some(AppVersion::global(cx)),
+        });
 
         let tmp_path_compressed = remote_server_dir_relative().join(
             RelPath::from_unix_str(&format!(

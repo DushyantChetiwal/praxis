@@ -21,6 +21,10 @@ use windows::{
 
 use crate::windows_impl::WM_JOB_UPDATED;
 
+const LINUX_REMOTE_SERVER: &str = "zed-remote-server-linux-x86_64.gz";
+const OLD_LINUX_REMOTE_SERVER: &str = "old\\zed-remote-server-linux-x86_64.gz";
+const STAGED_LINUX_REMOTE_SERVER: &str = "install\\zed-remote-server-linux-x86_64.gz";
+
 struct UpdatePaths {
     application_executable: &'static str,
     old_application_executable: &'static str,
@@ -207,7 +211,9 @@ impl Job {
 }
 
 #[cfg(not(test))]
-pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
+pub(crate) static JOBS: LazyLock<[Job; 24]> = LazyLock::new(installation_jobs);
+
+fn installation_jobs() -> [Job; 24] {
     fn p(value: &str) -> &Path {
         Path::new(value)
     }
@@ -235,6 +241,10 @@ pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
         ),
         //
         Job::move_file(p("conpty.dll"), p("old\\conpty.dll")),
+        // The installer stages the WSL remote server next to the new executable.
+        // Leaving the old one in place makes WSL install a server from the
+        // previous build.
+        Job::move_if_exists(p(LINUX_REMOTE_SERVER), p(OLD_LINUX_REMOTE_SERVER)),
         // Copy new files
         Job::move_file(
             p(paths.staged_application_executable),
@@ -255,13 +265,14 @@ pub(crate) static JOBS: LazyLock<[Job; 22]> = LazyLock::new(|| {
         ),
         //
         Job::move_file(p("install\\conpty.dll"), p("conpty.dll")),
+        Job::move_if_exists(p(STAGED_LINUX_REMOTE_SERVER), p(LINUX_REMOTE_SERVER)),
         // Cleanup installer and updates folder
         Job::rmdir_nofail(p("updates")),
         Job::rmdir_nofail(p("install")),
         // Cleanup old installation
         Job::rmdir_nofail(p("old")),
     ]
-});
+}
 
 #[cfg(test)]
 pub(crate) static JOBS: LazyLock<[Job; 9]> = LazyLock::new(|| {
@@ -504,7 +515,87 @@ pub(crate) fn perform_update(
 mod test {
     use std::{ffi::OsString, path::Path};
 
-    use super::{perform_update, update_paths, zed_launch_command};
+    use super::{
+        LINUX_REMOTE_SERVER, STAGED_LINUX_REMOTE_SERVER, installation_jobs, perform_update,
+        update_paths, zed_launch_command,
+    };
+
+    fn write_installation(app_dir: &Path, staged_remote_server: bool) {
+        let paths = update_paths();
+        let mut files = vec![
+            (paths.application_executable, "old"),
+            (paths.cli_executable, "old"),
+            (paths.cli_script, "old"),
+            ("conpty.dll", "old"),
+            (LINUX_REMOTE_SERVER, "old"),
+            (paths.staged_application_executable, "new"),
+            (paths.staged_cli_executable, "new"),
+            (paths.staged_cli_script, "new"),
+            ("install\\conpty.dll", "new"),
+        ];
+        if staged_remote_server {
+            files.push((STAGED_LINUX_REMOTE_SERVER, "new"));
+        }
+        for (file, contents) in files {
+            let path = app_dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+    }
+
+    fn read(app_dir: &Path, file: &str) -> String {
+        std::fs::read_to_string(app_dir.join(file)).unwrap()
+    }
+
+    #[test]
+    fn test_an_update_replaces_the_bundled_wsl_remote_server() {
+        let app_dir = tempfile::tempdir().unwrap();
+        let app_dir = app_dir.path();
+        write_installation(app_dir, true);
+
+        for job in installation_jobs().iter() {
+            (job.apply)(app_dir).unwrap();
+        }
+
+        assert_eq!(read(app_dir, LINUX_REMOTE_SERVER), "new");
+        assert_eq!(read(app_dir, update_paths().application_executable), "new");
+        assert!(!app_dir.join("install").exists());
+        assert!(!app_dir.join("old").exists());
+    }
+
+    #[test]
+    fn test_a_rolled_back_update_restores_the_bundled_wsl_remote_server() {
+        let app_dir = tempfile::tempdir().unwrap();
+        let app_dir = app_dir.path();
+        write_installation(app_dir, true);
+
+        let jobs = installation_jobs();
+        // The trailing cleanup jobs delete folders and cannot be rolled back.
+        let reversible_jobs = &jobs[..jobs.len() - 3];
+        for job in reversible_jobs {
+            (job.apply)(app_dir).unwrap();
+        }
+        for job in reversible_jobs.iter().rev() {
+            (job.rollback)(app_dir).unwrap();
+        }
+
+        assert_eq!(read(app_dir, LINUX_REMOTE_SERVER), "old");
+        assert_eq!(read(app_dir, STAGED_LINUX_REMOTE_SERVER), "new");
+    }
+
+    #[test]
+    fn test_an_update_without_a_staged_wsl_remote_server_still_succeeds() {
+        let app_dir = tempfile::tempdir().unwrap();
+        let app_dir = app_dir.path();
+        write_installation(app_dir, false);
+
+        for job in installation_jobs().iter() {
+            (job.apply)(app_dir).unwrap();
+        }
+
+        assert!(!app_dir.join(LINUX_REMOTE_SERVER).exists());
+        assert_eq!(read(app_dir, update_paths().application_executable), "new");
+    }
 
     #[test]
     fn test_zed_launch_command_preserves_arguments() {

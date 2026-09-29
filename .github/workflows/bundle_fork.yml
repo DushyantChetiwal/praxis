@@ -155,6 +155,7 @@ jobs:
       # Compile the Praxis release feed without redirecting any upstream cloud
       # traffic.
       PRAXIS_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
+      PRAXIS_RELEASE_ASSET_BASE_URL: https://github.com/${{ github.repository }}/releases/download/praxis-dev-${{ github.run_number }}-${{ github.run_attempt }}
       # `bundle-mac` ad-hoc signs when the Apple secrets are absent, which is the
       # case here. Left unset deliberately rather than defined empty.
       RUST_BACKTRACE: 1
@@ -255,6 +256,7 @@ jobs:
       CARGO_INCREMENTAL: 0
       RUST_BACKTRACE: 1
       PRAXIS_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
+      PRAXIS_RELEASE_ASSET_BASE_URL: https://github.com/${{ github.repository }}/releases/download/praxis-dev-${{ github.run_number }}-${{ github.run_attempt }}
     steps:
       - name: Check out the fork
         uses: actions/checkout@v7
@@ -304,6 +306,7 @@ jobs:
       CARGO_INCREMENTAL: 0
       RUST_BACKTRACE: 1
       PRAXIS_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
+      PRAXIS_RELEASE_ASSET_BASE_URL: ${{ !inputs.test_build && format('https://github.com/{0}/releases/download/praxis-dev-{1}-{2}', github.repository, github.run_number, github.run_attempt) || '' }}
       GH_TOKEN: ${{ github.token }}
       PRAXIS_CARGO_PROFILE: ${{ inputs.test_build && 'praxis-test' || 'release' }}
       # A test installer leaves WSL to the source-build fallback rather than
