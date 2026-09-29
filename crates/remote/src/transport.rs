@@ -11,6 +11,7 @@ use futures::{
     channel::mpsc::{Sender, UnboundedReceiver, UnboundedSender},
 };
 use gpui::{AppContext as _, AsyncApp, Task};
+use release_channel::ReleaseChannel;
 use rpc::proto::Envelope;
 use util::command::Child;
 
@@ -19,6 +20,32 @@ pub mod docker;
 pub mod mock;
 pub mod ssh;
 pub mod wsl;
+
+fn development_remote_server_version_matches(version: &str, expected_commit: &str) -> bool {
+    let version = version.trim();
+    if version == expected_commit {
+        return true;
+    }
+
+    version
+        .split_once('+')
+        .is_some_and(|(build_id, commit)| !build_id.is_empty() && commit == expected_commit)
+}
+
+/// Every development build installs its server at the same remote path, so a
+/// server left behind by an earlier build must not be reused after an update.
+fn installed_remote_server_is_current(
+    release_channel: ReleaseChannel,
+    installed_version: &str,
+    expected_commit: Option<&str>,
+) -> bool {
+    match (release_channel, expected_commit) {
+        (ReleaseChannel::Dev, Some(expected_commit)) => {
+            development_remote_server_version_matches(installed_version, expected_commit)
+        }
+        _ => true,
+    }
+}
 
 /// Parses the output of `uname -sm` to determine the remote platform.
 /// Takes the last line to skip possible shell initialization output.
@@ -263,6 +290,32 @@ fn remote_server_target_dir() -> std::path::PathBuf {
     elsewhere
 }
 
+/// An installed build has no checkout to build from, so it downloads the
+/// server for its release instead.
+#[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
+fn should_build_remote_server_from_source(
+    build_setting: &str,
+    checkout_found: bool,
+    binary_exists_on_server: bool,
+) -> bool {
+    match build_setting {
+        "never" => return false,
+        "false" | "no" | "off" | "0" if binary_exists_on_server => return false,
+        "false" | "no" | "off" | "0" => log::warn!(
+            "ZED_BUILD_REMOTE_SERVER is disabled, but no server binary exists on the server"
+        ),
+        _ => {}
+    }
+
+    if !checkout_found {
+        log::info!(
+            "no source checkout found; downloading the remote server instead of building it"
+        );
+        return false;
+    }
+    true
+}
+
 #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
 async fn build_remote_server_from_source(
     platform: &crate::RemotePlatform,
@@ -290,13 +343,12 @@ async fn build_remote_server_from_source(
     let build_remote_server =
         std::env::var("ZED_BUILD_REMOTE_SERVER").unwrap_or("nocompress".into());
 
-    if let "never" = &*build_remote_server {
+    if !should_build_remote_server_from_source(
+        &build_remote_server,
+        util::dev_repo_root().is_some(),
+        binary_exists_on_server,
+    ) {
         return Ok(None);
-    } else if let "false" | "no" | "off" | "0" = &*build_remote_server {
-        if binary_exists_on_server {
-            return Ok(None);
-        }
-        log::warn!("ZED_BUILD_REMOTE_SERVER is disabled, but no server binary exists on the server")
     }
 
     async fn run_cmd(command: &mut Command) -> Result<()> {
@@ -542,6 +594,63 @@ async fn which(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn test_a_development_server_from_another_build_is_not_reused() {
+        let current = format!("39+{COMMIT}");
+        let stale = "38+fedcba9876543210fedcba9876543210fedcba98";
+
+        assert!(installed_remote_server_is_current(
+            ReleaseChannel::Dev,
+            &current,
+            Some(COMMIT)
+        ));
+        assert!(!installed_remote_server_is_current(
+            ReleaseChannel::Dev,
+            stale,
+            Some(COMMIT)
+        ));
+        assert!(installed_remote_server_is_current(
+            ReleaseChannel::Dev,
+            stale,
+            None
+        ));
+        assert!(installed_remote_server_is_current(
+            ReleaseChannel::Stable,
+            stale,
+            Some(COMMIT)
+        ));
+    }
+
+    #[cfg(any(debug_assertions, feature = "build-remote-server-binary"))]
+    #[test]
+    fn test_an_installed_build_downloads_the_server_rather_than_building_it() {
+        for setting in ["nocompress", "1", "nomusl", "never", "false"] {
+            for binary_exists_on_server in [false, true] {
+                assert!(
+                    !should_build_remote_server_from_source(
+                        setting,
+                        false,
+                        binary_exists_on_server
+                    ),
+                    "built without a checkout for {setting:?}"
+                );
+            }
+        }
+
+        assert!(should_build_remote_server_from_source(
+            "nocompress",
+            true,
+            true
+        ));
+        assert!(should_build_remote_server_from_source("false", true, false));
+        assert!(!should_build_remote_server_from_source("false", true, true));
+        assert!(!should_build_remote_server_from_source(
+            "never", true, false
+        ));
+    }
 
     #[test]
     fn test_parse_platform() {

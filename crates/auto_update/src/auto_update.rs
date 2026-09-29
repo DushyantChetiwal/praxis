@@ -36,12 +36,56 @@ use workspace::Workspace;
 const SHOULD_SHOW_UPDATE_NOTIFICATION_KEY: &str = "auto-updater-should-show-updated-notification";
 const PRAXIS_UPDATE_MANIFEST_BASE_URL: Option<&str> =
     option_env!("PRAXIS_UPDATE_MANIFEST_BASE_URL");
+/// The download URL of the release this build is published in.
+const PRAXIS_RELEASE_ASSET_BASE_URL: Option<&str> = option_env!("PRAXIS_RELEASE_ASSET_BASE_URL");
 
-fn dev_update_manifest_base_url() -> Option<&'static str> {
-    PRAXIS_UPDATE_MANIFEST_BASE_URL
-        .map(str::trim)
+fn configured_url(url: Option<&'static str>) -> Option<&'static str> {
+    url.map(str::trim)
         .map(|url| url.trim_end_matches('/'))
         .filter(|url| !url.is_empty())
+}
+
+fn dev_update_manifest_base_url() -> Option<&'static str> {
+    configured_url(PRAXIS_UPDATE_MANIFEST_BASE_URL)
+}
+
+fn dev_remote_server_asset_name(os: &str, arch: &str) -> String {
+    let extension = if os == "windows" { "zip" } else { "gz" };
+    format!("zed-remote-server-{os}-{arch}.{extension}")
+}
+
+/// Development remote servers only accept a client from the same commit, so a
+/// published build takes its server from its own release rather than the latest.
+fn pinned_dev_remote_server_asset(
+    release_base_url: &str,
+    os: &str,
+    arch: &str,
+) -> Option<ReleaseAsset> {
+    let (_, release_tag) = release_base_url.rsplit_once('/')?;
+    Some(ReleaseAsset {
+        version: release_tag.to_string(),
+        url: format!(
+            "{release_base_url}/{}",
+            dev_remote_server_asset_name(os, arch)
+        ),
+        sha256: None,
+    })
+}
+
+fn dev_remote_server_asset_beside(
+    desktop_release: ReleaseAsset,
+    os: &str,
+    arch: &str,
+) -> Option<ReleaseAsset> {
+    let (release_directory, _) = desktop_release.url.rsplit_once('/')?;
+    Some(ReleaseAsset {
+        version: desktop_release.version,
+        url: format!(
+            "{release_directory}/{}",
+            dev_remote_server_asset_name(os, arch)
+        ),
+        sha256: None,
+    })
 }
 
 fn dev_updates_enabled(release_channel: ReleaseChannel) -> bool {
@@ -732,8 +776,25 @@ impl AutoUpdater {
         };
         let http_client = client.http_client();
 
+        let is_dev_remote_server =
+            release_channel == ReleaseChannel::Dev && asset == "zed-remote-server";
+        if is_dev_remote_server
+            && let Some(release) = configured_url(PRAXIS_RELEASE_ASSET_BASE_URL)
+                .and_then(|base_url| pinned_dev_remote_server_asset(base_url, os, arch))
+        {
+            return Ok(release);
+        }
+
         let url = if release_channel == ReleaseChannel::Dev && asset == "zed" {
             dev_update_manifest_url(os, arch)
+        } else if is_dev_remote_server {
+            // The remote server is published beside the desktop build, which
+            // is what the local platform's manifest points at.
+            Some(dev_update_manifest_url(OS, ARCH).context(
+                "This Praxis build has no release to download the remote server from. \
+                 Install a published Praxis build, or run Praxis from its source checkout \
+                 to build the server.",
+            )?)
         } else {
             None
         };
@@ -767,12 +828,17 @@ impl AutoUpdater {
             String::from_utf8_lossy(&body),
         );
 
-        serde_json::from_slice(body.as_slice()).with_context(|| {
+        let release: ReleaseAsset = serde_json::from_slice(body.as_slice()).with_context(|| {
             format!(
                 "error deserializing release {:?}",
                 String::from_utf8_lossy(&body),
             )
-        })
+        })?;
+        if is_dev_remote_server {
+            return dev_remote_server_asset_beside(release, os, arch)
+                .context("the Praxis release manifest has no download URL");
+        }
+        Ok(release)
     }
 
     async fn update(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
@@ -1643,6 +1709,57 @@ mod tests {
         let path = path.unwrap();
         assert_eq!(path, tmp_dir.path().join("zed"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "<fake-zed-update>");
+    }
+
+    #[test]
+    fn test_a_published_praxis_build_downloads_the_remote_server_from_its_own_release() {
+        let release = pinned_dev_remote_server_asset(
+            "https://github.com/owner/praxis/releases/download/praxis-dev-39-1",
+            "linux",
+            "x86_64",
+        )
+        .unwrap();
+        assert_eq!(release.version, "praxis-dev-39-1");
+        assert_eq!(
+            release.url,
+            "https://github.com/owner/praxis/releases/download/praxis-dev-39-1/zed-remote-server-linux-x86_64.gz"
+        );
+
+        let release = pinned_dev_remote_server_asset(
+            "https://github.com/owner/praxis/releases/download/praxis-dev-39-1",
+            "windows",
+            "x86_64",
+        )
+        .unwrap();
+        assert!(
+            release
+                .url
+                .ends_with("/zed-remote-server-windows-x86_64.zip")
+        );
+        assert_eq!(
+            configured_url(Some(" https://example.com/download/tag/ ")),
+            Some("https://example.com/download/tag")
+        );
+        assert_eq!(configured_url(Some("  ")), None);
+    }
+
+    #[test]
+    fn test_an_unpinned_praxis_build_downloads_the_remote_server_beside_the_latest_build() {
+        let desktop_release = ReleaseAsset {
+            version: "1.23.0+praxis.39.abc".to_string(),
+            url: "https://github.com/owner/praxis/releases/download/praxis-dev-39-1/Praxis-x86_64.exe"
+                .to_string(),
+            sha256: Some("ab".repeat(32)),
+        };
+
+        let release = dev_remote_server_asset_beside(desktop_release, "macos", "aarch64").unwrap();
+
+        assert_eq!(release.version, "1.23.0+praxis.39.abc");
+        assert_eq!(
+            release.url,
+            "https://github.com/owner/praxis/releases/download/praxis-dev-39-1/zed-remote-server-macos-aarch64.gz"
+        );
+        assert_eq!(release.sha256, None);
     }
 
     #[test]

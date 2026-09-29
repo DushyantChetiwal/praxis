@@ -1,7 +1,7 @@
 use crate::{
     RemoteArch, RemoteClientDelegate, RemoteOs, RemotePlatform,
     remote_client::{CommandTemplate, Interactive, RemoteConnection, RemoteConnectionOptions},
-    transport::{parse_platform, parse_shell},
+    transport::{development_remote_server_version_matches, parse_platform, parse_shell},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -33,17 +33,6 @@ use util::{
 
 #[cfg(target_os = "windows")]
 const BUNDLED_LINUX_X86_64_REMOTE_SERVER: &str = "zed-remote-server-linux-x86_64.gz";
-
-fn development_remote_server_version_matches(version: &str, expected_commit: &str) -> bool {
-    let version = version.trim();
-    if version == expected_commit {
-        return true;
-    }
-
-    version
-        .split_once('+')
-        .is_some_and(|(build_id, commit)| !build_id.is_empty() && commit == expected_commit)
-}
 
 fn remote_server_install_is_forced(
     copy_override_present: bool,
@@ -399,7 +388,7 @@ impl WslRemoteConnection {
                 Ok(()) => return Ok(dst_path.into()),
                 Err(error) => {
                     log::warn!(
-                        "failed to install the matching bundled WSL remote server; falling back to a source build: {error:#}"
+                        "failed to install the bundled WSL remote server; building or downloading one instead: {error:#}"
                     );
                 }
             }

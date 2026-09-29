@@ -194,8 +194,37 @@ jobs:
       - name: Test the updater
         run: cargo test --locked -p auto_update --lib
 
+      - name: Test remote server installation
+        run: |
+          cargo test --locked -p remote --lib transport::tests::
+          cargo test --locked -p remote --lib transport::wsl::tests::
+
       - name: Test MCP OAuth client registration
         run: "cargo test --locked -p context_server --lib oauth::"
+
+  windows-updater-tests:
+    name: Windows update helper tests
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - name: Check out the selected source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: architect-windows-updater-tests
+          cache-on-failure: true
+
+      - name: Test the Windows update helper
+        run: cargo test --locked -p auto_update_helper
+
+      - name: Check the Windows update helper with Clippy
+        shell: bash
+        run: ./script/clippy --locked -p auto_update_helper
 
   clippy:
     name: Clippy package checks
@@ -220,4 +249,4 @@ jobs:
       - name: Check the Architect packages with Clippy
         run: >-
           ./script/clippy --locked -p architect -p agent -p agent_ui -p auto_update
-          -p context_server -p feedback
+          -p context_server -p feedback -p remote
