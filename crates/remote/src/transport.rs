@@ -308,7 +308,9 @@ fn should_build_remote_server_from_source(
     }
 
     if !checkout_found {
-        log::info!("no source checkout found; downloading the remote server instead of building it");
+        log::info!(
+            "no source checkout found; downloading the remote server instead of building it"
+        );
         return false;
     }
     true
@@ -645,7 +647,9 @@ mod tests {
         ));
         assert!(should_build_remote_server_from_source("false", true, false));
         assert!(!should_build_remote_server_from_source("false", true, true));
-        assert!(!should_build_remote_server_from_source("never", true, false));
+        assert!(!should_build_remote_server_from_source(
+            "never", true, false
+        ));
     }
 
     #[test]

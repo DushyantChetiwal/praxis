@@ -34,7 +34,6 @@ use util::{
 #[cfg(target_os = "windows")]
 const BUNDLED_LINUX_X86_64_REMOTE_SERVER: &str = "zed-remote-server-linux-x86_64.gz";
 
-
 fn remote_server_install_is_forced(
     copy_override_present: bool,
     build_override: Option<&str>,

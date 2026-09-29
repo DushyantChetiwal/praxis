@@ -1731,7 +1731,11 @@ mod tests {
             "x86_64",
         )
         .unwrap();
-        assert!(release.url.ends_with("/zed-remote-server-windows-x86_64.zip"));
+        assert!(
+            release
+                .url
+                .ends_with("/zed-remote-server-windows-x86_64.zip")
+        );
         assert_eq!(
             configured_url(Some(" https://example.com/download/tag/ ")),
             Some("https://example.com/download/tag")
@@ -1748,8 +1752,7 @@ mod tests {
             sha256: Some("ab".repeat(32)),
         };
 
-        let release =
-            dev_remote_server_asset_beside(desktop_release, "macos", "aarch64").unwrap();
+        let release = dev_remote_server_asset_beside(desktop_release, "macos", "aarch64").unwrap();
 
         assert_eq!(release.version, "1.23.0+praxis.39.abc");
         assert_eq!(
