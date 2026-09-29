@@ -416,8 +416,8 @@ impl AgentTool for SetStepLocksTool {
                     else {
                         return Err(NO_PLAN.to_string());
                     };
-                    let change = apply_step_locks(&mut graph, &input)
-                        .map_err(|error| error.to_string())?;
+                    let change =
+                        apply_step_locks(&mut graph, &input).map_err(|error| error.to_string())?;
                     // A request that changes nothing leaves the thread alone,
                     // rather than marking it edited.
                     if !change.changed.is_empty() {
