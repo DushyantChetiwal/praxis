@@ -1,10 +1,11 @@
-<p align="center">
-  <img src="docs/brand/praxis-banner.png" alt="Praxis — detailed and deterministic planning" width="420">
-</p>
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/praxis-logo-dark.svg">
+    <img src="docs/brand/praxis-logo-light.svg" alt="Praxis" width="320">
+  </picture>
+</h1>
 
-# Praxis
-
-**Plan systems. Ship code.**
+<p align="center"><strong>Plan systems. Ship code.</strong></p>
 
 Praxis is a plan-driven software workspace for detailed and deterministic
 planning. It is an independent product built on the open-source
