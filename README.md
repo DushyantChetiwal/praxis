@@ -1,6 +1,3 @@
-> [!IMPORTANT]
-> Remove this line to confirm you've reviewed this PR before submitting.
-
 <p align="center">
   <img src="docs/brand/praxis-banner.png" alt="Praxis — detailed and deterministic planning" width="420">
 </p>
