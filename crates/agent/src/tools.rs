@@ -28,6 +28,7 @@ mod pull_request_tool;
 mod read_file_tool;
 mod refine_step_tool;
 mod rename_tool;
+mod set_step_locks_tool;
 mod skill_tool;
 mod spawn_agent_tool;
 mod symbol_locator;
@@ -105,6 +106,7 @@ pub use pull_request_tool::*;
 pub use read_file_tool::*;
 pub use refine_step_tool::*;
 pub use rename_tool::*;
+pub use set_step_locks_tool::*;
 pub use skill_tool::*;
 pub use spawn_agent_tool::*;
 pub use symbol_locator::*;
@@ -244,6 +246,7 @@ tools! {
     ReadFileTool,
     RefineStepTool,
     RenameTool,
+    SetStepLocksTool,
     SkillTool,
     SpawnAgentTool,
     TerminalTool,
@@ -335,6 +338,7 @@ mod tests {
         for capability in [
             DraftPlanTool::capability(),
             RefineStepTool::capability(),
+            SetStepLocksTool::capability(),
             CompleteStepTool::capability(),
         ] {
             assert_eq!(capability, crate::ToolCapability::ConversationMutation);

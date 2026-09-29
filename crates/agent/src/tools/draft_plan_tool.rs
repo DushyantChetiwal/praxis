@@ -25,8 +25,9 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 /// A step the user has **locked** is settled: its goal, rules, capture and
 /// routing were argued out, often in a chat of its own. Restate a locked step
 /// exactly as it is, connections included, or this tool will refuse the whole
-/// draft. If a locked step genuinely has to change, say so and let the user
-/// unlock it.
+/// draft. If a locked step genuinely has to change, say so and ask the user.
+/// Once they agree, unlock it with `set_step_locks` before redrawing, or let
+/// them unlock it on the canvas. Never unlock a step they have not asked you to.
 ///
 /// For an unlocked step you are keeping, anything you leave blank keeps what is
 /// already there, so you need only state what you are actually changing.
@@ -220,7 +221,8 @@ impl AgentTool for DraftPlanTool {
                              were argued out, often in its own chat. Draw the plan again, \
                              restating those steps and their connections exactly as they are, and \
                              change only what is not locked. If one of them really does have to \
-                             change, say so and let the user unlock it first.",
+                             change, say so and ask the user. Once they agree, unlock it with \
+                             `set_step_locks` and draw the plan again.",
                             refusal.steps.join(", "),
                         ),
                     });

@@ -1453,6 +1453,9 @@ mod tests {
             // to the project until they do.
             "draft_plan",
             "refine_step",
+            // Only flips lock flags on the plan, as the canvas lock button
+            // does, and only when the user asks for it.
+            "set_step_locks",
             // Records a finished step's summary on the plan while a run drives
             // it; the step's own tool calls carry the permission checks.
             "complete_step",

@@ -53,7 +53,7 @@ A step can contain a plan of its own, for work that is one step at this level bu
 
 - **Double-click a step** on the canvas to open its plan, or use **Break Into Steps** in the inspector. If the step has no plan yet, an empty one is created.
 - A breadcrumb along the top names the trail back out. **Escape** backs out one layer at a time: first the selection, then the plan you are looking at, then the canvas itself.
-- A step containing a plan **cannot be locked** until every step inside it is locked.
+- **Locking** a step that contains a plan locks every step inside it too. Unlocking it reopens only that step.
 - Plans nested more than **5** deep are refused rather than run.
 
 ## Handing work on {#handing-work-on}
@@ -81,7 +81,9 @@ The step's thread starts knowing what the main conversation knows, then diverges
 
 ## Locking
 
-A step you are satisfied with should be **locked**. Locking makes it read-only and is your signal that deliberation on it is over. The agent will not lock a step for you.
+A step you are satisfied with should be **locked**. Locking makes it read-only and is your signal that deliberation on it is over. The agent will not lock or unlock a step on its own initiative.
+
+You can also ask for it in the main conversation, such as "lock the schema step", "lock everything", or "reopen the tests step so we can change it". The agent changes the locks with the `set_step_locks` tool, the same way the lock button does: locking a step that contains a plan locks everything inside it, and unlocking reopens only the step named. Locks cannot change while a run is in progress or paused.
 
 A plan cannot run until every step is locked and the canvas reports no problems, such as a connection pointing at a step that does not exist, or a step nothing leads to.
 

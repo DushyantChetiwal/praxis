@@ -5,9 +5,10 @@ use crate::{
     FindReferencesTool, GetCodeActionsTool, GitBranchesTool, GitDiffTool, GitRemotesTool,
     GitShowTool, GitStatusTool, GoToDefinitionTool, GrepTool, ListAgentsAndModelsTool,
     ListDirectoryTool, MovePathTool, ProjectSnapshot, PullRequestTool, ReadFileTool, RenameTool,
-    SandboxedTerminalTool, SpawnAgentTool, SystemPromptTemplate, Template, Templates,
-    TerminalStatusTool, TerminalStopTool, TerminalTaskRegistry, TerminalTool, TerminalWaitTool,
-    ToolPermissionDecision, WebSearchTool, WriteFileTool, decide_permission_from_settings,
+    SandboxedTerminalTool, SetStepLocksTool, SpawnAgentTool, SystemPromptTemplate, Template,
+    Templates, TerminalStatusTool, TerminalStopTool, TerminalTaskRegistry, TerminalTool,
+    TerminalWaitTool, ToolPermissionDecision, WebSearchTool, WriteFileTool,
+    decide_permission_from_settings,
 };
 use acp_thread::{AgentModelId, ClientUserMessageId, MentionUri};
 use action_log::ActionLog;
@@ -2982,6 +2983,7 @@ impl Thread {
 
         self.add_tool(DiagnosticsTool::new(self.project.clone()));
         self.add_tool(DraftPlanTool::new(cx.weak_entity()));
+        self.add_tool(SetStepLocksTool::new(cx.weak_entity()));
         self.add_tool(ExitPlanModeTool::new(cx.weak_entity()));
 
         let code_action_store: CodeActionStore = cx.new(|_cx| None);

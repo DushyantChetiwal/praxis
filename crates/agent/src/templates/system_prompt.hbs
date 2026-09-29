@@ -306,4 +306,8 @@ This thread already has a plan. It is the user's working copy: they have moved s
 {{{plan}}}
 
 Reuse a step's id whenever that step is staying, so its conversation, its recorded result and its place on the canvas stay attached to it. A step marked locked is settled and must be restated exactly, connections included.
+{{#if (contains available_tools 'set_step_locks')}}
+
+Locks belong to the user. When they ask you to lock or unlock steps, or to reopen a step so it can change, use `set_step_locks`. If a locked step has to change and they have not asked, say why and ask them first; never lock or unlock a step on your own initiative.
+{{/if}}
 {{/if}}
