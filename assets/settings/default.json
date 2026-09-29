@@ -1304,6 +1304,8 @@
           // agent decides for itself when a task is worth planning, rather than
           // the user having to pick a separate profile first.
           "draft_plan": true,
+          // Locking and unlocking steps when the user asks for it in chat.
+          "set_step_locks": true,
           // Presenting a plan for approval ends Plan mode.
           "exit_plan_mode": true,
           "complete_step": true,

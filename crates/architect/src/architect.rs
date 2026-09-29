@@ -1226,6 +1226,23 @@ impl ArchitectGraph {
             .sum()
     }
 
+    /// Unlocks every step here and in every nested plan. Returns how many
+    /// steps changed.
+    pub fn unlock_all(&mut self) -> usize {
+        self.nodes
+            .iter_mut()
+            .map(|node| {
+                let changed = usize::from(node.locked);
+                node.locked = false;
+                let nested = node
+                    .subplan
+                    .as_deref_mut()
+                    .map_or(0, ArchitectGraph::unlock_all);
+                changed + nested
+            })
+            .sum()
+    }
+
     /// Resolves the plan containing a node and rejects traversal through a
     /// locked containing step.
     fn containing_graph_mut(
@@ -2187,6 +2204,15 @@ mod tests {
         assert_eq!(graph.lock_all(), graph.step_count_deeply());
         assert!(graph.is_fully_locked_deeply());
         assert_eq!(graph.lock_all(), 0);
+    }
+
+    #[test]
+    fn unlock_all_reopens_every_step_at_every_depth() {
+        let mut graph = two_level_plan();
+        let total = graph.lock_all();
+        assert_eq!(graph.unlock_all(), total);
+        assert_eq!(graph.locked_step_count_deeply(), 0);
+        assert_eq!(graph.unlock_all(), 0, "unlocking again changes nothing");
     }
 
     /// A settled plan, as it would be after the user argued the steps out and

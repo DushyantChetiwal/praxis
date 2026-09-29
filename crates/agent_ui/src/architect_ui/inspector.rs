@@ -34,6 +34,9 @@ pub(super) struct EdgeInspector {
 
 pub(super) struct NodeInspector {
     node: NodeId,
+    /// Whether the step was locked when the editors were built, which is what
+    /// decided whether they are read-only.
+    locked: bool,
     pub(super) title: Entity<Editor>,
     responsibility: Entity<Editor>,
     goal: Entity<Editor>,
@@ -304,6 +307,7 @@ impl ArchitectPane {
 
         NodeInspector {
             node: node.id,
+            locked: node.locked,
             title,
             responsibility,
             goal,
@@ -628,6 +632,37 @@ impl ArchitectPane {
             self.record_activity(Some(activity_path), activity, cx);
         }
         self.refresh_inspector(window, cx);
+    }
+
+    /// Rebuilds the inspector when its step was locked or unlocked without
+    /// going through the canvas, as the agent does from the chat, so its
+    /// fields go read-only or editable again with the step.
+    pub(super) fn refresh_inspector_if_lock_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(inspector) = self.inspector.as_ref() else {
+            return;
+        };
+        let lock_changed = self
+            .graph(cx)
+            .and_then(|graph| graph.node(&inspector.node))
+            .is_some_and(|node| node.locked != inspector.locked);
+        if !lock_changed {
+            return;
+        }
+        // Rebuilding the editors needs the window, which an observer is not
+        // given, so it waits until this update has finished.
+        let pane = cx.weak_entity();
+        let window_handle = self.window_handle;
+        cx.defer(move |cx| {
+            let refreshed = window_handle.update(cx, |_, window, cx| {
+                pane.update(cx, |pane, cx| pane.refresh_inspector(window, cx))
+            });
+            match refreshed {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) | Err(error) => {
+                    log::debug!("Skipped refreshing the step inspector: {error:#}");
+                }
+            }
+        });
     }
 
     /// Rebuilds the inspector so its fields match the step again, which is what

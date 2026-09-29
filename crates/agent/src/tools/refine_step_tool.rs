@@ -34,7 +34,9 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 ///
 /// ### Locking
 /// Set `lock` only when the user has explicitly said this step is settled.
-/// Locking is their signal that deliberation is over, not yours.
+/// Locking is their signal that deliberation is over, not yours. A locked step
+/// cannot be refined here, and this conversation cannot unlock it: the user can
+/// unlock it on the canvas, or ask for it in the main conversation.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct RefineStepToolInput {

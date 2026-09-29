@@ -1,20 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Same geometry as ic_launcher_foreground; the launcher tints it for themed
+     icons. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
     <group
-        android:scaleX="0.9"
-        android:scaleY="0.9"
-        android:translateX="7.65"
-        android:translateY="8.1">
+        android:scaleX="0.081447964"
+        android:scaleY="0.081447964"
+        android:translateX="12.298643"
+        android:translateY="12.298643">
         <path
             android:fillColor="#FFFFFFFF"
-            android:fillType="evenOdd"
-            android:pathData="M33,78V24h17a17,17 0,0 1,0 34h-6v20zM44,34v14h6a7,7 0,0 0,0 -14z" />
+            android:pathData="M300.3,230.5H560.5A162,162 0,0 1,722.5 392.5V404H612.45A52.7,52.7 0,0 0,559.8 353.5H300.3Z" />
         <path
             android:fillColor="#FFFFFFFF"
-            android:pathData="M64,70m-6,0a6,6 0,1 0,12 0a6,6 0,1 0,-12 0" />
+            android:pathData="M300.3,791.6V485.65H387.26A30.8,30.8 0,0 1,447.74 485.65H547.6A64.35,64.35 0,0 0,611.95 421.3V418.85H722V432.9A168.8,168.8 0,0 1,553.2 601.7H424.85V512.3A22.1,22.1 0,1 0,410 512.3V791.6Z" />
     </group>
 </vector>

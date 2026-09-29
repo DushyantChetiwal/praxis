@@ -119,6 +119,7 @@ jobs:
           cargo test --locked -p agent --lib tools::pull_request_tool::tests::
           cargo test --locked -p agent --lib tools::refine_step_tool::tests::
           cargo test --locked -p agent --lib tools::draft_plan_tool::tests::
+          cargo test --locked -p agent --lib tools::set_step_locks_tool::tests::
           cargo test --locked -p agent --lib tools::exit_plan_mode_tool::tests::
           cargo test --locked -p agent --lib templates::tests::
 

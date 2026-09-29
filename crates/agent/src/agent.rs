@@ -8368,6 +8368,7 @@ mod internal_tests {
                 CreateThreadTool::NAME,
                 // Drafting on the canvas belongs to Architect mode.
                 DraftPlanTool::NAME,
+                SetStepLocksTool::NAME,
             ] {
                 assert!(
                     !tools.contains_key(tool_name),
@@ -8504,6 +8505,7 @@ mod internal_tests {
             let tools = thread.enabled_tools(cx);
             assert!(tools.contains_key(ReadFileTool::NAME));
             assert!(tools.contains_key(DraftPlanTool::NAME));
+            assert!(tools.contains_key(SetStepLocksTool::NAME));
             assert!(!tools.contains_key(ExitPlanModeTool::NAME));
             assert!(!tools.contains_key(EditFileTool::NAME));
             assert!(!tools.contains_key(TerminalTool::NAME));
@@ -8709,6 +8711,9 @@ mod internal_tests {
             // Settling a step is not the place to redraw the whole plan, nor to
             // build: those belong to the main conversation.
             assert!(!enabled.contains_key("draft_plan"));
+            // Locks are the user's to set through the main conversation or
+            // the canvas; `refine_step` covers settling this one step.
+            assert!(!enabled.contains_key(SetStepLocksTool::NAME));
             assert!(!enabled.contains_key("edit_file"));
         });
     }

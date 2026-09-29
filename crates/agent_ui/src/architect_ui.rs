@@ -354,6 +354,7 @@ impl ArchitectPane {
         let subscription = cx.observe(&thread, |this, _, cx| {
             // The agent or a run may have removed selected steps.
             this.prune_bulk_selection(cx);
+            this.refresh_inspector_if_lock_changed(cx);
             cx.emit(workspace::item::ItemEvent::UpdateTab);
             cx.notify();
         });
@@ -604,6 +605,7 @@ impl ArchitectPane {
         self.thread = thread.clone();
         self._thread_subscription = cx.observe(&thread, |this, _, cx| {
             this.prune_bulk_selection(cx);
+            this.refresh_inspector_if_lock_changed(cx);
             cx.emit(workspace::item::ItemEvent::UpdateTab);
             cx.notify();
         });
@@ -2262,7 +2264,7 @@ mod tests {
 
     use acp_thread::AgentConnection as _;
     use fs::Fs as _;
-    use gpui::{Modifiers, MouseMoveEvent, Render, Task, TestAppContext, size};
+    use gpui::{Modifiers, MouseMoveEvent, Render, Task, TestAppContext, VisualTestContext, size};
     use project::{FakeFs, Project};
     use serde_json::json;
     use ui::prelude::*;
@@ -3973,5 +3975,71 @@ mod tests {
                 "with nothing to reach from, Shift-click selects the step alone"
             );
         });
+    }
+
+    /// The agent locks and unlocks steps from the chat, which changes the plan
+    /// without going through the canvas. An inspector open on such a step
+    /// used to keep its fields editable after the step was locked.
+    #[gpui::test]
+    async fn an_open_inspector_follows_locks_changed_from_the_chat(cx: &mut TestAppContext) {
+        fn title_is_read_only(pane: &Entity<ArchitectPane>, cx: &mut VisualTestContext) -> bool {
+            let title = pane.read_with(cx, |pane, _| {
+                pane.inspector
+                    .as_ref()
+                    .expect("the selected step should have an inspector")
+                    .title
+                    .clone()
+            });
+            title.read_with(cx, |editor, cx| editor.read_only(cx))
+        }
+
+        let plan = test_plan(cx).await;
+        let project = plan.project.clone();
+        let thread = plan.thread;
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(ArchitectNode::new("schema", "Define schema"));
+        thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
+
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.update_in(cx, |_workspace, window, cx| {
+            let workspace = cx.weak_entity();
+            cx.new(|cx| {
+                ArchitectPane::new(
+                    thread.clone(),
+                    workspace,
+                    None,
+                    Vec::new(),
+                    None,
+                    px(226.0),
+                    px(348.0),
+                    window,
+                    cx,
+                )
+            })
+        });
+        pane.update_in(cx, |pane, window, cx| {
+            pane.set_selection(Some(Selection::Node(NodeId::from("schema"))), window, cx);
+        });
+        cx.run_until_parked();
+        assert!(!title_is_read_only(&pane, cx));
+
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(|graph| graph.lock_all(), cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            title_is_read_only(&pane, cx),
+            "a step locked from the chat should turn its inspector read-only"
+        );
+
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(|graph| graph.unlock_all(), cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            !title_is_read_only(&pane, cx),
+            "a step unlocked from the chat should be editable again"
+        );
     }
 }

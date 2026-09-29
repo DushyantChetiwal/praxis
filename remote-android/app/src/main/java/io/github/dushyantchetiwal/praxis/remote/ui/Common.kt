@@ -43,6 +43,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -107,9 +108,12 @@ fun AppLogo(size: Dp = 72.dp) {
             .size(size)
             .clip(RoundedCornerShape(size * 0.24f)),
     ) {
-        Image(painterResource(R.drawable.ic_launcher_background), null, Modifier.fillMaxSize())
-        // The foreground is drawn for a 108dp canvas with a 66dp safe zone.
-        Image(painterResource(R.drawable.ic_launcher_foreground), null, Modifier.fillMaxSize())
+        // The layers are drawn for a 108dp adaptive icon canvas, of which launchers
+        // show the central 72dp; scaling up shows that same area, matching the
+        // launcher and desktop icon proportions.
+        val layer = Modifier.fillMaxSize().scale(108f / 72f)
+        Image(painterResource(R.drawable.ic_launcher_background), null, layer)
+        Image(painterResource(R.drawable.ic_launcher_foreground), null, layer)
     }
 }
 

@@ -164,6 +164,32 @@ mod tests {
             rendered.contains("Reuse a step's id"),
             "ids are what keep a step's history attached to it"
         );
+        assert!(
+            !rendered.contains("set_step_locks"),
+            "a thread without the tool must not be told to use it"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_says_locks_change_only_when_the_user_asks() {
+        let project = prompt_store::ProjectContext::default();
+        let template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec!["draft_plan".into(), "set_step_locks".into()],
+            model_name: Some("test-model".to_string()),
+            date: "2026-01-01".to_string(),
+            user_agents_md: None,
+            sandboxing: false,
+            is_linux: false,
+            is_windows: false,
+            plan_mode: false,
+            plan: Some("- schema — \"Define schema\" [locked: settled, do not rewrite]".into()),
+        };
+
+        let rendered = template.render(&Templates::new()).unwrap();
+
+        assert!(rendered.contains("use `set_step_locks`"));
+        assert!(rendered.contains("never lock or unlock a step on your own initiative"));
     }
 
     #[test]
