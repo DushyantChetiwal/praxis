@@ -14,6 +14,8 @@ or endorsed by Zed Industries.
 
 ## Architect View
 
+<img width="2874" height="1648" alt="image" src="https://github.com/user-attachments/assets/65da59db-5857-454c-92fd-811ecc45c74a" />
+
 Instead of treating an agent as a one-turn command box, Praxis makes planning a
 primary view. Work is drafted as a graph of explicit steps, constraints,
 dependencies, conditions, loops, and expected hand-offs. Individual steps can
