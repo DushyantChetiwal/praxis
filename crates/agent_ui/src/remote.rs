@@ -18,7 +18,7 @@
 //!
 //! `docs/src/ai/praxis-remote-protocol.md` specifies the wire format, which
 //! the Android app in `remote-android/` follows as well. Files can be read
-//! remotely but never written: changes go through the agent.
+//! and downloaded remotely but never written: changes go through the agent.
 
 mod channel;
 mod crypto;
@@ -34,6 +34,7 @@ use acp_thread::{
 };
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::{Context as _, Result, anyhow, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc;
 use gpui::{
@@ -63,6 +64,12 @@ const FILE_LIMIT: usize = 20_000;
 /// for the rest of the answer in the 46,000 bytes an answer may have.
 const FILE_JSON_BUDGET: usize = 40_000;
 const MAX_FILE_BYTES: u64 = 2_000_000;
+/// A download travels in pieces that each fit in one answer once base64
+/// encoded.
+const DOWNLOAD_CHUNK_BYTES: u64 = 32 * 1024;
+/// Every piece is a comment that the phone writes and Praxis rewrites, and
+/// GitHub limits how many comments an account may write in an hour.
+const MAX_DOWNLOAD_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_DIR_ENTRIES: usize = 500;
 /// What a directory listing's entries may take once they are JSON.
 const DIR_JSON_BUDGET: usize = 40_000;
@@ -368,23 +375,45 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
                 Ok(path) => path.to_string(),
                 Err(error) => return Task::ready(Err(error)),
             };
-            return match with_workspace(window, cx, |workspace, _, cx| {
-                let roots = project_roots(workspace, cx);
-                let (root_name, relative) = split_project_path(&roots, &path)?;
-                if is_private(workspace, root_name, relative, cx) {
-                    bail!("{path} is private, so Praxis will not show it");
-                }
-                Ok(roots)
-            }) {
+            return match readable_roots(window, &path, cx) {
                 Ok(roots) => cx
                     .background_executor()
                     .spawn(async move { read_file(&roots, &path) }),
                 Err(error) => Task::ready(Err(error)),
             };
         }
+        "download" => {
+            let path = match required(args, "path") {
+                Ok(path) => path.to_string(),
+                Err(error) => return Task::ready(Err(error)),
+            };
+            let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
+            return match readable_roots(window, &path, cx) {
+                Ok(roots) => cx
+                    .background_executor()
+                    .spawn(async move { download_chunk(&roots, &path, offset) }),
+                Err(error) => Task::ready(Err(error)),
+            };
+        }
         op => Err(anyhow!("Praxis does not know the request {op:?}")),
     };
     Task::ready(result)
+}
+
+/// The window's projects, once the path is known not to be private.
+fn readable_roots(
+    window: Option<u64>,
+    path: &str,
+    cx: &mut App,
+) -> Result<Vec<(String, PathBuf)>> {
+    with_workspace(window, cx, |workspace, _, cx| {
+        let roots = project_roots(workspace, cx);
+        let (root_name, relative) = split_project_path(&roots, path)?;
+        if is_private(workspace, root_name, relative, cx) {
+            bail!("{path} is private, so Praxis will not share it");
+        }
+        Ok(roots)
+    })
 }
 
 fn required<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
@@ -1006,11 +1035,14 @@ fn read_file(roots: &[(String, PathBuf)], path: &str) -> Result<Value> {
         bail!("{display} is not a file");
     }
     if metadata.len() > MAX_FILE_BYTES {
-        bail!("{display} is too large to show ({} bytes)", metadata.len());
+        bail!(
+            "{display} is too large to show ({} bytes); download it instead",
+            metadata.len()
+        );
     }
     let bytes = std::fs::read(&path).with_context(|| format!("reading {display}"))?;
     if bytes.contains(&0) {
-        bail!("{display} is not a text file");
+        bail!("{display} is not a text file; download it instead");
     }
     let text = String::from_utf8_lossy(&bytes);
     // Escaping makes some text longer (quotes, backslashes, control
@@ -1034,9 +1066,130 @@ fn read_file(roots: &[(String, PathBuf)], path: &str) -> Result<Value> {
     }))
 }
 
+/// One piece of a file, starting at `offset`. The phone asks for the pieces in
+/// order and checks that `version` stays the same, so a file that changes
+/// while it downloads is noticed instead of saved half old and half new.
+fn download_chunk(roots: &[(String, PathBuf)], path: &str, offset: u64) -> Result<Value> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+
+    let (display, path) = resolve_project_path(roots, path)?;
+    let path = ensure_inside(roots, &path)?;
+    let mut file = std::fs::File::open(&path).with_context(|| format!("opening {display}"))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        bail!("{display} is not a file");
+    }
+    let size = metadata.len();
+    if size > MAX_DOWNLOAD_BYTES {
+        bail!(
+            "{display} is too large to download ({:.1} MB; the limit is {} MB)",
+            size as f64 / (1024.0 * 1024.0),
+            MAX_DOWNLOAD_BYTES / (1024 * 1024)
+        );
+    }
+    if offset > size {
+        bail!("{display} changed while it was downloading; try again");
+    }
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_nanos());
+    file.seek(SeekFrom::Start(offset))?;
+    let mut data = Vec::new();
+    file.by_ref()
+        .take(DOWNLOAD_CHUNK_BYTES)
+        .read_to_end(&mut data)
+        .with_context(|| format!("reading {display}"))?;
+    Ok(json!({
+        "size": size,
+        "offset": offset,
+        "version": format!("{size}:{modified}"),
+        "data": BASE64.encode(&data),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_downloads_in_pieces_that_reassemble_exactly() {
+        let temp = tempfile::tempdir().expect("a temporary directory");
+        let root = temp.path().join("app");
+        std::fs::create_dir_all(&root).expect("create");
+        let bytes: Vec<u8> = (0..DOWNLOAD_CHUNK_BYTES * 2 + 123)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        std::fs::write(root.join("image.bin"), &bytes).expect("write");
+        let roots = vec![("app".to_string(), root)];
+
+        let mut received = Vec::new();
+        let mut version = None;
+        loop {
+            let chunk =
+                download_chunk(&roots, "app/image.bin", received.len() as u64).expect("a piece");
+            assert_eq!(chunk["size"], bytes.len() as u64);
+            assert_eq!(chunk["offset"], received.len() as u64);
+            let this_version = chunk["version"].as_str().expect("version").to_string();
+            assert_eq!(
+                *version.get_or_insert_with(|| this_version.clone()),
+                this_version
+            );
+            let data = BASE64
+                .decode(chunk["data"].as_str().expect("data"))
+                .expect("base64");
+            assert!(data.len() as u64 <= DOWNLOAD_CHUNK_BYTES);
+            if data.is_empty() {
+                break;
+            }
+            received.extend(data);
+        }
+        assert_eq!(received, bytes);
+    }
+
+    #[test]
+    fn a_full_download_piece_fits_in_one_answer() {
+        let temp = tempfile::tempdir().expect("a temporary directory");
+        let root = temp.path().join("app");
+        std::fs::create_dir_all(&root).expect("create");
+        std::fs::write(root.join("large.bin"), vec![0xff; MAX_DOWNLOAD_BYTES as usize])
+            .expect("write");
+        let roots = vec![("app".to_string(), root)];
+
+        let offset = MAX_DOWNLOAD_BYTES - DOWNLOAD_CHUNK_BYTES;
+        let chunk = download_chunk(&roots, "app/large.bin", offset).expect("a piece");
+        let envelope = json!({
+            "id": "m".repeat(64),
+            "ok": true,
+            "result": chunk,
+        });
+        assert!(envelope.to_string().len() <= channel::MAX_ANSWER_LEN);
+    }
+
+    #[test]
+    fn downloads_stay_inside_the_project_and_under_the_size_limit() {
+        let temp = tempfile::tempdir().expect("a temporary directory");
+        let root = temp.path().join("app");
+        std::fs::create_dir_all(&root).expect("create");
+        std::fs::write(temp.path().join("secret.txt"), "hidden").expect("write");
+        std::fs::write(
+            root.join("huge.bin"),
+            vec![0; MAX_DOWNLOAD_BYTES as usize + 1],
+        )
+        .expect("write");
+        std::fs::write(root.join("small.txt"), "small").expect("write");
+        let roots = vec![("app".to_string(), root)];
+
+        assert!(download_chunk(&roots, "app/../secret.txt", 0).is_err());
+        assert!(download_chunk(&roots, "app", 0).is_err(), "not a file");
+        let too_large = download_chunk(&roots, "app/huge.bin", 0).expect_err("too large");
+        assert!(too_large.to_string().contains("too large to download"));
+        assert!(
+            download_chunk(&roots, "app/small.txt", 6).is_err(),
+            "an offset past the end means the file changed"
+        );
+    }
 
     #[test]
     fn paths_name_a_project_and_cannot_climb_out_of_it() {

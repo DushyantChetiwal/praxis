@@ -2,6 +2,7 @@ package io.github.dushyantchetiwal.praxis.remote
 
 import android.app.Application
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import androidx.annotation.StringRes
 import androidx.compose.runtime.getValue
@@ -15,6 +16,9 @@ import io.github.dushyantchetiwal.praxis.remote.data.CryptoException
 import io.github.dushyantchetiwal.praxis.remote.data.Device
 import io.github.dushyantchetiwal.praxis.remote.data.DeviceFlow
 import io.github.dushyantchetiwal.praxis.remote.data.DirEntry
+import io.github.dushyantchetiwal.praxis.remote.data.DownloadException
+import io.github.dushyantchetiwal.praxis.remote.data.DownloadSink
+import io.github.dushyantchetiwal.praxis.remote.data.checkDownloadChunk
 import io.github.dushyantchetiwal.praxis.remote.data.ErrorKind
 import io.github.dushyantchetiwal.praxis.remote.data.GistRead
 import io.github.dushyantchetiwal.praxis.remote.data.Gists
@@ -34,12 +38,16 @@ import io.github.dushyantchetiwal.praxis.remote.data.TokenManager
 import io.github.dushyantchetiwal.praxis.remote.data.UpdateInfo
 import io.github.dushyantchetiwal.praxis.remote.data.findUpdate
 import io.github.dushyantchetiwal.praxis.remote.data.obj
+import io.github.dushyantchetiwal.praxis.remote.data.parseDownloadChunk
 import io.github.dushyantchetiwal.praxis.remote.data.parseFile
 import io.github.dushyantchetiwal.praxis.remote.data.parseListing
 import io.github.dushyantchetiwal.praxis.remote.data.parseThreads
 import io.github.dushyantchetiwal.praxis.remote.data.str
+import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -121,6 +129,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Bumped whenever the selected device changes, to drop queued requests. */
     private var generation = 0
     private var pollJob: Job? = null
+    private var downloadJob: Job? = null
     private val pollNow = Channel<Unit>(Channel.CONFLATED)
     private var pollFailures = 0
     /** The gist response last applied to the selected computer. */
@@ -555,6 +564,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun stopDevice() {
         pollJob?.cancel()
         pollJob = null
+        downloadJob?.cancel()
+        downloadJob = null
         generation++
         resetWatcher()
         pollFailures = 0
@@ -1040,6 +1051,77 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun closeFile() {
         edit { copy(files = files.copy(file = null, error = null)) }
         if (d.files.entries == null) listDir(d.files.path)
+    }
+
+    /**
+     * Downloads one file, piece by piece, into Downloads/Praxis, or to [chosen]
+     * where Android needs the user to pick a place. One download runs at a
+     * time; each piece is its own request, so chat and other actions still
+     * get through while it runs.
+     */
+    fun download(entry: DirEntry, chosen: Uri? = null) {
+        if (entry.dir || d.device == null || d.download?.active == true) return
+        val window = d.windowId
+        val gen = generation
+        val changed = str(R.string.download_changed, entry.name)
+        edit { copy(download = DownloadState(entry.path, entry.name)) }
+        downloadJob = viewModelScope.launch {
+            val sink = try {
+                withContext(Dispatchers.IO) { DownloadSink.open(getApplication(), entry.name, chosen) }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                failDownload(gen, str(R.string.download_cannot_save, entry.name))
+                return@launch
+            }
+            try {
+                var received = 0L
+                var version: String? = null
+                while (true) {
+                    val args = JSONObject().put("path", entry.path).put("offset", received)
+                    window?.let { args.put("window", it) }
+                    val chunk = parseDownloadChunk(praxis("download", args))
+                        ?: throw DownloadException(str(R.string.error_unreadable_response))
+                    val bytes = checkDownloadChunk(chunk, received, version, changed)
+                    version = chunk.version
+                    withContext(Dispatchers.IO) { sink.stream.write(bytes) }
+                    received += bytes.size
+                    if (gen == generation) edit { copy(download = download?.copy(received = received, size = chunk.size)) }
+                    if (received >= chunk.size) break
+                }
+                withContext(Dispatchers.IO) { sink.complete() }
+                if (gen == generation) {
+                    edit { copy(download = download?.copy(savedUri = sink.uri.toString(), inDownloads = chosen == null)) }
+                }
+            } catch (e: CancellationException) {
+                withContext(NonCancellable + Dispatchers.IO) { sink.abandon() }
+                throw e
+            } catch (e: Exception) {
+                withContext(NonCancellable + Dispatchers.IO) { sink.abandon() }
+                val message = when (e) {
+                    is ApiException -> if (e.kind == ErrorKind.Cancelled) null else e.message
+                    is DownloadException -> e.message
+                    is IOException -> str(R.string.download_cannot_save, entry.name)
+                    else -> str(R.string.download_failed, entry.name, e.message ?: e.javaClass.simpleName)
+                }
+                failDownload(gen, message)
+            }
+        }
+    }
+
+    private fun failDownload(gen: Int, message: String?) {
+        if (gen != generation) return
+        edit { copy(download = if (message == null) null else download?.copy(error = message)) }
+    }
+
+    fun cancelDownload() {
+        downloadJob?.cancel()
+        downloadJob = null
+        edit { copy(download = null) }
+    }
+
+    fun dismissDownload() {
+        if (d.download?.active == true) return
+        edit { copy(download = null) }
     }
 
     // -----------------------------------------------------------------------

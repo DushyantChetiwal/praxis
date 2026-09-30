@@ -172,6 +172,18 @@
     <string name="files_no_projects">No projects are open in this window.</string>
     <string name="files_truncated_listing">Only the first 500 entries are shown.</string>
     <string name="files_truncated">This file is large; only the beginning is shown.</string>
+    <string name="download_action">Download %1$s</string>
+    <string name="download_running">Downloading %1$s</string>
+    <string name="download_progress">%1$s of %2$s</string>
+    <string name="download_starting">Starting…</string>
+    <string name="download_saved_downloads">Saved %1$s to Downloads/Praxis</string>
+    <string name="download_saved">Saved %1$s</string>
+    <string name="download_open">Open</string>
+
+    <string name="download_changed">%1$s changed on the computer while it was downloading. Download it again.</string>
+    <string name="download_cannot_save">Could not save %1$s on this phone. Check that there is free space and try again.</string>
+    <string name="download_failed">Could not download %1$s: %2$s</string>
+    <string name="download_no_app">No app on this phone can open this file. Find it in the Files app.</string>
 
     <!-- Settings -->
     <string name="settings_title">Settings</string>
