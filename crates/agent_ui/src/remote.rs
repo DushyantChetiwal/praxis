@@ -401,11 +401,7 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
 }
 
 /// The window's projects, once the path is known not to be private.
-fn readable_roots(
-    window: Option<u64>,
-    path: &str,
-    cx: &mut App,
-) -> Result<Vec<(String, PathBuf)>> {
+fn readable_roots(window: Option<u64>, path: &str, cx: &mut App) -> Result<Vec<(String, PathBuf)>> {
     with_workspace(window, cx, |workspace, _, cx| {
         let roots = project_roots(workspace, cx);
         let (root_name, relative) = split_project_path(&roots, path)?;
@@ -1153,8 +1149,11 @@ mod tests {
         let temp = tempfile::tempdir().expect("a temporary directory");
         let root = temp.path().join("app");
         std::fs::create_dir_all(&root).expect("create");
-        std::fs::write(root.join("large.bin"), vec![0xff; MAX_DOWNLOAD_BYTES as usize])
-            .expect("write");
+        std::fs::write(
+            root.join("large.bin"),
+            vec![0xff; MAX_DOWNLOAD_BYTES as usize],
+        )
+        .expect("write");
         let roots = vec![("app".to_string(), root)];
 
         let offset = MAX_DOWNLOAD_BYTES - DOWNLOAD_CHUNK_BYTES;
