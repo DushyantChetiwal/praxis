@@ -52,7 +52,7 @@ const MAX_CLOCK_AHEAD_SECONDS: i64 = 120;
 const PAIRING_TIMEOUT_SECONDS: i64 = 300;
 const CLEANUP_AGE_SECONDS: i64 = 600;
 /// Plain-text caps that keep every comment and file within GitHub's limits.
-const MAX_ANSWER_LEN: usize = 46_000;
+pub(super) const MAX_ANSWER_LEN: usize = 46_000;
 const MAX_SNAPSHOT_LEN: usize = 64_000;
 const MAX_PHONE_NAME_CHARS: usize = 60;
 /// Every phone's key shares one keychain entry, and Windows caps an entry at

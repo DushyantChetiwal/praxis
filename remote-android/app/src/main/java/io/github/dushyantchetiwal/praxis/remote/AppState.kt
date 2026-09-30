@@ -104,6 +104,24 @@ data class FilesState(
     val file: FileContent? = null,
 )
 
+/** The one file downloading, or the result of the last download until dismissed. */
+data class DownloadState(
+    val path: String,
+    val name: String,
+    val received: Long = 0L,
+    val size: Long? = null,
+    /** Where the finished file is, once it is complete. */
+    val savedUri: String? = null,
+    /** Whether it went to Downloads/Praxis rather than a place the user chose. */
+    val inDownloads: Boolean = false,
+    val error: String? = null,
+) {
+    val active: Boolean get() = savedUri == null && error == null
+
+    /** Between 0 and 1, or null until the size is known. */
+    val fraction: Float? get() = size?.let { total -> if (total == 0L) 1f else (received.toFloat() / total).coerceIn(0f, 1f) }
+}
+
 data class Banner(val text: String, val error: Boolean)
 
 /** Everything about the selected device, mirroring the web app's state. */
@@ -124,6 +142,7 @@ data class DeviceUi(
     val tab: Tab = Tab.Chat,
     val threads: ThreadsState = ThreadsState(),
     val files: FilesState = FilesState(),
+    val download: DownloadState? = null,
     val outbox: List<OutboxItem> = emptyList(),
     val answered: Set<String> = emptySet(),
     val busyPermissions: Set<String> = emptySet(),

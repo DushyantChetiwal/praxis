@@ -80,7 +80,7 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: gradle -p remote-android --no-daemon assembleRelease lintRelease
+        run: gradle -p remote-android --no-daemon testReleaseUnitTest assembleRelease lintRelease
 
       - name: Name the APK
         id: apk

@@ -110,9 +110,38 @@ praxis-remote/v2 rejected <phone_id>
 <reason>
 ```
 
-The computer refuses a request when the comment or its `sent_at` is more than five minutes old, when `sent_at` is more than two minutes in the future, or when it has already seen that request id from that phone. Operations are the same as in version 1 (`status`, `threads`, `thread`, `prompt`, `stop`, `new_thread`, `open_thread`, `permission`, `mode`, `architect`, `list_dir`, `read_file`, `watch`, `batch`), plus `unpair`, which removes the phone that sends it.
+The computer refuses a request when the comment or its `sent_at` is more than five minutes old, when `sent_at` is more than two minutes in the future, or when it has already seen that request id from that phone. Operations are the same as in version 1 (`status`, `threads`, `thread`, `prompt`, `stop`, `new_thread`, `open_thread`, `permission`, `mode`, `architect`, `list_dir`, `read_file`, `watch`, `batch`), plus `unpair`, which removes the phone that sends it, and `download`.
 
 Plain-text sizes are capped so that every comment fits GitHub's 65,536-character limit: 46,000 bytes for an answer. Larger answers become an error.
+
+### Downloading a file
+
+`download` sends one file of any kind, text or binary, in pieces small enough for one answer each. The phone asks for the pieces in order:
+
+```json
+{
+  "op": "download",
+  "args": { "path": "app/assets/logo.png", "offset": 0, "window": 1 }
+}
+```
+
+`path` is a project path as for `read_file`, which refuses the same paths: outside the window's projects, inside `.git`, or covered by the project's `private_files` setting. `offset` is how many bytes the phone already has, 0 at first. The answer is:
+
+```json
+{
+  "size": 81234,
+  "offset": 0,
+  "version": "81234:1759200000000000000",
+  "data": "<base64>"
+}
+```
+
+- `data` holds at most 32,768 bytes, starting at `offset`.
+- The phone asks again at `offset` plus the bytes it received, and stops once it has `size` bytes.
+- `version` identifies the file's contents on disk, currently its size and modification time. If it changes between pieces, or a piece does not start where the phone expects, the file changed while downloading: the phone discards what it has and says so.
+- Files larger than 5 MB are refused with an error. Each piece is a comment the phone writes and the computer rewrites, and GitHub limits how many comments an account may write in an hour.
+
+A phone runs one download at a time, one piece in flight, so its other requests still get through.
 
 ## Housekeeping
 
