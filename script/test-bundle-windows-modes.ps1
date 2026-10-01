@@ -17,7 +17,9 @@ $modeAssignments = $bundle.EndBlock.Statements | Where-Object {
     $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
     $_.Left.Extent.Text -in @('$buildDesktop', '$buildRemoteServer')
 }
-$bindMode = [scriptblock]::Create($bundle.ParamBlock.Extent.Text + "`n" +
+# ParamBlock's extent starts at 'param'; its preceding attributes have separate extents.
+$parameterAttributes = ($bundle.ParamBlock.Attributes | ForEach-Object { $_.Extent.Text }) -join "`n"
+$bindMode = [scriptblock]::Create($parameterAttributes + "`n" + $bundle.ParamBlock.Extent.Text + "`n" +
     (($modeAssignments | ForEach-Object { $_.Extent.Text }) -join "`n") + "`n" +
     '[pscustomobject]@{ Desktop = $buildDesktop; Remote = $buildRemoteServer }')
 

@@ -314,16 +314,16 @@ jobs:
           ref: ${{ env.SOURCE_REF }}
           persist-credentials: false
 
+      - name: Test Windows split release packaging
+        if: hashFiles('script/test-bundle-windows-modes.ps1') != ''
+        shell: pwsh
+        run: ./script/test-bundle-windows-modes.ps1
+
       - name: Cache Rust dependencies and build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: architect-windows-updater-tests
           cache-on-failure: true
-
-      - name: Test Windows split release packaging
-        if: hashFiles('script/test-bundle-windows-modes.ps1') != ''
-        shell: pwsh
-        run: ./script/test-bundle-windows-modes.ps1
 
       - name: Test the Windows update helper
         run: cargo test --locked -p auto_update_helper
