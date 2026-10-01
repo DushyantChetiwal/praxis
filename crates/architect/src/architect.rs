@@ -2209,18 +2209,30 @@ mod tests {
         let mut parallel = ArchitectNode::new("parallel", "Parallel");
         parallel.file_surface = Some(vec!["worktree/README.md".into()]);
         graph.add_node(parallel);
-        assert!(graph.file_surface_problems().iter().any(|problem| {
-            matches!(problem, GraphProblem::FileSurfaceOverlap { .. })
-        }));
+        assert!(
+            graph
+                .file_surface_problems()
+                .iter()
+                .any(|problem| { matches!(problem, GraphProblem::FileSurfaceOverlap { .. }) })
+        );
     }
 
     #[test]
     fn created_case_variant_is_added_even_when_another_spelling_is_declared() {
         let mut graph = surface_graph(&["source", "after"], &[("source", "after")]);
-        graph.node_mut(&"after".into()).unwrap().file_surface = Some(vec!["worktree/README.md".into()]);
-        graph.record_created_files(&NodePath::root("source".into()), &["worktree/readme.md".into()]);
-        assert_eq!(graph.node(&"after".into()).unwrap().file_surface,
-            Some(vec!["worktree/README.md".into(), "worktree/readme.md".into()]));
+        graph.node_mut(&"after".into()).unwrap().file_surface =
+            Some(vec!["worktree/README.md".into()]);
+        graph.record_created_files(
+            &NodePath::root("source".into()),
+            &["worktree/readme.md".into()],
+        );
+        assert_eq!(
+            graph.node(&"after".into()).unwrap().file_surface,
+            Some(vec![
+                "worktree/README.md".into(),
+                "worktree/readme.md".into()
+            ])
+        );
         assert!(graph.file_surface_problems().is_empty());
     }
 
@@ -2454,9 +2466,10 @@ mod tests {
             Some(Box::new(surface_graph(&["finish"], &[])));
         let source = NodePath::root("parent".into()).child("source".into());
         let snapshot = graph.clone();
+        // Root-name and separator aliases deduplicate; filename case may differ on the host.
         let files = vec![
             "worktree\\src\\created.rs".into(),
-            "WORKTREE/src/CREATED.rs".into(),
+            "WORKTREE/src/created.rs".into(),
         ];
         let changed = graph.record_created_files(&source, &files);
         let mut expected = vec![

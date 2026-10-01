@@ -307,14 +307,9 @@ async fn test_remote_file_inventory_rejects_directory_declarations(
     host_fs
         .insert_tree(path!("/a"), json!({ "src": { "main.rs": "host" } }))
         .await;
-    let (project, host) = Project::test_remote_worktrees(
-        client_fs,
-        host_fs,
-        [Path::new(path!("/a"))],
-        cx,
-        host_cx,
-    )
-    .await;
+    let (project, host) =
+        Project::test_remote_worktrees(client_fs, host_fs, [Path::new(path!("/a"))], cx, host_cx)
+            .await;
     let host_tree = host.read_with(host_cx, |project, cx| {
         project.visible_worktrees(cx).next().unwrap()
     });
@@ -322,7 +317,9 @@ async fn test_remote_file_inventory_rejects_directory_declarations(
         project.visible_worktrees(cx).next().unwrap()
     });
     let local_error = host_tree
-        .update(host_cx, |tree, cx| tree.file_inventory(vec!["src".into()], cx))
+        .update(host_cx, |tree, cx| {
+            tree.file_inventory(vec!["src".into()], cx)
+        })
         .await
         .unwrap_err();
     assert!(format!("{local_error:#}").contains("is a directory"));

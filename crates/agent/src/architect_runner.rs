@@ -10,9 +10,9 @@ use architect::{
     ArchitectGraph, Branch, Decision, MAX_NODE_VISITS, MAX_PLAN_DEPTH, MAX_RUN_STEPS, NodePath,
     PlanRun, RunOutcome, RunRefusal,
 };
+use futures::FutureExt as _;
 use futures::channel::oneshot;
 use futures::future::{LocalBoxFuture, join_all};
-use futures::FutureExt as _;
 use gpui::{App, AsyncApp, Context, Entity, SharedString, WeakEntity};
 use language_model::{LanguageModel, LanguageModelProviderId, LanguageModelRegistry};
 use serde::{Deserialize, Serialize};
@@ -573,10 +573,15 @@ impl FileSnapshot {
             "The file snapshot has no roots or exceeds the file budget"
         );
         for (identity, file) in &self.files {
-            let normalized = ArchitectGraph::normalize_file_surface_path(file)
-                .map_err(anyhow::Error::msg)?;
+            let normalized =
+                ArchitectGraph::normalize_file_surface_path(file).map_err(anyhow::Error::msg)?;
             anyhow::ensure!(
-                identity == if self.case_preserving { file } else { &normalized },
+                identity
+                    == if self.case_preserving {
+                        file
+                    } else {
+                        &normalized
+                    },
                 "Invalid file snapshot identity for {file}"
             );
         }
@@ -610,13 +615,18 @@ impl FileSnapshot {
             skipped_paths.iter().map(String::as_str).collect();
         let mut created = Vec::new();
         for file in self.files.values() {
-            let normalized = ArchitectGraph::normalize_file_surface_path(file)
-                .map_err(anyhow::Error::msg)?;
-            let previous_identity = if previous.case_preserving { file } else { &normalized };
+            let normalized =
+                ArchitectGraph::normalize_file_surface_path(file).map_err(anyhow::Error::msg)?;
+            let previous_identity = if previous.case_preserving {
+                file
+            } else {
+                &normalized
+            };
             if !previous.files.contains_key(previous_identity)
                 && !std::iter::successors(Some(normalized.as_str()), |path| {
                     path.rsplit_once('/').map(|(parent, _)| parent)
-                }).any(|path| skipped.contains(path))
+                })
+                .any(|path| skipped.contains(path))
             {
                 created.push(file.clone());
             }
@@ -703,9 +713,11 @@ fn preflight_creation_tracking(
                 .iter()
                 .find(|(name, _)| name.to_lowercase() == root.to_lowercase())
             else {
-                return Err(ArchitectRunStartError::CreationTrackingUnavailable(format!(
-                    "Step {path} declares {file:?}, which does not belong to an open project root. Update its file surface using the current project's relative paths before running."
-                )));
+                return Err(ArchitectRunStartError::CreationTrackingUnavailable(
+                    format!(
+                        "Step {path} declares {file:?}, which does not belong to an open project root. Update its file surface using the current project's relative paths before running."
+                    ),
+                ));
             };
             let Ok(relative) = util::rel_path::RelPath::from_unix_str(relative) else {
                 continue;
@@ -715,9 +727,11 @@ fn preflight_creation_tracking(
                 .entry_for_path(relative)
                 .is_some_and(|entry| entry.is_dir())
             {
-                return Err(ArchitectRunStartError::CreationTrackingUnavailable(format!(
-                    "Step {path} declares directory {file:?}. List the existing files individually before running."
-                )));
+                return Err(ArchitectRunStartError::CreationTrackingUnavailable(
+                    format!(
+                        "Step {path} declares directory {file:?}. List the existing files individually before running."
+                    ),
+                ));
             }
         }
     }
@@ -3339,7 +3353,8 @@ mod checkpoint_tests {
             "roots": {"a": "/a"},
             "files": {"a/readme.md": "a/README.md"},
             "skipped_paths": []
-        })).unwrap();
+        }))
+        .unwrap();
         legacy.validate().unwrap();
         assert!(!legacy.case_preserving);
         let mut current = legacy.clone();
@@ -3350,13 +3365,21 @@ mod checkpoint_tests {
         ]);
         current.validate().unwrap();
         assert!(current.created_since(&legacy).unwrap().is_empty());
-        let restored: FileSnapshot = serde_json::from_value(serde_json::to_value(&current).unwrap()).unwrap();
+        let restored: FileSnapshot =
+            serde_json::from_value(serde_json::to_value(&current).unwrap()).unwrap();
         assert!(restored.case_preserving);
-        current.files.insert("a/Readme.md".into(), "a/Readme.md".into());
-        assert_eq!(current.created_since(&restored).unwrap(), vec!["a/Readme.md"]);
+        current
+            .files
+            .insert("a/Readme.md".into(), "a/Readme.md".into());
+        assert_eq!(
+            current.created_since(&restored).unwrap(),
+            vec!["a/Readme.md"]
+        );
         current.skipped_paths = Some(vec!["a/ignored".into()]);
         let baseline = current.clone();
-        current.files.insert("a/Ignored/New.rs".into(), "a/Ignored/New.rs".into());
+        current
+            .files
+            .insert("a/Ignored/New.rs".into(), "a/Ignored/New.rs".into());
         assert!(current.created_since(&baseline).unwrap().is_empty());
     }
 
@@ -3364,23 +3387,32 @@ mod checkpoint_tests {
     async fn newly_created_case_variant_is_propagated_to_successors(cx: &mut TestAppContext) {
         let (_connection, thread, acp_thread, fake) = native_session(cx).await;
         let fs = project_fs(&thread, cx);
-        fs.insert_tree("/a", serde_json::json!({"README.md": "existing"})).await;
+        fs.insert_tree("/a", serde_json::json!({"README.md": "existing"}))
+            .await;
         fs.pause_events();
         let mut graph = linear_graph(&["source", "after"]);
         graph.node_at_mut(&path("after")).unwrap().file_surface = Some(vec!["a/README.md".into()]);
         cx.update(|cx| {
-            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph.clone()), cx)
+            });
             start_architect_run(thread.clone(), acp_thread, graph, cx).unwrap();
         });
         cx.run_until_parked();
         assert_running(&thread, "source", cx);
-        fs.insert_tree("/a", serde_json::json!({"readme.md": "new"})).await;
+        fs.insert_tree("/a", serde_json::json!({"readme.md": "new"}))
+            .await;
         finish_pending_step(&fake);
         cx.run_until_parked();
         assert_running(&thread, "after", cx);
         thread.read_with(cx, |thread, _| {
             assert_eq!(
-                thread.architect_graph().unwrap().node_at(&path("after")).unwrap().file_surface,
+                thread
+                    .architect_graph()
+                    .unwrap()
+                    .node_at(&path("after"))
+                    .unwrap()
+                    .file_surface,
                 Some(vec!["a/README.md".into(), "a/readme.md".into()])
             );
         });
