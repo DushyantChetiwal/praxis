@@ -237,7 +237,67 @@ class ProvenanceTests(unittest.TestCase):
 
     def test_missing_pr_association_rejected(self):
         self.run["pull_requests"] = []
+        self.api.responses[f"{ROOT}/commits/{HEAD}/pulls?per_page=100"] = []
         self.reject_receipt()
+
+    def merged_pr_association(self):
+        pull = copy.deepcopy(self.api.responses[f"{ROOT}/pulls/9"])
+        pull.update(state="closed", merged_at="2026-10-01T17:40:16Z")
+        self.run["pull_requests"] = []
+        self.api.responses[f"{ROOT}/commits/{HEAD}/pulls?per_page=100"] = [pull]
+        return pull
+
+    def test_merged_pr_receipt_reuses_when_run_association_is_cleared(self):
+        self.merged_pr_association()
+        self.assertTrue(self.check()[0])
+        self.assertIn(f"{ROOT}/commits/{HEAD}/pulls?per_page=100", self.api.calls)
+
+    def test_commit_associations_select_the_recorded_pr_not_another_pr(self):
+        pull = self.merged_pr_association()
+        other = copy.deepcopy(pull)
+        other["number"] = 99
+        self.api.responses[f"{ROOT}/commits/{HEAD}/pulls?per_page=100"] = [other, pull]
+        self.assertTrue(self.check()[0])
+
+    def test_recorded_pr_must_be_associated_with_the_immutable_run_head(self):
+        pull = self.merged_pr_association()
+        pull["number"] = 99
+        self.reject_receipt()
+
+    def test_duplicate_commit_pr_associations_fail_closed(self):
+        pull = self.merged_pr_association()
+        self.api.responses[f"{ROOT}/commits/{HEAD}/pulls?per_page=100"] = [pull, copy.deepcopy(pull)]
+        self.reject_receipt()
+
+    def test_merged_fork_association_fails_closed(self):
+        pull = self.merged_pr_association()
+        pull["head"]["repo"]["id"] = 99
+        self.reject_receipt()
+
+    def test_merged_pr_fallback_still_checks_merge_parents_and_source_tree(self):
+        self.merged_pr_association()
+        for field in ("parents", "tree"):
+            with self.subTest(field=field):
+                commit = self.api.responses[f"{ROOT}/git/commits/{MERGE}"]
+                original = copy.deepcopy(commit)
+                if field == "parents":
+                    commit["parents"][1]["sha"] = OTHER
+                else:
+                    commit["tree"]["sha"] = OTHER
+                self.reject_receipt()
+                self.api.responses[f"{ROOT}/git/commits/{MERGE}"] = original
+
+    def test_cleared_run_association_does_not_hide_api_failure(self):
+        self.merged_pr_association()
+        self.api.responses[f"{ROOT}/commits/{HEAD}/pulls?per_page=100"] = validation.Unverified("API unavailable")
+        self.reject_receipt()
+
+    def test_record_can_use_event_identity_after_pr_merges(self):
+        self.merged_pr_association()
+        self.set_execution_environment()
+        receipt = self.validator.record(MERGE)
+        self.assertEqual(receipt["pr_number"], 9)
+        self.assertEqual(receipt["pr_head_sha"], HEAD)
 
     def test_mutated_association_shas_do_not_replace_recorded_event(self):
         self.run["pull_requests"][0]["head"]["sha"] = OTHER

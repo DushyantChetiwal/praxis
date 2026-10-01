@@ -114,9 +114,13 @@ they lack the captured event provenance. Acceptance requires all of the followin
   receipt's event base and the immutable run head SHA. The recorded event head
   must equal that same run head. The workflow execution SHA must be this tested
   merge SHA. The run's association supplies only PR number and repository
-  ownership, corroborated against the live PR. Neither API object's mutable
-  base/head SHAs are provenance. Fork PRs are excluded; missing event fields,
-  mismatched event heads, and invalid merge parents fail closed.
+  ownership, corroborated against the live PR. GitHub can clear that association
+  after merge; in that case the immutable run-head commit's associated PRs must
+  contain the event/receipt's PR number with matching repository ownership.
+  Missing, duplicate, conflicting, or inaccessible associations still fail closed.
+  Neither API object's mutable base/head SHAs are provenance. Fork PRs are
+  excluded; missing event fields, mismatched event heads, and invalid merge
+  parents fail closed.
 - Push/dispatch originals require selected source, run head, and executing
   workflow commit to be identical. A dispatch with a different selected source
   still runs quality, but does not mint a receipt with unverifiable input history.
