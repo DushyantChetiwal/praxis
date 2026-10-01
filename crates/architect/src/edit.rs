@@ -43,8 +43,13 @@ pub enum GraphEdit {
         path: NodePath,
         position: NodePosition,
     },
+    /// Replace the complete existing-file list; tool inputs are resolved before preview.
     SetFileSurface {
+        /// Full node path, for example ["outer", "step"], not a file path.
         path: NodePath,
+        /// Project-relative files, for example ["src/main.rs", "README.md"].
+        /// Use root/path when a multi-root path is ambiguous. [] means no existing
+        /// files are anticipated. No absolute paths, directories, globs, or '..'.
         file_surface: Vec<String>,
     },
     InsertEdge {

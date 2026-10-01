@@ -131,7 +131,9 @@ pub struct ArchitectNode {
     /// The area of work this step owns.
     #[serde(default)]
     pub responsibility: String,
-    /// Existing files this step anticipates modifying, qualified as `worktree/path`.
+    /// Existing files this step anticipates modifying. Tool inputs accept
+    /// project-relative paths such as ["src/main.rs", "README.md"], or root/path
+    /// to disambiguate multiple roots. Stored graphs use root-qualified paths.
     /// `None` is an unreviewed legacy declaration; `Some([])` anticipates no existing files.
     #[serde(default)]
     pub file_surface: Option<Vec<String>>,
@@ -1951,8 +1953,11 @@ pub struct ProposedNode {
     /// The area of work this step owns, such as `Authentication` or `Tests`.
     #[serde(default)]
     pub responsibility: String,
-    /// Required existing-file surface, using canonical `worktree/path` files, not
-    /// directories or globs. List anticipated modifications, renames, and deletions,
+    /// Required existing-file surface. Example: ["src/main.rs", "README.md"].
+    /// Paths are project-relative; use "backend/src/main.rs" to disambiguate
+    /// multiple open roots. Root-prefixed paths also work in single-root projects.
+    /// Local and connected remote projects use the same rules. No absolute paths,
+    /// directories, globs, or '..'. List modifications, renames, and deletions,
     /// not read-only access. Use [] when no existing files will be affected.
     /// Concurrent steps must have disjoint surfaces, including nested children.
     pub file_surface: Vec<String>,

@@ -224,6 +224,7 @@ jobs:
       - name: Test Architect scheduling and durable history
         run: |
           cargo test --locked -p agent --lib architect_runner::checkpoint_tests::
+          cargo test --locked -p project --features test-support --test integration test_remote_file_inventory_
           cargo test --locked -p agent --lib internal_tests::architect_persistence_tests::
           cargo test --locked -p agent --lib db::tests::test_architect_state_legacy_migration -- --exact
           cargo test --locked -p acp_thread --lib test_tool_call_liveness

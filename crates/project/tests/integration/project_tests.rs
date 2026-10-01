@@ -26,7 +26,7 @@ use buffer_diff::{
 };
 use collections::{BTreeSet, HashMap, HashSet};
 use encoding_rs;
-use fs::{FakeFs, PathEventKind, RealFs};
+use fs::{FakeFs, Fs as _, PathEventKind, RealFs};
 use futures::{FutureExt as _, StreamExt, channel::oneshot, future};
 use git::{
     GitHostingProviderRegistry,
@@ -97,6 +97,155 @@ use util::{
     uri,
 };
 use worktree::WorktreeModelHandle as _;
+
+#[gpui::test(iterations = 3)]
+async fn test_remote_file_inventory_uses_host_files_and_refresh_barriers(
+    cx: &mut TestAppContext,
+    host_cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let client_fs = FakeFs::new(cx.executor());
+    let host_fs = FakeFs::new(host_cx.executor());
+    client_fs
+        .insert_tree(
+            path!("/a"),
+            json!({ "client_only.rs": "wrong filesystem" }),
+        )
+        .await;
+    host_fs
+        .insert_tree(
+            path!("/a"),
+            json!({
+                ".gitignore": "ignored/\n",
+                "host_only.rs": "host",
+                "ignored": { "old.rs": "not a creation" },
+                "target": { "generated.rs": "excluded" }
+            }),
+        )
+        .await;
+    init_test(host_cx);
+    host_cx.update(|cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.project.worktree.file_scan_exclusions =
+                    Some(SplicingVec::from(vec!["**/target".to_string()]));
+            });
+        });
+    });
+    let (project, _host) = Project::test_remote_worktrees(
+        client_fs.clone(),
+        host_fs.clone(),
+        [Path::new(path!("/a"))],
+        cx,
+        host_cx,
+    )
+    .await;
+    let tree = project.read_with(cx, |project, cx| {
+        assert!(project.is_via_remote_server());
+        project.visible_worktrees(cx).next().unwrap()
+    });
+    tree.read_with(cx, |tree, _| {
+        assert!(tree.is_remote());
+        tree.check_file_inventory_support().unwrap();
+    });
+    let client_reads = (
+        client_fs.read_dir_call_count(),
+        client_fs.metadata_call_count(),
+    );
+    let baseline = tree
+        .update(cx, |tree, cx| tree.file_inventory(vec![], cx))
+        .await
+        .unwrap();
+    assert_eq!(
+        baseline.files.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([".gitignore".to_string(), "host_only.rs".to_string()])
+    );
+    assert!(baseline.skipped_paths.contains(&"ignored".to_string()));
+    assert!(baseline.skipped_paths.contains(&"target".to_string()));
+
+    host_fs.pause_events();
+    host_fs
+        .insert_tree(
+            path!("/a"),
+            json!({ "new": { "created.rs": "external write" } }),
+        )
+        .await;
+    host_fs
+        .create_symlink(
+            Path::new(path!("/a/alias.rs")),
+            PathBuf::from(path!("/a/host_only.rs")),
+        )
+        .await
+        .unwrap();
+    let inventory = tree
+        .update(cx, |tree, cx| {
+            tree.file_inventory(vec!["alias.rs".into(), "host_only.rs".into()], cx)
+        })
+        .await
+        .unwrap();
+    assert!(inventory.files.contains(&"new/created.rs".to_string()));
+    assert_eq!(
+        inventory.canonical_paths["alias.rs"],
+        inventory.canonical_paths["host_only.rs"]
+    );
+    tree.read_with(cx, |tree, _| {
+        assert!(
+            tree.entry_for_path(rel_path("new/created.rs")).is_some(),
+            "the inventory response must wait for the replicated scan"
+        );
+    });
+    assert_eq!(
+        client_reads,
+        (client_fs.read_dir_call_count(), client_fs.metadata_call_count())
+    );
+    host_fs.unpause_events_and_flush();
+}
+
+#[gpui::test(iterations = 3)]
+async fn test_remote_file_inventory_disconnect_is_not_an_empty_snapshot(
+    cx: &mut TestAppContext,
+    host_cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let client_fs = FakeFs::new(cx.executor());
+    let host_fs = FakeFs::new(host_cx.executor());
+    host_fs
+        .insert_tree(path!("/a"), json!({ "host.rs": "host" }))
+        .await;
+    let (project, _host) = Project::test_remote_worktrees(
+        client_fs.clone(),
+        host_fs,
+        [Path::new(path!("/a"))],
+        cx,
+        host_cx,
+    )
+    .await;
+    let tree = project.read_with(cx, |project, cx| {
+        project.visible_worktrees(cx).next().unwrap()
+    });
+    let client_reads = (
+        client_fs.read_dir_call_count(),
+        client_fs.metadata_call_count(),
+    );
+    let inventory = tree.update(cx, |tree, cx| tree.file_inventory(Vec::new(), cx));
+    let remote = project.read_with(cx, |project, _| project.remote_client().unwrap());
+    remote.update(cx, |remote, cx| remote.force_server_not_running(cx));
+    cx.run_until_parked();
+    let error = inventory.await.unwrap_err();
+    assert!(format!("{error:#}").contains("disconnect"), "{error:#}");
+    tree.read_with(cx, |tree, _| {
+        assert!(
+            tree.check_file_inventory_support()
+                .unwrap_err()
+                .to_string()
+                .contains("Reconnect")
+        );
+    });
+    assert_eq!(
+        client_reads,
+        (client_fs.read_dir_call_count(), client_fs.metadata_call_count())
+    );
+}
 
 #[gpui::test]
 async fn test_block_via_channel(cx: &mut gpui::TestAppContext) {

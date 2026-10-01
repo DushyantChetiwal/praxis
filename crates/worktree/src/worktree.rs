@@ -1,3 +1,4 @@
+mod file_inventory;
 mod ignore;
 mod worktree_settings;
 
@@ -31,6 +32,7 @@ use gpui::{
     App, AppContext as _, AsyncApp, BackgroundExecutor, Context, Entity, EventEmitter, Priority,
     Task,
 };
+pub use file_inventory::{FileInventory, MAX_FILE_INVENTORY_ENTRIES};
 pub use ignore::{IgnoreKind, IgnoreStack};
 use language::{
     ByteContent, DiskState, FILE_ANALYSIS_BYTES, analyze_byte_content, decode_text, encode_text,
@@ -177,6 +179,7 @@ pub struct RemoteWorktree {
     replica_id: ReplicaId,
     visible: bool,
     disconnected: bool,
+    file_inventory_support: Option<Result<(), String>>,
     received_initial_update: bool,
 }
 
@@ -665,6 +668,7 @@ impl Worktree {
                 snapshot_subscriptions: Default::default(),
                 visible: worktree.visible,
                 disconnected: false,
+                file_inventory_support: None,
                 received_initial_update: false,
             };
 
@@ -1098,6 +1102,7 @@ impl Worktree {
                 let response = this.client.request(proto::ExpandProjectEntry {
                     project_id: this.project_id,
                     entry_id: entry_id.to_proto(),
+                    file_inventory: None,
                 });
                 Some(cx.spawn(async move |this, cx| {
                     let response = response.await?;
@@ -1244,6 +1249,40 @@ impl Worktree {
         request: proto::ExpandProjectEntry,
         mut cx: AsyncApp,
     ) -> Result<proto::ExpandProjectEntryResponse> {
+        let request_project_id = request.project_id;
+        if let Some(request) = request.file_inventory {
+            if request.check_support_only {
+                this.update(&mut cx, |this, cx| this.negotiate_file_inventory(cx))
+                    .await;
+            }
+            this.read_with(&cx, |this, _| this.check_file_inventory_support())?;
+            let inventory = if request.check_support_only {
+                None
+            } else {
+                let inventory = this
+                    .update(&mut cx, |this, cx| {
+                        this.file_inventory_internal(
+                            request.declared_paths,
+                            request.include_private
+                                && request_project_id == proto::REMOTE_SERVER_PROJECT_ID,
+                            cx,
+                        )
+                    })
+                    .await?;
+                Some(proto::WorktreeFileInventory {
+                    root_path: inventory.root_path.to_string_lossy().into_owned(),
+                    files: inventory.files,
+                    skipped_paths: inventory.skipped_paths,
+                    canonical_paths: inventory.canonical_paths.into_iter().collect(),
+                    entry_count: inventory.entry_count as u64,
+                })
+            };
+            return Ok(proto::ExpandProjectEntryResponse {
+                worktree_scan_id: this.read_with(&cx, |this, _| this.scan_id()) as u64,
+                supports_file_inventory: true,
+                file_inventory: inventory,
+            });
+        }
         let task = this.update(&mut cx, |this, cx| {
             this.expand_entry(ProjectEntryId::from_proto(request.entry_id), cx)
         });
@@ -1252,6 +1291,8 @@ impl Worktree {
         let scan_id = this.read_with(&cx, |this, _| this.scan_id());
         Ok(proto::ExpandProjectEntryResponse {
             worktree_scan_id: scan_id as u64,
+            supports_file_inventory: false,
+            file_inventory: None,
         })
     }
 
