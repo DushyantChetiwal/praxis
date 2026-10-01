@@ -1396,7 +1396,9 @@ impl ArchitectPane {
 
     fn render_run_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let thread = self.thread.read(cx);
-        let run = thread.architect_run().filter(|run| !run.result_dismissed())?;
+        let run = thread
+            .architect_run()
+            .filter(|run| !run.result_dismissed())?;
         let total = self
             .root_graph(cx)
             .map(ArchitectGraph::step_count_deeply)
@@ -1550,7 +1552,9 @@ impl ArchitectPane {
                         IconButton::new("architect-dismiss-run", IconName::Close)
                             .tab_index(0isize)
                             .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text("Hide this result; keep run history and recovery"))
+                            .tooltip(Tooltip::text(
+                                "Hide this result; keep run history and recovery",
+                            ))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.thread.update(cx, |thread, cx| {
                                     thread.dismiss_architect_run(cx);
@@ -3257,9 +3261,8 @@ mod tests {
         fs.insert_tree("/", serde_json::json!({ "a": {} })).await;
         let project = Project::test(fs.clone(), [Path::new("/a")], cx).await;
         let thread_store = cx.update(|cx| agent::ThreadStore::global(cx));
-        let native_agent = cx.update(|cx| {
-            agent::NativeAgent::new(thread_store, agent::Templates::new(), fs, cx)
-        });
+        let native_agent =
+            cx.update(|cx| agent::NativeAgent::new(thread_store, agent::Templates::new(), fs, cx));
         let connection = Rc::new(agent::NativeAgentConnection(native_agent));
         let session = cx
             .update(|cx| {
@@ -3321,12 +3324,13 @@ mod tests {
             assert!(!pane.is_running(cx));
         });
         fake.allow_requests();
-        cx.update(|cx| agent::resume_architect_run(thread.clone(), session, cx)).unwrap();
+        cx.update(|_, cx| agent::resume_architect_run(thread.clone(), session, cx))
+            .unwrap();
         pane.update(cx, |pane, cx| {
             assert!(pane.render_run_bar(cx).is_some());
             assert!(pane.is_running(cx));
         });
-        cx.update(|cx| agent::stop_architect_run(&thread, None, cx));
+        cx.update(|_, cx| agent::stop_architect_run(&thread, None, cx));
     }
 
     #[test]

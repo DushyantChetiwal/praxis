@@ -76,7 +76,7 @@ impl NodeInspector {
 }
 
 pub(super) fn available_step_models(cx: &App) -> Vec<(StepModel, SharedString)> {
-    let mut models = Vec::new();
+    let mut models: Vec<(StepModel, SharedString)> = Vec::new();
     for provider in LanguageModelRegistry::read_global(cx).visible_providers() {
         if !provider.is_authenticated(cx) {
             continue;
@@ -187,7 +187,7 @@ impl ArchitectPane {
                         Button::new("architect-step-model", label)
                             .tab_index(0isize)
                             .label_size(LabelSize::Small)
-                            .icon(IconName::ChevronDown)
+                            .end_icon(Icon::new(IconName::ChevronDown))
                             .disabled(refusal.is_some()),
                         Tooltip::text(
                             refusal.unwrap_or("Choose the model that executes this step"),

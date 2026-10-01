@@ -444,6 +444,7 @@ pub struct ElicitationStore {
 #[derive(Default)]
 pub struct QuestionWindowActivity {
     windows: RefCell<Vec<std::rc::Weak<Cell<Option<Instant>>>>>,
+    app_inactive_since: Rc<Cell<Option<Instant>>>,
 }
 
 impl QuestionWindowActivity {
@@ -464,12 +465,26 @@ impl QuestionWindowActivity {
         cx: &mut Context<T>,
     ) -> Subscription {
         let activity = self.track_window(window.is_window_active(), cx.background_executor().now());
+        let app_inactive_since = self.app_inactive_since.clone();
         cx.observe_window_activation(window, move |_, window, cx| {
             activity.set((!window.is_window_active()).then(|| cx.background_executor().now()));
+            Self::update_app_activity(&app_inactive_since, cx);
         })
     }
 
-    fn remaining(&self, created_at: Instant, now: Instant) -> Option<Duration> {
+    fn update_app_activity(inactive_since: &Cell<Option<Instant>>, cx: &App) {
+        // This is a platform query, not a window/entity update. A different
+        // Praxis window in the foreground must protect this question too.
+        if cx.active_window().is_some() {
+            inactive_since.set(None);
+        } else if inactive_since.get().is_none() {
+            inactive_since.set(Some(cx.background_executor().now()));
+        }
+    }
+
+    fn remaining(&self, created_at: Instant, cx: &App) -> Option<Duration> {
+        Self::update_app_activity(&self.app_inactive_since, cx);
+        let app_inactive_since = self.app_inactive_since.get()?;
         let mut inactive_since = None;
         for window in self.windows.borrow().iter() {
             // Unknown/closed windows do not authorize unattended answers, and
@@ -480,7 +495,8 @@ impl QuestionWindowActivity {
                 Some(inactive_since.map_or(since, |previous: Instant| previous.max(since)));
         }
         inactive_since.map(|since| {
-            (since.max(created_at) + Duration::from_secs(10)).saturating_duration_since(now)
+            (since.max(created_at).max(app_inactive_since) + Duration::from_secs(10))
+                .saturating_duration_since(cx.background_executor().now())
         })
     }
 }
@@ -494,14 +510,14 @@ struct QuestionTimeout {
 }
 
 impl QuestionTimeout {
-    fn message(&self, now: Instant) -> String {
+    fn message(&self, cx: &App) -> String {
         let status = if self.interacted.get() {
             "Auto-answer paused; waiting for your answer.".to_string()
-        } else if let Some(remaining) = self.activity.remaining(self.created_at, now) {
+        } else if let Some(remaining) = self.activity.remaining(self.created_at, cx) {
             let seconds = remaining.as_secs_f64().ceil() as u64;
-            format!("Using the recommendation in {seconds}s while the question window is inactive.")
+            format!("Using the recommendation in {seconds}s while Praxis is inactive.")
         } else {
-            "Auto-answer paused while Praxis is active; countdown starts after you leave the question window.".to_string()
+            "Auto-answer paused while Praxis is active; countdown starts after you leave Praxis.".to_string()
         };
         format!(
             "{}\n\nRecommendation: {}\n\n{status}",
@@ -4206,7 +4222,7 @@ impl AcpThread {
             message: request.message.clone(),
             recommendation: recommendation_label,
         };
-        request.message = state.message(created_at);
+        request.message = state.message(cx);
         let (id, response) = self.request_elicitation_with_id(request, cx)?;
         let interacted = state.interacted.clone();
         self.elicitations
@@ -4246,7 +4262,7 @@ impl AcpThread {
                 if interacted.get() {
                     return (response.await, timed_out.get());
                 }
-                let remaining = activity.remaining(created_at, executor.now());
+                let remaining = cx.update(|cx| activity.remaining(created_at, cx));
                 let delay = remaining
                     .filter(|remaining| !remaining.is_zero())
                     .unwrap_or(Duration::from_secs(1))
@@ -4257,8 +4273,8 @@ impl AcpThread {
                     response = response => return (response, timed_out.get()),
                     _ = tick => {}
                 }
-                if activity
-                    .remaining(created_at, executor.now())
+                if cx
+                    .update(|cx| activity.remaining(created_at, cx))
                     .is_some_and(|remaining| remaining.is_zero())
                 {
                     let id = task_id.clone();
@@ -4285,10 +4301,7 @@ impl AcpThread {
                                             !state.interacted.get()
                                                 && state
                                                     .activity
-                                                    .remaining(
-                                                        state.created_at,
-                                                        cx.background_executor().now(),
-                                                    )
+                                                    .remaining(state.created_at, cx)
                                                     .is_some_and(|remaining| remaining.is_zero())
                                         })
                                         && thread.elicitation(&id).is_some_and(|(_, entry)| {
@@ -4351,7 +4364,7 @@ impl AcpThread {
         let Some(state) = self.elicitations.question_timeouts.get(id) else {
             return;
         };
-        let message = state.message(cx.background_executor().now());
+        let message = state.message(cx);
         let Some(ix) = self.elicitation_entry_ix(id) else {
             return;
         };
@@ -10172,6 +10185,121 @@ mod tests {
             .clock()
             .advance(Duration::from_secs(1));
         cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert!(matches!(
+                thread.elicitation(&id).unwrap().1.status,
+                ElicitationStatus::Pending { .. }
+            ));
+        });
+        thread.update(cx, |thread, cx| thread.cancel_elicitation(&id, cx));
+        assert!(!task.await.1);
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_other_praxis_window_resets_inactivity(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (id, task, activity) = request_timed_question(&thread, cx);
+        drop(activity);
+        let activity = thread.read_with(cx, |thread, _| {
+            thread.question_window_activity(&id).unwrap()
+        });
+        let question_window = cx.add_window(|window, cx| QuestionActivityView {
+            _subscription: activity.observe_window(window, cx),
+        });
+        question_window
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+
+        // B has no question or activity subscription. TestPlatform changes its
+        // foreground handle synchronously, then delivers activation callbacks.
+        let cx = cx.add_empty_window();
+        cx.update(|window, cx| {
+            window.activate_window();
+            assert_eq!(cx.active_window(), Some(window.window_handle()));
+        });
+        cx.run_until_parked();
+        question_window
+            .update(cx, |_, window, _| assert!(!window.is_window_active()))
+            .unwrap();
+        for _ in 0..3 {
+            cx.executor().advance_clock(Duration::from_secs(60));
+            cx.run_until_parked();
+            thread.read_with(cx, |thread, _| {
+                let entry = thread.elicitation(&id).unwrap().1;
+                assert!(matches!(entry.status, ElicitationStatus::Pending { .. }));
+                assert!(
+                    entry
+                        .request
+                        .message
+                        .contains("paused while Praxis is active")
+                );
+            });
+            cx.deactivate_window();
+            cx.update(|_, cx| assert!(cx.active_window().is_none()));
+            // The first tick observes B's blur. Neither A's earlier blur nor
+            // time spent in B may count toward these ten inactive seconds.
+            cx.executor().advance_clock(Duration::from_secs(10));
+            cx.run_until_parked();
+            thread.read_with(cx, |thread, _| {
+                assert!(matches!(
+                    thread.elicitation(&id).unwrap().1.status,
+                    ElicitationStatus::Pending { .. }
+                ));
+            });
+            cx.update(|window, _| window.activate_window());
+            cx.run_until_parked();
+        }
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.deactivate_window();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.executor().advance_clock(Duration::from_millis(9999));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert!(matches!(
+                thread.elicitation(&id).unwrap().1.status,
+                ElicitationStatus::Pending { .. }
+            ));
+        });
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        let (response, timed_out) = task
+            .now_or_never()
+            .expect("ten observed inactive seconds must resolve the question");
+        assert!(timed_out);
+        assert_eq!(response.action, question_test_answer("postgres").action);
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_other_praxis_window_at_deadline(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (id, task, activity) = request_timed_question(&thread, cx);
+        drop(activity);
+        let activity = thread.read_with(cx, |thread, _| {
+            thread.question_window_activity(&id).unwrap()
+        });
+        cx.add_window(|window, cx| QuestionActivityView {
+            _subscription: activity.observe_window(window, cx),
+        });
+        let cx = cx.add_empty_window();
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.deactivate_window();
+        cx.executor().advance_clock(Duration::from_secs(10));
+        cx.dispatcher
+            .scheduler()
+            .clock()
+            .advance(Duration::from_secs(1));
+        cx.update(|window, cx| {
+            window.activate_window();
+            assert_eq!(cx.active_window(), Some(window.window_handle()));
+        });
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_secs(60));
         cx.run_until_parked();

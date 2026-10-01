@@ -4132,7 +4132,9 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn inspector_tracks_revised_briefs_without_resetting_local_edits(cx: &mut TestAppContext) {
+    async fn inspector_tracks_revised_briefs_without_resetting_local_edits(
+        cx: &mut TestAppContext,
+    ) {
         let plan = test_plan(cx).await;
         let project = plan.project.clone();
         let thread = plan.thread;
@@ -4187,7 +4189,10 @@ mod tests {
             .expect("the coordinator should be able to revise a locked pending step");
         });
         cx.run_until_parked();
-        assert_eq!(goal.read_with(cx, |editor, cx| editor.text(cx)), "Revised goal");
+        assert_eq!(
+            goal.read_with(cx, |editor, cx| editor.text(cx)),
+            "Revised goal"
+        );
         assert_eq!(
             capture.read_with(cx, |editor, cx| editor.text(cx)),
             "Revised capture"

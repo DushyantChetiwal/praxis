@@ -24,7 +24,7 @@ const FREEFORM_ANSWER_FIELD: &str = "freeform_answer";
 /// than one. A freeform answer is always available, including with options.
 /// Keep the options concise and use their descriptions to explain meaningful
 /// tradeoffs. Always supply a recommendation when it is safe to proceed
-/// automatically after 10 seconds with the question window inactive. Otherwise
+/// automatically after 10 seconds with all Praxis windows inactive. Otherwise
 /// omit it and wait for a manual answer. Do not use this tool to request secrets.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -39,7 +39,7 @@ pub struct AskQuestionToolInput {
     pub allow_multiple: bool,
     /// Always supply a recommendation when it is safe to proceed without user input.
     /// Use a string for free text/single select, or a nonempty array of unique option
-    /// values for multi select. After 10 seconds with the question window inactive
+    /// values for multi select. After 10 seconds with all Praxis windows inactive
     /// and no edits or selections, this answer is used automatically. Active time
     /// never counts toward the timeout. Omit only when no safe recommendation
     /// exists; then wait for a manual answer. Never use this to authorize tools
@@ -352,7 +352,7 @@ impl AskQuestionTool {
             AskQuestionToolOutput::TimedOut { answer } => (
                 "Question timed out; used model recommendation",
                 format!(
-                    "**Question:** {}\n\nThe question window was inactive for 10 seconds with no edits or selections. Used the model recommendation (not a user answer): {}",
+                    "**Question:** {}\n\nPraxis was inactive for 10 seconds with no edits or selections. Used the model recommendation (not a user answer): {}",
                     input.question,
                     Self::recommendation_label(input, answer)
                 ),

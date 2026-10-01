@@ -10190,20 +10190,31 @@ mod internal_tests {
         let (checkpoint, failed_graph) = thread.read_with(cx, |thread, _| {
             let run = thread.architect_run().unwrap();
             assert!(!run.result_dismissed());
-            (run.control().unwrap().clone(), thread.architect_graph().cloned())
+            (
+                run.control().unwrap().clone(),
+                thread.architect_graph().cloned(),
+            )
         });
         thread.update(cx, |thread, cx| {
             thread.dismiss_architect_run(cx);
             thread.dismiss_architect_run(cx);
         });
         thread.read_with(cx, |thread, _| {
-            let run = thread.architect_run().expect("dismissal must retain the run");
+            let run = thread
+                .architect_run()
+                .expect("dismissal must retain the run");
             assert!(run.result_dismissed());
             assert!(run.can_resume(), "dismissal must not remove recovery");
             assert!(Rc::ptr_eq(run.control().unwrap(), &checkpoint));
-            assert!(matches!(&run.outcome, Some(architect::RunOutcome::Failed { .. })));
+            assert!(matches!(
+                &run.outcome,
+                Some(architect::RunOutcome::Failed { .. })
+            ));
             assert_eq!(run.history().len(), 3);
-            assert_eq!(run.history()[1].summary.as_deref(), Some("Preserve the completed left lane."));
+            assert_eq!(
+                run.history()[1].summary.as_deref(),
+                Some("Preserve the completed left lane.")
+            );
             assert_eq!(thread.architect_graph(), failed_graph.as_ref());
         });
         cx.update(|cx| crate::resume_architect_run(thread.clone(), acp_thread.clone(), cx))
@@ -10254,7 +10265,11 @@ mod internal_tests {
             let run = thread.architect_run().unwrap();
             assert!(run.result_dismissed());
             assert_eq!(run.outcome, Some(architect::RunOutcome::Completed));
-            assert_eq!(run.history().len(), 5, "completed history remains inspectable");
+            assert_eq!(
+                run.history().len(),
+                5,
+                "completed history remains inspectable"
+            );
             assert!(!run.can_resume());
             thread.architect_graph().cloned().unwrap()
         });

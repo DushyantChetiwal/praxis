@@ -125,9 +125,11 @@ Stops an existing task in the same conversation and reports its output/status. I
 
 ### `ask_question`
 
-Asks for a preference or missing requirement, with free text, a single choice, or multiple choices. When the agent supplies a valid recommendation, the question shows it with a **10-second countdown**. If you do not interact, Praxis uses that recommendation and continues; the conversation records this as an automatic recommendation, not as your answer.
+Asks for a preference or missing requirement, with free text, a single choice, or multiple choices. Questions with predefined options also always offer **Or write your own answer**. Nonblank freeform text takes precedence over selected options.
 
-Typing, changing a selection, or submitting pauses automatic continuation for that question. Decline, Cancel, and stopping the agent never select the recommendation. Questions without a safe recommendation wait for a manual answer. This timeout applies only to `ask_question`, not to tool permissions or approval to leave Plan mode.
+When the agent supplies a valid recommendation, the question can auto-answer after **10 continuous seconds with Praxis inactive**. Reading a question while any Praxis window has focus does not use that time; returning to Praxis resets the countdown. Typing or changing a selection disables automatic continuation for that question, even if you subsequently switch apps. The conversation records a timeout as an automatic recommendation, not as your answer.
+
+Decline, Cancel, and stopping the agent never select the recommendation. Questions without a safe recommendation or a known question window wait for a manual answer. This timeout applies only to `ask_question`, not to tool permissions or approval to leave Plan mode.
 
 ### `skill`
 
