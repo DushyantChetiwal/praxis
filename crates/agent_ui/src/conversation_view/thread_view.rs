@@ -13062,6 +13062,154 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_question_timeout_manual_text_and_choices_survive_blur(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        crate::conversation_view::tests::init_test(cx);
+        let project = Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |workspace, _| workspace.workspace().clone());
+        let conversation_view = cx.update(|window, cx| {
+            let connection_store = cx.new(|cx| AgentConnectionStore::new(project.clone(), cx));
+            let thread_store = cx.new(|cx| ThreadStore::new(cx));
+            cx.new(|cx| {
+                ConversationView::new(
+                    Rc::new(crate::conversation_view::tests::StubAgentServer::default_response()),
+                    connection_store,
+                    Agent::Custom { id: "Test".into() },
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    workspace.downgrade(),
+                    project,
+                    Some(thread_store),
+                    AgentThreadSource::AgentPanel,
+                    window,
+                    cx,
+                )
+            })
+        });
+        cx.run_until_parked();
+        let view = conversation_view.read_with(cx, |view, _| view.active_thread().unwrap().clone());
+        let thread = view.read_with(cx, |view, _| view.thread.clone());
+        for (edit_text, allow_multiple) in [(true, false), (false, false), (false, true)] {
+            cx.update(|window, _| window.activate_window());
+            let schema = agent::AskQuestionTool::elicitation_schema(&agent::AskQuestionToolInput {
+                question: "Which database?".into(),
+                options: vec![
+                    agent::AskQuestionOption {
+                        value: "postgres".into(),
+                        label: "PostgreSQL".into(),
+                        description: None,
+                    },
+                    agent::AskQuestionOption {
+                        value: "sqlite".into(),
+                        label: "SQLite".into(),
+                        description: None,
+                    },
+                ],
+                allow_multiple,
+                recommendation: None,
+            });
+            let (id, task) = thread.update(cx, |thread, cx| {
+                let answer = if allow_multiple {
+                    acp::ElicitationContentValue::StringArray(vec!["postgres".into()])
+                } else {
+                    acp::ElicitationContentValue::from("postgres")
+                };
+                thread
+                    .request_question_with_timeout(
+                        acp::CreateElicitationRequest::new(
+                            acp::ElicitationFormMode::new(
+                                acp::ElicitationSessionScope::new(thread.session_id().clone()),
+                                schema.clone(),
+                            ),
+                            "Which database?",
+                        ),
+                        acp::CreateElicitationResponse::new(acp::ElicitationAction::Accept(
+                            acp::ElicitationAcceptAction::new().content(
+                                std::collections::BTreeMap::from([("answer".into(), answer)]),
+                            ),
+                        )),
+                        "PostgreSQL".into(),
+                        || false,
+                        cx,
+                    )
+                    .unwrap()
+            });
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_secs(65));
+            thread.read_with(cx, |thread, _| {
+                assert!(
+                    thread
+                        .elicitation(&id)
+                        .unwrap()
+                        .1
+                        .request
+                        .message
+                        .contains("in 5s.")
+                );
+                assert!(!thread.question_interaction_flag(&id).unwrap().get());
+            });
+            if edit_text {
+                let editor = view.read_with(cx, |view, _| {
+                    view.elicitation_form_states
+                        .get(&id)
+                        .unwrap()
+                        .text_editor_for_test("freeform_answer")
+                });
+                editor.update_in(cx, |editor, window, cx| {
+                    editor.set_text("Use SQLite locally", window, cx);
+                });
+            } else {
+                let handlers = view.update(cx, |view, cx| view.elicitation_card_handlers(cx));
+                cx.update(|_, cx| handlers.select_answer_for_test(id.clone(), allow_multiple, cx));
+            }
+            cx.run_until_parked();
+            let content = view.read_with(cx, |view, cx| {
+                view.elicitation_form_states
+                    .get(&id)
+                    .unwrap()
+                    .collect(&schema, cx)
+                    .unwrap()
+            });
+            assert!(!content.is_empty());
+            for active in [true, false, true] {
+                if active {
+                    cx.update(|window, _| window.activate_window());
+                } else {
+                    cx.deactivate_window();
+                }
+                cx.executor().advance_clock(Duration::from_secs(120));
+                cx.run_until_parked();
+                thread.read_with(cx, |thread, _| {
+                    assert!(thread.question_interaction_flag(&id).unwrap().get());
+                    assert!(matches!(
+                        thread.elicitation(&id).unwrap().1.status,
+                        ElicitationStatus::Pending { .. }
+                    ));
+                });
+                view.read_with(cx, |view, cx| {
+                    assert_eq!(
+                        view.elicitation_form_states
+                            .get(&id)
+                            .unwrap()
+                            .collect(&schema, cx)
+                            .unwrap(),
+                        content
+                    );
+                });
+            }
+            thread.update(cx, |thread, cx| thread.cancel_elicitation(&id, cx));
+            assert!(!task.await.1);
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
     async fn test_open_link_bare_path(cx: &mut gpui::TestAppContext) {
         crate::test_support::init_test(cx);
 

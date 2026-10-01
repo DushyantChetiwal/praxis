@@ -47,6 +47,14 @@ pub(crate) struct ElicitationFormState {
 }
 
 impl ElicitationFormState {
+    #[cfg(test)]
+    pub(crate) fn text_editor_for_test(&self, name: &str) -> Entity<Editor> {
+        match self.fields.get(name) {
+            Some(ElicitationFieldState::Text(editor)) => editor.clone(),
+            _ => panic!("expected a text field named {name}"),
+        }
+    }
+
     pub(crate) fn observe_question_window<T: 'static>(
         &mut self,
         activity: &acp_thread::QuestionWindowActivity,
@@ -1826,6 +1834,20 @@ pub(crate) struct ElicitationCardHandlers {
 }
 
 impl ElicitationCardHandlers {
+    #[cfg(test)]
+    pub(crate) fn select_answer_for_test(
+        &self,
+        id: ElicitationEntryId,
+        multiple: bool,
+        cx: &mut App,
+    ) {
+        if multiple {
+            (self.on_multi_select_change)(id, "answer".into(), "sqlite".into(), true, cx);
+        } else {
+            (self.on_single_select_change)(id, "answer".into(), "sqlite".into(), cx);
+        }
+    }
+
     pub(crate) fn new(
         on_submit: impl Fn(ElicitationEntryId, &mut Window, &mut App) + 'static,
         on_decline: impl Fn(ElicitationEntryId, &mut Window, &mut App) + 'static,
