@@ -108,6 +108,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn architect_production_instructions_follow_individual_tool_visibility() {
+        let project = prompt_store::ProjectContext::default();
+        let templates = Templates::new();
+        let tools = [
+            "inspect_architect_plan",
+            "edit_architect_plan",
+            "wait_architect_run",
+        ];
+        for name in ["system_prompt.hbs", "experimental_system_prompt.hbs"] {
+            for visible in tools {
+                let template = SystemPromptTemplate {
+                    project: &project,
+                    available_tools: vec![visible.into()],
+                    model_name: None,
+                    date: "2026-10-01".into(),
+                    user_agents_md: None,
+                    sandboxing: false,
+                    is_linux: false,
+                    is_windows: false,
+                    plan_mode: false,
+                    plan: None,
+                };
+                let rendered = templates.0.render(name, &template).unwrap();
+                for tool in tools {
+                    assert_eq!(rendered.contains(&format!("`{tool}`")), tool == visible);
+                }
+                if visible == "edit_architect_plan" {
+                    assert!(rendered.contains("permission approval, even in Architect mode"));
+                    assert!(rendered.contains("unsupported checkpoint rebases are refused"));
+                    assert!(rendered.contains("even a canvas move can invalidate work"));
+                    assert!(rendered.contains("unknown impact and no apply token"));
+                    assert!(rendered.contains("recomputes runtime impact after permission"));
+                    assert!(rendered.contains("flat acyclic graph"));
+                    assert!(rendered.contains("cannot infer retained conditional verdicts"));
+                }
+                if visible == "wait_architect_run" {
+                    assert!(rendered.contains("event_sequence unchanged"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn architect_coordinator_instructions_follow_tool_visibility() {
         let project = prompt_store::ProjectContext::default();
         let templates = Templates::new();
@@ -147,6 +190,8 @@ mod tests {
                     assert!(rendered.contains("`revise_step`"));
                     assert!(rendered.contains("Completed work cannot be revised"));
                     assert!(rendered.contains("does not roll back their file changes"));
+                    assert!(rendered.contains("`models[].configuration`"));
+                    assert!(rendered.contains("never split display IDs"));
                 }
             }
         }

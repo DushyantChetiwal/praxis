@@ -1,4 +1,5 @@
 mod apply_code_action_tool;
+mod architect_plan_tool;
 mod architect_run_tool;
 mod ask_question_tool;
 mod ask_user_tool;
@@ -81,6 +82,7 @@ where
 }
 
 pub use apply_code_action_tool::*;
+pub use architect_plan_tool::*;
 pub use architect_run_tool::*;
 pub use ask_question_tool::*;
 pub use ask_user_tool::*;
@@ -229,6 +231,7 @@ tools! {
     DeletePathTool,
     DiagnosticsTool,
     DraftPlanTool,
+    EditArchitectPlanTool,
     EditFileTool,
     ExitPlanModeTool,
     FetchTool,
@@ -242,6 +245,7 @@ tools! {
     GitStatusTool,
     GoToDefinitionTool,
     GrepTool,
+    InspectArchitectPlanTool,
     InspectArchitectRunTool,
     ListAgentsAndModelsTool,
     ListDirectoryTool,
@@ -257,6 +261,7 @@ tools! {
     TerminalStatusTool,
     TerminalStopTool,
     TerminalWaitTool,
+    WaitArchitectRunTool,
     WebSearchTool,
     WriteFileTool,
 }
@@ -353,6 +358,7 @@ mod tests {
         assert_eq!(GitDiffTool::capability(), crate::ToolCapability::ReadOnly);
         for capability in [
             DraftPlanTool::capability(),
+            EditArchitectPlanTool::capability(),
             RefineStepTool::capability(),
             SetStepLocksTool::capability(),
             CompleteStepTool::capability(),

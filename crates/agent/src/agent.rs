@@ -862,6 +862,12 @@ impl NativeAgent {
                     thread_handle.downgrade(),
                     acp_thread.downgrade(),
                 ));
+                thread.add_tool(InspectArchitectPlanTool::new(thread_handle.downgrade()));
+                thread.add_tool(EditArchitectPlanTool::new(thread_handle.downgrade()));
+                thread.add_tool(WaitArchitectRunTool::new(
+                    thread_handle.downgrade(),
+                    acp_thread.downgrade(),
+                ));
             }
             // The resolver closure reads `state.skills` at invocation
             // time, so skills added or removed by the SKILL.md watcher
@@ -1749,7 +1755,13 @@ impl NativeAgent {
                         .update(cx, |this, cx| {
                             let project_id = this.get_or_create_project_state(&project, cx);
                             this.pending_sessions.remove(&id);
-                            this.register_session(thread.clone(), project_id, cx)
+                            let acp_thread = this.register_session(thread.clone(), project_id, cx);
+                            // Restore-time notifications are drained before registration.
+                            // Persist recovery errors and events even when the thread stays idle.
+                            if thread.read(cx).has_persistent_architect_state() {
+                                this.save_thread(thread.clone(), cx);
+                            }
+                            acp_thread
                         })
                         .map_err(Arc::new)?;
                     let events = thread.update(cx, |thread, cx| thread.replay(cx));
@@ -1901,14 +1913,17 @@ impl NativeAgent {
 
     /// Builds everything needed to persist a session's thread content,
     /// capturing the current draft prompt from the ACP thread. Returns `None`
-    /// if the thread is empty or its project state is gone.
+    /// if the root thread has no conversation or Architect state, or its project is gone.
     fn thread_save_payload(
         &self,
         session: &Session,
         draft_prompt: Option<Vec<acp::ContentBlock>>,
         cx: &mut App,
     ) -> Option<(acp::SessionId, PathList, Task<DbThread>)> {
-        if session.thread.read(cx).is_empty() {
+        if session.thread.read(cx).is_empty()
+            && !session.thread.read(cx).has_persistent_architect_state()
+            && session.thread.read(cx).parent_thread_id().is_none()
+        {
             return None;
         }
         let state = self.projects.get(&session.project_id)?;
@@ -2296,6 +2311,10 @@ impl NativeAgentConnection {
                 .get_mut(parent_session_id)
                 .context("the thread this plan belongs to is no longer open")?;
             parent_session.subagents.push(acp_thread.clone());
+            // Persist the session before linking it into run history, even if
+            // interruption happens before its first prompt is submitted.
+            let child_id = acp_thread.read(cx).session_id().clone();
+            agent.enqueue_save(&child_id, None, cx);
             Ok(acp_thread)
         })
     }
@@ -2945,6 +2964,10 @@ pub fn available_native_agent(cx: &App) -> AvailableAgent {
                 id,
                 name: model.name().0,
                 is_default,
+                configuration: Some(architect::StepModel {
+                    provider: provider_id.0.to_string(),
+                    model: model.id().0.to_string(),
+                }),
             });
         }
     }
@@ -4198,6 +4221,29 @@ mod internal_tests {
     use util::{path, rel_path::rel_path};
 
     #[gpui::test]
+    fn test_available_native_agent_exposes_step_configuration(cx: &mut TestAppContext) {
+        let provider = init_test(cx);
+        let model = provider.model("family/model");
+        cx.read(|cx| {
+            let available = available_native_agent(cx);
+            let entry = available
+                .models
+                .iter()
+                .find(|entry| entry.id == format!("{}/{}", model.provider_id().0, model.id().0))
+                .expect("configured model should be discoverable");
+            assert_eq!(
+                entry.configuration,
+                Some(architect::StepModel {
+                    provider: model.provider_id().0.to_string(),
+                    model: "family/model".to_string(),
+                })
+            );
+            let serialized = serde_json::to_value(entry).expect("model serializes");
+            assert_eq!(serialized["configuration"]["model"], "family/model");
+        });
+    }
+
+    #[gpui::test]
     fn test_available_native_agent_hides_hidden_providers(cx: &mut TestAppContext) {
         init_test(cx);
         cx.update(|cx| {
@@ -5185,6 +5231,890 @@ mod internal_tests {
             restored.read_with(cx, |thread, _| tool_names(thread)),
             live_tool_names
         );
+    }
+
+    mod architect_persistence_tests {
+        use super::*;
+
+        fn plan() -> architect::ArchitectGraph {
+            let mut graph = architect::ArchitectGraph::default();
+            let mut node = architect::ArchitectNode::new("step", "Saved step");
+            node.locked = true;
+            graph.add_node(node);
+            graph
+        }
+
+        #[gpui::test]
+        async fn history_events_and_child_transcript_survive_close_reopen(cx: &mut TestAppContext) {
+            init_test(cx);
+            let (connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+            let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+            let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+            let path = architect::NodePath::root("step".into());
+            let visit = thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(plan()), cx);
+                thread.set_session_mode(SessionMode::Architect, cx);
+                thread.start_architect_run(path.clone(), "Saved step".into(), Task::ready(()), cx);
+                thread.note_architect_run_position(path.clone(), "Saved step".into(), 1, 1, cx)
+            });
+            let child = cx.update(|cx| {
+                connection
+                    .create_architect_run_step_thread(
+                        &session_id,
+                        "Saved step".into(),
+                        visit,
+                        None,
+                        cx,
+                    )
+                    .expect("create child session")
+            });
+            let child_id = child.read_with(cx, |child, _| child.session_id().clone());
+            cx.run_until_parked();
+            let database = cx
+                .update(|cx| ThreadsDatabase::connect(cx))
+                .await
+                .expect("database");
+            let empty_child = database
+                .load_thread(child_id.clone())
+                .await
+                .expect("load child")
+                .expect("a newly linked child must exist before its first prompt");
+            assert!(empty_child.messages.is_empty());
+            let child_thread = cx.update(|cx| native_thread_for_session(&agent, &child_id, cx));
+            child_thread.update(cx, |thread, cx| {
+                thread.push_acp_user_block(
+                    ClientUserMessageId::new(),
+                    [acp::ContentBlock::from("Durable step transcript")],
+                    project.read(cx).path_style(cx),
+                    cx,
+                );
+                thread.push_acp_agent_block("Durable step response".into(), cx);
+            });
+            let original_run = thread.update(cx, |thread, cx| {
+                thread.set_architect_run_step_thread(visit, &child, cx);
+                thread.finish_architect_run_step(visit, Some("Saved summary".into()), cx);
+                thread.finish_architect_run(architect::RunOutcome::Completed, cx);
+                thread.dismiss_architect_run(cx);
+                let original_run = thread.architect_run().expect("first run").id();
+                let mut replacement = plan();
+                replacement.node_mut(&"step".into()).expect("step").intent = "Revised goal".into();
+                thread.set_architect_graph(Some(replacement), cx);
+                thread.start_architect_run(path.clone(), "Second run".into(), Task::ready(()), cx);
+                thread.note_architect_run_position(path.clone(), "Second run".into(), 1, 1, cx);
+                original_run
+            });
+            cx.run_until_parked();
+            let saved = database
+                .load_thread(session_id.clone())
+                .await
+                .expect("load")
+                .expect("idle main thread must save Architect state without messages");
+            assert!(saved.messages.is_empty());
+            let saved_state = saved.persistent_architect.expect("persistent state");
+            assert_eq!(saved_state.archive.len(), 1);
+            let sequence = saved_state.sequence;
+            let first_event = saved_state.events.first().expect("events").clone();
+
+            drop(child_thread);
+            drop(child);
+            drop(thread);
+            drop(acp_thread);
+            release_dropped_entities(cx);
+            agent.read_with(cx, |agent, _| assert!(agent.sessions.is_empty()));
+            let reopened = agent
+                .update(cx, |agent, cx| {
+                    agent.open_thread(session_id.clone(), project.clone(), cx)
+                })
+                .await
+                .expect("reopen parent");
+            let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+            thread.read_with(cx, |thread, _| {
+                let archive = thread.architect_run_archive();
+                assert_eq!(archive.len(), 1);
+                let archived = archive.first().expect("archived run");
+                assert_eq!(archived.id, original_run);
+                assert!(matches!(
+                    archived.outcome,
+                    Some(ArchitectRunOutcome::Completed)
+                ));
+                let step = archived.history.first().expect("saved visit");
+                assert_eq!(step.path, path);
+                assert_eq!(step.visit, visit);
+                assert_eq!(step.title.as_ref(), "Saved step");
+                assert_eq!(step.session_id.as_ref(), Some(&child_id));
+                assert_eq!(step.summary.as_deref(), Some("Saved summary"));
+                assert_eq!((step.attempt, step.step_number), (1, 1));
+                assert!(step.started_at >= archived.started_at);
+                assert!(matches!(step.outcome, Some(ArchitectRunOutcome::Completed)));
+                let run = thread.architect_run().expect("interrupted current run");
+                assert!(!run.is_running());
+                assert!(run.interrupted());
+                assert!(!run.can_resume(), "missing checkpoints must fail closed");
+                assert!(run.recovery_error().is_some());
+                assert!(run.running_steps().is_empty());
+                assert!(thread.architect_step_visit_id().is_none());
+                assert!(thread.architect_event_sequence() > sequence);
+                assert_eq!(
+                    serde_json::to_value(thread.architect_events(0, 1)).expect("events"),
+                    serde_json::to_value(vec![first_event]).expect("saved event"),
+                );
+                assert!(!thread.architect_snapshot().revisions.is_empty());
+                assert_eq!(thread.session_mode(), SessionMode::Architect);
+            });
+            let child_saved = database
+                .load_thread(child_id)
+                .await
+                .expect("load child")
+                .expect("child content must be saved separately");
+            assert!(
+                child_saved
+                    .to_markdown()
+                    .contains("Durable step transcript")
+            );
+            assert!(child_saved.to_markdown().contains("Durable step response"));
+            assert_eq!(
+                child_saved
+                    .subagent_context
+                    .expect("child context")
+                    .parent_thread_id,
+                session_id,
+            );
+            drop(reopened);
+        }
+
+        #[gpui::test]
+        async fn restored_checkpoint_requires_explicit_resume(cx: &mut TestAppContext) {
+            init_test(cx);
+            let (_connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+            let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+            let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+            let saved = cx
+                .update(|cx| {
+                    let graph = plan();
+                    thread.update(cx, |thread, cx| {
+                        thread.set_architect_graph(Some(graph.clone()), cx)
+                    });
+                    crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx)
+                        .expect("start run");
+                    crate::pause_architect_run(&thread, cx);
+                    let saved = thread.read(cx).to_db(cx);
+                    crate::stop_architect_run(&thread, Some(&acp_thread), cx);
+                    saved
+                })
+                .await;
+            let original = saved
+                .persistent_architect
+                .as_ref()
+                .expect("state")
+                .current
+                .as_ref()
+                .expect("run")
+                .clone();
+            assert!(original.checkpoint.is_some());
+            let database = cx
+                .update(|cx| ThreadsDatabase::connect(cx))
+                .await
+                .expect("database");
+            let restored_id = acp::SessionId::new("architect-recovered-checkpoint");
+            database
+                .save_thread(restored_id.clone(), saved, PathList::default())
+                .await
+                .expect("save checkpoint");
+            let reopened = agent
+                .update(cx, |agent, cx| {
+                    agent.open_thread(restored_id.clone(), project, cx)
+                })
+                .await
+                .expect("restore checkpoint");
+            cx.run_until_parked();
+            let restored = cx.update(|cx| native_thread_for_session(&agent, &restored_id, cx));
+            restored.read_with(cx, |thread, _| {
+                let run = thread.architect_run().expect("run");
+                assert_eq!(run.id(), original.id);
+                assert_eq!(run.snapshot().started_at, original.started_at);
+                assert_eq!(run.snapshot().elapsed, original.elapsed);
+                assert!(!run.is_running());
+                assert!(run.interrupted());
+                assert!(run.can_resume());
+                assert!(run.recovery_error().is_none());
+                assert!(run.running_steps().is_empty());
+                assert!(thread.is_empty(), "restoring must not submit a prompt");
+            });
+            drop(reopened);
+        }
+
+        #[gpui::test]
+        async fn changed_saved_graph_is_not_modified_by_checkpoint_restore(
+            cx: &mut TestAppContext,
+        ) {
+            init_test(cx);
+            let (_connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+            let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+            let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+            let path = architect::NodePath::root("step".into());
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(plan()), cx);
+                thread.start_architect_run(path.clone(), "Prior run".into(), Task::ready(()), cx);
+                let visit =
+                    thread.note_architect_run_position(path.clone(), "Prior run".into(), 1, 1, cx);
+                thread.finish_architect_run_step(visit, Some("Prior summary".into()), cx);
+                thread.finish_architect_run(architect::RunOutcome::Completed, cx);
+            });
+            let mut saved = cx
+                .update(|cx| {
+                    crate::start_architect_run(thread.clone(), acp_thread.clone(), plan(), cx)
+                        .expect("start run");
+                    crate::pause_architect_run(&thread, cx);
+                    thread.update(cx, |thread, cx| {
+                        thread.note_architect_run_position(
+                            path.clone(),
+                            "Interrupted step".into(),
+                            1,
+                            1,
+                            cx,
+                        );
+                    });
+                    let saved = thread.read(cx).to_db(cx);
+                    crate::stop_architect_run(&thread, Some(&acp_thread), cx);
+                    saved
+                })
+                .await;
+            let state = saved.persistent_architect.as_mut().expect("state");
+            let current = state.current.as_mut().expect("current run");
+            let checkpoint = current.checkpoint.as_mut().expect("checkpoint");
+            // Model a saved turn admitted to lane zero, before its first response.
+            checkpoint["in_flight"] = json!([0]);
+            let control = crate::architect_runner::RunState::from_checkpoint(checkpoint.clone())
+                .expect("the fixture must be a valid interrupted checkpoint");
+            let original_run = current.clone();
+            let archive = serde_json::to_value(&state.archive).expect("archive");
+            let graph = saved.architect_graph.as_mut().expect("graph");
+            let node = graph.node_at_mut(&path).expect("same path");
+            node.intent = "A newer, unrelated goal at the same path".into();
+            node.result = Some(architect::StepResult {
+                summary: "Newer root result must survive".into(),
+                attempt: 7,
+            });
+            let expected_graph = graph.clone();
+            let mut unguarded = graph.clone();
+            control.restore_interrupted_results(&mut unguarded);
+            assert_ne!(
+                unguarded, expected_graph,
+                "the fixture exercises destructive restoration"
+            );
+            let database = cx
+                .update(|cx| ThreadsDatabase::connect(cx))
+                .await
+                .expect("database");
+            let restored_id = acp::SessionId::new("architect-mismatched-saved-graph");
+            database
+                .save_thread(restored_id.clone(), saved, PathList::default())
+                .await
+                .expect("save mismatched fixture");
+            let reopened = agent
+                .update(cx, |agent, cx| {
+                    agent.open_thread(restored_id.clone(), project, cx)
+                })
+                .await
+                .expect("history must still load");
+            cx.run_until_parked();
+            let restored = cx.update(|cx| native_thread_for_session(&agent, &restored_id, cx));
+            restored.read_with(cx, |thread, _| {
+                assert_eq!(thread.architect_graph(), Some(&expected_graph));
+                let run = thread.architect_run().expect("retained run history");
+                assert_eq!(run.id(), original_run.id);
+                assert!(!run.is_running());
+                assert!(!run.can_resume());
+                assert!(run.control().is_none());
+                assert!(run.recovery_error().is_some());
+                assert_eq!(run.snapshot().checkpoint, original_run.checkpoint);
+                assert_eq!(run.history().len(), original_run.history.len());
+                assert_eq!(
+                    serde_json::to_value(thread.architect_run_archive()).expect("archive"),
+                    archive
+                );
+                assert!(
+                    thread
+                        .architect_events(0, MAX_ARCHITECT_EVENTS)
+                        .iter()
+                        .any(|event| event.kind == "run_restored" && event.message.is_some())
+                );
+            });
+            let persisted = database
+                .load_thread(restored_id)
+                .await
+                .expect("load")
+                .expect("persisted recovery error");
+            assert_eq!(persisted.architect_graph, Some(expected_graph));
+            assert!(
+                persisted
+                    .persistent_architect
+                    .expect("state")
+                    .current
+                    .expect("run")
+                    .recovery_error
+                    .is_some()
+            );
+            drop(reopened);
+        }
+
+        #[gpui::test]
+        async fn graph_replacement_archives_current_run_and_rejects_late_reports(
+            cx: &mut TestAppContext,
+        ) {
+            init_test(cx);
+            let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+            let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+            let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+            let path = architect::NodePath::root("step".into());
+            cx.update(|cx| {
+                thread.update(cx, |thread, cx| {
+                    thread.set_architect_graph(Some(plan()), cx)
+                });
+                crate::start_architect_run(thread.clone(), acp_thread.clone(), plan(), cx)
+                    .expect("start run");
+                crate::pause_architect_run(&thread, cx);
+                thread.update(cx, |thread, cx| {
+                    let visit = thread.note_architect_run_position(
+                        path.clone(),
+                        "Old step".into(),
+                        1,
+                        1,
+                        cx,
+                    );
+                    let run_id = thread.architect_run().expect("run").id();
+                    let checkpoint = thread.architect_run().expect("run").snapshot().checkpoint;
+                    let sequence = thread.architect_event_sequence();
+                    thread.set_architect_graph(thread.architect_graph().cloned(), cx);
+                    assert_eq!(
+                        thread.architect_event_sequence(),
+                        sequence,
+                        "identical replacement is a no-op"
+                    );
+                    assert_eq!(thread.architect_run().expect("unchanged run").id(), run_id);
+                    let mut replacement = plan();
+                    replacement.node_at_mut(&path).expect("step").intent = "Unrelated goal".into();
+                    thread.set_architect_graph(Some(replacement.clone()), cx);
+                    assert!(thread.architect_run().is_none());
+                    assert!(thread.architect_step_visit_id().is_none());
+                    assert_eq!(thread.architect_graph(), Some(&replacement));
+                    let archive = thread.architect_run_archive();
+                    assert_eq!(archive.len(), 1);
+                    let run = archive.first().expect("archived run");
+                    assert_eq!(run.id, run_id);
+                    assert_eq!(run.checkpoint, checkpoint);
+                    assert_eq!(run.graph, Some(plan()));
+                    assert_eq!(run.history.len(), 1);
+                    assert!(run.interrupted);
+                    assert_eq!(
+                        thread.complete_architect_step_visit(visit, "Late report".into(), cx),
+                        Err(ArchitectStepCompletionError::NoActiveVisit)
+                    );
+                    assert_eq!(thread.architect_graph(), Some(&replacement));
+                    assert!(
+                        thread
+                            .architect_events(sequence, 10)
+                            .iter()
+                            .any(|event| event.kind == "run_archived"
+                                && event.run_id == Some(run_id))
+                    );
+                });
+            });
+            let saved = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
+            let state = saved.persistent_architect.expect("state");
+            assert!(state.current.is_none());
+            assert_eq!(state.archive.len(), 1);
+        }
+
+        #[gpui::test]
+        async fn layout_and_noop_updates_do_not_grow_revision_history(cx: &mut TestAppContext) {
+            init_test(cx);
+            let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+            let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+            let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+            let path = architect::NodePath::root("step".into());
+            let child_path = path.child("child".into());
+            thread.update(cx, |thread, cx| {
+                let mut graph = plan();
+                let mut nested = architect::ArchitectGraph::default();
+                nested.add_node(architect::ArchitectNode::new("child", "Nested step"));
+                graph.node_at_mut(&path).expect("step").subplan = Some(Box::new(nested));
+                thread.set_architect_graph(Some(graph), cx);
+                let before = serde_json::to_value(thread.architect_snapshot()).expect("snapshot");
+                for index in 0..1000 {
+                    let position = architect::Position {
+                        x: index as f32,
+                        y: 10.0,
+                    };
+                    thread.update_architect_graph(
+                        |graph| {
+                            graph.move_node_at(&path, position).expect("move root");
+                            graph
+                                .move_node_at(&child_path, position)
+                                .expect("move nested node");
+                        },
+                        cx,
+                    );
+                    let sequence = thread.architect_event_sequence();
+                    assert_eq!(thread.update_architect_graph(|_| 42, cx), Some(42));
+                    thread.update_architect_graph(
+                        |graph| {
+                            graph.move_node_at(&path, position).expect("no-op move");
+                        },
+                        cx,
+                    );
+                    thread.set_architect_graph(thread.architect_graph().cloned(), cx);
+                    assert_eq!(
+                        thread.architect_event_sequence(),
+                        sequence,
+                        "no-op updates emit no events"
+                    );
+                }
+                assert_eq!(
+                    serde_json::to_value(thread.architect_snapshot()).expect("snapshot"),
+                    before,
+                    "layout changes retain constant history size and no extra events"
+                );
+                assert_eq!(
+                    thread
+                        .architect_graph()
+                        .expect("graph")
+                        .node_at(&child_path)
+                        .expect("child")
+                        .position,
+                    Some(architect::Position { x: 999.0, y: 10.0 })
+                );
+                thread.start_architect_run(path.clone(), "Result".into(), Task::ready(()), cx);
+                let visit =
+                    thread.note_architect_run_position(path.clone(), "Result".into(), 1, 1, cx);
+                let sequence = thread.architect_event_sequence();
+                thread
+                    .complete_architect_step_visit(visit, "Saved after dragging".into(), cx)
+                    .expect("report step result");
+                assert!(
+                    thread
+                        .architect_events(sequence, 10)
+                        .iter()
+                        .any(|event| event.kind == "step_reported")
+                );
+                thread.finish_architect_run_step(visit, Some("Saved after dragging".into()), cx);
+                thread.finish_architect_run(architect::RunOutcome::Completed, cx);
+            });
+            cx.run_until_parked();
+            let database = cx
+                .update(|cx| ThreadsDatabase::connect(cx))
+                .await
+                .expect("database");
+            let saved = database
+                .load_thread(session_id)
+                .await
+                .expect("load")
+                .expect("saved changes");
+            let graph = saved.architect_graph.expect("graph");
+            assert_eq!(
+                graph.node_at(&child_path).expect("child").position,
+                Some(architect::Position { x: 999.0, y: 10.0 })
+            );
+            assert_eq!(
+                graph
+                    .node_at(&path)
+                    .expect("step")
+                    .result
+                    .as_ref()
+                    .expect("result")
+                    .summary,
+                "Saved after dragging"
+            );
+        }
+
+        #[gpui::test]
+        async fn revision_retention_keeps_run_archives_and_trims_legacy_snapshots(
+            cx: &mut TestAppContext,
+        ) {
+            init_test(cx);
+            let (_connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+            let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+            let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+            let path = architect::NodePath::root("step".into());
+            let archive = thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(plan()), cx);
+                thread.start_architect_run(path.clone(), "First run".into(), Task::ready(()), cx);
+                let visit =
+                    thread.note_architect_run_position(path.clone(), "First run".into(), 1, 1, cx);
+                thread.finish_architect_run_step(visit, Some("Retained history".into()), cx);
+                thread.finish_architect_run(architect::RunOutcome::Completed, cx);
+                thread.start_architect_run(path.clone(), "Second run".into(), Task::ready(()), cx);
+                thread.finish_architect_run(architect::RunOutcome::Completed, cx);
+                let archive =
+                    serde_json::to_value(thread.architect_run_archive()).expect("archive");
+                for index in 0..100 {
+                    thread.update_architect_graph(
+                        |graph| {
+                            graph.node_at_mut(&path).expect("step").intent =
+                                format!("Goal {index}");
+                        },
+                        cx,
+                    );
+                }
+                let snapshot = thread.architect_snapshot();
+                assert_eq!(snapshot.revisions.len(), MAX_ARCHITECT_REVISION_SNAPSHOTS);
+                assert_eq!(snapshot.discarded_revision_snapshots, 36);
+                assert_eq!(
+                    serde_json::to_value(&snapshot.archive).expect("archive"),
+                    archive
+                );
+                assert_eq!(snapshot.archive.first().expect("run").graph, Some(plan()));
+                archive
+            });
+            let mut saved = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
+            let state = saved.persistent_architect.as_mut().expect("state");
+            let revisions = state.revisions.clone();
+            state.revisions.splice(0..0, revisions);
+            let database = cx
+                .update(|cx| ThreadsDatabase::connect(cx))
+                .await
+                .expect("database");
+            let restored_id = acp::SessionId::new("architect-legacy-unbounded-revisions");
+            database
+                .save_thread(restored_id.clone(), saved, PathList::default())
+                .await
+                .expect("save legacy snapshots");
+            let reopened = agent
+                .update(cx, |agent, cx| {
+                    agent.open_thread(restored_id.clone(), project, cx)
+                })
+                .await
+                .expect("reopen bounded snapshots");
+            let restored = cx.update(|cx| native_thread_for_session(&agent, &restored_id, cx));
+            restored.read_with(cx, |thread, _| {
+                let snapshot = thread.architect_snapshot();
+                assert_eq!(snapshot.revisions.len(), MAX_ARCHITECT_REVISION_SNAPSHOTS);
+                assert_eq!(snapshot.discarded_revision_snapshots, 100);
+                assert_eq!(
+                    serde_json::to_value(snapshot.archive).expect("archive"),
+                    archive
+                );
+            });
+            drop(reopened);
+        }
+
+        #[gpui::test]
+        async fn incompatible_checkpoint_keeps_archive_and_fails_closed(cx: &mut TestAppContext) {
+            init_test(cx);
+            let (_connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+            let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+            let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+            thread.update(cx, |thread, cx| {
+                let path = architect::NodePath::root("step".into());
+                thread.set_architect_graph(Some(plan()), cx);
+                thread.start_architect_run(path.clone(), "Completed".into(), Task::ready(()), cx);
+                thread.finish_architect_run(architect::RunOutcome::Completed, cx);
+                thread.start_architect_run(path, "Interrupted".into(), Task::ready(()), cx);
+            });
+            let database = cx
+                .update(|cx| ThreadsDatabase::connect(cx))
+                .await
+                .expect("database");
+            for version in [ARCHITECT_STATE_VERSION, 999] {
+                let mut saved = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
+                let state = saved.persistent_architect.as_mut().expect("state");
+                state.version = version;
+                let corrupt = json!({"version": 1, "state": "corrupt"});
+                state.current.as_mut().expect("current run").checkpoint = Some(corrupt.clone());
+                let restored_id = acp::SessionId::new(format!("architect-corrupt-{version}"));
+                database
+                    .save_thread(restored_id.clone(), saved, PathList::default())
+                    .await
+                    .expect("save corrupt checkpoint");
+                let reopened = agent
+                    .update(cx, |agent, cx| {
+                        agent.open_thread(restored_id.clone(), project.clone(), cx)
+                    })
+                    .await
+                    .expect("history must still open");
+                let restored = cx.update(|cx| native_thread_for_session(&agent, &restored_id, cx));
+                restored.read_with(cx, |thread, _| {
+                    assert_eq!(thread.architect_run_archive().len(), 1);
+                    let run = thread.architect_run().expect("current run");
+                    assert!(!run.is_running());
+                    assert!(!run.can_resume());
+                    assert!(run.recovery_error().is_some());
+                    assert_eq!(run.snapshot().checkpoint, Some(corrupt));
+                    assert!(
+                        thread
+                            .architect_events(0, MAX_ARCHITECT_EVENTS)
+                            .iter()
+                            .any(|event| event.kind == "run_restored" && event.message.is_some())
+                    );
+                });
+                drop(reopened);
+            }
+        }
+
+        #[gpui::test]
+        async fn terminal_checkpoint_preserves_completed_and_skipped_readiness_after_reload(
+            cx: &mut TestAppContext,
+        ) {
+            fn assert_terminal_readiness(thread: &Thread) {
+                let run = thread.architect_run().expect("completed run");
+                assert_eq!(run.outcome, Some(architect::RunOutcome::Completed));
+                assert!(run.control().is_none());
+                assert!(run.saved_checkpoint().is_some());
+                assert!(!run.can_resume());
+                assert!(!run.is_running());
+                let readiness = crate::architect_runner::architect_run_readiness(thread);
+                let steps = readiness["steps"].as_array().expect("readiness steps");
+                for (path, status) in [("step", "completed"), ("skipped", "skipped")] {
+                    let step = steps
+                        .iter()
+                        .find(|step| step["path"] == json!([path]))
+                        .expect("step readiness");
+                    assert_eq!(step["status"], status);
+                }
+            }
+
+            let fake = init_test(cx);
+            let (_connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+            let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+            let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+            let model = fake.model("fake");
+            let mut graph = plan();
+            let mut skipped = architect::ArchitectNode::new("skipped", "Unselected route");
+            skipped.locked = true;
+            graph.add_node(skipped);
+            graph.connect("step", "skipped");
+            graph.edges.last_mut().expect("route").max_repeats = Some(0);
+            thread.update(cx, |thread, cx| {
+                thread.set_model(model.clone(), cx);
+                thread.set_architect_graph(Some(graph.clone()), cx);
+            });
+            cx.update(|cx| {
+                crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx)
+                    .expect("start run");
+            });
+            cx.run_until_parked();
+            let pending = pending_step_briefs(&fake);
+            assert_eq!(pending.len(), 1);
+            let (request, _) = pending.first().expect("admitted step");
+            fake.send_text(&model, request, "Completed the selected route.");
+            fake.end_stream(&model, request);
+            cx.run_until_parked();
+            let (run_id, checkpoint) = thread.read_with(cx, |thread, _| {
+                assert_terminal_readiness(thread);
+                let run = thread.architect_run().expect("run");
+                assert_eq!(run.history().len(), 1);
+                let checkpoint = run.saved_checkpoint().expect("terminal checkpoint").clone();
+                crate::architect_runner::RunState::from_checkpoint(checkpoint.clone())
+                    .expect("terminal checkpoint remains structurally valid");
+                assert_eq!(run.snapshot().checkpoint.as_ref(), Some(&checkpoint));
+                (run.id(), checkpoint)
+            });
+            thread.update(cx, |thread, cx| {
+                thread.finish_architect_run(architect::RunOutcome::Completed, cx);
+                thread.dismiss_architect_run(cx);
+                assert_eq!(
+                    thread.architect_run().expect("run").saved_checkpoint(),
+                    Some(&checkpoint)
+                );
+            });
+            let saved = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
+            let database = cx
+                .update(|cx| ThreadsDatabase::connect(cx))
+                .await
+                .expect("database");
+            let restored_id = acp::SessionId::new("architect-terminal-readiness");
+            database
+                .save_thread(restored_id.clone(), saved, PathList::default())
+                .await
+                .expect("save terminal checkpoint");
+            let reopened = agent
+                .update(cx, |agent, cx| {
+                    agent.open_thread(restored_id.clone(), project, cx)
+                })
+                .await
+                .expect("reopen terminal checkpoint");
+            cx.run_until_parked();
+            let restored = cx.update(|cx| native_thread_for_session(&agent, &restored_id, cx));
+            restored.read_with(cx, |thread, _| {
+                assert_terminal_readiness(thread);
+                let run = thread.architect_run().expect("run");
+                assert_eq!(run.id(), run_id);
+                assert_eq!(run.saved_checkpoint(), Some(&checkpoint));
+                assert_eq!(run.snapshot().checkpoint.as_ref(), Some(&checkpoint));
+            });
+            assert!(
+                pending_step_briefs(&fake).is_empty(),
+                "reload must not start another step"
+            );
+            cx.update(|cx| {
+                assert!(matches!(
+                    crate::resume_architect_run(restored.clone(), reopened.clone(), cx),
+                    Err(crate::ArchitectRunStartError::NotResumable)
+                ));
+            });
+            restored.update(cx, |thread, cx| {
+                thread.start_architect_run(
+                    architect::NodePath::root("step".into()),
+                    "New run".into(),
+                    Task::ready(()),
+                    cx,
+                );
+                let previous = thread
+                    .architect_run_archive()
+                    .last()
+                    .expect("archived terminal run");
+                assert_eq!(previous.id, run_id);
+                assert_eq!(previous.checkpoint.as_ref(), Some(&checkpoint));
+            });
+            cx.run_until_parked();
+            let archived = database
+                .load_thread(restored_id)
+                .await
+                .expect("load archive")
+                .expect("saved archive")
+                .persistent_architect
+                .expect("state");
+            let previous = archived.archive.last().expect("archived run");
+            assert_eq!(previous.id, run_id);
+            assert_eq!(previous.checkpoint.as_ref(), Some(&checkpoint));
+            assert_eq!(previous.history.len(), 1);
+        }
+
+        #[gpui::test]
+        async fn corrupt_terminal_checkpoint_is_retained_without_executable_control(
+            cx: &mut TestAppContext,
+        ) {
+            init_test(cx);
+            let (_connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+            let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+            let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+            thread.update(cx, |thread, cx| {
+                let path = architect::NodePath::root("step".into());
+                thread.set_architect_graph(Some(plan()), cx);
+                thread.start_architect_run(path.clone(), "Completed".into(), Task::ready(()), cx);
+                let visit = thread.note_architect_run_position(path, "Completed".into(), 1, 1, cx);
+                thread.finish_architect_run_step(visit, Some("Preserved summary".into()), cx);
+                thread.finish_architect_run(architect::RunOutcome::Completed, cx);
+            });
+            let mut saved = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
+            let corrupt = json!({"version": 1, "state": "corrupt terminal checkpoint"});
+            saved
+                .persistent_architect
+                .as_mut()
+                .expect("state")
+                .current
+                .as_mut()
+                .expect("run")
+                .checkpoint = Some(corrupt.clone());
+            let database = cx
+                .update(|cx| ThreadsDatabase::connect(cx))
+                .await
+                .expect("database");
+            let restored_id = acp::SessionId::new("architect-corrupt-terminal-checkpoint");
+            database
+                .save_thread(restored_id.clone(), saved, PathList::default())
+                .await
+                .expect("save corrupt terminal checkpoint");
+            let reopened = agent
+                .update(cx, |agent, cx| {
+                    agent.open_thread(restored_id.clone(), project, cx)
+                })
+                .await
+                .expect("terminal history must still load");
+            let restored = cx.update(|cx| native_thread_for_session(&agent, &restored_id, cx));
+            restored.read_with(cx, |thread, _| {
+                let run = thread.architect_run().expect("terminal run");
+                assert_eq!(run.outcome, Some(architect::RunOutcome::Completed));
+                assert_eq!(run.saved_checkpoint(), Some(&corrupt));
+                assert_eq!(run.snapshot().checkpoint.as_ref(), Some(&corrupt));
+                assert!(run.control().is_none());
+                assert!(!run.can_resume());
+                assert!(!run.is_running());
+                assert_eq!(
+                    run.history().first().expect("visit").summary.as_deref(),
+                    Some("Preserved summary")
+                );
+            });
+            cx.update(|cx| {
+                assert!(matches!(
+                    crate::resume_architect_run(restored, reopened, cx),
+                    Err(crate::ArchitectRunStartError::NotResumable)
+                ));
+            });
+        }
+
+        #[gpui::test]
+        async fn event_cursor_is_bounded_and_completed_runs_stay_completed(
+            cx: &mut TestAppContext,
+        ) {
+            init_test(cx);
+            let (_connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+            let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+            let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+            thread.update(cx, |thread, cx| {
+                let path = architect::NodePath::root("step".into());
+                thread.start_architect_run(path.clone(), "Finished".into(), Task::ready(()), cx);
+                let visit = thread.note_architect_run_position(path, "Finished".into(), 1, 1, cx);
+                thread.finish_architect_run_step(visit, Some("Done".into()), cx);
+                thread.finish_architect_run(architect::RunOutcome::Completed, cx);
+                for _ in 0..MAX_ARCHITECT_EVENTS + 3 {
+                    thread.checkpoint_architect_run(cx);
+                }
+                let events = thread.architect_events(0, usize::MAX);
+                assert_eq!(events.len(), MAX_ARCHITECT_EVENTS);
+                assert!(events.first().expect("event").sequence > 1);
+                assert!(
+                    events
+                        .windows(2)
+                        .all(|pair| pair[1].sequence == pair[0].sequence + 1)
+                );
+                let sequence = thread.architect_event_sequence();
+                assert!(thread.architect_events(sequence, 10).is_empty());
+                assert!(thread.architect_events(0, 0).is_empty());
+                assert_eq!(thread.architect_events(sequence - 2, 1).len(), 1);
+            });
+            let saved = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
+            let snapshot = saved
+                .persistent_architect
+                .as_ref()
+                .expect("state")
+                .current
+                .as_ref()
+                .expect("run");
+            assert!(matches!(
+                snapshot.outcome,
+                Some(ArchitectRunOutcome::Completed)
+            ));
+            assert!(snapshot.checkpoint.is_none());
+            assert!(!snapshot.interrupted);
+            let sequence = thread.read_with(cx, |thread, _| thread.architect_event_sequence());
+            let database = cx
+                .update(|cx| ThreadsDatabase::connect(cx))
+                .await
+                .expect("database");
+            let restored_id = acp::SessionId::new("architect-completed-checkpoint");
+            database
+                .save_thread(restored_id.clone(), saved, PathList::default())
+                .await
+                .expect("save completed run");
+            let reopened = agent
+                .update(cx, |agent, cx| {
+                    agent.open_thread(restored_id.clone(), project, cx)
+                })
+                .await
+                .expect("restore completed run");
+            cx.run_until_parked();
+            let restored = cx.update(|cx| native_thread_for_session(&agent, &restored_id, cx));
+            restored.read_with(cx, |thread, _| {
+                let run = thread.architect_run().expect("completed run");
+                assert_eq!(run.outcome, Some(architect::RunOutcome::Completed));
+                assert!(!run.can_resume());
+                assert!(!run.is_running());
+                assert!(!run.interrupted());
+                assert_eq!(thread.architect_event_sequence(), sequence);
+            });
+            drop(reopened);
+        }
     }
 
     #[gpui::test]
@@ -8736,6 +9666,7 @@ mod internal_tests {
             ));
             let input = ToolInput::resolved(ControlArchitectRunToolInput {
                 action: ArchitectRunAction::SetStepModel,
+                models: vec![],
                 node_path: Some(architect::NodePath::root("step".into())),
                 model: None,
                 goal: None,
@@ -8902,6 +9833,7 @@ mod internal_tests {
             ));
             let input = ToolInput::resolved(ControlArchitectRunToolInput {
                 action: ArchitectRunAction::Interrupt,
+                models: vec![],
                 node_path: None,
                 model: None,
                 goal: None,

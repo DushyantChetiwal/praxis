@@ -7,6 +7,7 @@ use action_log::{ActionLog, ActionLogTelemetry};
 use agent_client_protocol::schema::{MaybeUndefined, v1 as acp};
 use agent_settings::AgentSettings;
 use anyhow::{Context as _, Result, anyhow};
+use chrono::{DateTime, Utc};
 use collections::HashSet;
 pub use connection::*;
 pub use diff::*;
@@ -1126,6 +1127,9 @@ pub struct ToolCall {
     pub kind: acp::ToolKind,
     structured_content: Vec<ToolCallContent>,
     pub status: ToolCallStatus,
+    started_at: DateTime<Utc>,
+    last_activity: DateTime<Utc>,
+    cancellation_requested_at: Option<DateTime<Utc>>,
     pub locations: Vec<acp::ToolCallLocation>,
     pub resolved_locations: Vec<Option<AgentLocation>>,
     pub raw_input: Option<serde_json::Value>,
@@ -1143,6 +1147,58 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
+    /// Content-free local observations, not a backend heartbeat or execution clock.
+    /// `started_at` is when this entry was first observed; `last_activity` advances
+    /// on tool updates, authorization and cancellation, including duplicate updates.
+    /// ACP does not distinguish replay here, so neither timestamp proves live work.
+    /// Reads, rendering, unrelated thread activity and terminal entity notifications
+    /// do not refresh these timestamps. UTC may jump; use a monotonic clock for durations.
+    ///
+    /// `pending_input` means the call is not running yet, not necessarily user input.
+    /// An in-progress call has no known wait reason, even if named `ask_question`.
+    /// Consult `AcpThread::is_waiting_for_confirmation` and elicitation statuses
+    /// separately. Cancellation is a sticky local request, not backend acknowledgement;
+    /// a late completion can change `status` without clearing that request.
+    pub fn liveness(&self) -> serde_json::Value {
+        let (status, wait_reason) = match &self.status {
+            ToolCallStatus::Pending => ("pending", Some("pending_input")),
+            ToolCallStatus::WaitingForConfirmation { .. } => {
+                ("awaiting_confirmation", Some("awaiting_confirmation"))
+            }
+            ToolCallStatus::InProgress => ("in_progress", None),
+            ToolCallStatus::Completed => ("completed", None),
+            ToolCallStatus::Failed => ("failed", None),
+            ToolCallStatus::Rejected => ("rejected", None),
+            ToolCallStatus::Canceled => ("canceled", None),
+        };
+        let cancellation_requested_at =
+            self.cancellation_requested_at.map(|time| time.to_rfc3339());
+        serde_json::json!({
+            "started_at": self.started_at.to_rfc3339(),
+            "last_activity": self.last_activity.to_rfc3339(),
+            "status": status,
+            "wait_reason": wait_reason,
+            "cancellation_state": if self.cancellation_requested_at.is_some() {
+                "requested"
+            } else {
+                "not_requested"
+            },
+            "cancellation_requested_at": cancellation_requested_at,
+            "timestamp_basis": "local_observation",
+            "replay": "unknown",
+        })
+    }
+
+    fn record_activity(&mut self) {
+        self.last_activity = Utc::now();
+    }
+
+    fn record_cancellation(&mut self) {
+        self.record_activity();
+        self.cancellation_requested_at
+            .get_or_insert(self.last_activity);
+    }
+
     fn from_acp(
         tool_call: acp::ToolCall,
         status: ToolCallStatus,
@@ -1186,6 +1242,9 @@ impl ToolCall {
             cx,
         );
 
+        let started_at = Utc::now();
+        let cancellation_requested_at =
+            matches!(status, ToolCallStatus::Canceled).then_some(started_at);
         let mut result = Self {
             id: tool_call.tool_call_id,
             label,
@@ -1195,6 +1254,9 @@ impl ToolCall {
             locations: tool_call.locations,
             resolved_locations: Vec::default(),
             status,
+            started_at,
+            last_activity: started_at,
+            cancellation_requested_at,
             raw_input: tool_call.raw_input,
             raw_input_markdown,
             raw_output: tool_call.raw_output,
@@ -1257,6 +1319,7 @@ impl ToolCall {
         terminals: &HashMap<acp::TerminalId, Entity<Terminal>>,
         cx: &mut App,
     ) -> Result<()> {
+        self.record_activity();
         let acp::ToolCallUpdateFields {
             kind,
             status,
@@ -1419,6 +1482,9 @@ impl ToolCall {
     }
 
     fn update_status(&mut self, status: ToolCallStatus) {
+        if matches!(status, ToolCallStatus::Canceled) {
+            self.record_cancellation();
+        }
         match status {
             ToolCallStatus::Pending => self.update_acp_status(acp::ToolCallStatus::Pending),
             ToolCallStatus::InProgress => self.update_acp_status(acp::ToolCallStatus::InProgress),
@@ -3701,6 +3767,7 @@ impl AcpThread {
         self.flush_streaming_text(cx);
         self.entries.push(entry);
         cx.emit(AcpThreadEvent::NewEntry);
+        cx.notify();
     }
 
     pub fn push_context_compaction(
@@ -3880,6 +3947,7 @@ impl AcpThread {
             Some(ix) => ix,
             None => {
                 // Tool call not found - create a failed tool call entry
+                let started_at = Utc::now();
                 let failed_tool_call = ToolCall {
                     id: update.id().clone(),
                     label: cx.new(|cx| Markdown::new("Tool call not found".into(), None, None, cx)),
@@ -3889,6 +3957,9 @@ impl AcpThread {
                         ContentBlock::new_output("Tool call not found".into(), &languages, cx),
                     )],
                     status: ToolCallStatus::Failed,
+                    started_at,
+                    last_activity: started_at,
+                    cancellation_requested_at: None,
                     locations: Vec::new(),
                     resolved_locations: Vec::new(),
                     raw_input: None,
@@ -3909,6 +3980,7 @@ impl AcpThread {
             unreachable!()
         };
 
+        cx.notify();
         match update {
             ToolCallUpdate::UpdateFields(update) => {
                 let location_updated = update.fields.locations.is_some();
@@ -3923,12 +3995,14 @@ impl AcpThread {
                 }
             }
             ToolCallUpdate::UpdateDiff(update) => {
+                call.record_activity();
                 call.structured_content.clear();
                 call.structured_content
                     .push(ToolCallContent::Diff(update.diff));
                 call.update_raw_output_content(&languages, cx);
             }
             ToolCallUpdate::UpdateTerminal(update) => {
+                call.record_activity();
                 call.structured_content.clear();
                 call.structured_content
                     .push(ToolCallContent::Terminal(update.terminal));
@@ -3980,6 +4054,7 @@ impl AcpThread {
         }
 
         if let Some(ix) = self.index_for_tool_call(&id) {
+            cx.notify();
             let AgentThreadEntry::ToolCall(call) = &mut self.entries[ix] else {
                 unreachable!()
             };
@@ -4180,7 +4255,9 @@ impl AcpThread {
             return;
         }
 
+        call.record_cancellation();
         call.status = ToolCallStatus::Canceled;
+        cx.notify();
         cx.emit(AcpThreadEvent::EntryUpdated(ix));
         cx.emit(AcpThreadEvent::ToolAuthorizationReceived(id.clone()));
     }
@@ -4221,7 +4298,9 @@ impl AcpThread {
                 },
             };
 
+        call.record_activity();
         let curr_status = mem::replace(&mut call.status, new_status);
+        cx.notify();
 
         if let ToolCallStatus::WaitingForConfirmation { respond_tx, .. } = curr_status {
             respond_tx
@@ -4457,6 +4536,7 @@ impl AcpThread {
         cx: &mut Context<Self>,
     ) {
         cx.emit(AcpThreadEvent::EntryUpdated(entry_index));
+        cx.notify();
         if matches!(change, ElicitationChange::Responded) {
             cx.emit(AcpThreadEvent::ElicitationResponded(id.clone()));
         }
@@ -4497,6 +4577,7 @@ impl AcpThread {
         }
 
         cx.emit(AcpThreadEvent::EntryUpdated(ix));
+        cx.notify();
     }
 
     pub fn cancel_elicitation(&mut self, id: &ElicitationEntryId, cx: &mut Context<Self>) {
@@ -4942,6 +5023,8 @@ impl AcpThread {
                             | ToolCallStatus::InProgress
                     );
                     if cancel {
+                        call.record_cancellation();
+                        cx.notify();
                         let previous_status =
                             mem::replace(&mut call.status, ToolCallStatus::Canceled);
                         if let ToolCallStatus::WaitingForConfirmation { respond_tx, .. } =
@@ -8020,6 +8103,445 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.code, acp::ErrorCode::ResourceNotFound);
+    }
+
+    fn tool_call_liveness(
+        thread: &Entity<AcpThread>,
+        id: &acp::ToolCallId,
+        cx: &TestAppContext,
+    ) -> serde_json::Value {
+        thread.read_with(cx, |thread, _| {
+            thread
+                .tool_call(id)
+                .expect("tool call should exist")
+                .1
+                .liveness()
+        })
+    }
+
+    fn age_tool_call_activity(
+        thread: &Entity<AcpThread>,
+        id: &acp::ToolCallId,
+        cx: &mut TestAppContext,
+    ) -> serde_json::Value {
+        // Fake executor time does not advance UTC. Use a sentinel to detect an
+        // event write without requiring wall-clock resolution or monotonicity.
+        thread.update(cx, |thread, _| {
+            let (_, call) = thread.tool_call_mut(id).expect("tool call should exist");
+            call.last_activity = DateTime::<Utc>::UNIX_EPOCH;
+            call.liveness()
+        })
+    }
+
+    #[gpui::test]
+    async fn test_tool_call_liveness_updates_without_content_leaks(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let id = acp::ToolCallId::new("liveness");
+        let notifications = Rc::new(Cell::new(0));
+        let _observer = cx.update(|cx| {
+            cx.observe(&thread, {
+                let notifications = notifications.clone();
+                move |_, _| notifications.set(notifications.get() + 1)
+            })
+        });
+        thread.update(cx, |thread, cx| {
+            thread
+                .upsert_tool_call(
+                    acp::ToolCall::new(id.clone(), "secret title")
+                        .raw_input(json!({"secret": "input"}))
+                        .raw_output(json!({"secret": "output"})),
+                    cx,
+                )
+                .expect("tool call should be inserted");
+        });
+        let initial = tool_call_liveness(&thread, &id, cx);
+        assert_eq!(
+            initial,
+            json!({
+                "started_at": initial["started_at"],
+                "last_activity": initial["started_at"],
+                "status": "pending",
+                "wait_reason": "pending_input",
+                "cancellation_state": "not_requested",
+                "cancellation_requested_at": null,
+                "timestamp_basis": "local_observation",
+                "replay": "unknown",
+            })
+        );
+        let timestamp =
+            DateTime::parse_from_rfc3339(initial["started_at"].as_str().expect("UTC timestamp"))
+                .expect("timestamp should be RFC 3339");
+        assert_eq!(timestamp.offset().local_minus_utc(), 0);
+
+        for (status, expected) in [
+            (acp::ToolCallStatus::InProgress, "in_progress"),
+            (acp::ToolCallStatus::Completed, "completed"),
+            (acp::ToolCallStatus::Failed, "failed"),
+        ] {
+            let previous = age_tool_call_activity(&thread, &id, cx);
+            cx.run_until_parked();
+            let previous_notifications = notifications.get();
+            thread.update(cx, |thread, cx| {
+                thread
+                    .update_tool_call(
+                        acp::ToolCallUpdate::new(
+                            id.clone(),
+                            acp::ToolCallUpdateFields::new().status(status),
+                        ),
+                        cx,
+                    )
+                    .expect("status update should succeed");
+            });
+            cx.run_until_parked();
+            assert!(notifications.get() > previous_notifications);
+            let current = tool_call_liveness(&thread, &id, cx);
+            assert_eq!(current["started_at"], initial["started_at"]);
+            assert_ne!(current["last_activity"], previous["last_activity"]);
+            assert_eq!(current["status"], expected);
+            assert!(current["wait_reason"].is_null());
+        }
+
+        let previous = age_tool_call_activity(&thread, &id, cx);
+        thread.update(cx, |thread, cx| {
+            thread
+                .upsert_tool_call(
+                    acp::ToolCall::new(id.clone(), "replayed or duplicate snapshot")
+                        .status(acp::ToolCallStatus::Failed),
+                    cx,
+                )
+                .expect("upsert should succeed");
+        });
+        let current = tool_call_liveness(&thread, &id, cx);
+        assert_eq!(current["started_at"], initial["started_at"]);
+        assert_ne!(current["last_activity"], previous["last_activity"]);
+        assert_eq!(current["replay"], "unknown");
+    }
+
+    #[gpui::test]
+    async fn test_tool_call_liveness_reads_and_background_activity_are_not_heartbeats(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let id = acp::ToolCallId::new("quiet-tool");
+        thread.update(cx, |thread, cx| {
+            thread
+                .upsert_tool_call(
+                    acp::ToolCall::new(id.clone(), "Quiet tool")
+                        .status(acp::ToolCallStatus::InProgress),
+                    cx,
+                )
+                .expect("tool call should be inserted");
+        });
+        let initial = tool_call_liveness(&thread, &id, cx);
+        let before = cx.background_executor.now();
+        cx.background_executor.timer(Duration::from_secs(60)).await;
+        assert!(cx.background_executor.now().duration_since(before) >= Duration::from_secs(60));
+        thread.update(cx, |thread, cx| {
+            thread.push_assistant_content_block("unrelated background activity".into(), false, cx);
+            thread.resolve_locations(id.clone(), cx);
+        });
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, cx| {
+            let (_, call) = thread.tool_call(&id).expect("tool call should exist");
+            call.content();
+            call.to_markdown(cx);
+            assert!(!thread.is_waiting_for_confirmation());
+        });
+        assert_eq!(tool_call_liveness(&thread, &id, cx), initial);
+        assert_eq!(tool_call_liveness(&thread, &id, cx), initial);
+    }
+
+    #[gpui::test]
+    async fn test_tool_call_liveness_authorization(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let id = acp::ToolCallId::new("permission");
+        let permission = request_test_permission(&thread, id.clone(), cx);
+        let waiting = tool_call_liveness(&thread, &id, cx);
+        assert_eq!(waiting["status"], "awaiting_confirmation");
+        assert_eq!(waiting["wait_reason"], "awaiting_confirmation");
+        assert!(thread.read_with(cx, |thread, _| thread.is_waiting_for_confirmation()));
+
+        let previous = age_tool_call_activity(&thread, &id, cx);
+        thread.update(cx, |thread, cx| {
+            thread
+                .upsert_tool_call(
+                    acp::ToolCall::new(id.clone(), "Duplicate")
+                        .status(acp::ToolCallStatus::InProgress),
+                    cx,
+                )
+                .expect("duplicate update should succeed");
+        });
+        let current = tool_call_liveness(&thread, &id, cx);
+        assert_eq!(current["status"], "awaiting_confirmation");
+        assert_ne!(current["last_activity"], previous["last_activity"]);
+
+        let previous = age_tool_call_activity(&thread, &id, cx);
+        thread.update(cx, |thread, cx| {
+            thread.authorize_tool_call(
+                id.clone(),
+                SelectedPermissionOutcome::new(
+                    acp::PermissionOptionId::new("allow"),
+                    acp::PermissionOptionKind::AllowOnce,
+                ),
+                cx,
+            );
+        });
+        assert!(matches!(
+            permission.await,
+            RequestPermissionOutcome::Selected(_)
+        ));
+        let current = tool_call_liveness(&thread, &id, cx);
+        assert_eq!(current["started_at"], waiting["started_at"]);
+        assert_eq!(current["status"], "in_progress");
+        assert!(current["wait_reason"].is_null());
+        assert_ne!(current["last_activity"], previous["last_activity"]);
+        assert!(!thread.read_with(cx, |thread, _| thread.is_waiting_for_confirmation()));
+
+        let previous = age_tool_call_activity(&thread, &id, cx);
+        let permission = request_test_permission(&thread, id.clone(), cx);
+        let current = tool_call_liveness(&thread, &id, cx);
+        assert_eq!(current["status"], "awaiting_confirmation");
+        assert_ne!(current["last_activity"], previous["last_activity"]);
+        thread.update(cx, |thread, cx| {
+            thread.authorize_tool_call(
+                id.clone(),
+                SelectedPermissionOutcome::new(
+                    acp::PermissionOptionId::new("reject"),
+                    acp::PermissionOptionKind::RejectOnce,
+                ),
+                cx,
+            );
+        });
+        assert!(matches!(
+            permission.await,
+            RequestPermissionOutcome::Selected(_)
+        ));
+        let rejected = tool_call_liveness(&thread, &id, cx);
+        assert_eq!(rejected["status"], "rejected");
+        assert_eq!(rejected["cancellation_state"], "not_requested");
+
+        let permission = request_test_permission(&thread, id.clone(), cx);
+        let previous = age_tool_call_activity(&thread, &id, cx);
+        thread.update(cx, |thread, cx| {
+            thread.cancel_tool_call_authorization(&id, cx)
+        });
+        assert!(matches!(
+            permission.await,
+            RequestPermissionOutcome::Cancelled
+        ));
+        let canceled = tool_call_liveness(&thread, &id, cx);
+        assert_eq!(canceled["status"], "canceled");
+        assert!(canceled["wait_reason"].is_null());
+        assert_eq!(canceled["cancellation_state"], "requested");
+        assert_eq!(
+            canceled["cancellation_requested_at"],
+            canceled["last_activity"]
+        );
+        assert_ne!(canceled["last_activity"], previous["last_activity"]);
+        thread.update(cx, |thread, cx| {
+            thread.cancel_tool_call_authorization(&id, cx)
+        });
+        assert_eq!(tool_call_liveness(&thread, &id, cx), canceled);
+    }
+
+    #[gpui::test]
+    async fn test_tool_call_liveness_cancellation_survives_late_completion(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (complete, request) = start_test_turn(&thread, cx);
+        cx.run_until_parked();
+        let id = acp::ToolCallId::new("running-tool");
+        thread.update(cx, |thread, cx| {
+            thread
+                .upsert_tool_call(
+                    acp::ToolCall::new(id.clone(), "Running tool")
+                        .status(acp::ToolCallStatus::InProgress),
+                    cx,
+                )
+                .expect("tool call should be inserted");
+        });
+        let previous = age_tool_call_activity(&thread, &id, cx);
+        let cancellation = thread.update(cx, |thread, cx| thread.cancel(cx));
+        let canceled = tool_call_liveness(&thread, &id, cx);
+        assert_eq!(canceled["status"], "canceled");
+        assert_eq!(canceled["cancellation_state"], "requested");
+        assert_ne!(canceled["last_activity"], previous["last_activity"]);
+        let previous = age_tool_call_activity(&thread, &id, cx);
+        thread.update(cx, |thread, cx| {
+            thread
+                .update_tool_call(
+                    acp::ToolCallUpdate::new(
+                        id.clone(),
+                        acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Completed),
+                    ),
+                    cx,
+                )
+                .expect("late completion should be accepted");
+        });
+        let completed = tool_call_liveness(&thread, &id, cx);
+        assert_eq!(completed["status"], "completed");
+        assert_eq!(completed["started_at"], canceled["started_at"]);
+        assert_eq!(completed["cancellation_state"], "requested");
+        assert_eq!(
+            completed["cancellation_requested_at"],
+            canceled["cancellation_requested_at"]
+        );
+        assert_ne!(completed["last_activity"], previous["last_activity"]);
+        complete
+            .send(Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)))
+            .expect("backend should still be running");
+        cancellation.await;
+        request.await.expect("turn should finish");
+        assert_eq!(tool_call_liveness(&thread, &id, cx), completed);
+    }
+
+    #[gpui::test]
+    async fn test_tool_call_liveness_content_and_partial_updates(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let id = acp::ToolCallId::new("content-updates");
+        let permission = request_test_permission(&thread, id.clone(), cx);
+        let initial = tool_call_liveness(&thread, &id, cx);
+        let previous = age_tool_call_activity(&thread, &id, cx);
+        thread.update(cx, |thread, cx| {
+            thread
+                .update_tool_call(
+                    acp::ToolCallUpdate::new(
+                        id.clone(),
+                        acp::ToolCallUpdateFields::new()
+                            .raw_output(json!({"secret": "streamed output"})),
+                    ),
+                    cx,
+                )
+                .expect("output-only update should succeed");
+        });
+        let current = tool_call_liveness(&thread, &id, cx);
+        assert_ne!(current["last_activity"], previous["last_activity"]);
+        assert_eq!(current["status"], "awaiting_confirmation");
+        assert_eq!(current.as_object().map(|object| object.len()), Some(8));
+        assert!(!current.to_string().contains("secret"));
+
+        let previous = age_tool_call_activity(&thread, &id, cx);
+        thread.update(cx, |thread, cx| {
+            let languages = thread.project.read(cx).languages().clone();
+            let diff = cx.new(|cx| {
+                Diff::finalized("test.txt".into(), None, "new content".into(), languages, cx)
+            });
+            thread
+                .update_tool_call(
+                    ToolCallUpdateDiff {
+                        id: id.clone(),
+                        diff,
+                    },
+                    cx,
+                )
+                .expect("diff update should succeed");
+        });
+        assert_ne!(
+            tool_call_liveness(&thread, &id, cx)["last_activity"],
+            previous["last_activity"]
+        );
+
+        let previous = age_tool_call_activity(&thread, &id, cx);
+        thread.update(cx, |thread, cx| {
+            assert!(
+                thread
+                    .update_tool_call(
+                        acp::ToolCallUpdate::new(
+                            id.clone(),
+                            acp::ToolCallUpdateFields::new()
+                                .status(acp::ToolCallStatus::Completed)
+                                .content(vec![acp::ToolCallContent::Terminal(acp::Terminal::new(
+                                    acp::TerminalId::new("missing-terminal"),
+                                ))]),
+                        ),
+                        cx,
+                    )
+                    .is_err()
+            );
+        });
+        assert!(matches!(
+            permission.await,
+            RequestPermissionOutcome::Cancelled
+        ));
+        let completed = tool_call_liveness(&thread, &id, cx);
+        assert_eq!(completed["started_at"], initial["started_at"]);
+        assert_ne!(completed["last_activity"], previous["last_activity"]);
+        assert_eq!(completed["status"], "completed");
+        assert_eq!(completed["cancellation_state"], "not_requested");
+        assert!(!thread.read_with(cx, |thread, _| thread.is_waiting_for_confirmation()));
+
+        let missing_id = acp::ToolCallId::new("missing-tool");
+        thread.update(cx, |thread, cx| {
+            thread
+                .update_tool_call(
+                    acp::ToolCallUpdate::new(missing_id.clone(), acp::ToolCallUpdateFields::new()),
+                    cx,
+                )
+                .expect("unknown call should produce a failed entry");
+        });
+        let failed = tool_call_liveness(&thread, &missing_id, cx);
+        assert_eq!(failed["status"], "failed");
+        assert_eq!(failed["started_at"], failed["last_activity"]);
+    }
+
+    #[gpui::test]
+    async fn test_tool_call_liveness_elicitation_wait_is_separate(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let id = acp::ToolCallId::new("question");
+        thread.update(cx, |thread, cx| {
+            thread
+                .upsert_tool_call(
+                    acp::ToolCall::new(id.clone(), "Ask a question")
+                        .name("ask_question")
+                        .status(acp::ToolCallStatus::InProgress),
+                    cx,
+                )
+                .expect("tool call should be inserted");
+        });
+        let initial = tool_call_liveness(&thread, &id, cx);
+        assert_eq!(initial["status"], "in_progress");
+        assert!(initial["wait_reason"].is_null());
+        assert!(!thread.read_with(cx, |thread, _| thread.is_waiting_for_confirmation()));
+        let (elicitation_id, response) = request_test_form_elicitation(&thread, cx);
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.is_waiting_for_confirmation());
+            assert!(matches!(
+                thread
+                    .elicitation(&elicitation_id)
+                    .expect("elicitation should exist")
+                    .1
+                    .status,
+                ElicitationStatus::Pending { .. }
+            ));
+        });
+        assert_eq!(tool_call_liveness(&thread, &id, cx), initial);
+        thread.update(cx, |thread, cx| {
+            thread.respond_to_elicitation(
+                &elicitation_id,
+                acp::CreateElicitationResponse::new(acp::ElicitationAction::Decline),
+                cx,
+            );
+        });
+        assert_eq!(response.await.action, acp::ElicitationAction::Decline);
+        thread.read_with(cx, |thread, _| {
+            assert!(!thread.is_waiting_for_confirmation());
+            assert!(matches!(
+                thread
+                    .elicitation(&elicitation_id)
+                    .expect("elicitation should exist")
+                    .1
+                    .status,
+                ElicitationStatus::Declined
+            ));
+        });
+        assert_eq!(tool_call_liveness(&thread, &id, cx), initial);
     }
 
     #[gpui::test]

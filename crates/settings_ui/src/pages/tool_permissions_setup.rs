@@ -23,8 +23,14 @@ const TOOLS: &[ToolInfo] = &[
     ToolInfo {
         id: "control_architect_run",
         name: "Architect Run Control",
-        description: "Interrupt, pause, resume, change a step model, or revise a locked step brief in the main conversation",
-        regex_explanation: "Patterns match the action name only: interrupt, pause, resume, set_step_model, or revise_step. For example, ^revise_step$ matches changes to locked step briefs while preserving checkpoints, not topology edits. Rules apply to every step and model in this tool.",
+        description: "Interrupt, pause, resume at a ready step, change step models, or revise a locked step brief",
+        regex_explanation: "Patterns match the action name only: interrupt, pause, resume, resume_at, set_step_model, set_step_models, or revise_step. Rules apply to every step and model in a batch. Topology edits have separate permissions.",
+    },
+    ToolInfo {
+        id: "edit_architect_plan",
+        name: "Architect Plan Edit",
+        description: "Apply a previewed topology change with a fresh token; affected execution locks reopen for review",
+        regex_explanation: "Patterns match apply only. Preview does not request permission or change the graph. Apply checks permission even in Architect mode, never starts a run, and refuses stale previews or unsupported checkpoint rebases.",
     },
     ToolInfo {
         id: "terminal",
@@ -326,6 +332,7 @@ fn get_tool_render_fn(
         "search_web" => render_web_search_tool_config,
         "skill" => render_skill_tool_config,
         "control_architect_run" => render_architect_run_tool_config,
+        "edit_architect_plan" => render_architect_plan_tool_config,
         _ => render_terminal_tool_config, // fallback
     }
 }
@@ -1406,6 +1413,7 @@ tool_config_page_fn!(render_pull_request_tool_config, "pull_request");
 tool_config_page_fn!(render_web_search_tool_config, "search_web");
 tool_config_page_fn!(render_skill_tool_config, "skill");
 tool_config_page_fn!(render_architect_run_tool_config, "control_architect_run");
+tool_config_page_fn!(render_architect_plan_tool_config, "edit_architect_plan");
 
 #[cfg(test)]
 mod tests {
@@ -1423,6 +1431,8 @@ mod tests {
                 "interrupt",
                 "pause",
                 "resume",
+                "resume_at",
+                "set_step_models",
                 "set_step_model",
                 "revise_step",
             ] {
@@ -1469,6 +1479,39 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn architect_plan_apply_has_separate_permission_rules(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            assert!(TOOLS.iter().any(|tool| tool.id == "edit_architect_plan"));
+            assert_eq!(
+                evaluate_test_input("edit_architect_plan", "apply", cx),
+                ToolPermissionDecision::Confirm
+            );
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.tools.insert(
+                "edit_architect_plan".into(),
+                agent_settings::ToolRules {
+                    default: Some(ToolPermissionMode::Allow),
+                    always_allow: vec![],
+                    always_deny: vec![agent_settings::CompiledRegex::new("^apply$", true).unwrap()],
+                    always_confirm: vec![],
+                    invalid_patterns: vec![],
+                },
+            );
+            AgentSettings::override_global(settings, cx);
+            assert!(matches!(
+                evaluate_test_input("edit_architect_plan", "apply", cx),
+                ToolPermissionDecision::Deny(_)
+            ));
+            assert_eq!(
+                evaluate_test_input("control_architect_run", "resume_at", cx),
+                ToolPermissionDecision::Confirm
+            );
+        });
+    }
+
     #[test]
     fn test_all_tools_are_in_tool_info_or_excluded() {
         // Tools that intentionally don't appear in the permissions UI.
@@ -1499,6 +1542,8 @@ mod tests {
             "list_agents_and_models",
             // Reads only the owning plan's run and recorded step conversations.
             "inspect_architect_run",
+            "inspect_architect_plan",
+            "wait_architect_run",
             "list_directory",
             "open",
             "read_file",

@@ -12,6 +12,7 @@ Build a release .tar.gz for Linux.
 Options:
   -h, --help     Display this help and exit.
   --flatpak      Set ZED_BUNDLE_TYPE=flatpak so that this can be included in system info
+  --desktop-only Build and package only the desktop application
   --remote-server-only
                  Build and package only the remote server, which the Windows
                  installer bundles for WSL
@@ -19,6 +20,7 @@ Options:
 }
 
 remote_server_only=false
+desktop_only=false
 
 # Parse all arguments manually
 while [[ $# -gt 0 ]]; do
@@ -29,6 +31,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --flatpak)
             export ZED_BUNDLE_TYPE=flatpak
+            shift
+            ;;
+        --desktop-only)
+            desktop_only=true
             shift
             ;;
         --remote-server-only)
@@ -51,6 +57,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if "$desktop_only" && "$remote_server_only"; then
+    echo "Error: --desktop-only and --remote-server-only are mutually exclusive" >&2
+    exit 1
+fi
 
 if [[ -n "${RUSTFLAGS+x}" || -n "${CARGO_ENCODED_RUSTFLAGS+x}" ]]; then
     echo "Unset RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS; put extra flags in target rustflags in .cargo/config.toml so bundle flags are preserved." >&2
@@ -81,7 +92,7 @@ fi
 # Generate the licenses first, so they can be baked into the binaries
 script/generate-licenses
 
-if "$rustup_installed"; then
+if ! "$desktop_only" && "$rustup_installed"; then
     rustup target add "$remote_server_triple"
 fi
 
@@ -91,23 +102,22 @@ export CC=${CC:-$(which clang)}
 if ! "$remote_server_only"; then
     cargo --config .cargo/bundle-config.toml build --release --target "${target_triple}" --package zed --package cli
 fi
-# Build remote_server in separate invocation to prevent feature unification from other crates
-# from influencing dynamic libraries required by it.
-if [[ "$remote_server_triple" == "$musl_triple" ]]; then
-    musl_cc_var="CC_$(echo "$remote_server_triple" | tr '-' '_')"
-    export "$musl_cc_var"=musl-gcc
-fi
-cargo --config .cargo/bundle-config.toml build --release --target "${remote_server_triple}" --package remote_server
-
-if "$remote_server_only"; then
-    remote_server="${target_dir}/${remote_server_triple}/release/remote_server"
-    llvm-objcopy --only-keep-debug "${remote_server}" "${remote_server}.dbg"
-    llvm-objcopy --strip-debug --discard-all "${remote_server}"
-    if [[ "$remote_server_triple" == *-musl ]] && ldd "${remote_server}" | grep -q 'libcrypto\|libssl'; then
-        echo "Error: remote_server still depends on libssl or libcrypto" && exit 1
+if ! "$desktop_only"; then
+    # Build remote_server separately to prevent feature unification from other
+    # crates from influencing dynamic libraries required by it.
+    if [[ "$remote_server_triple" == "$musl_triple" ]]; then
+        musl_cc_var="CC_$(echo "$remote_server_triple" | tr '-' '_')"
+        export "$musl_cc_var"=musl-gcc
     fi
-    gzip -f --stdout --best "${remote_server}" > "${target_dir}/zed-remote-server-linux-$(uname -m).gz"
-    exit 0
+    cargo --config .cargo/bundle-config.toml build --release --target "${remote_server_triple}" --package remote_server
+fi
+
+debug_binaries=()
+if ! "$remote_server_only"; then
+    debug_binaries+=("${target_dir}/${target_triple}/release/zed")
+fi
+if ! "$desktop_only"; then
+    debug_binaries+=("${target_dir}/${remote_server_triple}/release/remote_server")
 fi
 
 # Upload debug info to sentry.io
@@ -122,8 +132,7 @@ else
         for attempt in 1 2 3; do
             echo "Attempting sentry upload (attempt $attempt/3)..."
             if sentry-cli debug-files upload --include-sources --wait -p zed -o zed-dev \
-                "${target_dir}/${target_triple}"/release/zed \
-                "${target_dir}/${remote_server_triple}"/release/remote_server; then
+                "${debug_binaries[@]}"; then
                 echo "Sentry upload successful on attempt $attempt"
                 break
             else
@@ -144,19 +153,29 @@ fi
 # is skipped.
 # We use llvm-objcopy because GNU objcopy on older distros (e.g. Ubuntu 20.04)
 # doesn't understand CREL sections produced by newer LLVM.
-llvm-objcopy --only-keep-debug "${target_dir}/${target_triple}/release/zed" "${target_dir}/${target_triple}/release/zed.dbg"
-llvm-objcopy --only-keep-debug "${target_dir}/${remote_server_triple}/release/remote_server" "${target_dir}/${remote_server_triple}/release/remote_server.dbg"
-llvm-objcopy --strip-debug --discard-all "${target_dir}/${target_triple}/release/zed"
-llvm-objcopy --strip-debug --discard-all "${target_dir}/${target_triple}/release/cli"
-llvm-objcopy --strip-debug --discard-all "${target_dir}/${remote_server_triple}/release/remote_server"
+for binary in "${debug_binaries[@]}"; do
+    llvm-objcopy --only-keep-debug "${binary}" "${binary}.dbg"
+done
+if ! "$remote_server_only"; then
+    llvm-objcopy --strip-debug --discard-all "${target_dir}/${target_triple}/release/zed"
+    llvm-objcopy --strip-debug --discard-all "${target_dir}/${target_triple}/release/cli"
+fi
+if ! "$desktop_only"; then
+    llvm-objcopy --strip-debug --discard-all "${target_dir}/${remote_server_triple}/release/remote_server"
 
-# Ensure that remote_server does not depend on libssl nor libcrypto, as we got rid of these deps.
-if ldd "${target_dir}/${remote_server_triple}/release/remote_server" | grep -q 'libcrypto\|libssl'; then
-    if [[ "$remote_server_triple" == *-musl ]]; then
-        echo "Error: remote_server still depends on libssl or libcrypto" && exit 1
-    else
-        echo "Info: Using non-musl remote-server build."
+    # Ensure that remote_server does not depend on libssl nor libcrypto, as we got rid of these deps.
+    if ldd "${target_dir}/${remote_server_triple}/release/remote_server" | grep -q 'libcrypto\|libssl'; then
+        if [[ "$remote_server_triple" == *-musl ]]; then
+            echo "Error: remote_server still depends on libssl or libcrypto" && exit 1
+        else
+            echo "Info: Using non-musl remote-server build."
+        fi
     fi
+fi
+
+if "$remote_server_only"; then
+    gzip -f --stdout --best "${target_dir}/${remote_server_triple}/release/remote_server" > "${target_dir}/zed-remote-server-linux-$(uname -m).gz"
+    exit 0
 fi
 
 suffix=""
@@ -242,4 +261,6 @@ remove_match="${app_slug}(-[a-zA-Z0-9]+)?-linux-$(uname -m)\.tar\.gz"
 ls "${target_dir}/release" | grep -E ${remove_match} | xargs -d "\n" -I {} rm -f "${target_dir}/release/{}" || true
 tar -czvf "${target_dir}/release/$archive" -C ${temp_dir} "${app_slug}${suffix}.app"
 
-gzip -f --stdout --best "${target_dir}/${remote_server_triple}/release/remote_server" > "${target_dir}/zed-remote-server-linux-${arch}.gz"
+if ! "$desktop_only"; then
+    gzip -f --stdout --best "${target_dir}/${remote_server_triple}/release/remote_server" > "${target_dir}/zed-remote-server-linux-${arch}.gz"
+fi

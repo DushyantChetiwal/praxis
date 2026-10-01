@@ -8,10 +8,15 @@
 //! This crate is deliberately free of UI and app dependencies so the graph can
 //! be stored alongside a thread and exercised in plain unit tests.
 
+mod edit;
 mod layout;
 mod run;
 mod spec;
 
+pub use edit::{
+    GraphEdit, GraphEditError, GraphEditPreview, NodePosition, preview_graph_edits,
+    preview_graph_replacement,
+};
 pub use layout::{COLUMN_SPACING, Position, ROW_SPACING, layout_positions};
 pub use run::{
     Branch, Decision, MAX_NODE_VISITS, MAX_PLAN_DEPTH, MAX_RUN_STEPS, PlanRun, RunOutcome,
@@ -49,7 +54,9 @@ impl From<String> for NodeId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 pub struct EdgeId(pub String);
 
 impl From<&str> for EdgeId {
@@ -96,7 +103,7 @@ impl EdgeCondition {
 ///
 /// This is what travels along an edge to the steps that follow, and what the
 /// step itself is reminded of when a loop brings it round again.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct StepResult {
     /// The step's own account of what it did, answering its `capture`.
     pub summary: String,
@@ -114,7 +121,7 @@ pub struct StepModel {
 }
 
 /// A single step in the plan.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ArchitectNode {
     pub id: NodeId,
     pub title: String,
@@ -124,6 +131,10 @@ pub struct ArchitectNode {
     /// The area of work this step owns.
     #[serde(default)]
     pub responsibility: String,
+    /// Existing files this step anticipates modifying, qualified as `worktree/path`.
+    /// `None` is an unreviewed legacy declaration; `Some([])` anticipates no existing files.
+    #[serde(default)]
+    pub file_surface: Option<Vec<String>>,
     /// What this step has to accomplish.
     #[serde(default)]
     pub intent: String,
@@ -142,12 +153,14 @@ pub struct ArchitectNode {
     pub pinned: bool,
     /// Where the node sits on the canvas. `None` until it has been laid out.
     #[serde(default)]
+    #[schemars(with = "Option<NodePosition>")]
     pub position: Option<Position>,
     /// A locked node is finished being deliberated and can no longer be edited.
     #[serde(default)]
     pub locked: bool,
     /// The thread used to deliberate this step, created on first use.
     #[serde(default)]
+    #[schemars(with = "Option<String>")]
     pub chat: Option<acp::SessionId>,
     /// A plan nested inside this step. Running the step runs this plan, and the
     /// step is done when the plan is.
@@ -165,6 +178,7 @@ impl ArchitectNode {
             title: title.into(),
             model: None,
             responsibility: String::new(),
+            file_surface: Some(Vec::new()),
             intent: String::new(),
             rules: Vec::new(),
             capture: String::new(),
@@ -174,6 +188,14 @@ impl ArchitectNode {
             chat: None,
             subplan: None,
             result: None,
+        }
+    }
+
+    pub(crate) fn file_surface_description(&self) -> String {
+        match &self.file_surface {
+            None => "MISSING — declare existing files before running".into(),
+            Some(files) if files.is_empty() => "[] — no existing files anticipated".into(),
+            Some(files) => format!("{files:?}"),
         }
     }
 
@@ -207,7 +229,7 @@ impl From<&str> for ArchitectNode {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ArchitectEdge {
     pub id: EdgeId,
     pub from: NodeId,
@@ -242,7 +264,7 @@ impl ArchitectEdge {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ArchitectGraph {
     #[serde(default)]
     pub nodes: Vec<ArchitectNode>,
@@ -251,7 +273,7 @@ pub struct ArchitectGraph {
 }
 
 /// Something wrong with the graph that the user should see before running it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum GraphProblem {
     DuplicateNode(NodeId),
     /// An edge referring to a node that is not in the graph.
@@ -269,6 +291,17 @@ pub enum GraphProblem {
     /// unconditional, unlimited connections, all of which a run takes, so it
     /// could never leave the loop.
     EndlessLoop(NodeId),
+    MissingFileSurface(NodeId),
+    InvalidFileSurface {
+        node: NodeId,
+        file: String,
+        reason: String,
+    },
+    FileSurfaceOverlap {
+        first: NodeId,
+        second: NodeId,
+        file: String,
+    },
     /// Something wrong inside a step's nested plan.
     InSubplan {
         node: NodeId,
@@ -298,6 +331,24 @@ impl Display for GraphProblem {
                 formatter,
                 "{id} is in a loop with no way out; give one of its connections a condition or a \
                  repeat limit"
+            ),
+            GraphProblem::MissingFileSurface(node) => write!(
+                formatter,
+                "{node} needs an explicit file_surface; list existing files as worktree/path, or [] if none are anticipated"
+            ),
+            GraphProblem::InvalidFileSurface { node, file, reason } => {
+                write!(
+                    formatter,
+                    "{node} has an invalid file surface path {file:?}: {reason}"
+                )
+            }
+            GraphProblem::FileSurfaceOverlap {
+                first,
+                second,
+                file,
+            } => write!(
+                formatter,
+                "{first} and {second} may run concurrently and both declare {file}; serialize these steps or give them disjoint file surfaces (including nested steps)"
             ),
             GraphProblem::InSubplan { node, problem } => {
                 write!(formatter, "inside {node}: {problem}")
@@ -344,6 +395,23 @@ impl GraphProblem {
                 "\"{}\" is in a loop with no way out; give one of its connections a condition \
                  or a repeat limit",
                 title(id)
+            ),
+            GraphProblem::MissingFileSurface(node) => format!(
+                "\"{}\" needs an existing-file surface. List worktree/path files, or [] if none are anticipated",
+                title(node)
+            ),
+            GraphProblem::InvalidFileSurface { node, file, reason } => format!(
+                "\"{}\" has an invalid file path {file:?}: {reason}",
+                title(node)
+            ),
+            GraphProblem::FileSurfaceOverlap {
+                first,
+                second,
+                file,
+            } => format!(
+                "\"{}\" and \"{}\" may run concurrently and both touch {file}. Serialize them or declare disjoint file surfaces, including nested steps",
+                title(first),
+                title(second)
             ),
             GraphProblem::InSubplan { node, problem } => {
                 let inner = graph
@@ -502,7 +570,278 @@ fn routes_from(graph: &ArchitectGraph, id: &NodeId) -> Vec<Route> {
     routes
 }
 
+// This is a lexical comparison spelling, not OS canonicalization. Filesystem
+// aliases (including symlinks and short names) need host-specific resolution.
+fn canonical_file_surface_path(path: &str) -> Result<String, String> {
+    let path = path.replace('\\', "/");
+    if path.is_empty() || path.starts_with('/') || path.ends_with('/') {
+        return Err(
+            "use a relative file path qualified as worktree/path, not a directory or absolute path"
+                .into(),
+        );
+    }
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        if component.is_empty() || component == "." {
+            continue;
+        }
+        if component == ".." {
+            return Err("parent traversal is ambiguous; spell the file directly as worktree/path without '..'".into());
+        }
+        if component
+            .chars()
+            .any(|character| character.is_control() || "<>:\"|?*".contains(character))
+            || component.ends_with([' ', '.'])
+        {
+            return Err("remove control characters, Windows-reserved characters, or trailing spaces or dots from the file path".into());
+        }
+        let stem = component
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        if matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) || stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"))
+            .is_some_and(|suffix| {
+                matches!(
+                    suffix,
+                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                )
+            })
+        {
+            return Err("Windows device names are not portable file paths; name a regular worktree/path file".into());
+        }
+        components.push(component);
+    }
+    if components.len() < 2 {
+        return Err(
+            "include the worktree name and a file, for example worktree/src/main.rs".into(),
+        );
+    }
+    Ok(components.join("/"))
+}
+
 impl ArchitectGraph {
+    /// Conservative comparison identity for a worktree-qualified file path.
+    /// Normalizes separators, '.' components, and Unicode lowercase spelling.
+    /// This is not full Unicode case folding, Unicode normalization, or OS
+    /// canonicalization: symlinks, short names, and filesystem aliases are unresolved.
+    pub fn normalize_file_surface_path(path: &str) -> Result<String, String> {
+        canonical_file_surface_path(path).map(|path| path.to_lowercase())
+    }
+
+    /// Sorted, deduplicated identities suitable for comparing file surfaces.
+    /// Do not use these identities to open files on a case-sensitive filesystem.
+    pub fn normalize_file_surface(files: &[String]) -> Result<Vec<String>, String> {
+        files
+            .iter()
+            .map(|file| Self::normalize_file_surface_path(file))
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()
+            .map(|files| files.into_iter().collect())
+    }
+
+    /// Includes a composite step's own declaration and every nested declaration.
+    pub fn effective_file_surface(&self, path: &NodePath) -> Result<Vec<String>, String> {
+        let node = self
+            .node_at(path)
+            .ok_or_else(|| format!("No step at {path}"))?;
+        let files = node
+            .file_surface
+            .as_ref()
+            .ok_or_else(|| format!("Step {path} needs an explicit file_surface before running"))?;
+        let mut surface: std::collections::BTreeSet<_> =
+            Self::normalize_file_surface(files)?.into_iter().collect();
+        if let Some(subplan) = node.subplan() {
+            for child in &subplan.nodes {
+                surface.extend(subplan.effective_file_surface(&NodePath::root(child.id.clone()))?);
+            }
+        }
+        Ok(surface.into_iter().collect())
+    }
+
+    /// Surface blockers at every depth, including effective composite scopes.
+    pub fn file_surface_problems(&self) -> Vec<GraphProblem> {
+        let mut problems = self.local_file_surface_problems();
+        for node in &self.nodes {
+            if let Some(subplan) = node.subplan() {
+                problems.extend(subplan.file_surface_problems().into_iter().map(|problem| {
+                    GraphProblem::InSubplan {
+                        node: node.id.clone(),
+                        problem: Box::new(problem),
+                    }
+                }));
+            }
+        }
+        problems
+    }
+
+    fn local_file_surface_problems(&self) -> Vec<GraphProblem> {
+        let mut problems = Vec::new();
+        for node in &self.nodes {
+            let Some(files) = &node.file_surface else {
+                problems.push(GraphProblem::MissingFileSurface(node.id.clone()));
+                continue;
+            };
+            let mut identities = HashSet::default();
+            for file in files {
+                let problem = match canonical_file_surface_path(file) {
+                    Err(reason) => Some(reason),
+                    Ok(canonical) => {
+                        if !identities.insert(canonical.to_lowercase()) {
+                            Some("this file is already declared, possibly with different case; remove the duplicate".into())
+                        } else if &canonical != file {
+                            Some(format!(
+                                "use the canonical spelling {canonical:?}, with '/' separators and no empty or '.' components"
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                };
+                if let Some(reason) = problem {
+                    problems.push(GraphProblem::InvalidFileSurface {
+                        node: node.id.clone(),
+                        file: file.clone(),
+                        reason,
+                    });
+                }
+            }
+        }
+
+        // A disabled edge cannot prove ordering. Conditional edges are dependencies,
+        // not exclusive choices: both branches can be selected by the runner.
+        let reachable: Vec<HashSet<NodeId>> = self
+            .nodes
+            .iter()
+            .map(|node| {
+                let mut reached = HashSet::default();
+                let mut pending: Vec<_> = self
+                    .edges_from(&node.id)
+                    .filter(|edge| edge.max_repeats != Some(0))
+                    .map(|edge| edge.to.clone())
+                    .collect();
+                while let Some(id) = pending.pop() {
+                    if reached.insert(id.clone()) {
+                        pending.extend(
+                            self.edges_from(&id)
+                                .filter(|edge| edge.max_repeats != Some(0))
+                                .map(|edge| edge.to.clone()),
+                        );
+                    }
+                }
+                reached
+            })
+            .collect();
+        // Repeated visits invalidate ordering only across potentially concurrent
+        // loop branches, not every predecessor and successor of a serial retry.
+        let concurrent_loop_steps = run::potentially_concurrent_loop_steps(self);
+        // Invalid or missing declarations already have actionable problems at
+        // their own depth. Only complete scopes can be compared for overlap.
+        let surfaces: Vec<_> = self
+            .nodes
+            .iter()
+            .map(|node| self.effective_file_surface(&NodePath::root(node.id.clone())))
+            .collect();
+        for (first_index, first) in self.nodes.iter().enumerate() {
+            for (second_index, second) in self.nodes.iter().enumerate().skip(first_index + 1) {
+                let ordered = !concurrent_loop_steps
+                    .contains(&(first.id.clone(), second.id.clone()))
+                    && (reachable
+                        .get(first_index)
+                        .is_some_and(|nodes| nodes.contains(&second.id))
+                        || reachable
+                            .get(second_index)
+                            .is_some_and(|nodes| nodes.contains(&first.id)));
+                if ordered {
+                    continue;
+                }
+                if let (Some(Ok(first_surface)), Some(Ok(second_surface))) =
+                    (surfaces.get(first_index), surfaces.get(second_index))
+                {
+                    for file in first_surface
+                        .iter()
+                        .filter(|file| second_surface.contains(file))
+                    {
+                        problems.push(GraphProblem::FileSurfaceOverlap {
+                            first: first.id.clone(),
+                            second: second.id.clone(),
+                            file: file.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        problems
+    }
+
+    /// Widens downstream declarations after creation, including nested successors
+    /// and containing scopes, without reopening locks or discarding live results.
+    /// Returns changed paths in stable order. Missing legacy surfaces stay missing.
+    /// Invalid paths are retained verbatim so validation fails rather than silently
+    /// losing a created file. Callers must revalidate before scheduling more work.
+    pub fn record_created_files(&mut self, source: &NodePath, files: &[String]) -> Vec<NodePath> {
+        if self.node_at(source).is_none() || files.is_empty() {
+            return Vec::new();
+        }
+        let mut pending = vec![(source.clone(), false, false)];
+        let mut visited = HashSet::default();
+        let mut changed = std::collections::BTreeSet::new();
+        while let Some((path, descend, record)) = pending.pop() {
+            if !visited.insert((path.clone(), descend, record)) {
+                continue;
+            }
+            if record
+                && let Some(node) = self.node_at_mut(&path)
+                && let Some(surface) = &mut node.file_surface
+            {
+                for file in files {
+                    let canonical =
+                        canonical_file_surface_path(file).unwrap_or_else(|_| file.clone());
+                    let identity = Self::normalize_file_surface_path(&canonical);
+                    if !surface.iter().any(|existing| {
+                        existing == &canonical
+                            || identity.as_ref().is_ok_and(|identity| {
+                                Self::normalize_file_surface_path(existing).as_ref() == Ok(identity)
+                            })
+                    }) {
+                        surface.push(canonical);
+                        changed.insert(path.clone());
+                    }
+                }
+            }
+            if descend && let Some(subplan) = self.node_at(&path).and_then(ArchitectNode::subplan) {
+                // An edge re-entering a composite starts its subplan afresh,
+                // including earlier children. Merely ascending to widen a parent
+                // scope never sets descend, even during a local child retry.
+                pending.extend(
+                    subplan
+                        .nodes
+                        .iter()
+                        .map(|node| (path.child(node.id.clone()), true, true)),
+                );
+            }
+            let parent = path.parent().unwrap_or_default();
+            if !parent.is_empty() {
+                // Widen the parent scope, not unrelated siblings inside it.
+                pending.push((parent.clone(), false, true));
+            }
+            if let Some(id) = path.leaf()
+                && let Some(local) = self.graph_at(&parent)
+            {
+                pending.extend(
+                    local
+                        .edges_from(id)
+                        .map(|edge| (parent.child(edge.to.clone()), true, true)),
+                );
+            }
+        }
+        changed.into_iter().collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
@@ -591,6 +930,7 @@ impl ArchitectGraph {
                             .is_some_and(|model| Some(model) != settled.model.as_ref())
                         || drafted.responsibility.trim() != settled.responsibility.trim()
                         || drafted.intent.trim() != settled.intent.trim()
+                        || drafted.file_surface != settled.file_surface
                         || drafted.rules != settled.rules
                         || drafted.capture.trim() != settled.capture.trim()
                         || routes_from(&draft, &settled.id) != routes_from(self, &settled.id)
@@ -658,6 +998,17 @@ impl ArchitectGraph {
             }
         }
 
+        // Compare composite scopes only after omitted nested plans have been
+        // restored; omission is preservation, not removal of a child's files.
+        for settled in self.nodes.iter().filter(|node| node.locked) {
+            let path = NodePath::root(settled.id.clone());
+            if draft.effective_file_surface(&path) != self.effective_file_surface(&path) {
+                refused.push(settled.title.clone());
+            }
+        }
+        if !refused.is_empty() {
+            return Err(LockedStepsWouldChange { steps: refused });
+        }
         Ok(MergedDraft {
             graph: draft,
             preserved,
@@ -704,6 +1055,10 @@ impl ArchitectGraph {
                     node.responsibility.trim()
                 ));
             }
+            out.push_str(&format!(
+                "{pad}  file_surface: {}\n",
+                node.file_surface_description()
+            ));
             if !node.intent.trim().is_empty() {
                 let _ = writeln!(out, "{pad}  goal: {}", node.intent.trim());
             }
@@ -1416,6 +1771,7 @@ impl ArchitectGraph {
             problems.push(GraphProblem::EndlessLoop(id));
         }
 
+        problems.extend(self.local_file_surface_problems());
         problems.extend(self.edges.iter().filter_map(|edge| {
             edge.condition
                 .label()
@@ -1595,6 +1951,11 @@ pub struct ProposedNode {
     /// The area of work this step owns, such as `Authentication` or `Tests`.
     #[serde(default)]
     pub responsibility: String,
+    /// Required existing-file surface, using canonical `worktree/path` files, not
+    /// directories or globs. List anticipated modifications, renames, and deletions,
+    /// not read-only access. Use [] when no existing files will be affected.
+    /// Concurrent steps must have disjoint surfaces, including nested children.
+    pub file_surface: Vec<String>,
     /// What this step has to accomplish.
     #[serde(default)]
     pub intent: String,
@@ -1645,6 +2006,7 @@ impl ProposedGraph {
                 title: node.title,
                 model: node.model,
                 responsibility: node.responsibility,
+                file_surface: Some(node.file_surface),
                 intent: node.intent,
                 rules: node.rules,
                 capture: node.capture,
@@ -1679,6 +2041,554 @@ mod tests {
 
     /// A chain with a loop back to an earlier step, which is the shape the
     /// layout and validation both have to tolerate.
+    fn surface_graph(nodes: &[&str], edges: &[(&str, &str)]) -> ArchitectGraph {
+        let mut graph = ArchitectGraph::default();
+        for id in nodes {
+            let mut node = ArchitectNode::new(*id, *id);
+            node.file_surface = Some(vec!["worktree/src/shared.rs".into()]);
+            node.locked = true;
+            graph.add_node(node);
+        }
+        for (from, to) in edges {
+            graph.connect(*from, *to);
+        }
+        graph
+    }
+
+    #[test]
+    fn proposed_surfaces_are_required_in_serde_and_schema_at_every_depth() {
+        let missing = serde_json::json!({"id": "step", "title": "Step"});
+        assert!(serde_json::from_value::<ProposedNode>(missing.clone()).is_err());
+        let mut explicit = missing;
+        explicit["file_surface"] = serde_json::json!([]);
+        let proposed: ProposedNode = serde_json::from_value(explicit.clone()).expect("explicit []");
+        assert!(proposed.file_surface.is_empty());
+        explicit["file_surface"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<ProposedNode>(explicit).is_err());
+        let nested = serde_json::json!({"nodes": [{
+            "id": "parent", "title": "Parent", "file_surface": [],
+            "steps": {"nodes": [{"id": "child", "title": "Child"}]}
+        }]});
+        assert!(serde_json::from_value::<ProposedGraph>(nested).is_err());
+        let schema = serde_json::to_value(schemars::schema_for!(ProposedNode)).expect("schema");
+        assert!(
+            schema["required"]
+                .as_array()
+                .expect("required fields")
+                .contains(&serde_json::json!("file_surface"))
+        );
+        assert!(
+            schema["properties"]["file_surface"]
+                .get("default")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn legacy_missing_surfaces_load_but_never_authorize_execution() {
+        let graph: ArchitectGraph = serde_json::from_value(serde_json::json!({"nodes": [{
+            "id": "legacy", "title": "Legacy", "locked": true
+        }]}))
+        .expect("legacy graph loads");
+        assert_eq!(
+            graph.node(&"legacy".into()).expect("legacy").file_surface,
+            None
+        );
+        assert_eq!(
+            graph.file_surface_problems(),
+            vec![GraphProblem::MissingFileSurface("legacy".into())]
+        );
+        assert!(PlanRun::start(&graph).is_err());
+        assert!(compile_spec(&graph).is_err());
+        let restored: ArchitectGraph =
+            serde_json::from_value(serde_json::to_value(&graph).expect("serialize"))
+                .expect("restore");
+        assert_eq!(graph, restored);
+        assert!(restored.outline().contains("MISSING"));
+        assert_eq!(
+            ArchitectNode::new("new", "New").file_surface,
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn file_surface_identities_are_portable_and_invalid_paths_are_actionable() {
+        for alias in [
+            "Worktree/Src/File.rs",
+            "worktree\\src\\file.rs",
+            "./worktree//src/./file.rs",
+        ] {
+            assert_eq!(
+                ArchitectGraph::normalize_file_surface_path(alias).expect("identity"),
+                "worktree/src/file.rs"
+            );
+        }
+        assert_eq!(
+            ArchitectGraph::normalize_file_surface(&[
+                "Worktree/Src/File.rs".into(),
+                "worktree\\src\\file.rs".into(),
+            ])
+            .expect("deduplicate"),
+            vec!["worktree/src/file.rs"]
+        );
+        for invalid in [
+            "",
+            "file.rs",
+            "/worktree/file.rs",
+            "C:\\worktree\\file.rs",
+            "//server/share/file.rs",
+            "worktree/../file.rs",
+            "worktree/src/",
+            "worktree/*.rs",
+            "worktree/file.rs:stream",
+            "worktree/NUL.txt",
+            "worktree/COM1",
+            "worktree/file.",
+            "worktree/file ",
+            "worktree/file\n.rs",
+            "worktree/COM¹.txt",
+            "worktree/LPT²",
+        ] {
+            assert!(
+                ArchitectGraph::normalize_file_surface_path(invalid).is_err(),
+                "{invalid:?}"
+            );
+        }
+        let mut graph = surface_graph(&["a", "b"], &[]);
+        graph.node_mut(&"a".into()).expect("a").file_surface =
+            Some(vec!["worktree\\src\\shared.rs".into()]);
+        let problems = graph.file_surface_problems();
+        assert!(problems.iter().any(|problem| matches!(problem,
+            GraphProblem::InvalidFileSurface { reason, .. } if reason.contains("canonical spelling")
+        )));
+        assert!(
+            problems
+                .iter()
+                .any(|problem| matches!(problem, GraphProblem::FileSurfaceOverlap { .. }))
+        );
+        graph.node_mut(&"a".into()).expect("a").file_surface = Some(vec![
+            "Worktree/src/shared.rs".into(),
+            "worktree/src/shared.rs".into(),
+        ]);
+        assert!(
+            graph
+                .file_surface_problems()
+                .iter()
+                .any(|problem| matches!(problem,
+                    GraphProblem::InvalidFileSurface { reason, .. } if reason.contains("duplicate")
+                ))
+        );
+    }
+
+    #[test]
+    fn unicode_surfaces_preserve_spelling_and_compare_lowercase_aliases() {
+        for (path, identity) in [
+            ("Проект/Данные/É.TXT", "проект/данные/é.txt"),
+            ("项目/源/ 文件~.rs", "项目/源/ 文件~.rs"),
+            ("Worktree/ file~.rs", "worktree/ file~.rs"),
+            ("Worktree/SHORT~1.rs", "worktree/short~1.rs"),
+            ("Worktree/İ.rs", "worktree/i\u{307}.rs"),
+        ] {
+            assert_eq!(
+                ArchitectGraph::normalize_file_surface_path(path).expect("valid path"),
+                identity
+            );
+        }
+        // This lexical comparison does not claim Unicode normalization or OS
+        // alias resolution, and must not rewrite display/open-file spellings.
+        assert_ne!(
+            ArchitectGraph::normalize_file_surface_path("worktree/é.rs"),
+            ArchitectGraph::normalize_file_surface_path("worktree/e\u{301}.rs")
+        );
+        let mut graph = surface_graph(&["left", "right"], &[]);
+        graph.node_mut(&"left".into()).expect("left").file_surface =
+            Some(vec!["Données/É.rs".into()]);
+        graph.node_mut(&"right".into()).expect("right").file_surface =
+            Some(vec!["données/é.rs".into()]);
+        assert_eq!(
+            graph.file_surface_problems(),
+            vec![GraphProblem::FileSurfaceOverlap {
+                first: "left".into(),
+                second: "right".into(),
+                file: "données/é.rs".into(),
+            }]
+        );
+        graph.connect("left", "right");
+        assert!(graph.file_surface_problems().is_empty());
+        let files = vec!["项目/源/ 文件~.rs".into()];
+        graph.record_created_files(&NodePath::root("left".into()), &files);
+        assert!(
+            graph
+                .node(&"right".into())
+                .expect("right")
+                .file_surface
+                .as_ref()
+                .expect("surface")
+                .contains(&files[0])
+        );
+        assert!(graph.file_surface_problems().is_empty());
+    }
+
+    #[test]
+    fn parallel_surfaces_conflict_but_serial_and_join_surfaces_do_not() {
+        let mut graph = surface_graph(
+            &["root", "left", "right", "join"],
+            &[
+                ("root", "left"),
+                ("root", "right"),
+                ("left", "join"),
+                ("right", "join"),
+            ],
+        );
+        assert_eq!(
+            graph.file_surface_problems(),
+            vec![GraphProblem::FileSurfaceOverlap {
+                first: "left".into(),
+                second: "right".into(),
+                file: "worktree/src/shared.rs".into(),
+            }]
+        );
+        graph.connect("left", "right");
+        assert!(graph.file_surface_problems().is_empty());
+        assert!(PlanRun::start(&graph).is_ok());
+        let mut disjoint = surface_graph(&["left", "right"], &[]);
+        disjoint
+            .node_mut(&"right".into())
+            .expect("right")
+            .file_surface = Some(vec!["other/src/shared.rs".into()]);
+        assert!(disjoint.file_surface_problems().is_empty());
+    }
+
+    #[test]
+    fn conditional_branches_disabled_routes_and_loops_do_not_hide_conflicts() {
+        let mut graph = surface_graph(
+            &["root", "left", "right"],
+            &[("root", "left"), ("root", "right")],
+        );
+        for edge in &mut graph.edges {
+            edge.condition = EdgeCondition::Objective {
+                statement: "both may be true".into(),
+            };
+        }
+        assert_eq!(graph.file_surface_problems().len(), 1);
+        let edge = graph.connect("left", "right");
+        graph
+            .edges
+            .iter_mut()
+            .find(|candidate| candidate.id == edge)
+            .expect("edge")
+            .max_repeats = Some(0);
+        assert_eq!(graph.file_surface_problems().len(), 1);
+        let mut looping = surface_graph(&["a", "b"], &[("a", "b"), ("b", "a")]);
+        for edge in &mut looping.edges {
+            edge.max_repeats = Some(2);
+        }
+        assert!(
+            looping.file_surface_problems().is_empty(),
+            "bounded repeats run serially"
+        );
+        // A disabled back edge must not turn a proven serial chain into a loop.
+        looping
+            .edges
+            .iter_mut()
+            .find(|edge| edge.from == NodeId::from("b"))
+            .expect("back edge")
+            .max_repeats = Some(0);
+        assert!(looping.file_surface_problems().is_empty());
+    }
+
+    #[test]
+    fn composite_surfaces_union_children_without_conflicting_with_their_own_steps() {
+        let mut graph = surface_graph(&["parent", "peer"], &[]);
+        let parent = graph.node_mut(&"parent".into()).expect("parent");
+        parent.file_surface = Some(Vec::new());
+        parent.subplan = Some(Box::new(surface_graph(
+            &["first", "second"],
+            &[("first", "second")],
+        )));
+        assert_eq!(
+            graph.effective_file_surface(&NodePath::root("parent".into())),
+            Ok(vec!["worktree/src/shared.rs".into()])
+        );
+        assert_eq!(graph.file_surface_problems().len(), 1);
+        graph.connect("parent", "peer");
+        assert!(graph.file_surface_problems().is_empty());
+        let nested = graph.subplan_mut(&"parent".into()).expect("nested");
+        nested.edges.clear();
+        assert!(graph.file_surface_problems().iter().any(|problem| matches!(problem,
+            GraphProblem::InSubplan { problem, .. } if matches!(problem.as_ref(), GraphProblem::FileSurfaceOverlap { .. })
+        )));
+        graph
+            .node_at_mut(&NodePath::root("parent".into()).child("first".into()))
+            .expect("first")
+            .file_surface = None;
+        assert!(graph.file_surface_problems().iter().any(|problem| matches!(problem,
+            GraphProblem::InSubplan { problem, .. } if matches!(problem.as_ref(), GraphProblem::MissingFileSurface(_))
+        )));
+        assert!(PlanRun::start(&graph).is_err());
+    }
+
+    #[test]
+    fn proposals_keep_conflicting_drafts_inspectable_and_locked_surfaces_are_protected() {
+        let proposal: ProposedGraph = serde_json::from_value(serde_json::json!({"nodes": [
+            {"id": "left", "title": "Left", "file_surface": ["Worktree/src/shared.rs"]},
+            {"id": "right", "title": "Right", "file_surface": ["worktree/src/shared.rs"]}
+        ]}))
+        .expect("valid proposal payload");
+        let mut graph = proposal.into_graph();
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.file_surface_problems().len(), 1);
+        assert!(graph.outline().contains("Worktree/src/shared.rs"));
+        graph.lock_all();
+        assert!(PlanRun::start(&graph).is_err());
+        let mut changed = graph.clone();
+        changed.node_mut(&"left".into()).expect("left").file_surface = Some(Vec::new());
+        assert!(graph.merge_draft(changed.clone()).is_err());
+        graph.unlock_all();
+        let merged = graph
+            .merge_draft(changed)
+            .expect("unlocked correction")
+            .graph;
+        assert_eq!(
+            merged.node(&"left".into()).expect("left").file_surface,
+            Some(Vec::new())
+        );
+        assert!(merged.file_surface_problems().is_empty());
+    }
+
+    #[test]
+    fn a_locked_composite_cannot_gain_a_new_child_file_surface_during_merge() {
+        let mut graph = surface_graph(&["parent"], &[]);
+        let mut nested = surface_graph(&["child"], &[]);
+        let mut leaf = surface_graph(&["leaf"], &[]);
+        leaf.node_mut(&"leaf".into()).expect("leaf").file_surface =
+            Some(vec!["worktree/leaf.rs".into()]);
+        nested.node_mut(&"child".into()).expect("child").subplan = Some(Box::new(leaf));
+        graph.node_mut(&"parent".into()).expect("parent").subplan = Some(Box::new(nested));
+        let mut omitted_child = graph.clone();
+        omitted_child
+            .node_at_mut(&NodePath::root("parent".into()).child("child".into()))
+            .expect("child")
+            .subplan = None;
+        assert_eq!(
+            graph
+                .merge_draft(omitted_child)
+                .expect("deep omission preserves files")
+                .graph,
+            graph
+        );
+        let mut omitted = graph.clone();
+        omitted.node_mut(&"parent".into()).expect("parent").subplan = None;
+        assert_eq!(
+            graph
+                .merge_draft(omitted)
+                .expect("omission preserves children")
+                .graph,
+            graph
+        );
+        let mut draft = graph.clone();
+        let mut child = ArchitectNode::new("new-child", "New child");
+        child.file_surface = Some(vec!["worktree/new.rs".into()]);
+        draft
+            .subplan_mut(&"parent".into())
+            .expect("subplan")
+            .add_node(child);
+        assert!(graph.merge_draft(draft).is_err());
+    }
+
+    #[test]
+    fn created_files_reach_nested_successors_and_outer_successors_without_touching_siblings() {
+        let mut graph = surface_graph(
+            &["before", "parent", "after", "unrelated"],
+            &[("before", "parent"), ("parent", "after")],
+        );
+        let mut nested = surface_graph(&["source", "next", "sibling"], &[("source", "next")]);
+        nested.node_mut(&"next".into()).expect("next").subplan =
+            Some(Box::new(surface_graph(&["deep"], &[])));
+        graph.node_mut(&"parent".into()).expect("parent").subplan = Some(Box::new(nested));
+        graph.node_mut(&"after".into()).expect("after").subplan =
+            Some(Box::new(surface_graph(&["finish"], &[])));
+        let source = NodePath::root("parent".into()).child("source".into());
+        let snapshot = graph.clone();
+        let files = vec![
+            "worktree\\src\\created.rs".into(),
+            "WORKTREE/src/CREATED.rs".into(),
+        ];
+        let changed = graph.record_created_files(&source, &files);
+        let mut expected = vec![
+            NodePath::root("parent".into()),
+            NodePath::root("parent".into()).child("next".into()),
+            NodePath::root("parent".into())
+                .child("next".into())
+                .child("deep".into()),
+            NodePath::root("after".into()),
+            NodePath::root("after".into()).child("finish".into()),
+        ];
+        expected.sort();
+        assert_eq!(changed, expected);
+        for path in &changed {
+            let node = graph.node_at(path).expect("changed step");
+            assert_eq!(
+                node.file_surface
+                    .as_ref()
+                    .expect("declared")
+                    .last()
+                    .map(String::as_str),
+                Some("worktree/src/created.rs")
+            );
+            assert_eq!(
+                node.locked,
+                snapshot.node_at(path).expect("previous").locked
+            );
+            assert_eq!(
+                node.result,
+                snapshot.node_at(path).expect("previous").result
+            );
+        }
+        for path in [
+            source.clone(),
+            NodePath::root("before".into()),
+            NodePath::root("unrelated".into()),
+            NodePath::root("parent".into()).child("sibling".into()),
+        ] {
+            assert_eq!(graph.node_at(&path), snapshot.node_at(&path));
+        }
+        assert!(graph.record_created_files(&source, &files).is_empty());
+        assert!(
+            graph
+                .record_created_files(&NodePath::root("missing".into()), &files)
+                .is_empty()
+        );
+        assert!(graph.record_created_files(&source, &[]).is_empty());
+    }
+
+    #[test]
+    fn local_retries_preserve_siblings_but_outer_reentry_widens_future_children() {
+        let mut nested = surface_graph(
+            &["before", "source", "next", "sibling"],
+            &[("before", "source"), ("source", "next"), ("next", "source")],
+        );
+        nested
+            .edges
+            .iter_mut()
+            .find(|edge| edge.from == NodeId::from("next"))
+            .expect("local retry")
+            .max_repeats = Some(1);
+        nested
+            .node_mut(&"sibling".into())
+            .expect("sibling")
+            .file_surface = Some(vec!["worktree/sibling.rs".into()]);
+        let mut graph = surface_graph(&["parent", "after"], &[("parent", "after")]);
+        graph.node_mut(&"parent".into()).expect("parent").subplan = Some(Box::new(nested));
+        let source = NodePath::root("parent".into()).child("source".into());
+        let before = NodePath::root("parent".into()).child("before".into());
+        let sibling = NodePath::root("parent".into()).child("sibling".into());
+        let snapshot = graph.clone();
+        let files = vec!["项目/新文件.rs".into()];
+        let changed = graph.record_created_files(&source, &files);
+        assert!(
+            changed.contains(&source),
+            "the local loop revisits the source"
+        );
+        assert!(changed.contains(&NodePath::root("after".into())));
+        assert!(!changed.contains(&before));
+        assert!(!changed.contains(&sibling));
+        assert_eq!(graph.node_at(&before), snapshot.node_at(&before));
+        assert_eq!(graph.node_at(&sibling), snapshot.node_at(&sibling));
+        assert!(graph.record_created_files(&source, &files).is_empty());
+
+        let mut retry = ArchitectEdge::new("outer-retry", "after", "parent");
+        retry.max_repeats = Some(1);
+        graph.edges.push(retry);
+        let changed = graph.record_created_files(&source, &files);
+        assert!(
+            changed.contains(&before),
+            "outer reentry restarts the nested plan"
+        );
+        assert!(
+            changed.contains(&sibling),
+            "all nested roots run on reentry"
+        );
+        for path in [&before, &sibling] {
+            let node = graph.node_at(path).expect("future nested step");
+            assert!(
+                node.file_surface
+                    .as_ref()
+                    .expect("surface")
+                    .contains(&files[0])
+            );
+            assert_eq!(
+                node.locked,
+                snapshot.node_at(path).expect("previous").locked
+            );
+            assert_eq!(
+                node.result,
+                snapshot.node_at(path).expect("previous").result
+            );
+        }
+        assert!(graph.record_created_files(&source, &files).is_empty());
+    }
+
+    #[test]
+    fn created_files_can_require_serializing_previously_disjoint_successors() {
+        let mut graph = ArchitectGraph::default();
+        for id in ["source", "left", "right"] {
+            graph.add_node(ArchitectNode::new(id, id));
+        }
+        graph.connect("source", "left");
+        graph.connect("source", "right");
+        graph.lock_all();
+        assert!(PlanRun::start(&graph).is_ok());
+        let changed = graph.record_created_files(
+            &NodePath::root("source".into()),
+            &["worktree/new.rs".into()],
+        );
+        assert_eq!(
+            changed,
+            vec![
+                NodePath::root("left".into()),
+                NodePath::root("right".into())
+            ]
+        );
+        assert!(graph.is_fully_locked_deeply());
+        assert!(PlanRun::start(&graph).is_err());
+        graph.connect("left", "right");
+        assert!(PlanRun::start(&graph).is_ok());
+    }
+
+    #[test]
+    fn creation_propagation_preserves_missing_surfaces_and_fails_closed_on_invalid_paths() {
+        let mut graph = surface_graph(
+            &["source", "legacy", "after"],
+            &[
+                ("source", "legacy"),
+                ("legacy", "after"),
+                ("after", "source"),
+            ],
+        );
+        graph
+            .node_mut(&"legacy".into())
+            .expect("legacy")
+            .file_surface = None;
+        let source = NodePath::root("source".into());
+        let changed = graph.record_created_files(&source, &["worktree/../invalid.rs".into()]);
+        assert!(
+            changed.contains(&source),
+            "a loop revisits the creating step"
+        );
+        assert!(changed.contains(&NodePath::root("after".into())));
+        assert_eq!(
+            graph.node(&"legacy".into()).expect("legacy").file_surface,
+            None
+        );
+        assert!(
+            graph
+                .file_surface_problems()
+                .iter()
+                .any(|problem| matches!(problem, GraphProblem::InvalidFileSurface { .. }))
+        );
+    }
+
     fn looping_graph() -> ArchitectGraph {
         let mut graph = ArchitectGraph::default();
         for id in ["plan", "edit", "test", "ship"] {
@@ -2385,7 +3295,25 @@ mod tests {
         graph
     }
 
-    fn draft(json: serde_json::Value) -> ArchitectGraph {
+    fn draft(mut json: serde_json::Value) -> ArchitectGraph {
+        // These historical merge fixtures exercise other fields; their steps
+        // explicitly anticipate no existing files. Required serde is tested raw.
+        fn declare_surfaces(graph: &mut serde_json::Value) {
+            if let Some(nodes) = graph
+                .get_mut("nodes")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for node in nodes {
+                    if node.get("file_surface").is_none() {
+                        node["file_surface"] = serde_json::json!([]);
+                    }
+                    if let Some(steps) = node.get_mut("steps") {
+                        declare_surfaces(steps);
+                    }
+                }
+            }
+        }
+        declare_surfaces(&mut json);
         serde_json::from_value::<ProposedGraph>(json)
             .unwrap()
             .into_graph()
@@ -2569,8 +3497,8 @@ mod tests {
     fn a_proposal_arrives_laid_out() {
         let proposal: ProposedGraph = serde_json::from_value(serde_json::json!({
             "nodes": [
-                { "id": "plan", "title": "Plan the change" },
-                { "id": "edit", "title": "Make the edit", "rules": ["Keep the public API stable"] },
+                { "id": "plan", "title": "Plan the change", "file_surface": [] },
+                { "id": "edit", "title": "Make the edit", "file_surface": [], "rules": ["Keep the public API stable"] },
             ],
             "edges": [
                 { "from": "plan", "to": "edit" },

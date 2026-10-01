@@ -1304,7 +1304,10 @@
           // agent decides for itself when a task is worth planning, rather than
           // the user having to pick a separate profile first.
           "draft_plan": true,
+          "inspect_architect_plan": true,
+          "edit_architect_plan": true,
           "inspect_architect_run": true,
+          "wait_architect_run": true,
           "control_architect_run": true,
           // Locking and unlocking steps when the user asks for it in chat.
           "set_step_locks": true,
@@ -1349,7 +1352,9 @@
         // We don't know which of the context server tools are safe for the "Ask" profile, so we don't enable them by default.
         // "enable_all_context_servers": true,
         "tools": {
+          "inspect_architect_plan": true,
           "inspect_architect_run": true,
+          "wait_architect_run": true,
           "ask_question": true,
           "exit_plan_mode": true,
           "create_thread": true,

@@ -22,7 +22,8 @@
 //! is easy to get wrong testable without a model in the loop.
 
 use crate::{ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, GraphProblem, NodeId, NodePath};
-use collections::HashMap;
+use collections::{HashMap, HashSet};
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt::{self, Display, Write};
 
@@ -62,7 +63,7 @@ impl Display for RunRefusal {
 }
 
 /// How a run ended.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunOutcome {
     Completed,
     StepLimit { steps: usize },
@@ -146,7 +147,7 @@ fn find_title(graph: &ArchitectGraph, id: &NodeId) -> Option<String> {
 }
 
 /// One way out of the step the run is sitting on.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Branch {
     pub edge: EdgeId,
     pub to: NodeId,
@@ -154,7 +155,7 @@ pub struct Branch {
 }
 
 /// What the caller should do next.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Decision {
     /// Carry out this step, then report it with [`PlanRun::finish_step`].
     Run(NodePath),
@@ -176,7 +177,7 @@ pub enum Decision {
     Done(RunOutcome),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Phase {
     Working,
     Deciding {
@@ -193,7 +194,7 @@ enum Phase {
 }
 
 /// A position within one plan. A run holds a stack of these, one per level.
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Frame {
     /// The steps walked to reach this plan; empty for the top-level plan.
     parents: Vec<NodeId>,
@@ -206,6 +207,64 @@ struct Frame {
     /// How many times each connection in this plan has been taken, for
     /// connections with a repeat limit.
     edge_uses: HashMap<EdgeId, usize>,
+    prerequisites: Option<Prerequisites>,
+    dependency_fork: bool,
+}
+
+/// A dependency region has one owner, even when only some branches converge.
+/// Edges become selected or closed only after their source's routing is settled.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Prerequisites {
+    nodes: Vec<NodeId>,
+    entries: Vec<NodeId>,
+    completed: Vec<NodeId>,
+    skipped: Vec<NodeId>,
+    selected: Vec<EdgeId>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StepReadiness {
+    pub path: NodePath,
+    pub status: String,
+    pub reason: String,
+}
+
+impl Prerequisites {
+    fn settled(&self, node: &NodeId) -> bool {
+        self.completed.contains(node) || self.skipped.contains(node)
+    }
+
+    fn waiting(&self, graph: &ArchitectGraph, node: &NodeId) -> bool {
+        graph.edges.iter().any(|edge| {
+            &edge.to == node && self.nodes.contains(&edge.from) && !self.settled(&edge.from)
+        })
+    }
+
+    fn activated(&self, graph: &ArchitectGraph, node: &NodeId) -> bool {
+        self.entries.contains(node)
+            || graph
+                .edges
+                .iter()
+                .any(|edge| &edge.to == node && self.selected.contains(&edge.id))
+    }
+
+    fn close_skipped(&mut self, graph: &ArchitectGraph) {
+        loop {
+            let skipped = self
+                .nodes
+                .iter()
+                .find(|node| {
+                    !self.settled(node)
+                        && !self.waiting(graph, node)
+                        && !self.activated(graph, node)
+                })
+                .cloned();
+            match skipped {
+                Some(node) => self.skipped.push(node),
+                None => break,
+            }
+        }
+    }
 }
 
 impl Frame {
@@ -221,7 +280,7 @@ impl Frame {
 }
 
 /// A position in a plan, and the history of how it got there.
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlanRun {
     stack: Vec<Frame>,
     /// Every step entered, at any depth, in order and including repeats.
@@ -230,6 +289,7 @@ pub struct PlanRun {
     /// For a lane of a fork, the steps of the lane's own plan that it stops
     /// short of: where its branches meet, which run once every lane is done.
     stops: Vec<NodeId>,
+    settled_readiness: Vec<StepReadiness>,
 }
 
 impl PlanRun {
@@ -239,6 +299,29 @@ impl PlanRun {
             history: Vec::new(),
             outcome: None,
             stops: Vec::new(),
+            settled_readiness: Vec::new(),
+        }
+    }
+
+    /// A saved or rebased draft may await review, but its addresses and routing
+    /// must remain valid. Execution still uses the full readiness check.
+    pub fn validate_structure(graph: &ArchitectGraph) -> Result<(), RunRefusal> {
+        fn only_unlocked(problem: &GraphProblem) -> bool {
+            match problem {
+                GraphProblem::Unlocked(_) => true,
+                GraphProblem::InSubplan { problem, .. } => only_unlocked(problem),
+                _ => false,
+            }
+        }
+        let problems: Vec<_> = graph
+            .blocking_problems()
+            .into_iter()
+            .filter(|problem| !only_unlocked(problem))
+            .collect();
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(RunRefusal::NotReady(problems))
         }
     }
 
@@ -261,7 +344,7 @@ impl PlanRun {
             return Err(RunRefusal::NothingToRun);
         }
         let mut run = Self::empty();
-        run.push_frame(Vec::new(), entries);
+        run.push_frame(Vec::new(), entries, graph);
         // The entry step may itself be a plan, so descend before handing back.
         run.descend_while_nested(graph);
         Ok(run)
@@ -278,7 +361,7 @@ impl PlanRun {
         }
         let mut run = Self::empty();
         for (depth, id) in path.iter().enumerate() {
-            run.push_frame(path.0[..depth].to_vec(), vec![id.clone()]);
+            run.push_frame(path.0[..depth].to_vec(), vec![id.clone()], graph);
         }
         run.descend_while_nested(graph);
         Ok(run)
@@ -303,7 +386,7 @@ impl PlanRun {
             run.outcome = Some(RunOutcome::Completed);
             return run;
         }
-        run.push_frame(graph_path.0.clone(), vec![start]);
+        run.push_frame(graph_path.0.clone(), vec![start], graph);
         run.descend_while_nested(graph);
         run
     }
@@ -323,6 +406,28 @@ impl PlanRun {
         let mut stops: Vec<NodeId> = join.iter().cloned().collect();
         if self.stack.len() == 1 {
             stops.extend(self.stops.iter().cloned());
+        }
+        if frame.dependency_fork {
+            let mut run = Self::empty();
+            // This lane owns the entire remaining region, including the nominal
+            // join. Otherwise a skipped conditional route could still run it.
+            if self.stack.len() == 1 {
+                run.stops = self.stops.clone();
+            }
+            let entries = branches.iter().map(|(_, node)| node.clone()).collect();
+            run.push_frame(graph_path.0, entries, graph);
+            if !run.is_finished()
+                && run
+                    .stack
+                    .last()
+                    .is_some_and(|frame| frame.prerequisites.is_none())
+            {
+                run.enable_prerequisites(graph);
+            }
+            if !run.is_finished() {
+                run.descend_while_nested(graph);
+            }
+            return vec![run];
         }
         branches
             .iter()
@@ -344,6 +449,9 @@ impl PlanRun {
         let Phase::Forked { join, .. } = &frame.phase else {
             return self.decide(graph);
         };
+        if frame.dependency_fork {
+            return self.leave_frame(graph);
+        }
         match join.clone() {
             Some(join) => self.enter(join, graph),
             None => self.leave_frame(graph),
@@ -378,7 +486,10 @@ impl PlanRun {
         self.decide(graph)
     }
 
-    fn push_frame(&mut self, parents: Vec<NodeId>, entries: Vec<NodeId>) {
+    fn push_frame(&mut self, parents: Vec<NodeId>, entries: Vec<NodeId>, graph: &ArchitectGraph) {
+        let needs_prerequisites = graph
+            .graph_at(&NodePath(parents.clone()))
+            .is_some_and(|local| overlapping_regions(local, &entries, &[]));
         let mut entries = entries.into_iter();
         let Some(current) = entries.next() else {
             return;
@@ -392,9 +503,456 @@ impl PlanRun {
             phase: Phase::Working,
             visits,
             edge_uses: HashMap::default(),
+            prerequisites: None,
+            dependency_fork: false,
         };
         self.history.push(frame.path());
         self.stack.push(frame);
+        if needs_prerequisites {
+            self.enable_prerequisites(graph);
+        }
+    }
+
+    fn enable_prerequisites(&mut self, graph: &ArchitectGraph) {
+        let stops = if self.stack.len() == 1 {
+            self.stops.clone()
+        } else {
+            Vec::new()
+        };
+        let Some(frame) = self.stack.last_mut() else {
+            return;
+        };
+        let Some(local) = graph.graph_at(&frame.graph_path()) else {
+            return;
+        };
+        let mut entries = vec![frame.current.clone()];
+        entries.append(&mut frame.remaining_roots);
+        let nodes = reachable_before(local, &entries, &stops);
+        if local.edges.iter().any(|edge| {
+            nodes.contains(&edge.from) && nodes.contains(&edge.to) && local.is_loop_edge(edge)
+        }) {
+            self.finish(RunOutcome::Failed {
+                message: "Overlapping prerequisite branches contain a cycle. Split the loop into a nested plan before running.".into(),
+            });
+            return;
+        }
+        frame.prerequisites = Some(Prerequisites {
+            nodes,
+            entries,
+            completed: Vec::new(),
+            skipped: Vec::new(),
+            selected: Vec::new(),
+        });
+        // A branch can start directly at a shared node. Pick a genuinely ready
+        // entry rather than letting the order of outgoing edges bypass a parent.
+        if let Some(prerequisites) = &frame.prerequisites
+            && prerequisites.waiting(local, &frame.current)
+            && let Some(ready) = prerequisites
+                .nodes
+                .iter()
+                .find(|node| {
+                    !prerequisites.waiting(local, node) && prerequisites.activated(local, node)
+                })
+                .cloned()
+        {
+            frame.visits.remove(&frame.current);
+            frame.current = ready.clone();
+            frame.visits.insert(ready, 1);
+            if let Some(path) = self.history.last_mut() {
+                *path = frame.path();
+            }
+        }
+    }
+
+    fn settle_prerequisites(&mut self, selected: Vec<EdgeId>, graph: &ArchitectGraph) -> Decision {
+        let Some(frame) = self.stack.last_mut() else {
+            return self.finish(RunOutcome::Completed);
+        };
+        let Some(local) = graph.graph_at(&frame.graph_path()) else {
+            return self.finish(RunOutcome::Failed {
+                message: "The checkpoint plan is missing.".into(),
+            });
+        };
+        let Some(prerequisites) = &mut frame.prerequisites else {
+            return self.decide(graph);
+        };
+        prerequisites.completed.push(frame.current.clone());
+        for edge in &selected {
+            *frame.edge_uses.entry(edge.clone()).or_insert(0) += 1;
+        }
+        prerequisites.selected.extend(selected);
+        prerequisites.close_skipped(local);
+        let next = prerequisites
+            .nodes
+            .iter()
+            .find(|node| {
+                !prerequisites.settled(node)
+                    && !prerequisites.waiting(local, node)
+                    && prerequisites.activated(local, node)
+            })
+            .cloned();
+        if let Some(next) = next {
+            return self.enter(next, graph);
+        }
+        if prerequisites
+            .nodes
+            .iter()
+            .any(|node| !prerequisites.settled(node))
+        {
+            return self.finish(RunOutcome::Failed {
+                message: "No step is ready: unresolved cyclic prerequisites remain.".into(),
+            });
+        }
+        self.leave_frame(graph)
+    }
+
+    /// Dependency state for active regions. Callers can combine this with lane
+    /// positions and completed results without treating a summary as a verdict.
+    pub fn readiness(&self, graph: &ArchitectGraph) -> Vec<StepReadiness> {
+        let mut readiness = self.settled_readiness.clone();
+        for frame in &self.stack {
+            let Some(prerequisites) = &frame.prerequisites else {
+                continue;
+            };
+            let Some(local) = graph.graph_at(&frame.graph_path()) else {
+                continue;
+            };
+            for node in &prerequisites.nodes {
+                let (status, reason) = if prerequisites.completed.contains(node) {
+                    ("completed", "Step and outgoing routing completed")
+                } else if prerequisites.skipped.contains(node) {
+                    ("skipped", "Every incoming route was closed")
+                } else if prerequisites.waiting(local, node) {
+                    (
+                        "waiting",
+                        "Incoming prerequisites or branch decisions are unfinished",
+                    )
+                } else if prerequisites.activated(local, node) {
+                    (
+                        "ready",
+                        "All incoming prerequisites are settled and a route is selected",
+                    )
+                } else {
+                    ("waiting", "No incoming route has been selected")
+                };
+                let mut path = frame.parents.clone();
+                path.push(node.clone());
+                readiness.push(StepReadiness {
+                    path: NodePath(path),
+                    status: status.into(),
+                    reason: reason.into(),
+                });
+            }
+        }
+        readiness
+    }
+
+    /// Rebuilds a flat acyclic checkpoint without reexecuting retained results.
+    /// This does not authorize execution: the runner must gate resume on review.
+    /// Conditional routing cannot be inferred from a completed summary.
+    pub fn rebase_remaining(
+        graph: &ArchitectGraph,
+        completed: &[NodePath],
+    ) -> Result<Self, String> {
+        if graph.is_empty() {
+            return Err(RunRefusal::NothingToRun.to_string());
+        }
+        Self::validate_structure(graph).map_err(|error| error.to_string())?;
+        if graph.nodes.iter().any(|node| node.subplan().is_some())
+            || graph.edges.iter().any(|edge| graph.is_loop_edge(edge))
+        {
+            return Err("Topology rebasing requires a flat acyclic plan; the original checkpoint was preserved".into());
+        }
+        let completed: Vec<NodeId> = completed
+            .iter()
+            .map(|path| {
+                if path.depth() != 1 || graph.node_at(path).is_none() {
+                    return Err(format!("Cannot retain missing completed step {path}"));
+                }
+                path.leaf()
+                    .cloned()
+                    .ok_or_else(|| "An empty step cannot be completed".into())
+            })
+            .collect::<Result<_, String>>()?;
+        if graph
+            .edges
+            .iter()
+            .any(|edge| completed.contains(&edge.from) && !edge.condition.is_always())
+        {
+            return Err("Topology rebasing cannot infer a completed branch verdict; invalidate that step explicitly".into());
+        }
+        let mut prerequisites = Prerequisites {
+            nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
+            entries: entries_of(graph),
+            selected: graph
+                .edges
+                .iter()
+                .filter(|edge| completed.contains(&edge.from) && edge.max_repeats != Some(0))
+                .map(|edge| edge.id.clone())
+                .collect(),
+            completed,
+            skipped: Vec::new(),
+        };
+        prerequisites.close_skipped(graph);
+        if prerequisites
+            .completed
+            .iter()
+            .any(|node| prerequisites.waiting(graph, node) || !prerequisites.activated(graph, node))
+        {
+            return Err("Retained results have unfinished incoming prerequisites; invalidate those results first".into());
+        }
+        let next = prerequisites
+            .nodes
+            .iter()
+            .find(|node| {
+                !prerequisites.settled(node)
+                    && !prerequisites.waiting(graph, node)
+                    && prerequisites.activated(graph, node)
+            })
+            .cloned();
+        let mut run = Self::empty();
+        if let Some(next) = next {
+            run.push_frame(Vec::new(), vec![next], graph);
+            if let Some(frame) = run.stack.last_mut() {
+                frame.prerequisites = Some(prerequisites);
+            }
+        } else if prerequisites
+            .nodes
+            .iter()
+            .all(|node| prerequisites.settled(node))
+        {
+            run.outcome = Some(RunOutcome::Completed);
+        } else {
+            return Err("No remaining step has satisfied prerequisites".into());
+        }
+        Ok(run)
+    }
+
+    /// Changes only the next ready step in a dependency region, never its
+    /// completed work. The caller must ensure the displaced step has not begun.
+    pub fn prioritize_ready(
+        &mut self,
+        path: &NodePath,
+        graph: &ArchitectGraph,
+    ) -> Result<(), String> {
+        if self.is_finished()
+            || !self
+                .stack
+                .last()
+                .is_some_and(|frame| frame.phase == Phase::Working)
+        {
+            return Err("The lane is not waiting on an executable step".into());
+        }
+        if &self.current() == path {
+            return Ok(());
+        }
+        let frame = self
+            .stack
+            .last_mut()
+            .ok_or_else(|| "The run has finished".to_string())?;
+        let local = graph
+            .graph_at(&frame.graph_path())
+            .ok_or_else(|| "The plan is missing".to_string())?;
+        let node = path.leaf().ok_or_else(|| "Select a step".to_string())?;
+        let prerequisites = frame.prerequisites.as_ref().ok_or_else(|| {
+            "Only the checkpoint's current step is ready in this lane".to_string()
+        })?;
+        if frame.phase != Phase::Working
+            || path.0[..path.depth() - 1] != frame.parents
+            || !prerequisites.nodes.contains(node)
+            || prerequisites.settled(node)
+            || prerequisites.waiting(local, node)
+            || !prerequisites.activated(local, node)
+        {
+            return Err(
+                "The selected step is completed, skipped, or still waiting for prerequisites"
+                    .into(),
+            );
+        }
+        if graph
+            .node_at(path)
+            .is_some_and(|node| node.subplan().is_some())
+        {
+            return Err("Resume a nested plan at its admitted leaf step".into());
+        }
+        frame.visits.remove(&frame.current);
+        frame.current = node.clone();
+        frame.visits.insert(node.clone(), 1);
+        if let Some(previous) = self.history.last_mut() {
+            *previous = path.clone();
+        }
+        Ok(())
+    }
+
+    /// Validates deserialized positions before any driver can execute them.
+    pub fn validate_checkpoint(&self, graph: &ArchitectGraph) -> Result<(), String> {
+        Self::validate_structure(graph).map_err(|error| error.to_string())?;
+        if self.stack.len() > MAX_PLAN_DEPTH || self.history.len() > MAX_RUN_STEPS + MAX_NODE_VISITS
+        {
+            return Err("Checkpoint counters exceed run limits".into());
+        }
+        if self.outcome.is_none() && self.stack.is_empty() {
+            return Err("An unfinished checkpoint has no position".into());
+        }
+        for path in &self.history {
+            if path.is_empty() || path.depth() > MAX_PLAN_DEPTH || graph.node_at(path).is_none() {
+                return Err(format!(
+                    "Checkpoint history refers to an invalid or missing step {path}"
+                ));
+            }
+        }
+        for step in &self.settled_readiness {
+            if step.path.is_empty()
+                || step.path.depth() > MAX_PLAN_DEPTH
+                || graph.node_at(&step.path).is_none()
+                || !matches!(step.status.as_str(), "completed" | "skipped")
+            {
+                return Err("Checkpoint contains invalid settled readiness".into());
+            }
+        }
+        for (index, frame) in self.stack.iter().enumerate() {
+            if index > 0
+                && self
+                    .stack
+                    .get(index - 1)
+                    .is_none_or(|parent| parent.path().0 != frame.parents)
+            {
+                return Err("Checkpoint nesting does not match its parent step".into());
+            }
+            let local = graph
+                .graph_at(&frame.graph_path())
+                .ok_or_else(|| "Checkpoint contains a missing nested plan".to_string())?;
+            if local.node(&frame.current).is_none()
+                || !frame.visits.contains_key(&frame.current)
+                || (index == 0 && self.stops.iter().any(|node| local.node(node).is_none()))
+                || frame
+                    .remaining_roots
+                    .iter()
+                    .enumerate()
+                    .any(|(index, node)| {
+                        local.node(node).is_none() || frame.remaining_roots[..index].contains(node)
+                    })
+                || frame.visits.iter().any(|(node, visits)| {
+                    local.node(node).is_none() || *visits == 0 || *visits > MAX_NODE_VISITS + 1
+                })
+                || frame.edge_uses.iter().any(|(id, uses)| {
+                    *uses == 0
+                        || *uses > MAX_RUN_STEPS
+                        || !local.edges.iter().any(|edge| &edge.id == id)
+                })
+            {
+                return Err("Checkpoint contains invalid node or edge counters".into());
+            }
+            let valid_edge = |id: &EdgeId, to: &NodeId| {
+                local
+                    .edges
+                    .iter()
+                    .any(|edge| &edge.id == id && &edge.to == to && edge.from == frame.current)
+            };
+            match &frame.phase {
+                Phase::Deciding { remaining, plain } => {
+                    let mut edges = std::collections::HashSet::new();
+                    if remaining
+                        .iter()
+                        .map(|branch| &branch.edge)
+                        .chain(plain.iter().map(|(edge, _)| edge))
+                        .any(|edge| !edges.insert(edge))
+                    {
+                        return Err("Checkpoint repeats a pending branch decision".into());
+                    }
+                    if remaining.iter().any(|branch| {
+                        !valid_edge(&branch.edge, &branch.to)
+                            || !local.edges.iter().any(|edge| {
+                                edge.id == branch.edge && edge.condition == branch.condition
+                            })
+                    }) || plain.iter().any(|(edge, to)| !valid_edge(edge, to))
+                    {
+                        return Err("Checkpoint branch decision does not match the graph".into());
+                    }
+                }
+                Phase::Forked { branches, join } => {
+                    let mut edges = std::collections::HashSet::new();
+                    if branches.iter().any(|(edge, _)| !edges.insert(edge)) {
+                        return Err("Checkpoint repeats a fork branch".into());
+                    }
+                    if branches.is_empty()
+                        || branches.iter().any(|(edge, to)| !valid_edge(edge, to))
+                        || *join != join_of(local, &frame.current, branches)
+                        || frame.dependency_fork != fork_needs_prerequisites(local, branches, join)
+                    {
+                        return Err("Checkpoint fork does not match the graph".into());
+                    }
+                }
+                Phase::Working => {}
+            }
+            if let Some(prerequisites) = &frame.prerequisites {
+                let stops = if index == 0 {
+                    self.stops.as_slice()
+                } else {
+                    &[]
+                };
+                if !prerequisites.nodes.contains(&frame.current)
+                    || prerequisites.nodes != reachable_before(local, &prerequisites.entries, stops)
+                    || prerequisites
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .any(|(index, node)| prerequisites.entries[..index].contains(node))
+                    || prerequisites
+                        .selected
+                        .iter()
+                        .enumerate()
+                        .any(|(index, edge)| prerequisites.selected[..index].contains(edge))
+                    || prerequisites
+                        .completed
+                        .iter()
+                        .enumerate()
+                        .any(|(index, node)| prerequisites.completed[..index].contains(node))
+                    || prerequisites
+                        .skipped
+                        .iter()
+                        .enumerate()
+                        .any(|(index, node)| prerequisites.skipped[..index].contains(node))
+                    || prerequisites
+                        .nodes
+                        .iter()
+                        .any(|node| local.node(node).is_none())
+                    || local.edges.iter().any(|edge| {
+                        prerequisites.nodes.contains(&edge.from)
+                            && prerequisites.nodes.contains(&edge.to)
+                            && local.is_loop_edge(edge)
+                    })
+                    || prerequisites.completed.iter().any(|node| {
+                        prerequisites.waiting(local, node) || !prerequisites.activated(local, node)
+                    })
+                    || prerequisites.skipped.iter().any(|node| {
+                        prerequisites.waiting(local, node) || prerequisites.activated(local, node)
+                    })
+                    || prerequisites
+                        .entries
+                        .iter()
+                        .chain(&prerequisites.completed)
+                        .chain(&prerequisites.skipped)
+                        .any(|node| !prerequisites.nodes.contains(node))
+                    || prerequisites
+                        .completed
+                        .iter()
+                        .any(|node| prerequisites.skipped.contains(node))
+                    || prerequisites.selected.iter().any(|id| {
+                        !local.edges.iter().any(|edge| {
+                            &edge.id == id && prerequisites.completed.contains(&edge.from)
+                        })
+                    })
+                    || (frame.phase == Phase::Working
+                        && (prerequisites.settled(&frame.current)
+                            || prerequisites.waiting(local, &frame.current)
+                            || !prerequisites.activated(local, &frame.current)))
+                {
+                    return Err("Checkpoint prerequisite state is inconsistent".into());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The step the run is on, as a full path.
@@ -575,6 +1133,14 @@ impl PlanRun {
     /// Leaves the current step by its plain connections: nowhere, one step,
     /// or several at once.
     fn follow_plain(&mut self, plain: Vec<(EdgeId, NodeId)>, graph: &ArchitectGraph) -> Decision {
+        if self
+            .stack
+            .last()
+            .is_some_and(|frame| frame.prerequisites.is_some())
+        {
+            return self
+                .settle_prerequisites(plain.into_iter().map(|(edge, _)| edge).collect(), graph);
+        }
         let mut branches: Vec<(EdgeId, NodeId)> = Vec::new();
         for (edge, to) in plain {
             if !branches.iter().any(|(_, seen)| seen == &to) {
@@ -602,6 +1168,9 @@ impl PlanRun {
         for (edge, _) in &branches {
             *frame.edge_uses.entry(edge.clone()).or_insert(0) += 1;
         }
+        frame.dependency_fork = graph
+            .graph_at(&graph_path)
+            .is_some_and(|local| fork_needs_prerequisites(local, &branches, &join));
         frame.phase = Phase::Forked {
             branches: branches.clone(),
             join: join.clone(),
@@ -616,6 +1185,13 @@ impl PlanRun {
     /// Follows a connection out of the current step, counting it against any
     /// repeat limit it has.
     fn take(&mut self, edge: EdgeId, to: NodeId, graph: &ArchitectGraph) -> Decision {
+        if self
+            .stack
+            .last()
+            .is_some_and(|frame| frame.prerequisites.is_some())
+        {
+            return self.settle_prerequisites(vec![edge], graph);
+        }
         if let Some(frame) = self.stack.last_mut() {
             *frame.edge_uses.entry(edge).or_insert(0) += 1;
         }
@@ -657,6 +1233,9 @@ impl PlanRun {
     /// into it. Repeated, because the first step of that plan may nest too.
     fn descend_while_nested(&mut self, graph: &ArchitectGraph) {
         loop {
+            if self.is_finished() {
+                return;
+            }
             let Some(frame) = self.stack.last() else {
                 return;
             };
@@ -679,7 +1258,10 @@ impl PlanRun {
             if entries.is_empty() {
                 return;
             }
-            self.push_frame(path.0, entries);
+            self.push_frame(path.0, entries, graph);
+            if self.is_finished() {
+                return;
+            }
         }
     }
 
@@ -723,6 +1305,20 @@ impl PlanRun {
             return self.decide(graph);
         }
 
+        let depth = self.stack.last().map(|frame| frame.parents.len() + 1);
+        let settled: Vec<_> = self
+            .readiness(graph)
+            .into_iter()
+            .filter(|step| {
+                Some(step.path.depth()) == depth
+                    && matches!(step.status.as_str(), "completed" | "skipped")
+                    && !self
+                        .settled_readiness
+                        .iter()
+                        .any(|previous| previous.path == step.path)
+            })
+            .collect();
+        self.settled_readiness.extend(settled);
         self.stack.pop();
         if self.stack.is_empty() {
             return self.finish(RunOutcome::Completed);
@@ -734,6 +1330,146 @@ impl PlanRun {
         self.outcome = Some(outcome.clone());
         Decision::Done(outcome)
     }
+}
+
+fn reachable_before(graph: &ArchitectGraph, entries: &[NodeId], stops: &[NodeId]) -> Vec<NodeId> {
+    let mut reached = Vec::new();
+    let mut queue = VecDeque::from(entries.to_vec());
+    while let Some(node) = queue.pop_front() {
+        if stops.contains(&node) || reached.contains(&node) {
+            continue;
+        }
+        reached.push(node.clone());
+        queue.extend(graph.edges_from(&node).map(|edge| edge.to.clone()));
+    }
+    graph
+        .nodes
+        .iter()
+        .filter(|node| reached.contains(&node.id))
+        .map(|node| node.id.clone())
+        .collect()
+}
+
+fn fork_needs_prerequisites(
+    graph: &ArchitectGraph,
+    branches: &[(EdgeId, NodeId)],
+    join: &Option<NodeId>,
+) -> bool {
+    let entries: Vec<_> = branches.iter().map(|(_, node)| node.clone()).collect();
+    let stops: Vec<_> = join.iter().cloned().collect();
+    let region = reachable_before(graph, &entries, &[]);
+    let before_join = reachable_before(graph, &entries, &stops);
+    let after_join = reachable_before(graph, &stops, &[]);
+    overlapping_regions(graph, &entries, &stops)
+        || before_join.iter().any(|node| after_join.contains(node))
+        || graph.edges.iter().any(|edge| {
+            region.contains(&edge.from)
+                && (!edge.condition.is_always() || edge.max_repeats.is_some())
+                && !graph.is_loop_edge(edge)
+        })
+}
+
+/// Pairs whose repeated visits cannot be ordered by reachability alone.
+/// Keep the proof beside the runner's fork/join and exclusive-repeat semantics.
+/// Both pair orientations are returned for callers iterating in graph order.
+pub(crate) fn potentially_concurrent_loop_steps(
+    graph: &ArchitectGraph,
+) -> HashSet<(NodeId, NodeId)> {
+    // Disabled routes cannot establish a join or a loop. Only routing is needed;
+    // copying nested plans and recorded results would make this proof expensive.
+    let graph = ArchitectGraph {
+        nodes: graph
+            .nodes
+            .iter()
+            .map(|node| ArchitectNode::new(node.id.clone(), ""))
+            .collect(),
+        edges: graph
+            .edges
+            .iter()
+            .filter(|edge| edge.max_repeats != Some(0))
+            .cloned()
+            .collect(),
+    };
+    let loop_edges: HashSet<_> = graph
+        .edges
+        .iter()
+        .filter(|edge| graph.is_loop_edge(edge))
+        .map(|edge| (&edge.from, &edge.to))
+        .collect();
+    let mut concurrent = HashSet::default();
+    if loop_edges.is_empty() {
+        return concurrent;
+    }
+    for node in &graph.nodes {
+        let conditional_destinations: HashSet<_> = graph
+            .edges_from(&node.id)
+            .filter(|edge| !edge.condition.is_always())
+            .map(|edge| &edge.to)
+            .collect();
+        let mut branches: Vec<(EdgeId, NodeId)> = Vec::new();
+        for edge in graph.edges_from(&node.id) {
+            // finish_step takes bounded plain repeats alone; answer takes a
+            // successful retry directly, not alongside its fallback exits.
+            // Multiple conditional destinations remain conservative candidates,
+            // rather than assuming their predicates are mutually exclusive.
+            let exclusive_repeat = loop_edges.contains(&(&edge.from, &edge.to))
+                && ((edge.condition.is_always() && edge.max_repeats.is_some())
+                    || (!edge.condition.is_always() && conditional_destinations.len() == 1));
+            if !exclusive_repeat && !branches.iter().any(|(_, target)| target == &edge.to) {
+                branches.push((edge.id.clone(), edge.to.clone()));
+            }
+        }
+        if branches.len() < 2 {
+            continue;
+        }
+        let entries: Vec<_> = branches.iter().map(|(_, target)| target.clone()).collect();
+        let region = reachable_before(&graph, &entries, &[]);
+        if !graph
+            .edges
+            .iter()
+            .any(|edge| region.contains(&edge.from) && loop_edges.contains(&(&edge.from, &edge.to)))
+        {
+            continue;
+        }
+        let join = join_of(&graph, &node.id, &branches);
+        // Structured lanes stop at their join, so earlier work and work beyond
+        // that barrier do not conflict with the loop. Overlapping cyclic regions
+        // cannot use the prerequisite scheduler; keep those branches fail-closed.
+        let stops: Vec<_> = if fork_needs_prerequisites(&graph, &branches, &join) {
+            Vec::new()
+        } else {
+            join.into_iter().collect()
+        };
+        let regions: Vec<_> = entries
+            .iter()
+            .map(|entry| reachable_before(&graph, std::slice::from_ref(entry), &stops))
+            .collect();
+        for (index, first_region) in regions.iter().enumerate() {
+            for second_region in regions.iter().skip(index + 1) {
+                for first in first_region {
+                    for second in second_region {
+                        if first != second {
+                            concurrent.insert((first.clone(), second.clone()));
+                            concurrent.insert((second.clone(), first.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    concurrent
+}
+
+fn overlapping_regions(graph: &ArchitectGraph, entries: &[NodeId], stops: &[NodeId]) -> bool {
+    let mut seen = Vec::new();
+    for entry in entries {
+        let region = reachable_before(graph, std::slice::from_ref(entry), stops);
+        if region.iter().any(|node| seen.contains(node)) {
+            return true;
+        }
+        seen.extend(region);
+    }
+    false
 }
 
 /// Where a plan begins. Several entry points are valid; all are retained in
@@ -796,9 +1532,8 @@ fn distances_from(local: &ArchitectGraph, start: &NodeId) -> HashMap<NodeId, usi
 
 /// What a step running alongside others is told about them.
 ///
-/// Parallel steps share one working tree. Nothing isolates them from each
-/// other, so the brief has to: each keeps to its own work, and leaves alone
-/// what the others own and the commands that act on the whole repository.
+/// Parallel steps share one working tree. Their anticipated file surfaces
+/// provide coordination context, not permissions or modification restrictions.
 pub fn parallel_steps_prompt(graph: &ArchitectGraph, others: &[NodePath]) -> String {
     if others.is_empty() {
         return String::new();
@@ -817,12 +1552,27 @@ pub fn parallel_steps_prompt(graph: &ArchitectGraph, others: &[NodePath]) -> Str
         } else {
             let _ = writeln!(prompt, "- {}: {intent}", node.title);
         }
+        let _ = writeln!(
+            prompt,
+            "  Existing-file surface: {}",
+            node.file_surface_description()
+        );
+        if node.has_subplan() {
+            match graph.effective_file_surface(path) {
+                Ok(files) => {
+                    let _ = writeln!(prompt, "  Including nested steps: {files:?}");
+                }
+                Err(reason) => {
+                    let _ = writeln!(prompt, "  Nested file surface is not ready: {reason}");
+                }
+            }
+        }
     }
     prompt.push_str(
-        "\nKeep to this step's own work. Do not change files or state that those steps own. Do \
-         not run commands that act on the whole repository, such as git commit, checkout, reset, \
-         stash or rebase, formatting or regenerating the whole project, or installing \
-         dependencies, unless this step requires it.\n",
+        "\nThese surfaces describe anticipated scope for advisory scheduling, not file \
+         permissions. Account for concurrent work when planning edits or repository-wide \
+         commands such as git commit, checkout, reset, stash, rebase, formatting, regeneration, \
+         or dependency installation. Report scope changes to keep coordination current.\n",
     );
     prompt
 }
@@ -859,6 +1609,18 @@ pub fn step_prompt(
     }
 
     let _ = writeln!(prompt, "## Step {step_number}: {}", node.title);
+    let _ = writeln!(
+        prompt,
+        "\nExisting-file surface: {}",
+        node.file_surface_description()
+    );
+    prompt.push_str(
+        "This surface describes anticipated existing-file scope for advisory scheduling, \
+         not an edit allowlist or a restriction on which files you may modify. [] means no \
+         existing files are anticipated. Report scope changes using worktree-qualified \
+         paths (worktree/path) to keep scheduling information current. Report every newly \
+         created file by its worktree-qualified path so it can be added to downstream steps.\n",
+    );
 
     let handed_on = incoming_summaries(local, node);
     if !handed_on.is_empty() {
@@ -1830,6 +2592,180 @@ mod tests {
     }
 
     #[test]
+    fn an_outer_retry_restarts_all_nested_roots_after_a_local_retry_finishes() {
+        let mut nested = plain_graph(
+            &["before", "source", "next", "sibling"],
+            &[("before", "source"), ("source", "next")],
+        );
+        let mut local_retry = ArchitectEdge::new("local-retry", "next", "source");
+        local_retry.max_repeats = Some(1);
+        nested.edges.push(local_retry);
+        let mut graph = plain_graph(&["parent", "after"], &[("parent", "after")]);
+        graph.node_mut(&id("parent")).expect("parent").subplan = Some(Box::new(nested));
+        let mut outer_retry = ArchitectEdge::new("outer-retry", "after", "parent");
+        outer_retry.max_repeats = Some(1);
+        graph.edges.push(outer_retry);
+        let mut run = PlanRun::start(&graph).expect("nested retry plan");
+        let (steps, outcome) = run_lane(&mut run, &graph);
+        let iteration = vec![
+            path(&["parent", "before"]),
+            path(&["parent", "source"]),
+            path(&["parent", "next"]),
+            path(&["parent", "source"]),
+            path(&["parent", "next"]),
+            path(&["parent", "sibling"]),
+            path(&["after"]),
+        ];
+        assert_eq!(steps, [iteration.clone(), iteration].concat());
+        assert_eq!(outcome, RunOutcome::Completed);
+    }
+
+    #[test]
+    fn serial_retries_can_share_files_with_their_predecessors_and_successors() {
+        for conditional in [false, true] {
+            let mut graph = plain_graph(
+                &["before", "edit", "review", "after", "tail"],
+                &[
+                    ("before", "edit"),
+                    ("edit", "review"),
+                    ("review", "after"),
+                    ("after", "tail"),
+                ],
+            );
+            for node in &mut graph.nodes {
+                node.file_surface = Some(vec!["worktree/src/shared.rs".into()]);
+            }
+            let mut retry = ArchitectEdge::new("retry", "review", "edit");
+            retry.max_repeats = Some(1);
+            if conditional {
+                retry.condition = EdgeCondition::Objective {
+                    statement: "Needs another edit".into(),
+                };
+            }
+            graph.edges.push(retry);
+            assert!(graph.file_surface_problems().is_empty());
+            assert!(crate::compile_spec(&graph).is_ok());
+            let mut run = PlanRun::start(&graph).expect("serial file sharing");
+            assert_eq!(run.current(), path(&["before"]));
+            assert_eq!(run.finish_step(&graph), Decision::Run(path(&["edit"])));
+            assert_eq!(run.finish_step(&graph), Decision::Run(path(&["review"])));
+            let mut decision = run.finish_step(&graph);
+            if conditional {
+                assert!(matches!(decision, Decision::Ask(_)));
+                decision = run.answer(&graph, true);
+            }
+            assert_eq!(decision, Decision::Run(path(&["edit"])));
+            run.validate_checkpoint(&graph)
+                .expect("serial loop checkpoint");
+            assert_eq!(run.finish_step(&graph), Decision::Run(path(&["review"])));
+            assert_eq!(run.finish_step(&graph), Decision::Run(path(&["after"])));
+            assert_eq!(run.finish_step(&graph), Decision::Run(path(&["tail"])));
+            assert_eq!(
+                run.finish_step(&graph),
+                Decision::Done(RunOutcome::Completed)
+            );
+        }
+    }
+
+    #[test]
+    fn a_loop_lane_conflicts_with_its_peer_but_not_with_work_before_or_after_the_fork() {
+        let mut graph = plain_graph(
+            &["before", "split", "edit", "review", "peer", "join", "after"],
+            &[
+                ("before", "split"),
+                ("split", "edit"),
+                ("split", "peer"),
+                ("edit", "review"),
+                ("review", "join"),
+                ("peer", "join"),
+                ("join", "after"),
+            ],
+        );
+        let mut retry = ArchitectEdge::new("retry", "review", "edit");
+        retry.max_repeats = Some(1);
+        graph.edges.push(retry);
+        for node in &mut graph.nodes {
+            node.file_surface = Some(vec!["worktree/src/shared.rs".into()]);
+        }
+        assert_eq!(
+            graph.file_surface_problems(),
+            vec![
+                GraphProblem::FileSurfaceOverlap {
+                    first: id("edit"),
+                    second: id("peer"),
+                    file: "worktree/src/shared.rs".into(),
+                },
+                GraphProblem::FileSurfaceOverlap {
+                    first: id("review"),
+                    second: id("peer"),
+                    file: "worktree/src/shared.rs".into(),
+                },
+            ]
+        );
+        graph.node_mut(&id("peer")).expect("peer").file_surface =
+            Some(vec!["worktree/peer.rs".into()]);
+        assert!(graph.file_surface_problems().is_empty());
+        let mut run = PlanRun::start(&graph).expect("disjoint loop lane");
+        assert_eq!(run.finish_step(&graph), Decision::Run(path(&["split"])));
+        assert!(matches!(run.finish_step(&graph), Decision::Fork { .. }));
+        let mut lanes = run.fork_lanes(&graph);
+        assert_eq!(lanes.len(), 2);
+        let (steps, outcome) = run_lane(lanes.first_mut().expect("loop lane"), &graph);
+        assert_eq!(
+            steps,
+            vec![
+                path(&["edit"]),
+                path(&["review"]),
+                path(&["edit"]),
+                path(&["review"])
+            ]
+        );
+        assert_eq!(outcome, RunOutcome::Completed);
+        let (steps, outcome) = run_lane(lanes.get_mut(1).expect("peer lane"), &graph);
+        assert_eq!(steps, vec![path(&["peer"])]);
+        assert_eq!(outcome, RunOutcome::Completed);
+        assert_eq!(run.join(&graph), Decision::Run(path(&["join"])));
+        assert_eq!(run.finish_step(&graph), Decision::Run(path(&["after"])));
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Done(RunOutcome::Completed)
+        );
+    }
+
+    #[test]
+    fn overlapping_loop_branches_remain_fail_closed_without_tainting_predecessors() {
+        let mut graph = plain_graph(
+            &["before", "split", "left", "right", "join", "after"],
+            &[
+                ("before", "split"),
+                ("split", "left"),
+                ("split", "right"),
+                ("left", "join"),
+                ("right", "join"),
+                ("join", "after"),
+            ],
+        );
+        let mut retry = ArchitectEdge::new("retry", "join", "left");
+        retry.max_repeats = Some(1);
+        graph.edges.push(retry);
+        for node in &mut graph.nodes {
+            node.file_surface = Some(vec!["worktree/src/shared.rs".into()]);
+        }
+        let problems = graph.file_surface_problems();
+        assert!(problems.contains(&GraphProblem::FileSurfaceOverlap {
+            first: id("left"),
+            second: id("right"),
+            file: "worktree/src/shared.rs".into(),
+        }));
+        assert!(!problems.iter().any(|problem| matches!(problem,
+            GraphProblem::FileSurfaceOverlap { first, second, .. }
+                if [id("before"), id("split")].contains(first)
+                    || [id("before"), id("split")].contains(second)
+        )));
+        assert!(PlanRun::start(&graph).is_err());
+    }
+
+    #[test]
     fn a_limited_plain_loop_repeats_on_its_own_before_the_fork() {
         let mut graph = plain_graph(
             &["draft", "polish", "left", "right"],
@@ -1838,6 +2774,13 @@ mod tests {
         let mut again = ArchitectEdge::new("again", "polish", "draft");
         again.max_repeats = Some(1);
         graph.edges.push(again);
+        for node in &mut graph.nodes {
+            node.file_surface = Some(vec![if node.id == id("right") {
+                "worktree/right.rs".into()
+            } else {
+                "worktree/shared.rs".into()
+            }]);
+        }
         assert_eq!(graph.blocking_problems(), vec![]);
 
         let mut run = PlanRun::start(&graph).unwrap();
@@ -1861,13 +2804,17 @@ mod tests {
     }
 
     #[test]
-    fn a_step_running_alongside_others_is_told_to_keep_to_its_own_work() {
+    fn a_parallel_step_receives_advisory_coordination_context() {
         let mut graph = plain_graph(&["a", "b", "c"], &[("a", "b"), ("a", "c")]);
         graph.node_mut(&id("c")).unwrap().intent = "Write the migration".into();
         let prompt = parallel_steps_prompt(&graph, &[path(&["c"])]);
         assert!(prompt.contains("C: Write the migration"), "{prompt}");
         assert!(prompt.contains("git commit"), "{prompt}");
-        assert!(prompt.contains("Keep to this step's own work"), "{prompt}");
+        assert!(
+            prompt.contains("anticipated scope for advisory scheduling"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("Do not change files"), "{prompt}");
         assert_eq!(parallel_steps_prompt(&graph, &[]), "");
     }
 
@@ -1979,6 +2926,465 @@ mod tests {
     }
 
     // ── verdicts ──────────────────────────────────────────────────────────
+
+    fn run_all(run: &mut PlanRun, graph: &ArchitectGraph) -> Vec<NodePath> {
+        let mut paths = Vec::new();
+        let mut decision = run.decide(graph);
+        loop {
+            decision = match decision {
+                Decision::Run(path) => {
+                    paths.push(path);
+                    run.finish_step(graph)
+                }
+                Decision::Ask(_) => run.answer(graph, false),
+                Decision::Fork { .. } => {
+                    for mut lane in run.fork_lanes(graph) {
+                        paths.extend(run_all(&mut lane, graph));
+                    }
+                    run.join(graph)
+                }
+                Decision::Done(outcome) => {
+                    assert_eq!(outcome, RunOutcome::Completed);
+                    return paths;
+                }
+            };
+        }
+    }
+
+    #[test]
+    fn separate_roots_wait_for_every_incoming_prerequisite() {
+        let graph = plain_graph(&["a", "join", "b"], &[("a", "join"), ("b", "join")]);
+        let mut run = PlanRun::start(&graph).unwrap();
+        assert_eq!(run.finish_step(&graph), Decision::Run(path(&["b"])));
+        let readiness = run.readiness(&graph);
+        assert_eq!(
+            readiness
+                .iter()
+                .find(|step| step.path == path(&["join"]))
+                .unwrap()
+                .status,
+            "waiting"
+        );
+        assert_eq!(run.finish_step(&graph), Decision::Run(path(&["join"])));
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Done(RunOutcome::Completed)
+        );
+        assert_eq!(
+            run.history(),
+            &[path(&["a"]), path(&["b"]), path(&["join"])]
+        );
+    }
+
+    #[test]
+    fn a_partial_join_has_one_owner_and_waits_for_both_branches() {
+        let graph = plain_graph(
+            &["a", "b", "e", "c", "f", "d"],
+            &[
+                ("a", "b"),
+                ("a", "c"),
+                ("a", "d"),
+                ("b", "e"),
+                ("c", "e"),
+                ("e", "f"),
+                ("d", "f"),
+            ],
+        );
+        let mut run = PlanRun::start(&graph).unwrap();
+        assert_eq!(
+            run_all(&mut run, &graph),
+            vec![
+                path(&["a"]),
+                path(&["b"]),
+                path(&["c"]),
+                path(&["e"]),
+                path(&["d"]),
+                path(&["f"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_branch_bypassing_the_nominal_join_cannot_run_its_successors_early() {
+        let graph = plain_graph(
+            &["a", "b", "e", "f", "k", "later", "c", "join"],
+            &[
+                ("a", "b"),
+                ("a", "c"),
+                ("b", "e"),
+                ("b", "f"),
+                ("e", "join"),
+                ("f", "k"),
+                ("k", "later"),
+                ("c", "join"),
+                ("join", "later"),
+            ],
+        );
+        let mut run = PlanRun::start(&graph).unwrap();
+        let paths = run_all(&mut run, &graph);
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|node| **node == path(&["later"]))
+                .count(),
+            1
+        );
+        assert!(
+            paths.iter().position(|node| *node == path(&["later"]))
+                > paths.iter().position(|node| *node == path(&["join"]))
+        );
+    }
+
+    #[test]
+    fn multiple_shared_successors_each_run_once() {
+        let graph = plain_graph(
+            &["a", "b", "c", "y", "x"],
+            &[
+                ("a", "b"),
+                ("a", "c"),
+                ("b", "x"),
+                ("b", "y"),
+                ("c", "x"),
+                ("c", "y"),
+            ],
+        );
+        let mut run = PlanRun::start(&graph).unwrap();
+        assert_eq!(
+            run_all(&mut run, &graph),
+            vec![
+                path(&["a"]),
+                path(&["b"]),
+                path(&["c"]),
+                path(&["y"]),
+                path(&["x"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_closed_conditional_prerequisite_is_skipped_not_executed() {
+        let mut graph = plain_graph(
+            &["a", "b", "join", "root"],
+            &[("a", "b"), ("b", "join"), ("root", "join")],
+        );
+        graph.edges[0].condition = EdgeCondition::LlmEvaluated {
+            question: "Run b?".into(),
+        };
+        let mut run = PlanRun::start(&graph).unwrap();
+        assert!(matches!(run.finish_step(&graph), Decision::Ask(_)));
+        assert_eq!(run.answer(&graph, false), Decision::Run(path(&["root"])));
+        assert_eq!(
+            run.readiness(&graph)
+                .iter()
+                .find(|step| step.path == path(&["b"]))
+                .unwrap()
+                .status,
+            "skipped"
+        );
+        assert_eq!(run.finish_step(&graph), Decision::Run(path(&["join"])));
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Done(RunOutcome::Completed)
+        );
+        assert_eq!(
+            run.readiness(&graph)
+                .iter()
+                .find(|step| step.path == path(&["b"]))
+                .unwrap()
+                .status,
+            "skipped"
+        );
+    }
+
+    #[test]
+    fn a_disabled_internal_loop_preserves_structured_fork_lanes() {
+        let mut graph = plain_graph(
+            &["start", "a", "check", "b", "join"],
+            &[
+                ("start", "a"),
+                ("start", "b"),
+                ("a", "check"),
+                ("check", "join"),
+                ("b", "join"),
+            ],
+        );
+        let mut disabled = ArchitectEdge::new("disabled", "check", "a");
+        disabled.max_repeats = Some(0);
+        graph.edges.push(disabled);
+        let mut run = PlanRun::start(&graph).unwrap();
+        assert_eq!(fork_join(&run.finish_step(&graph)), Some(id("join")));
+        let mut lanes = run.fork_lanes(&graph);
+        assert_eq!(lanes.len(), 2);
+        let mut ran = Vec::new();
+        for lane in &mut lanes {
+            ran.extend(run_all(lane, &graph));
+        }
+        assert_eq!(ran, vec![path(&["a"]), path(&["check"]), path(&["b"])]);
+        assert_eq!(run.join(&graph), Decision::Run(path(&["join"])));
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Done(RunOutcome::Completed)
+        );
+    }
+
+    #[test]
+    fn repeat_limits_gate_a_nominal_join_even_for_unconditional_routes() {
+        for limits in [
+            (Some(0), Some(0)),
+            (Some(1), Some(0)),
+            (Some(0), None),
+            (Some(1), Some(1)),
+        ] {
+            let mut graph = plain_graph(
+                &["start", "a", "b", "join"],
+                &[("start", "a"), ("start", "b"), ("a", "join"), ("b", "join")],
+            );
+            for edge in &mut graph.edges {
+                if edge.from == id("a") {
+                    edge.max_repeats = limits.0;
+                } else if edge.from == id("b") {
+                    edge.max_repeats = limits.1;
+                }
+            }
+            let mut run = PlanRun::start(&graph).unwrap();
+            assert_eq!(fork_join(&run.finish_step(&graph)), Some(id("join")));
+            let mut lanes = run.fork_lanes(&graph);
+            assert_eq!(lanes.len(), 1, "the dependency region must own the join");
+            let mut lane = lanes.remove(0);
+            assert_eq!(lane.finish_step(&graph), Decision::Run(path(&["b"])));
+            assert_eq!(
+                lane.readiness(&graph)
+                    .iter()
+                    .find(|step| step.path == path(&["join"]))
+                    .unwrap()
+                    .status,
+                "waiting",
+                "a selected route still waits for the other branch"
+            );
+            let next = lane.finish_step(&graph);
+            if limits == (Some(0), Some(0)) {
+                assert_eq!(next, Decision::Done(RunOutcome::Completed));
+                assert_eq!(
+                    lane.readiness(&graph)
+                        .iter()
+                        .find(|step| step.path == path(&["join"]))
+                        .unwrap()
+                        .status,
+                    "skipped"
+                );
+                assert!(!lane.history().contains(&path(&["join"])));
+            } else {
+                assert_eq!(next, Decision::Run(path(&["join"])));
+                assert_eq!(
+                    lane.finish_step(&graph),
+                    Decision::Done(RunOutcome::Completed)
+                );
+                assert_eq!(
+                    lane.history()
+                        .iter()
+                        .filter(|step| **step == path(&["join"]))
+                        .count(),
+                    1
+                );
+            }
+            assert_eq!(run.join(&graph), Decision::Done(RunOutcome::Completed));
+            assert!(
+                !run.history().contains(&path(&["join"])),
+                "the parent must not run it again"
+            );
+        }
+    }
+
+    #[test]
+    fn a_nominal_join_is_skipped_when_every_branch_closes_its_route() {
+        let mut graph = plain_graph(
+            &["a", "b", "c", "join"],
+            &[("a", "b"), ("a", "c"), ("b", "join"), ("c", "join")],
+        );
+        for edge in &mut graph.edges {
+            if edge.to == id("join") {
+                edge.condition = EdgeCondition::LlmEvaluated {
+                    question: "Continue?".into(),
+                };
+            }
+        }
+        let mut run = PlanRun::start(&graph).unwrap();
+        assert_eq!(
+            run_all(&mut run, &graph),
+            vec![path(&["a"]), path(&["b"]), path(&["c"])]
+        );
+    }
+
+    #[test]
+    fn overlapping_cyclic_prerequisites_fail_closed() {
+        let mut graph = plain_graph(
+            &["a", "root", "b", "check", "done"],
+            &[("a", "b"), ("root", "b"), ("b", "check"), ("check", "done")],
+        );
+        graph
+            .edges
+            .push(ArchitectEdge::new("again", "check", "b").with_condition(
+                EdgeCondition::LlmEvaluated {
+                    question: "Again?".into(),
+                },
+            ));
+        let mut run = PlanRun::start(&graph).unwrap();
+        assert!(matches!(
+            run.decide(&graph),
+            Decision::Done(RunOutcome::Failed { .. })
+        ));
+    }
+
+    #[test]
+    fn dependency_checkpoint_roundtrip_keeps_decisions_and_completed_steps() {
+        let mut graph = plain_graph(
+            &["a", "b", "join", "root"],
+            &[("a", "b"), ("b", "join"), ("root", "join")],
+        );
+        graph.edges[0].condition = EdgeCondition::LlmEvaluated {
+            question: "Run b?".into(),
+        };
+        let mut run = PlanRun::start(&graph).unwrap();
+        let question = run.finish_step(&graph);
+        let value = serde_json::to_value(&run).unwrap();
+        let mut restored: PlanRun = serde_json::from_value(value).unwrap();
+        restored.validate_checkpoint(&graph).unwrap();
+        assert_eq!(restored.decide(&graph), question);
+        assert_eq!(restored.answer(&graph, true), Decision::Run(path(&["b"])));
+        assert_eq!(restored.finish_step(&graph), Decision::Run(path(&["root"])));
+        let value = serde_json::to_value(&restored).unwrap();
+        let mut restored: PlanRun = serde_json::from_value(value).unwrap();
+        restored.validate_checkpoint(&graph).unwrap();
+        assert_eq!(
+            run_all(&mut restored, &graph),
+            vec![path(&["root"]), path(&["join"])]
+        );
+    }
+
+    #[test]
+    fn loop_checkpoint_roundtrip_keeps_attempts_and_repeat_counters() {
+        let graph = locked_graph();
+        let mut run = PlanRun::start(&graph).unwrap();
+        run.finish_step(&graph);
+        run.finish_step(&graph);
+        assert!(matches!(run.finish_step(&graph), Decision::Ask(_)));
+        assert_eq!(run.answer(&graph, true), Decision::Run(path(&["edit"])));
+        let value = serde_json::to_value(&run).unwrap();
+        let mut restored: PlanRun = serde_json::from_value(value.clone()).unwrap();
+        restored.validate_checkpoint(&graph).unwrap();
+        assert_eq!(restored.attempt(&id("edit")), 2);
+        assert_eq!(serde_json::to_value(&restored).unwrap(), value);
+        assert_eq!(restored.finish_step(&graph), Decision::Run(path(&["test"])));
+        assert!(matches!(restored.finish_step(&graph), Decision::Ask(_)));
+        assert_eq!(
+            restored.answer(&graph, false),
+            Decision::Done(RunOutcome::Completed)
+        );
+    }
+
+    #[test]
+    fn selecting_a_ready_root_never_admits_its_shared_successor() {
+        let graph = plain_graph(&["a", "join", "b"], &[("a", "join"), ("b", "join")]);
+        let mut run = PlanRun::start(&graph).unwrap();
+        assert!(run.prioritize_ready(&path(&["join"]), &graph).is_err());
+        run.prioritize_ready(&path(&["b"]), &graph).unwrap();
+        run.validate_checkpoint(&graph).unwrap();
+        assert_eq!(
+            run_all(&mut run, &graph),
+            vec![path(&["b"]), path(&["a"]), path(&["join"])]
+        );
+    }
+
+    #[test]
+    fn unlocked_draft_can_be_rebased_but_cannot_start_before_review() {
+        let mut graph = plain_graph(&["a", "join", "b"], &[("a", "join"), ("b", "join")]);
+        graph.node_mut(&id("b")).unwrap().locked = false;
+        let run = PlanRun::rebase_remaining(&graph, &[path(&["a"])]).unwrap();
+        run.validate_checkpoint(&graph).unwrap();
+        assert_eq!(run.current(), path(&["b"]));
+        assert!(!graph.node(&id("b")).unwrap().locked);
+        assert!(matches!(
+            PlanRun::start(&graph),
+            Err(RunRefusal::NotReady(_))
+        ));
+        // Capture warnings remain attached to the draft; structural validation
+        // neither approves locks nor rewrites the requirements being reviewed.
+        assert_eq!(graph.steps_without_capture(), vec![id("a"), id("b")]);
+        graph.edges.push(ArchitectEdge::new("bad", "b", "missing"));
+        assert!(PlanRun::validate_structure(&graph).is_err());
+    }
+
+    #[test]
+    fn rebase_retains_completed_prerequisites_without_replaying_them() {
+        let graph = plain_graph(&["a", "join", "b"], &[("a", "join"), ("b", "join")]);
+        let mut run = PlanRun::rebase_remaining(&graph, &[path(&["a"])]).unwrap();
+        run.validate_checkpoint(&graph).unwrap();
+        assert_eq!(
+            run_all(&mut run, &graph),
+            vec![path(&["b"]), path(&["join"])]
+        );
+    }
+
+    #[test]
+    fn checkpoint_rejects_a_forged_ready_shared_node() {
+        let graph = plain_graph(&["a", "join", "b"], &[("a", "join"), ("b", "join")]);
+        let run = PlanRun::start(&graph).unwrap();
+        let mut value = serde_json::to_value(&run).unwrap();
+        value["stack"][0]["current"] = serde_json::json!("join");
+        value["stack"][0]["visits"]["join"] = serde_json::json!(1);
+        let restored: PlanRun = serde_json::from_value(value).unwrap();
+        assert!(restored.validate_checkpoint(&graph).is_err());
+    }
+
+    #[test]
+    fn starting_and_restoring_checkpoints_refuse_missing_or_conflicting_surfaces() {
+        let mut graph = plain_graph(
+            &["root", "left", "right"],
+            &[("root", "left"), ("root", "right")],
+        );
+        let run = PlanRun::start(&graph).expect("empty explicit surfaces are runnable");
+        let saved = serde_json::to_value(&run).expect("save checkpoint");
+        let restored: PlanRun = serde_json::from_value(saved).expect("restore checkpoint");
+        for surface in [None, Some(vec!["worktree/../invalid.rs".into()])] {
+            graph.node_mut(&id("left")).expect("left").file_surface = surface;
+            assert!(PlanRun::start(&graph).is_err());
+            assert!(PlanRun::start_at(&graph, &path(&["left"])).is_err());
+            assert!(restored.validate_checkpoint(&graph).is_err());
+        }
+        for step in ["left", "right"] {
+            graph.node_mut(&id(step)).expect("branch").file_surface =
+                Some(vec!["worktree/shared.rs".into()]);
+        }
+        assert!(PlanRun::start(&graph).is_err());
+        assert!(PlanRun::validate_structure(&graph).is_err());
+        assert!(restored.validate_checkpoint(&graph).is_err());
+        assert!(PlanRun::rebase_remaining(&graph, &[]).is_err());
+        graph.node_mut(&id("right")).expect("right").file_surface = Some(Vec::new());
+        restored
+            .validate_checkpoint(&graph)
+            .expect("corrected surface");
+    }
+
+    #[test]
+    fn step_and_parallel_prompts_include_existing_file_contracts() {
+        let mut graph = plain_graph(&["left", "right"], &[]);
+        graph.node_mut(&id("left")).expect("left").file_surface =
+            Some(vec!["worktree/src/left.rs".into()]);
+        let prompt = step_prompt(&graph, &path(&["left"]), 1, 1);
+        assert!(prompt.contains("worktree/src/left.rs"));
+        assert!(prompt.contains("anticipated existing-file scope for advisory scheduling"));
+        assert!(prompt.contains("not an edit allowlist or a restriction"));
+        assert!(!prompt.contains("Only touch existing files"));
+        assert!(!prompt.contains("stop and request a surface correction"));
+        assert!(prompt.contains("created file by its worktree-qualified path"));
+        let prompt = parallel_steps_prompt(&graph, &[path(&["left"])]);
+        assert!(prompt.contains("worktree/src/left.rs"));
+        assert!(
+            step_prompt(&graph, &path(&["right"]), 1, 1).contains("no existing files anticipated")
+        );
+        graph.node_mut(&id("right")).expect("right").file_surface = None;
+        assert!(step_prompt(&graph, &path(&["right"]), 1, 1).contains("MISSING"));
+    }
 
     #[test]
     fn a_verdict_is_read_from_the_first_word_of_the_reply() {

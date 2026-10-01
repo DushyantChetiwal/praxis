@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use agent::Thread;
 use architect::{
-    ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, GraphMutationError, GraphProblem, NodeId,
-    NodePath, Position,
+    ArchitectEdge, ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, GraphMutationError,
+    GraphProblem, NodeId, NodePath, Position,
 };
 use editor::Editor;
 use git_ui::git_panel::GitPanel;
@@ -1375,6 +1375,19 @@ impl ArchitectPane {
             .map(|node| node.id.clone())
     }
 
+    fn edge_curve(&self, graph: &ArchitectGraph, edge: &ArchitectEdge) -> Option<EdgeCurve> {
+        let from = graph.node(&edge.from)?;
+        let position = from.position?;
+        if edge.from == edge.to {
+            Some(EdgeCurve::self_loop(position, self.node_size(from)))
+        } else {
+            Some(EdgeCurve::between(
+                position,
+                graph.node(&edge.to)?.position?,
+            ))
+        }
+    }
+
     fn edge_at(&self, screen: Point<Pixels>, cx: &Context<Self>) -> Option<EdgeId> {
         let graph = self.graph(cx)?;
         let tolerance = EDGE_HIT_TOLERANCE / self.zoom;
@@ -1382,14 +1395,9 @@ impl ArchitectPane {
 
         let mut closest: Option<(f32, EdgeId)> = None;
         for edge in &graph.edges {
-            let (Some(from), Some(to)) = (
-                graph.node(&edge.from).and_then(|node| node.position),
-                graph.node(&edge.to).and_then(|node| node.position),
-            ) else {
+            let Some(curve) = self.edge_curve(graph, edge) else {
                 continue;
             };
-
-            let curve = EdgeCurve::between(from, to);
             let distance = curve.distance_to(canvas);
             if distance <= tolerance && closest.as_ref().is_none_or(|(best, _)| distance < *best) {
                 closest = Some((distance, edge.id.clone()));
@@ -1595,17 +1603,11 @@ impl ArchitectPane {
                 let (width, height) = self.node_size(node);
                 node.position.map(|position| (position, width, height))
             }),
-            Selection::Edge(id) => {
-                graph
-                    .edges
-                    .iter()
-                    .find(|edge| &edge.id == id)
-                    .and_then(|edge| {
-                        let from = graph.node(&edge.from)?.position?;
-                        let to = graph.node(&edge.to)?.position?;
-                        Some((EdgeCurve::between(from, to).midpoint(), 0.0, 0.0))
-                    })
-            }
+            Selection::Edge(id) => graph
+                .edges
+                .iter()
+                .find(|edge| &edge.id == id)
+                .and_then(|edge| Some((self.edge_curve(graph, edge)?.midpoint(), 0.0, 0.0))),
         };
         let Some((centre, width, height)) = target else {
             return;
@@ -1951,6 +1953,9 @@ impl ArchitectPane {
             | GraphProblem::Unreachable(id)
             | GraphProblem::Unlocked(id)
             | GraphProblem::EndlessLoop(id)
+            | GraphProblem::MissingFileSurface(id)
+            | GraphProblem::InvalidFileSurface { node: id, .. }
+            | GraphProblem::FileSurfaceOverlap { first: id, .. }
             | GraphProblem::InSubplan { node: id, .. } => Selection::Node(id.clone()),
             GraphProblem::DanglingEdge { edge, .. } | GraphProblem::EmptyCondition(edge) => {
                 Selection::Edge(edge.clone())
@@ -2112,7 +2117,7 @@ impl ArchitectPane {
         }
         if let Interaction::Connecting { from, .. } = &self.interaction {
             let from = from.clone();
-            let target = self.node_at(event.position, cx).filter(|to| *to != from);
+            let target = self.node_at(event.position, cx);
             if target.is_some() && self.is_running(cx) {
                 self.report("Stop the run before connecting steps.".to_string(), cx);
             } else if let Some(to) = target {
@@ -3764,6 +3769,162 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn self_loops_can_be_drawn_and_selected_outside_collapsed_and_expanded_steps(
+        cx: &mut TestAppContext,
+    ) {
+        let plan = test_plan(cx).await;
+        let mut step = ArchitectNode::new("step", "Retry this step");
+        step.position = Some(Position::ZERO);
+        step.subplan = Some(Box::new(ArchitectGraph {
+            nodes: vec![ArchitectNode::new("child", "Nested step")],
+            edges: Vec::new(),
+        }));
+        let graph = ArchitectGraph {
+            nodes: vec![step],
+            edges: Vec::new(),
+        };
+        plan.thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(graph), cx);
+        });
+
+        let direct_architect = Rc::new(RefCell::new(None));
+        let direct_architect_for_root = direct_architect.clone();
+        let (test_root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::test_new(plan.project.clone(), window, cx));
+            ArchitectIntegrationRoot {
+                workspace,
+                architect: direct_architect_for_root,
+            }
+        });
+        let workspace = test_root.read_with(cx, |root, _| root.workspace.clone());
+        let pane = workspace.update_in(cx, |_, window, cx| {
+            let workspace = cx.weak_entity();
+            cx.new(|cx| {
+                ArchitectPane::new(
+                    plan.thread.clone(),
+                    workspace,
+                    None,
+                    Vec::new(),
+                    None,
+                    px(226.0),
+                    px(348.0),
+                    window,
+                    cx,
+                )
+            })
+        });
+        *direct_architect.borrow_mut() = Some(pane.clone());
+        test_root.update(cx, |_, cx| cx.notify());
+        cx.simulate_resize(size(px(1500.0), px(1000.0)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+
+        let handle = cx
+            .debug_bounds("architect-node-handle-0")
+            .expect("the mounted step must expose its connection handle")
+            .center();
+        let center = pane.read_with(cx, |pane, _| pane.to_screen(Position::ZERO));
+        cx.simulate_mouse_down(handle, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(center, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(center, MouseButton::Left, Modifiers::default());
+        let edge_id = pane.update(cx, |pane, cx| {
+            let graph = pane.graph(cx).expect("plan");
+            assert_eq!(
+                graph.edges.len(),
+                1,
+                "dropping onto the source creates a loop"
+            );
+            let edge = graph.edges.first().expect("self-loop");
+            assert_eq!(edge.from, edge.to);
+            assert_eq!(pane.selection, Some(Selection::Edge(edge.id.clone())));
+            assert!(pane.edge_inspector.is_some());
+            assert_eq!(pane.undo_stack.len(), 1);
+
+            let mut coincident = graph.clone();
+            let mut other = ArchitectNode::new("other", "A different step at the same position");
+            other.position = Some(Position::ZERO);
+            coincident.add_node(other);
+            let mut between_nodes = edge.clone();
+            between_nodes.to = "other".into();
+            let curve = pane.edge_curve(&coincident, &between_nodes).expect("curve");
+            assert_eq!(
+                curve.at(0.25).x,
+                0.0,
+                "node identity, not position, defines a self-loop"
+            );
+            edge.id.clone()
+        });
+        plan.thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(
+                |graph| {
+                    graph.edges.first_mut().expect("self-loop").max_repeats = Some(3);
+                },
+                cx,
+            );
+        });
+
+        for expanded in [false, true] {
+            for zoom in [0.65, 1.0] {
+                pane.update_in(cx, |pane, window, cx| {
+                    if expanded {
+                        pane.expanded.insert("step".into());
+                    } else {
+                        pane.expanded.remove(&NodeId::from("step"));
+                    }
+                    pane.zoom = zoom;
+                    pane.pan = point(px(24.0), px(-32.0));
+                    pane.set_selection(None, window, cx);
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                cx.update(|window, cx| {
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                });
+                let label = cx
+                    .debug_bounds("architect-edge-label-0")
+                    .expect("the mounted self-loop must show its repeat label");
+                let click = pane.update(cx, |pane, cx| {
+                    let graph = pane.graph(cx).expect("plan");
+                    let node = graph.node(&"step".into()).expect("step");
+                    let position = node.position.expect("position");
+                    let (_, height) = pane.node_size(node);
+                    let bottom = pane.to_screen(Position {
+                        x: position.x,
+                        y: position.y + height / 2.0,
+                    });
+                    assert!(
+                        label.origin.y > bottom.y,
+                        "the label must clear the displayed card"
+                    );
+                    let expected = EdgeCurve::self_loop(position, pane.node_size(node));
+                    let midpoint = pane.to_screen(expected.midpoint());
+                    assert!((label.center().x - midpoint.x).abs() < px(1.0));
+                    assert!((label.origin.y - (midpoint.y - px(11.0))).abs() < px(1.0));
+                    let click = pane.to_screen(expected.at(0.125));
+                    assert_eq!(pane.node_at(click, cx), None);
+                    assert_eq!(pane.edge_at(click, cx), Some(edge_id.clone()));
+                    assert!(
+                        pane.viewport
+                            .get()
+                            .expect("painted viewport")
+                            .contains(&click)
+                    );
+                    click
+                });
+                cx.simulate_click(click, Modifiers::default());
+                pane.read_with(cx, |pane, _| {
+                    assert_eq!(pane.selection, Some(Selection::Edge(edge_id.clone())));
+                    assert!(pane.edge_inspector.is_some());
+                });
+            }
+        }
+    }
+
+    #[gpui::test]
     async fn canvas_zoom_glides_and_outline_clicks_follow_list_conventions(
         cx: &mut TestAppContext,
     ) {
@@ -3981,6 +4142,176 @@ mod tests {
                 "with nothing to reach from, Shift-click selects the step alone"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn file_surfaces_render_and_review_without_hiding_legacy_or_nested_problems(
+        cx: &mut TestAppContext,
+    ) {
+        let plan = test_plan(cx).await;
+        let mut legacy = ArchitectNode::new("step", "Legacy step");
+        legacy.file_surface = None;
+        legacy.position = Some(Position::ZERO);
+        legacy.locked = true;
+        let graph = ArchitectGraph {
+            nodes: vec![legacy],
+            edges: vec![],
+        };
+        plan.thread
+            .update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
+        let direct_architect = Rc::new(RefCell::new(None));
+        let direct_architect_for_root = direct_architect.clone();
+        let (test_root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::test_new(plan.project.clone(), window, cx));
+            ArchitectIntegrationRoot {
+                workspace,
+                architect: direct_architect_for_root,
+            }
+        });
+        let workspace = test_root.read_with(cx, |root, _| root.workspace.clone());
+        let pane = workspace.update_in(cx, |_, window, cx| {
+            let workspace = cx.weak_entity();
+            cx.new(|cx| {
+                ArchitectPane::new(
+                    plan.thread.clone(),
+                    workspace,
+                    None,
+                    Vec::new(),
+                    None,
+                    px(226.0),
+                    px(348.0),
+                    window,
+                    cx,
+                )
+            })
+        });
+        *direct_architect.borrow_mut() = Some(pane.clone());
+        test_root.update(cx, |_, cx| cx.notify());
+        cx.simulate_resize(size(px(1500.0), px(900.0)));
+        let title_editor = pane.update_in(cx, |pane, window, cx| {
+            pane.review_plan(window, cx);
+            assert_eq!(pane.selection, Some(Selection::Node("step".into())));
+            let graph = pane.graph(cx).expect("graph");
+            let node = graph.node(&"step".into()).expect("legacy step");
+            assert_eq!(
+                inspector::file_surface_summary(node),
+                "Existing files: not declared"
+            );
+            let details = pane.file_surface_details(node, cx);
+            assert!(details.contains("worktree/path"));
+            assert!(!graph.blocking_problems().is_empty());
+            pane.zoom = 1.0;
+            pane.inspector.as_ref().expect("inspector").title.clone()
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        assert!(cx.debug_bounds("architect-file-surface").is_some());
+        assert!(cx.debug_bounds("architect-node-file-surface-0").is_some());
+
+        plan.thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(
+                |graph| {
+                    graph.node_mut(&"step".into()).expect("step").file_surface = Some(vec![]);
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        pane.update_in(cx, |pane, _, cx| {
+            let graph = pane.graph(cx).expect("graph");
+            let node = graph.node(&"step".into()).expect("step");
+            assert_eq!(
+                pane.file_surface_details(node, cx),
+                "Existing files: none anticipated ([])"
+            );
+            assert!(graph.blocking_problems().is_empty());
+            assert_eq!(
+                pane.inspector.as_ref().expect("inspector").title,
+                title_editor
+            );
+            assert!(
+                pane.undo_stack.is_empty(),
+                "rendering must not rewrite the graph"
+            );
+        });
+
+        let mut child = ArchitectNode::new("child", "Child");
+        child.file_surface = Some(vec!["project/Shared.rs".into()]);
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.subplan = Some(Box::new(ArchitectGraph {
+            nodes: vec![child],
+            edges: vec![],
+        }));
+        let mut other = ArchitectNode::new("other", "Other");
+        other.file_surface = Some(vec!["project/shared.rs".into()]);
+        let mut graph = ArchitectGraph {
+            nodes: vec![parent, other],
+            edges: vec![],
+        };
+        graph.lock_all();
+        plan.thread
+            .update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
+        cx.run_until_parked();
+        pane.update_in(cx, |pane, window, cx| {
+            pane.review_plan(window, cx);
+            assert_eq!(pane.selection, Some(Selection::Node("parent".into())));
+            let graph = pane.graph(cx).expect("graph");
+            let parent = graph.node(&"parent".into()).expect("parent");
+            let details = pane.file_surface_details(parent, cx);
+            assert!(details.contains("Including nested steps"));
+            assert!(details.contains("project/shared.rs"));
+            for id in ["parent", "other"] {
+                let node = graph.node(&id.into()).expect("step");
+                let details = pane.file_surface_details(node, cx);
+                assert!(
+                    details.contains("Serialize"),
+                    "both sides must explain the conflict: {details}"
+                );
+            }
+            pane.drill_into("parent".into(), window, cx);
+            pane.set_selection(Some(Selection::Node("child".into())), window, cx);
+            let child = pane
+                .graph(cx)
+                .expect("subplan")
+                .node(&"child".into())
+                .expect("child");
+            assert_eq!(
+                inspector::file_surface_summary(child),
+                "Existing files: project/Shared.rs"
+            );
+        });
+        plan.thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(
+                |graph| {
+                    graph
+                        .node_at_mut(&NodePath::from(vec!["parent".into(), "child".into()]))
+                        .expect("child")
+                        .file_surface = Some(vec!["../outside.rs".into()]);
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        pane.update_in(cx, |pane, window, cx| {
+            pane.review_plan(window, cx);
+            assert_eq!(pane.selection, Some(Selection::Node("child".into())));
+            let child = pane
+                .graph(cx)
+                .expect("subplan")
+                .node(&"child".into())
+                .expect("child");
+            let details = pane.file_surface_details(child, cx);
+            assert!(details.contains("../outside.rs"));
+            assert!(details.contains("invalid"));
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        assert!(cx.debug_bounds("architect-file-surface").is_some());
     }
 
     #[gpui::test]

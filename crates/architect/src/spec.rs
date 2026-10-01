@@ -55,6 +55,11 @@ pub fn compile_spec(graph: &ArchitectGraph) -> Result<String, Vec<GraphProblem>>
             spec.push_str("\nModel: inherit plan\n");
         }
 
+        spec.push_str(&format!(
+            "\nExisting-file surface: {}\n",
+            node.file_surface_description()
+        ));
+
         if !node.responsibility.trim().is_empty() {
             spec.push_str("\nResponsibility: ");
             spec.push_str(node.responsibility.trim());
@@ -206,6 +211,18 @@ mod tests {
         assert!(spec.contains("Model: inherit plan"));
         assert!(spec.contains("Model: test-provider/test-model"));
         assert!(spec.contains("Nested work"));
+    }
+
+    #[test]
+    fn spec_carries_explicit_existing_file_surfaces() {
+        let mut graph = locked_graph();
+        graph.node_mut(&"plan".into()).expect("plan").file_surface =
+            Some(vec!["worktree/src/plan.rs".into()]);
+        let spec = compile_spec(&graph).expect("spec");
+        assert!(spec.contains("Existing-file surface: [\"worktree/src/plan.rs\"]"));
+        assert!(spec.contains("[] — no existing files anticipated"));
+        graph.node_mut(&"plan".into()).expect("plan").file_surface = None;
+        assert!(compile_spec(&graph).is_err());
     }
 
     #[test]

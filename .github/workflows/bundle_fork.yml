@@ -18,7 +18,8 @@
 # automated upstream sync.
 #
 # Kept as short as hosted runners allow:
-#   - a revision that already passed Architect quality is not validated again;
+#   - source trees with verified original quality receipts are not validated again;
+#   - desktop and native remote servers build in parallel with isolated features;
 #   - Windows builds alongside the Linux remote server it bundles for WSL,
 #     collecting it just before making the installer;
 #   - both macOS architectures build on Apple silicon, which is much faster
@@ -57,6 +58,7 @@ on:
         type: boolean
 
 permissions:
+  actions: read
   attestations: write
   contents: write
   id-token: write
@@ -69,6 +71,7 @@ jobs:
   prepare:
     name: Pin the source revision
     runs-on: ubuntu-24.04
+    timeout-minutes: 190
     permissions:
       actions: read
       contents: read
@@ -86,7 +89,7 @@ jobs:
         shell: bash
         run: echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
-      - name: Look for a passing Architect quality run of this revision
+      - name: Reuse a verified original quality run of this source
         id: validated
         env:
           GH_TOKEN: ${{ github.token }}
@@ -94,11 +97,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          passed="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/architect_quality.yml/runs?head_sha=${SOURCE_SHA}&status=success&per_page=1" --jq '.total_count')"
-          if [[ "${passed}" -gt 0 ]]; then
-            echo "Architect quality already passed for ${SOURCE_SHA}"
-            echo "validated=true" >> "${GITHUB_OUTPUT}"
+          if [[ -f script/praxis-validation.py ]]; then
+            python script/praxis-validation.py check \
+              --repository "${GITHUB_REPOSITORY}" --source-sha "${SOURCE_SHA}" \
+              --wait-seconds 10800 || echo "validated=false" >> "${GITHUB_OUTPUT}"
           else
+            echo "No validation receipt helper in this source; running full quality"
             echo "validated=false" >> "${GITHUB_OUTPUT}"
           fi
 
@@ -119,7 +123,8 @@ jobs:
     if: >-
       !cancelled() &&
       needs.prepare.result == 'success' &&
-      (needs.quality.result == 'success' || needs.quality.result == 'skipped')
+      (needs.quality.result == 'success' ||
+       (needs.quality.result == 'skipped' && needs.prepare.outputs.validated == 'true'))
     runs-on: ubuntu-24.04
     steps:
       - name: Record the validated revision
@@ -184,7 +189,7 @@ jobs:
         run: rustup show && cargo --version
 
       - name: Bundle
-        run: ./script/bundle-mac ${{ matrix.target }}
+        run: ./script/bundle-mac --desktop-only ${{ matrix.target }}
 
       - name: Upload the disk image
         uses: actions/upload-artifact@v7
@@ -192,6 +197,42 @@ jobs:
           name: praxis-macos-${{ matrix.architecture }}-dmg
           path: target/${{ matrix.target }}/release/Praxis-${{ matrix.architecture }}.dmg
           if-no-files-found: error
+
+  macos_remote_server:
+    name: macOS remote server (${{ matrix.architecture }})
+    if: >-
+      !cancelled() && needs.validated.result == 'success' &&
+      inputs.build_macos && !inputs.test_build
+    needs:
+      - prepare
+      - validated
+    runs-on: macos-15
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: aarch64
+            target: aarch64-apple-darwin
+          - architecture: x86_64
+            target: x86_64-apple-darwin
+    env:
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bundle-macos-remote-server-${{ matrix.architecture }}
+          cache-on-failure: true
+
+      - name: Build and package the remote server
+        run: ./script/bundle-mac --remote-server-only ${{ matrix.target }}
 
       - name: Upload the remote server
         uses: actions/upload-artifact@v7
@@ -275,9 +316,8 @@ jobs:
       - name: Download the WASI SDK
         run: ./script/download-wasi-sdk
 
-      # The remote server it also builds is published from its own job.
-      - name: Bundle the desktop app
-        run: ./script/bundle-linux
+      - name: Bundle only the desktop app
+        run: ./script/bundle-linux --desktop-only
 
       - name: Upload the desktop archive
         uses: actions/upload-artifact@v7
@@ -334,7 +374,7 @@ jobs:
         run: rustup show; cargo --version
 
       - name: Bundle
-        run: ./script/bundle-windows.ps1
+        run: ./script/bundle-windows.ps1 -DesktopOnly
         shell: pwsh
 
       - name: Upload the installer
@@ -344,6 +384,42 @@ jobs:
           name: praxis-windows-x86_64-installer
           path: target/Praxis-x86_64.exe
           if-no-files-found: error
+
+  windows_remote_server:
+    name: Windows remote server (x86_64)
+    if: >-
+      !cancelled() && needs.validated.result == 'success' &&
+      inputs.build_windows
+    needs:
+      - prepare
+      - validated
+    runs-on: windows-2022
+    timeout-minutes: 150
+    env:
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+      PRAXIS_CARGO_PROFILE: ${{ inputs.test_build && 'praxis-test' || 'release' }}
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+
+      - name: Configure Windows long-path support
+        shell: pwsh
+        run: |
+          git config --system core.longpaths true
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bundle-windows-remote-server-x86_64-${{ inputs.test_build && 'test' || 'release' }}
+          cache-on-failure: true
+
+      - name: Build and package the remote server
+        run: ./script/bundle-windows.ps1 -RemoteServerOnly
+        shell: pwsh
 
       - name: Upload the remote server
         uses: actions/upload-artifact@v7
@@ -361,13 +437,17 @@ jobs:
       inputs.build_windows &&
       inputs.build_linux &&
       needs.macos.result == 'success' &&
+      needs.macos_remote_server.result == 'success' &&
       needs.windows.result == 'success' &&
+      needs.windows_remote_server.result == 'success' &&
       needs.linux.result == 'success' &&
       needs.linux_remote_server.result == 'success'
     needs:
       - prepare
       - macos
+      - macos_remote_server
       - windows
+      - windows_remote_server
       - linux
       - linux_remote_server
     runs-on: ubuntu-24.04

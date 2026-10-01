@@ -256,6 +256,212 @@ impl ToolCapability {
     }
 }
 
+pub const ARCHITECT_STATE_VERSION: u32 = 1;
+pub const MAX_ARCHITECT_EVENTS: usize = 1024;
+/// Only draft graph snapshots are trimmed; run snapshots retain their own graph,
+/// checkpoint, visit history, and transcript links independently.
+pub const MAX_ARCHITECT_REVISION_SNAPSHOTS: usize = 64;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PersistentArchitectState {
+    pub version: u32,
+    pub revision: u64,
+    pub sequence: u64,
+    pub events: Vec<ArchitectEvent>,
+    pub archive: Vec<ArchitectRunSnapshot>,
+    /// The most recent 64 non-layout revisions, not a complete execution archive.
+    pub revisions: Vec<ArchitectRevisionSnapshot>,
+    /// Count of trimmed draft snapshots; no run or visit records are removed.
+    pub discarded_revision_snapshots: u64,
+    pub current: Option<ArchitectRunSnapshot>,
+}
+
+impl Default for PersistentArchitectState {
+    fn default() -> Self {
+        Self {
+            version: ARCHITECT_STATE_VERSION,
+            revision: 0,
+            sequence: 0,
+            events: Vec::new(),
+            archive: Vec::new(),
+            revisions: Vec::new(),
+            discarded_revision_snapshots: 0,
+            current: None,
+        }
+    }
+}
+
+impl PersistentArchitectState {
+    fn trim_revision_snapshots(&mut self) {
+        let excess = self
+            .revisions
+            .len()
+            .saturating_sub(MAX_ARCHITECT_REVISION_SNAPSHOTS);
+        self.revisions.drain(..excess);
+        self.discarded_revision_snapshots = self
+            .discarded_revision_snapshots
+            .saturating_add(excess as u64);
+    }
+
+    fn push_event(
+        &mut self,
+        run_id: Option<Uuid>,
+        kind: &str,
+        step: Option<ArchitectRunStepSnapshot>,
+        outcome: Option<ArchitectRunOutcome>,
+        message: Option<String>,
+    ) {
+        self.sequence = self.sequence.saturating_add(1);
+        self.events.push(ArchitectEvent {
+            sequence: self.sequence,
+            revision: self.revision,
+            run_id,
+            timestamp: Utc::now(),
+            kind: kind.into(),
+            step,
+            outcome,
+            message,
+        });
+        let excess = self.events.len().saturating_sub(MAX_ARCHITECT_EVENTS);
+        self.events.drain(..excess);
+    }
+}
+
+// Keep one comparison copy current during a drag without cloning graph payloads
+// or adding draft revisions. Identity/order changes still count as graph edits.
+fn coalesce_architect_layout(
+    previous: &mut architect::ArchitectGraph,
+    graph: &architect::ArchitectGraph,
+) {
+    for (previous, node) in previous.nodes.iter_mut().zip(&graph.nodes) {
+        if previous.id == node.id {
+            previous.position = node.position;
+            if let (Some(previous), Some(graph)) = (&mut previous.subplan, &node.subplan) {
+                coalesce_architect_layout(previous, graph);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchitectRevisionSnapshot {
+    pub revision: u64,
+    pub saved_at: DateTime<Utc>,
+    pub graph: architect::ArchitectGraph,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchitectEvent {
+    pub sequence: u64,
+    pub revision: u64,
+    pub run_id: Option<Uuid>,
+    pub timestamp: DateTime<Utc>,
+    pub kind: String,
+    #[serde(default)]
+    pub step: Option<ArchitectRunStepSnapshot>,
+    #[serde(default)]
+    pub outcome: Option<ArchitectRunOutcome>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchitectRunSnapshot {
+    pub id: Uuid,
+    pub revision: u64,
+    pub started_at: DateTime<Utc>,
+    pub elapsed: Duration,
+    pub graph: Option<architect::ArchitectGraph>,
+    pub current: Option<architect::NodePath>,
+    pub current_title: SharedString,
+    pub step_number: usize,
+    pub outcome: Option<ArchitectRunOutcome>,
+    #[serde(default)]
+    pub interrupted: bool,
+    #[serde(default)]
+    pub result_dismissed: bool,
+    #[serde(default)]
+    pub remote_workflow_url: Option<SharedString>,
+    #[serde(default)]
+    pub history: Vec<ArchitectRunStepSnapshot>,
+    #[serde(default)]
+    pub checkpoint: Option<serde_json::Value>,
+    #[serde(default)]
+    pub recovery_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchitectRunStepSnapshot {
+    pub path: architect::NodePath,
+    pub title: SharedString,
+    pub visit: ArchitectStepVisitId,
+    pub attempt: usize,
+    pub step_number: usize,
+    pub started_at: DateTime<Utc>,
+    pub elapsed: Duration,
+    pub summary: Option<SharedString>,
+    pub session_id: Option<acp::SessionId>,
+    pub outcome: Option<ArchitectRunOutcome>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ArchitectRunOutcome {
+    Completed,
+    StepLimit {
+        steps: usize,
+    },
+    NodeLimit {
+        node: architect::NodeId,
+        visits: usize,
+    },
+    DepthLimit {
+        node: architect::NodeId,
+    },
+    Failed {
+        message: String,
+    },
+    Cancelled,
+    Interrupted,
+}
+
+impl From<&architect::RunOutcome> for ArchitectRunOutcome {
+    fn from(outcome: &architect::RunOutcome) -> Self {
+        match outcome {
+            architect::RunOutcome::Completed => Self::Completed,
+            architect::RunOutcome::StepLimit { steps } => Self::StepLimit { steps: *steps },
+            architect::RunOutcome::NodeLimit { node, visits } => Self::NodeLimit {
+                node: node.clone(),
+                visits: *visits,
+            },
+            architect::RunOutcome::DepthLimit { node } => Self::DepthLimit { node: node.clone() },
+            architect::RunOutcome::Failed { message } => Self::Failed {
+                message: message.clone(),
+            },
+            architect::RunOutcome::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl ArchitectRunOutcome {
+    fn to_outcome(&self) -> architect::RunOutcome {
+        match self {
+            Self::Completed => architect::RunOutcome::Completed,
+            Self::StepLimit { steps } => architect::RunOutcome::StepLimit { steps: *steps },
+            Self::NodeLimit { node, visits } => architect::RunOutcome::NodeLimit {
+                node: node.clone(),
+                visits: *visits,
+            },
+            Self::DepthLimit { node } => architect::RunOutcome::DepthLimit { node: node.clone() },
+            Self::Failed { message } => architect::RunOutcome::Failed {
+                message: message.clone(),
+            },
+            Self::Cancelled | Self::Interrupted => architect::RunOutcome::Cancelled,
+        }
+    }
+}
+
 /// One step as a run took it.
 ///
 /// A plan says what is meant to happen; this says what did. They differ in the
@@ -275,12 +481,30 @@ pub struct RunStep {
     /// The visit this entry records. Steps running side by side finish in any
     /// order, so an entry is found by its visit rather than by being last.
     visit: ArchitectStepVisitId,
+    step_number: usize,
+    wall_started_at: DateTime<Utc>,
+    outcome: Option<ArchitectRunOutcome>,
     started_at: Instant,
     /// Set when the step ends, so a finished step stops counting up.
     elapsed: Option<Duration>,
 }
 
 impl RunStep {
+    fn snapshot(&self) -> ArchitectRunStepSnapshot {
+        ArchitectRunStepSnapshot {
+            path: self.path.clone(),
+            title: self.title.clone(),
+            visit: self.visit,
+            attempt: self.attempt,
+            step_number: self.step_number,
+            started_at: self.wall_started_at,
+            elapsed: self.elapsed(),
+            summary: self.summary.clone(),
+            session_id: self.session_id.clone(),
+            outcome: self.outcome.clone(),
+        }
+    }
+
     pub fn is_running(&self) -> bool {
         self.elapsed.is_none()
     }
@@ -319,6 +543,16 @@ impl RunningStep {
 /// A plan being carried out, and enough of its position to show progress
 /// wherever the user happens to be looking.
 pub struct ArchitectRun {
+    id: Uuid,
+    revision: u64,
+    started_at: DateTime<Utc>,
+    elapsed_before_resume: Duration,
+    resumed_at: Instant,
+    elapsed: Option<Duration>,
+    graph: Option<architect::ArchitectGraph>,
+    interrupted: bool,
+    recovery_error: Option<String>,
+    saved_checkpoint: Option<serde_json::Value>,
     /// The step most recently started, or `None` once the run has ended. When
     /// branches run side by side, see `running_steps` for all of them.
     pub current: Option<architect::NodePath>,
@@ -352,6 +586,131 @@ pub struct ArchitectRun {
 }
 
 impl ArchitectRun {
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    pub fn recovery_error(&self) -> Option<&str> {
+        self.recovery_error.as_deref()
+    }
+
+    pub fn interrupted(&self) -> bool {
+        self.interrupted
+    }
+
+    pub fn snapshot(&self) -> ArchitectRunSnapshot {
+        ArchitectRunSnapshot {
+            id: self.id,
+            revision: self.revision,
+            started_at: self.started_at,
+            elapsed: self.elapsed.unwrap_or_else(|| {
+                self.elapsed_before_resume
+                    .saturating_add(self.resumed_at.elapsed())
+            }),
+            graph: self.graph.clone(),
+            current: self.current.clone(),
+            current_title: self.current_title.clone(),
+            step_number: self.step_number,
+            outcome: if self.interrupted {
+                Some(ArchitectRunOutcome::Interrupted)
+            } else {
+                self.outcome.as_ref().map(ArchitectRunOutcome::from)
+            },
+            interrupted: self.interrupted,
+            result_dismissed: self.result_dismissed,
+            remote_workflow_url: self.remote_workflow_url.clone(),
+            history: self.history.iter().map(RunStep::snapshot).collect(),
+            checkpoint: self
+                .control
+                .as_ref()
+                .map(|control| control.borrow().checkpoint())
+                .or_else(|| self.saved_checkpoint.clone()),
+            recovery_error: self.recovery_error.clone(),
+        }
+    }
+
+    fn restore(snapshot: ArchitectRunSnapshot, version: u32) -> Self {
+        let interrupted = snapshot.interrupted || snapshot.outcome.is_none();
+        let mut outcome = snapshot
+            .outcome
+            .as_ref()
+            .map(ArchitectRunOutcome::to_outcome)
+            .unwrap_or(architect::RunOutcome::Cancelled);
+        let mut recovery_error = snapshot.recovery_error.clone();
+        let control = if version != ARCHITECT_STATE_VERSION {
+            recovery_error = Some(format!(
+                "Praxis cannot resume Architect state version {version}. Update Praxis; saved history is still available."
+            ));
+            None
+        } else if outcome.is_resumable() {
+            match snapshot.checkpoint.clone() {
+                Some(value) => match crate::architect_runner::RunState::from_checkpoint(value) {
+                    Ok(control) => Some(Rc::new(RefCell::new(control))),
+                    Err(error) => {
+                        recovery_error = Some(format!(
+                            "Praxis cannot restore this run checkpoint: {error}. Review saved history before starting a new run."
+                        ));
+                        None
+                    }
+                },
+                None => {
+                    recovery_error = Some(
+                        "Praxis has no checkpoint for this run. Review saved history before starting a new run.".into(),
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if outcome.is_resumable()
+            && let Some(message) = &recovery_error
+        {
+            outcome = architect::RunOutcome::Failed {
+                message: message.clone(),
+            };
+        }
+        Self {
+            id: snapshot.id,
+            revision: snapshot.revision,
+            started_at: snapshot.started_at,
+            elapsed_before_resume: snapshot.elapsed,
+            resumed_at: Instant::now(),
+            elapsed: Some(snapshot.elapsed),
+            graph: snapshot.graph,
+            interrupted,
+            recovery_error,
+            saved_checkpoint: snapshot.checkpoint,
+            current: None,
+            current_title: snapshot.current_title,
+            step_number: snapshot.step_number,
+            outcome: Some(outcome),
+            result_dismissed: snapshot.result_dismissed && !interrupted,
+            remote_workflow_url: snapshot.remote_workflow_url,
+            history: snapshot
+                .history
+                .into_iter()
+                .map(|step| RunStep {
+                    path: step.path,
+                    title: step.title,
+                    visit: step.visit,
+                    attempt: step.attempt,
+                    step_number: step.step_number,
+                    wall_started_at: step.started_at,
+                    started_at: Instant::now(),
+                    elapsed: Some(step.elapsed),
+                    summary: step.summary,
+                    session_id: step.session_id,
+                    outcome: Some(step.outcome.unwrap_or(ArchitectRunOutcome::Interrupted)),
+                })
+                .collect(),
+            running: Vec::new(),
+            step_thread: None,
+            control,
+            _task: Task::ready(()),
+        }
+    }
+
     pub fn is_running(&self) -> bool {
         self.outcome.is_none()
     }
@@ -409,9 +768,21 @@ impl ArchitectRun {
         self.control.as_ref()
     }
 
+    /// Inspection data only: a saved terminal checkpoint does not authorize resume.
+    pub(crate) fn saved_checkpoint(&self) -> Option<&serde_json::Value> {
+        self.saved_checkpoint.as_ref()
+    }
+
     fn close_running_steps(&mut self) {
+        self.elapsed = Some(self.elapsed.unwrap_or_else(|| {
+            self.elapsed_before_resume
+                .saturating_add(self.resumed_at.elapsed())
+        }));
         for step in &mut self.history {
-            step.close();
+            if step.is_running() {
+                step.outcome = self.outcome.as_ref().map(ArchitectRunOutcome::from);
+                step.close();
+            }
         }
         self.running.clear();
     }
@@ -424,7 +795,7 @@ impl ArchitectRun {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ArchitectStepVisitId(Uuid);
 
 #[derive(Clone, Debug)]
@@ -1254,6 +1625,9 @@ pub struct AvailableModel {
     pub name: SharedString,
     /// Whether this is the default model for the agent.
     pub is_default: bool,
+    /// Native execution configuration; copy directly into a plan's model field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration: Option<architect::StepModel>,
 }
 
 #[derive(Debug)]
@@ -1710,10 +2084,10 @@ pub struct Thread {
     /// The Architect plan drafted in this thread. The conversation governs the
     /// plan, so the two live and die together.
     architect_graph: Option<architect::ArchitectGraph>,
-    /// The exact run visits `complete_step` may report on, one per step in
-    /// progress, oldest first. Deliberately not persisted: a run does not
-    /// survive a restart. The unique visit id prevents a late tool call from
-    /// writing onto a later visit or a different step.
+    architect_revision_baseline: Option<architect::ArchitectGraph>,
+    persistent_architect: PersistentArchitectState,
+    /// Live report permissions are never restored. A recovered run must explicitly
+    /// resume with new visits, so late reports cannot overwrite saved work.
     architect_active_visits: Vec<ActiveArchitectStepVisit>,
     /// Whether the thread is planning or building.
     ///
@@ -1933,6 +2307,8 @@ impl Thread {
             running_subagents: Vec::new(),
             inherits_parent_model_settings: true,
             architect_graph: None,
+            architect_revision_baseline: None,
+            persistent_architect: PersistentArchitectState::default(),
             architect_active_visits: Vec::new(),
             session_mode: Rc::new(Cell::new(SessionMode::default())),
             architect_run: None,
@@ -2274,6 +2650,56 @@ impl Thread {
 
         let session_mode =
             SessionMode::restored(db_thread.session_mode, db_thread.architect_graph.is_some());
+        let mut persistent_architect = db_thread.persistent_architect.unwrap_or_default();
+        if let Some(event) = persistent_architect.events.last() {
+            persistent_architect.sequence = persistent_architect.sequence.max(event.sequence);
+        }
+        let excess = persistent_architect
+            .events
+            .len()
+            .saturating_sub(MAX_ARCHITECT_EVENTS);
+        persistent_architect.events.drain(..excess);
+        persistent_architect.trim_revision_snapshots();
+        let mut architect_run = persistent_architect
+            .current
+            .take()
+            .map(|snapshot| ArchitectRun::restore(snapshot, persistent_architect.version));
+        let mut architect_graph = db_thread.architect_graph;
+        if let Some(run) = &mut architect_run {
+            if let Some(control) = &run.control {
+                let compatible = architect_graph
+                    .as_ref()
+                    .context("The saved plan is missing")
+                    .and_then(|graph| control.borrow().validate_restore_graph(graph));
+                match compatible {
+                    Ok(()) => {
+                        if let Some(graph) = &mut architect_graph {
+                            control.borrow().restore_interrupted_results(graph);
+                        }
+                    }
+                    Err(error) => {
+                        let message = format!(
+                            "Praxis cannot resume this checkpoint with the saved plan: {error}. The plan and run history were preserved. Review them before starting a new run."
+                        );
+                        run.control = None;
+                        run.recovery_error = Some(message.clone());
+                        run.outcome = Some(architect::RunOutcome::Failed { message });
+                        run.result_dismissed = false;
+                    }
+                }
+            }
+            if run.interrupted || run.recovery_error.is_some() {
+                persistent_architect.push_event(
+                    Some(run.id),
+                    "run_restored",
+                    None,
+                    Some(ArchitectRunOutcome::Interrupted),
+                    run.recovery_error
+                        .clone()
+                        .or_else(|| Some("Run interrupted. Resume explicitly to continue.".into())),
+                );
+            }
+        }
 
         Self {
             id,
@@ -2325,10 +2751,12 @@ impl Thread {
             }),
             running_subagents: Vec::new(),
             inherits_parent_model_settings: true,
-            architect_graph: db_thread.architect_graph,
+            architect_revision_baseline: architect_graph.clone(),
+            architect_graph,
+            persistent_architect,
             architect_active_visits: Vec::new(),
             session_mode: Rc::new(Cell::new(session_mode)),
-            architect_run: None,
+            architect_run,
             sandboxed_terminal_temp_dir: db_thread.sandboxed_terminal_temp_dir,
             terminal_tasks: Rc::default(),
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::from_db(
@@ -2430,6 +2858,9 @@ impl Thread {
                 }
             }),
             architect_graph: self.architect_graph.clone(),
+            persistent_architect: self
+                .has_persistent_architect_state()
+                .then(|| self.architect_snapshot()),
             session_mode: self.session_mode(),
             sandboxed_terminal_temp_dir: self.sandboxed_terminal_temp_dir.clone(),
             sandbox_grants: self.sandbox_grants.borrow().to_db(),
@@ -2486,14 +2917,148 @@ impl Thread {
         self.architect_graph.as_ref()
     }
 
+    pub fn architect_event_sequence(&self) -> u64 {
+        self.persistent_architect.sequence
+    }
+
+    pub fn architect_revision(&self) -> u64 {
+        self.persistent_architect.revision
+    }
+
+    /// Returns events strictly after the cursor, oldest first. A gap before the
+    /// first returned sequence means the caller should refresh its snapshot.
+    pub fn architect_events(&self, after: u64, limit: usize) -> Vec<ArchitectEvent> {
+        self.persistent_architect
+            .events
+            .iter()
+            .filter(|event| event.sequence > after)
+            .take(limit.min(MAX_ARCHITECT_EVENTS))
+            .cloned()
+            .collect()
+    }
+
+    pub fn architect_run_archive(&self) -> &[ArchitectRunSnapshot] {
+        &self.persistent_architect.archive
+    }
+
+    pub fn architect_snapshot(&self) -> PersistentArchitectState {
+        let mut snapshot = self.persistent_architect.clone();
+        snapshot.current = self.architect_run.as_ref().map(ArchitectRun::snapshot);
+        snapshot
+    }
+
+    pub fn has_persistent_architect_state(&self) -> bool {
+        self.architect_graph.is_some()
+            || self.architect_run.is_some()
+            || self.persistent_architect.sequence > 0
+            || !self.persistent_architect.archive.is_empty()
+            || !self.persistent_architect.revisions.is_empty()
+            || self.session_mode() != SessionMode::Build
+    }
+
+    fn record_architect_event(
+        &mut self,
+        kind: &str,
+        visit: Option<ArchitectStepVisitId>,
+        cx: &mut Context<Self>,
+    ) {
+        let run_id = self.architect_run.as_ref().map(|run| run.id);
+        let step = visit.and_then(|visit| {
+            self.architect_run
+                .as_ref()?
+                .history
+                .iter()
+                .find(|step| step.visit == visit)
+                .map(RunStep::snapshot)
+        });
+        let outcome = self
+            .architect_run
+            .as_ref()
+            .and_then(|run| run.outcome.as_ref())
+            .map(ArchitectRunOutcome::from);
+        self.persistent_architect
+            .push_event(run_id, kind, step, outcome, None);
+        self.updated_at = Utc::now();
+        cx.notify();
+    }
+
+    /// Call after changing runner control without a thread-level transition.
+    /// Notifications use the existing deferred native save worker, not a turn stream.
+    pub fn checkpoint_architect_run(&mut self, cx: &mut Context<Self>) {
+        self.record_architect_event("checkpoint", None, cx);
+    }
+
+    fn archive_architect_revision(&mut self) {
+        if let Some(graph) = self.architect_revision_baseline.take() {
+            self.persistent_architect
+                .revisions
+                .push(ArchitectRevisionSnapshot {
+                    revision: self.persistent_architect.revision,
+                    saved_at: Utc::now(),
+                    graph,
+                });
+            self.persistent_architect.trim_revision_snapshots();
+        }
+        self.persistent_architect.revision = self.persistent_architect.revision.saturating_add(1);
+        self.architect_revision_baseline = self.architect_graph.clone();
+    }
+
+    fn note_architect_graph_change(&mut self, cx: &mut Context<Self>) {
+        if self.architect_revision_baseline == self.architect_graph {
+            return;
+        }
+        if let (Some(previous), Some(graph)) =
+            (&mut self.architect_revision_baseline, &self.architect_graph)
+        {
+            coalesce_architect_layout(previous, graph);
+        }
+        if self.architect_revision_baseline != self.architect_graph {
+            self.archive_architect_revision();
+            self.record_architect_event("graph_updated", None, cx);
+        } else {
+            self.updated_at = Utc::now();
+            cx.notify();
+        }
+    }
+
+    fn archive_current_architect_run(&mut self) {
+        if let Some(run) = self.architect_run.take() {
+            let mut snapshot = run.snapshot();
+            if snapshot.outcome.is_none() {
+                snapshot.outcome = Some(ArchitectRunOutcome::Interrupted);
+                snapshot.interrupted = true;
+                for step in &mut snapshot.history {
+                    if step.outcome.is_none() {
+                        step.outcome = Some(ArchitectRunOutcome::Interrupted);
+                    }
+                }
+            }
+            self.persistent_architect.push_event(
+                Some(snapshot.id),
+                "run_archived",
+                None,
+                snapshot.outcome.clone(),
+                None,
+            );
+            self.persistent_architect.archive.push(snapshot);
+        }
+        self.architect_active_visits.clear();
+    }
+
+    /// Replaces the plan and archives its previous run. Approved checkpoint
+    /// rebases must use `update_architect_graph` instead to retain their run.
     pub fn set_architect_graph(
         &mut self,
         graph: Option<architect::ArchitectGraph>,
         cx: &mut Context<Self>,
     ) {
+        if self.architect_graph == graph {
+            return;
+        }
+        self.archive_current_architect_run();
         self.architect_graph = graph;
-        self.updated_at = Utc::now();
-        cx.notify();
+        self.archive_architect_revision();
+        self.record_architect_event("graph_replaced", None, cx);
     }
 
     pub fn architect_run(&self) -> Option<&ArchitectRun> {
@@ -2508,7 +3073,19 @@ impl Thread {
         task: Task<()>,
         cx: &mut Context<Self>,
     ) {
+        self.archive_current_architect_run();
+        self.persistent_architect.version = ARCHITECT_STATE_VERSION;
         self.architect_run = Some(ArchitectRun {
+            id: Uuid::new_v4(),
+            revision: self.persistent_architect.revision,
+            started_at: Utc::now(),
+            elapsed_before_resume: Duration::ZERO,
+            resumed_at: Instant::now(),
+            elapsed: None,
+            graph: self.architect_graph.clone(),
+            interrupted: false,
+            recovery_error: None,
+            saved_checkpoint: None,
             current: Some(current),
             current_title,
             step_number: 1,
@@ -2522,7 +3099,7 @@ impl Thread {
             _task: task,
         });
         self.architect_active_visits.clear();
-        cx.notify();
+        self.record_architect_event("run_started", None, cx);
     }
 
     /// Carries on a run that was stopped or failed, with a new task and the
@@ -2530,9 +3107,13 @@ impl Thread {
     pub(crate) fn reopen_architect_run(&mut self, task: Task<()>, cx: &mut Context<Self>) {
         if let Some(run) = self.architect_run.as_mut() {
             run.outcome = None;
+            run.interrupted = false;
+            run.recovery_error = None;
+            run.elapsed_before_resume = run.elapsed.take().unwrap_or_default();
+            run.resumed_at = Instant::now();
             run.result_dismissed = false;
             run._task = task;
-            cx.notify();
+            self.record_architect_event("run_resumed", None, cx);
         }
     }
 
@@ -2564,7 +3145,7 @@ impl Thread {
             if !own_thread && let Some(step) = run.history_entry_mut(visit) {
                 step.session_id = Some(session_id);
             }
-            cx.notify();
+            self.record_architect_event("step_session", Some(visit), cx);
         }
     }
 
@@ -2575,7 +3156,7 @@ impl Thread {
     ) {
         if let Some(run) = self.architect_run.as_mut() {
             run.remote_workflow_url = url;
-            cx.notify();
+            self.record_architect_event("remote_workflow", None, cx);
         }
     }
 
@@ -2617,11 +3198,14 @@ impl Thread {
                 summary: None,
                 session_id: None,
                 visit: visit_id,
+                step_number,
+                wall_started_at: Utc::now(),
+                outcome: None,
                 started_at: Instant::now(),
                 elapsed: None,
             });
         }
-        cx.notify();
+        self.record_architect_event("step_started", Some(visit_id), cx);
         visit_id
     }
 
@@ -2636,12 +3220,28 @@ impl Thread {
         summary: Option<SharedString>,
         cx: &mut Context<Self>,
     ) {
+        let outcome = if summary.is_some() {
+            ArchitectRunOutcome::Completed
+        } else {
+            ArchitectRunOutcome::Interrupted
+        };
+        self.finish_architect_run_step_with_outcome(visit, summary, outcome, cx);
+    }
+
+    pub fn finish_architect_run_step_with_outcome(
+        &mut self,
+        visit: ArchitectStepVisitId,
+        summary: Option<SharedString>,
+        outcome: ArchitectRunOutcome,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(run) = self.architect_run.as_mut() {
             if let Some(step) = run.history_entry_mut(visit)
                 && step.is_running()
             {
                 step.close();
                 step.summary = summary;
+                step.outcome = Some(outcome);
             }
             run.running.retain(|step| step.visit != visit);
             // What is shown as the run's position stays on the latest step
@@ -2651,7 +3251,7 @@ impl Thread {
                 run.current_title = latest.title.clone();
             }
         }
-        cx.notify();
+        self.record_architect_event("step_finished", Some(visit), cx);
     }
 
     pub fn finish_architect_run(&mut self, outcome: architect::RunOutcome, cx: &mut Context<Self>) {
@@ -2664,6 +3264,9 @@ impl Thread {
             run.current = None;
             // Only a run that was cut short can be picked up again.
             if !outcome.is_resumable() {
+                if let Some(control) = &run.control {
+                    run.saved_checkpoint = Some(control.borrow().checkpoint());
+                }
                 run.control = None;
             }
             run.outcome = Some(outcome);
@@ -2673,7 +3276,8 @@ impl Thread {
             run.close_running_steps();
         }
         self.architect_active_visits.clear();
-        cx.notify();
+        self.note_architect_graph_change(cx);
+        self.record_architect_event("run_finished", None, cx);
     }
 
     /// Hides the finished run's result without discarding its history or checkpoint.
@@ -2683,7 +3287,7 @@ impl Thread {
             && !run.result_dismissed
         {
             run.result_dismissed = true;
-            cx.notify();
+            self.record_architect_event("result_dismissed", None, cx);
         }
     }
 
@@ -2705,7 +3309,8 @@ impl Thread {
             run._task = Task::ready(());
         }
         self.architect_active_visits.clear();
-        cx.notify();
+        self.note_architect_graph_change(cx);
+        self.record_architect_event("run_stopped", None, cx);
     }
 
     pub fn session_mode(&self) -> SessionMode {
@@ -2729,7 +3334,7 @@ impl Thread {
         self.session_mode.set(mode);
         self.updated_at = Utc::now();
         self.refresh_turn_tools(cx);
-        cx.notify();
+        self.record_architect_event("mode_changed", None, cx);
     }
 
     /// The step a run most recently started, which is the step an unbound
@@ -2784,22 +3389,53 @@ impl Thread {
         node.result = Some(architect::StepResult { summary, attempt });
         let title = node.title.clone();
         visit.reported = true;
-        self.updated_at = Utc::now();
-        cx.notify();
+        if let Some(run) = self.architect_run.as_mut()
+            && let Some(step) = run.history_entry_mut(visit_id)
+        {
+            step.summary = node
+                .result
+                .as_ref()
+                .map(|result| result.summary.clone().into());
+        }
+        self.note_architect_graph_change(cx);
+        self.record_architect_event("step_reported", Some(visit_id), cx);
         Ok((title, attempt))
     }
 
-    /// Edits the plan in place, marking the thread changed so the edit is
-    /// saved. Does nothing when the thread has no plan.
+    /// Records filesystem-observed creation without replacing the run or
+    /// invalidating reviewed locks and completed results.
+    pub(crate) fn record_architect_created_files(
+        &mut self,
+        source: &architect::NodePath,
+        files: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        if files.is_empty() {
+            return;
+        }
+        if let Some(graph) = &mut self.architect_graph {
+            graph.record_created_files(source, files);
+        }
+        if let Some(graph) = self
+            .architect_run
+            .as_mut()
+            .and_then(|run| run.graph.as_mut())
+        {
+            graph.record_created_files(source, files);
+        }
+        self.note_architect_graph_change(cx);
+    }
+
+    /// Edits the plan without detaching its run. No-ops are silent; layout-only
+    /// edits save positions without adding execution revisions or events.
+    /// Does nothing when the thread has no plan.
     pub fn update_architect_graph<R>(
         &mut self,
         update: impl FnOnce(&mut architect::ArchitectGraph) -> R,
         cx: &mut Context<Self>,
     ) -> Option<R> {
-        let graph = self.architect_graph.as_mut()?;
-        let result = update(graph);
-        self.updated_at = Utc::now();
-        cx.notify();
+        let result = update(self.architect_graph.as_mut()?);
+        self.note_architect_graph_change(cx);
         Some(result)
     }
 

@@ -88,7 +88,34 @@ impl EdgeCurve {
         }
     }
 
-    fn at(&self, t: f32) -> Position {
+    pub(super) fn self_loop(position: Position, (width, height): (f32, f32)) -> Self {
+        // Separate bottom ports keep the return arrow visible and prevent the
+        // curve from retracing itself. Use the displayed card's extents.
+        let start = Position {
+            x: position.x + width / 4.0,
+            y: position.y + height / 2.0,
+        };
+        let end = Position {
+            x: position.x - width / 4.0,
+            y: start.y,
+        };
+        let bow = NODE_HEIGHT * 1.15;
+        Self {
+            start,
+            control_a: Position {
+                x: start.x,
+                y: start.y + bow,
+            },
+            control_b: Position {
+                x: end.x,
+                y: end.y + bow,
+            },
+            end,
+            backwards: true,
+        }
+    }
+
+    pub(super) fn at(&self, t: f32) -> Position {
         let inverse = 1.0 - t;
         let a = inverse * inverse * inverse;
         let b = 3.0 * inverse * inverse * t;
@@ -192,6 +219,47 @@ mod tests {
         assert_eq!(curve.end.y, 40.0 + NODE_HEIGHT / 2.0);
         assert!(curve.control_a.y > curve.start.y);
         assert!(curve.control_b.y > curve.end.y);
+    }
+
+    #[test]
+    fn self_loop_stays_outside_normal_and_expanded_cards_without_retracing() {
+        let position = Position { x: 300.0, y: -40.0 };
+        for (width, height) in [
+            (NODE_WIDTH, NODE_HEIGHT),
+            (EXPANDED_NODE_WIDTH, EXPANDED_NODE_HEIGHT),
+        ] {
+            let curve = EdgeCurve::self_loop(position, (width, height));
+            let bottom = position.y + height / 2.0;
+            assert!(curve.backwards);
+            assert_eq!(curve.start.y, bottom);
+            assert_eq!(curve.end.y, bottom);
+            assert!(curve.start.x > position.x);
+            assert!(curve.end.x < position.x);
+            assert!(curve.start.x < position.x + width / 2.0);
+            assert!(curve.end.x > position.x - width / 2.0);
+
+            let mut previous = curve.start;
+            for step in 1..=32 {
+                let sample = curve.at(step as f32 / 32.0);
+                assert!(sample.x.is_finite() && sample.y.is_finite());
+                assert!(sample.x < previous.x, "the loop must not retrace itself");
+                if step < 32 {
+                    assert!(sample.y > bottom, "the loop must clear the card");
+                }
+                assert!(curve.distance_to(sample) < 0.001);
+                previous = sample;
+            }
+            assert!(curve.midpoint().y > bottom + EDGE_HIT_TOLERANCE);
+            assert!(curve.distance_to(position) > EDGE_HIT_TOLERANCE);
+
+            let approach = curve.at(0.94);
+            assert!(
+                approach.y > curve.end.y,
+                "the arrow must point into the card"
+            );
+            assert!(curve.end.y - curve.control_b.y < 0.0);
+            assert!(curve.start.y < curve.control_a.y);
+        }
     }
 
     #[test]
