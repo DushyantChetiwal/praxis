@@ -1447,11 +1447,14 @@ impl ArchitectPane {
             .map(ArchitectGraph::step_count_deeply)
             .unwrap_or_default()
             .max(1);
-        let completed = run
-            .history()
-            .iter()
-            .filter(|step| !step.is_running())
-            .count();
+        let succeeded = run.outcome.as_ref().is_some_and(RunOutcome::is_success);
+        // Visits do not include composite containers or skipped branches. A
+        // successful run has resolved the whole plan, regardless of visit count.
+        let completed = if succeeded {
+            total
+        } else {
+            run.history().iter().filter(|step| !step.is_running()).count()
+        };
         let progress = (completed as f32 / total as f32).clamp(0.0, 1.0);
         let elapsed = run
             .history()
@@ -3469,6 +3472,36 @@ mod tests {
                 }
             });
         }
+
+        let mut nested = ArchitectGraph::default();
+        nested.add_node(ArchitectNode::new("first", "First"));
+        nested.add_node(ArchitectNode::new("second", "Second"));
+        nested.connect("first", "second");
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.subplan = Some(Box::new(nested));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(parent);
+        graph.lock_all();
+        assert_eq!(graph.step_count_deeply(), 3);
+        thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(graph), cx);
+            let parent = NodePath::root("parent".into());
+            thread.start_architect_run(parent.child("first".into()), "First".into(), Task::ready(()), cx);
+            for (number, id) in ["first", "second"].into_iter().enumerate() {
+                let visit = thread.note_architect_run_position(parent.child(id.into()), id.into(), number + 1, 1, cx);
+                thread.finish_architect_run_step(visit, Some("Done".into()), cx);
+            }
+            thread.finish_architect_run(RunOutcome::Completed, cx);
+            assert_eq!(thread.architect_run().unwrap().history().len(), 2);
+        });
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(window.painted_quads().iter().any(|quad| {
+                quad.background == cx.theme().status().success.into()
+                    && quad.bounds.size == size(px(220.0), px(4.0)).scale(window.scale_factor())
+            }), "a completed nested plan must render full progress, not two visits out of three nodes");
+        });
     }
 
     #[gpui::test]

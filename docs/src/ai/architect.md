@@ -47,6 +47,8 @@ Pointing a connection back at an earlier step forms a loop, which is how you exp
 
 Architect mode can read and search your project but cannot change it through native tools. Drawing a plan and carrying it out are separate jobs.
 
+Step and connection IDs must be non-blank and unique within their graph. Nested graphs have separate namespaces, so a child ID can repeat under different parents. Drafting rejects ambiguous IDs before changing the current plan; it never silently renames a proposed step or redirects its connections.
+
 ## Existing-file surfaces
 
 Every drafted step must declare `file_surface`: the existing files it anticipates modifying, renaming, or deleting, using project-relative paths such as `src/main.rs` or `README.md`. With one open root, paths are relative to that root. In multi-root projects, an unprefixed path must identify an existing file in exactly one root; otherwise include the root name, such as `backend/src/main.rs`. Root-prefixed paths are also accepted in single-root projects. The saved graph uses root-qualified identities so mixed spellings cannot hide overlap. Read-only access does not require declaring a file. Include the declaration on parent steps and every nested child. Send explicit `[]` when no existing files are anticipated. Omission is not the same as an empty declaration: older saved steps with no surface remain visible but block execution until reviewed.
@@ -123,6 +125,8 @@ The run proceeds as follows:
 Because Zed holds the position in the graph, a model cannot quietly decide it has done enough and leave a retry loop early.
 
 Every step runs as an ordinary turn, so tool permissions, sandboxing, and cancellation all behave exactly as they do when you type a message yourself.
+
+A successfully completed run fills the canvas progress bar even when work was nested or conditional branches were skipped. Those cases do not produce one execution visit per canvas node.
 
 ### Parallel branches {#parallel-branches}
 
