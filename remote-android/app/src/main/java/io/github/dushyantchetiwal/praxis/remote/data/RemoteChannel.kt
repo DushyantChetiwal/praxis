@@ -52,6 +52,14 @@ internal fun JSONObject.long(key: String): Long? = (opt(key) as? Number)?.toLong
 
 internal fun JSONObject.int(key: String): Int? = (opt(key) as? Number)?.toInt()
 
+private val INDEX_INTEGER = Regex("0|[1-9][0-9]*")
+
+internal fun JSONObject.index(key: String): Int? {
+    val value = opt(key) as? Number ?: return null
+    val text = value.toString()
+    return if (INDEX_INTEGER.matches(text)) text.toIntOrNull() else null
+}
+
 internal fun JSONObject.bool(key: String): Boolean = opt(key) == true
 
 internal fun JSONObject.obj(key: String): JSONObject? = opt(key) as? JSONObject
@@ -154,6 +162,27 @@ data class WindowInfo(
 
 data class Status(val device: String?, val windows: List<WindowInfo>)
 
+data class RemoteViewScope(val generation: Int, val viewKey: String, val revision: Long)
+
+internal suspend fun viewScopedAction(
+    scope: RemoteViewScope,
+    currentScope: () -> RemoteViewScope,
+    operation: suspend () -> Unit,
+    onSuccess: () -> Unit,
+    onFailure: (ApiException) -> Unit,
+): Boolean {
+    if (scope != currentScope()) return false
+    return try {
+        operation()
+        if (scope != currentScope()) return false
+        onSuccess()
+        true
+    } catch (error: ApiException) {
+        if (scope == currentScope()) onFailure(error)
+        false
+    }
+}
+
 data class EntryPart(val index: Int, val role: String, val text: String)
 
 data class Entry(
@@ -162,7 +191,11 @@ data class Entry(
     val text: String,
     val status: String?,
     val parts: List<EntryPart> = emptyList(),
-)
+    val truncated: Boolean = false,
+    val truncation: String? = null,
+) {
+    val snapshotPreview: Boolean get() = truncated && truncation == "snapshot_budget"
+}
 
 data class ThreadView(
     val sessionId: String?,
@@ -174,6 +207,7 @@ data class ThreadView(
     val beforeIndex: Int? = null,
     val nextBefore: Int? = null,
     val hasMore: Boolean? = null,
+    val pagingValid: Boolean = true,
 )
 
 data class Snapshot(
@@ -280,15 +314,32 @@ private fun parseThreadSummary(o: JSONObject): ThreadSummary = ThreadSummary(
 fun parseThreadView(o: JSONObject): ThreadView = parseThreadView(o, includeSteps = true)
 
 private fun parseThreadView(o: JSONObject, includeSteps: Boolean): ThreadView {
+    var valid = true
+    val paging = o.has("next_before") || !o.isNull("before_index") || o.has("has_more")
+    fun index(objectValue: JSONObject, key: String, optional: Boolean = false): Int? {
+        if (optional && objectValue.isNull(key)) return null
+        return objectValue.index(key).also { if (it == null) valid = false }
+    }
+    val before = index(o, "before_index", optional = true)
+    val next = if (paging) index(o, "next_before") else null
+    val total = if (paging || o.has("total")) index(o, "total") else null
+    val hasMore = o.opt("has_more") as? Boolean
+    if (paging && hasMore == null) valid = false
+    val rawEntries = o.arr("entries")
+    if (paging && rawEntries == null) valid = false
+    if (rawEntries != null && rawEntries.objects().size != rawEntries.length()) valid = false
     val entries = o.arr("entries")?.objects()?.map { e ->
         Entry(
-            index = e.int("index") ?: 0,
+            index = index(e, "index") ?: -1,
             role = e.str("role") ?: "notice",
             text = e.str("text").orEmpty(),
             status = e.str("status"),
-            parts = e.arr("parts")?.objects()?.mapIndexedNotNull { index, part ->
+            truncated = e.bool("truncated"),
+            truncation = e.str("truncation"),
+            parts = e.arr("parts")?.objects()?.mapIndexedNotNull { partOffset, part ->
                 val text = part.str("text")?.takeIf { it.isNotBlank() } ?: return@mapIndexedNotNull null
-                EntryPart(part.int("index") ?: index, part.str("role") ?: "notice", text)
+                val partIndex = if (part.has("index")) index(part, "index") ?: -1 else partOffset
+                EntryPart(partIndex, part.str("role") ?: "notice", text)
             }.orEmpty(),
         )
     }.orEmpty()
@@ -296,11 +347,12 @@ private fun parseThreadView(o: JSONObject, includeSteps: Boolean): ThreadView {
         sessionId = o.str("session_id"),
         title = o.str("title"),
         status = o.str("status"),
-        total = o.int("total") ?: entries.size,
+        total = total ?: entries.size,
         entries = entries,
-        beforeIndex = o.int("before_index"),
-        nextBefore = o.int("next_before"),
-        hasMore = o.opt("has_more") as? Boolean,
+        beforeIndex = before,
+        nextBefore = next,
+        hasMore = hasMore,
+        pagingValid = valid,
         stepThreads = if (includeSteps) {
             o.arr("step_threads")?.objects()?.map { parseThreadView(it, includeSteps = false) }.orEmpty()
         } else {

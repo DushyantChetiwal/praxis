@@ -517,7 +517,8 @@ impl QuestionTimeout {
             let seconds = remaining.as_secs_f64().ceil() as u64;
             format!("Using the recommendation in {seconds}s while Praxis is inactive.")
         } else {
-            "Auto-answer paused while Praxis is active; countdown starts after you leave Praxis.".to_string()
+            "Auto-answer paused while Praxis is active; countdown starts after you leave Praxis."
+                .to_string()
         };
         format!(
             "{}\n\nRecommendation: {}\n\n{status}",

@@ -3280,18 +3280,35 @@ mod tests {
         let mut step = ArchitectNode::new("build", "Build");
         step.locked = true;
         graph.add_node(step);
+        let model = fake.model("fake");
         thread.update(cx, |thread, cx| {
-            thread.set_model(fake.model("fake"), cx);
+            thread.set_model(model.clone(), cx);
             thread.set_architect_graph(Some(graph.clone()), cx);
         });
-        fake.forbid_requests();
         cx.update(|cx| agent::start_architect_run(thread.clone(), session.clone(), graph, cx))
             .unwrap();
+        cx.run_until_parked();
+        let request = fake
+            .pending_completions_for(&model)
+            .pop()
+            .expect("the step should request a completion before authentication fails");
+        // forbid_requests returns a generic, retryable error rather than an auth rejection.
+        fake.send_error(
+            &model,
+            &request,
+            language_model::LanguageModelCompletionError::from_http_status(
+                model.provider_name.clone(),
+                http_client::StatusCode::UNAUTHORIZED,
+                "Invalid API key".into(),
+                None,
+            ),
+        );
+        fake.end_stream(&model, &request);
         cx.run_until_parked();
         thread.read_with(cx, |thread, _| {
             assert!(matches!(
                 &thread.architect_run().unwrap().outcome,
-                Some(RunOutcome::Failed { .. })
+                Some(RunOutcome::Failed { message }) if message.contains("Invalid API key")
             ));
         });
 
@@ -3323,7 +3340,6 @@ mod tests {
             assert!(pane.can_resume(cx), "the header must still offer Resume");
             assert!(!pane.is_running(cx));
         });
-        fake.allow_requests();
         cx.update(|_, cx| agent::resume_architect_run(thread.clone(), session, cx))
             .unwrap();
         pane.update(cx, |pane, cx| {

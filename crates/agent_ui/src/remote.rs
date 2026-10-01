@@ -320,7 +320,14 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
     let result = match op {
         "status" => Ok(status(device, cx)),
         "threads" => with_workspace(window, cx, |workspace, _, cx| threads(workspace, cx)),
-        "thread" => with_workspace(window, cx, |workspace, _, cx| thread(workspace, args, cx)),
+        "thread" => {
+            return match with_workspace(window, cx, |workspace, _, cx| {
+                Ok(request_thread(workspace, args, cx))
+            }) {
+                Ok(task) => task,
+                Err(error) => Task::ready(Err(error)),
+            };
+        }
         "prompt" => with_workspace(window, cx, |workspace, window, cx| {
             let text = required(args, "text")?.to_string();
             if text.trim().is_empty() {
@@ -840,6 +847,81 @@ fn thread(workspace: &Entity<Workspace>, args: &Value, cx: &App) -> Result<Value
     }
 }
 
+fn request_thread(
+    workspace: &Entity<Workspace>,
+    args: &Value,
+    cx: &mut App,
+) -> Task<Result<Value>> {
+    let error = match thread(workspace, args, cx) {
+        Ok(snapshot) => return Task::ready(Ok(snapshot)),
+        Err(error) => error,
+    };
+    let load = (|| {
+        let before = history_before_index(args)?.context("history needs before_index")?;
+        let session_id = acp::SessionId::new(required(args, "session_id")?.to_string());
+        let conversation = conversation_view(workspace, cx)?;
+        let owner = conversation
+            .read(cx)
+            .as_native_thread(cx)
+            .context("Open the root plan on the computer, then retry loading its step history")?;
+        let connection = conversation
+            .read(cx)
+            .as_native_connection(cx)
+            .context("Open the root plan on the computer, then retry loading its step history")?;
+        if !owns_step_session(owner.read(cx), &session_id) {
+            return Err(error);
+        }
+        Ok((
+            before,
+            load_owned_step_thread(owner, connection, session_id, cx),
+        ))
+    })();
+    let (before, load) = match load {
+        Ok(load) => load,
+        Err(error) => return Task::ready(Err(error)),
+    };
+    cx.spawn(async move |cx| {
+        let thread = load.await?;
+        Ok(cx.update(|cx| {
+            thread_page_snapshot(thread.read(cx), None, TRANSCRIPT_BUDGET, Some(before), cx)
+        }))
+    })
+}
+
+fn owns_step_session(owner: &agent::Thread, session_id: &acp::SessionId) -> bool {
+    owner.architect_run().is_some_and(|run| {
+        run.history()
+            .iter()
+            .any(|step| step.session_id.as_ref() == Some(session_id))
+    })
+}
+
+fn load_owned_step_thread(
+    owner: Entity<agent::Thread>,
+    connection: std::rc::Rc<agent::NativeAgentConnection>,
+    session_id: acp::SessionId,
+    cx: &mut App,
+) -> Task<Result<Entity<acp_thread::AcpThread>>> {
+    if !owns_step_session(owner.read(cx), &session_id) {
+        return Task::ready(Err(anyhow!(
+            "That step is no longer in this plan's run history. Open its conversation on the computer and retry."
+        )));
+    }
+    let project = owner.read(cx).project().clone();
+    let load = connection.0.update(cx, |agent, cx| {
+        agent.open_thread(session_id.clone(), project, cx)
+    });
+    cx.spawn(async move |cx| {
+        let thread = load.await?;
+        cx.update(|cx| {
+            if !owns_step_session(owner.read(cx), &session_id) {
+                bail!("The plan's run history changed. Open the step conversation on the computer and retry.");
+            }
+            Ok(thread)
+        })
+    })
+}
+
 fn history_before_index(args: &Value) -> Result<Option<usize>> {
     args.get("before_index")
         .filter(|value| !value.is_null())
@@ -944,7 +1026,8 @@ fn thread_page_snapshot(
         "entries": [],
     });
     let budget = budget.saturating_sub(snapshot.to_string().len());
-    let (entries, next_before) = transcript_page(thread.entries(), end, budget, cx);
+    let (entries, next_before) =
+        collect_transcript_page(thread.entries(), end, budget, before.is_none(), cx);
     snapshot["entries"] = json!(entries);
     snapshot["next_before"] = json!(next_before);
     snapshot["has_more"] = json!(next_before > 0);
@@ -953,13 +1036,24 @@ fn thread_page_snapshot(
 
 #[cfg(test)]
 fn transcript_entries(source: &[AgentThreadEntry], budget: usize, cx: &App) -> Vec<Value> {
-    transcript_page(source, source.len(), budget, cx).0
+    collect_transcript_page(source, source.len(), budget, true, cx).0
 }
 
+#[cfg(test)]
 fn transcript_page(
     source: &[AgentThreadEntry],
     before: usize,
+    budget: usize,
+    cx: &App,
+) -> (Vec<Value>, usize) {
+    collect_transcript_page(source, before, budget, false, cx)
+}
+
+fn collect_transcript_page(
+    source: &[AgentThreadEntry],
+    before: usize,
     mut budget: usize,
+    preview: bool,
     cx: &App,
 ) -> (Vec<Value>, usize) {
     let end = before.min(source.len());
@@ -972,74 +1066,24 @@ fn transcript_page(
         .rev()
         .take(HISTORY_PAGE_ENTRIES)
     {
-        let (role, text, status) = describe_entry(entry, cx);
-        let mut value = json!({ "index": index, "role": role, "text": "", "status": status });
-        let limit = budget.min(ENTRY_LIMIT);
-        if let AgentThreadEntry::AssistantMessage(message) = entry
-            && message
-                .chunks
-                .iter()
-                .any(|chunk| matches!(chunk, acp_thread::AssistantMessageChunk::Thought { .. }))
-        {
-            let mut parts = Vec::new();
-            let mut has_content = false;
-            let mut remaining = limit.saturating_sub(value.to_string().len() + 16);
-            for (part_index, chunk) in message.chunks.iter().enumerate().rev() {
-                let (role, block) = match chunk {
-                    acp_thread::AssistantMessageChunk::Message { block, .. } => {
-                        ("assistant", block)
-                    }
-                    acp_thread::AssistantMessageChunk::Thought { block, .. } => {
-                        ("reasoning", block)
-                    }
-                };
-                let text = block.to_markdown(cx);
-                if text.trim().is_empty() {
-                    continue;
-                }
-                has_content = true;
-                let mut part = json!({ "index": part_index, "role": role, "text": "" });
-                // Assistant text also appears in the legacy fallback below.
-                let text_budget = remaining.saturating_sub(part.to_string().len() + 8) / 2;
-                let text = truncate_json_text(text.trim(), text_budget);
-                if text.is_empty() {
-                    break;
-                }
-                part["text"] = json!(text);
-                remaining = remaining.saturating_sub(part.to_string().len() + json_len(&text) + 8);
-                parts.push(part);
-            }
-            parts.reverse();
-            if parts.is_empty() {
-                if has_content {
-                    break;
-                }
-                next_before = index;
-                continue;
-            }
-            value["text"] = json!(
-                parts
-                    .iter()
-                    .filter(|part| part["role"] == "assistant")
-                    .filter_map(|part| part["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
-            );
-            value["parts"] = json!(parts);
-        } else {
-            if text.trim().is_empty() {
-                next_before = index;
-                continue;
-            }
-            let text =
-                truncate_json_text(text.trim(), limit.saturating_sub(value.to_string().len()));
-            if text.is_empty() {
-                break;
-            }
-            value["text"] = json!(text);
-        }
+        let Some(value) = transcript_entry(index, entry, cx) else {
+            next_before = index;
+            continue;
+        };
+        let Some(value) = fit_transcript_entry(value, ENTRY_LIMIT, "entry_limit") else {
+            break;
+        };
         let cost = value.to_string().len() + 1;
         if cost > budget {
+            if preview
+                && entries.is_empty()
+                && let Some(value) =
+                    fit_transcript_entry(value, budget.saturating_sub(1), "snapshot_budget")
+            {
+                entries.push(value);
+                // This preview does not cover the entry. History must revisit it.
+                next_before = index + 1;
+            }
             break;
         }
         budget -= cost;
@@ -1050,18 +1094,85 @@ fn transcript_page(
     (entries, next_before)
 }
 
-fn truncate_json_text(text: &str, budget: usize) -> String {
-    let mut limit = text.len().min(budget);
-    let mut text = truncate(text, limit);
-    while json_len(&text) > budget && limit > 0 {
-        limit /= 2;
-        text = truncate(&text, limit);
+fn transcript_entry(index: usize, entry: &AgentThreadEntry, cx: &App) -> Option<Value> {
+    let (role, text, status) = describe_entry(entry, cx);
+    let mut value = json!({
+        "index": index, "role": role, "text": text.trim(), "status": status,
+        "truncated": false,
+    });
+    if let AgentThreadEntry::AssistantMessage(message) = entry
+        && message
+            .chunks
+            .iter()
+            .any(|chunk| matches!(chunk, acp_thread::AssistantMessageChunk::Thought { .. }))
+    {
+        let parts: Vec<Value> = message
+            .chunks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, chunk)| {
+                let (role, block) = match chunk {
+                    acp_thread::AssistantMessageChunk::Message { block, .. } => {
+                        ("assistant", block)
+                    }
+                    acp_thread::AssistantMessageChunk::Thought { block, .. } => {
+                        ("reasoning", block)
+                    }
+                };
+                let text = block.to_markdown(cx);
+                (!text.trim().is_empty()).then(|| {
+                    json!({ "index": index, "role": role, "text": text.trim() })
+                })
+            })
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        value["parts"] = json!(parts);
+        update_legacy_text(&mut value);
+    } else if text.trim().is_empty() {
+        return None;
     }
-    if json_len(&text) > budget || limit == 0 {
-        String::new()
-    } else {
-        text
+    Some(value)
+}
+
+fn update_legacy_text(value: &mut Value) {
+    if let Some(parts) = value["parts"].as_array() {
+        let text = parts
+            .iter()
+            .filter(|part| part["role"] == "assistant")
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        value["text"] = json!(text);
     }
+}
+
+fn fit_transcript_entry(mut value: Value, limit: usize, reason: &str) -> Option<Value> {
+    if value.to_string().len() <= limit {
+        return Some(value);
+    }
+    value["truncated"] = json!(true);
+    value["truncation"] = json!(reason);
+    while value.to_string().len() > limit {
+        if let Some(parts) = value["parts"].as_array_mut() {
+            if parts.len() > 1 {
+                parts.remove(0);
+            } else {
+                let part = parts.first_mut()?;
+                part["text"] = json!(shorten_transcript_text(part["text"].as_str()?)?);
+            }
+            update_legacy_text(&mut value);
+        } else {
+            value["text"] = json!(shorten_transcript_text(value["text"].as_str()?)?);
+        }
+    }
+    Some(value)
+}
+
+fn shorten_transcript_text(text: &str) -> Option<String> {
+    let shortened = truncate(text, text.len() / 2);
+    (shortened.len() < text.len()).then_some(shortened)
 }
 
 fn describe_entry(
@@ -1399,6 +1510,50 @@ mod tests {
     }
 
     #[gpui::test]
+    fn history_boundary_entries_are_deferred_intact(cx: &mut App) {
+        let boundary = "ordinary message ".repeat(120);
+        let newest = "newest ".repeat(300);
+        let source = vec![
+            assistant_entry(&[(false, &boundary)], cx),
+            assistant_entry(&[(false, &newest)], cx),
+        ];
+        let budget = transcript_entry(1, &source[1], cx)
+            .expect("newest")
+            .to_string()
+            .len()
+            + 201;
+        let (first, next) = transcript_page(&source, source.len(), budget, cx);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0]["index"], 1);
+        assert_eq!(first[0]["text"], newest.trim());
+        assert_eq!(first[0]["truncated"], false);
+        assert_eq!(next, 1);
+        let (second, next) = transcript_page(&source, next, TRANSCRIPT_BUDGET, cx);
+        assert_eq!(second[0]["text"], boundary.trim());
+        assert_eq!(second[0]["truncated"], false);
+        assert_eq!(next, 0);
+    }
+
+    #[gpui::test]
+    fn history_truncation_is_explicit_and_snapshot_previews_are_revisited(cx: &mut App) {
+        let text = "🦀\\\"\n".repeat(8_000);
+        let source = vec![assistant_entry(&[(true, &text), (false, &text)], cx)];
+        let (page, next) = transcript_page(&source, 1, TRANSCRIPT_BUDGET, cx);
+        assert_eq!(next, 0);
+        assert_eq!(page[0]["truncated"], true);
+        assert_eq!(page[0]["truncation"], "entry_limit");
+        assert!(page[0].to_string().len() <= ENTRY_LIMIT);
+        let (preview, next) = collect_transcript_page(&source, 1, 256, true, cx);
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0]["truncation"], "snapshot_budget");
+        assert_eq!(next, 1, "the preview does not consume the source entry");
+        assert!(serde_json::to_string(&preview).expect("preview JSON").len() <= 258);
+        let (history, next) = transcript_page(&source, next, TRANSCRIPT_BUDGET, cx);
+        assert_eq!(history, page);
+        assert_eq!(next, 0);
+    }
+
+    #[gpui::test]
     fn history_cursor_advances_over_bounded_blank_pages(cx: &mut App) {
         let source: Vec<_> = (0..205)
             .map(|_| assistant_entry(&[(true, "  ")], cx))
@@ -1604,9 +1759,9 @@ mod tests {
                 "Thinking in Leaf — more provider text"
             );
         });
-        for (visit, _) in steps {
+        for (visit, _) in &steps {
             owner.update(cx, |thread, cx| {
-                thread.finish_architect_run_step(visit, None, cx)
+                thread.finish_architect_run_step(*visit, None, cx)
             });
         }
         cx.read(|cx| {
@@ -1615,6 +1770,28 @@ mod tests {
                 json!([])
             );
         });
+        let finished_id = steps[0].1.read_with(cx, |thread, _| thread.session_id().clone());
+        let resolved = cx
+            .update(|cx| {
+                load_owned_step_thread(owner.clone(), connection.clone(), finished_id, cx)
+            })
+            .await
+            .expect("finished step remains owned and readable");
+        assert_eq!(resolved, steps[0].1);
+        let unrelated = cx
+            .update(|cx| {
+                load_owned_step_thread(
+                    owner.clone(),
+                    connection.clone(),
+                    acp::SessionId::new("unrelated"),
+                    cx,
+                )
+            })
+            .await;
+        assert!(
+            unrelated.is_err(),
+            "history resolution must enforce root ownership"
+        );
     }
 
     #[test]

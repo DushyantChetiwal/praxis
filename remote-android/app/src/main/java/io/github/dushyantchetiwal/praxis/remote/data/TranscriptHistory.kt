@@ -3,12 +3,13 @@ package io.github.dushyantchetiwal.praxis.remote.data
 /** Source-index coverage includes blank entries which have no rendered row. */
 data class HistoryRange(val start: Int, val end: Int)
 data class HistoryFailure(val message: String? = null)
-data class HistoryRequest(val id: Long, val session: String, val before: Int)
+data class HistoryRequest(val id: Long, val session: String, val before: Int, val previews: Map<Int, Entry> = emptyMap())
 
 data class HistoryRecord(
     val view: ThreadView,
     val ranges: List<HistoryRange> = emptyList(),
     val failure: HistoryFailure? = null,
+    val live: Boolean = true,
 ) {
     val nextBefore: Int?
         get() {
@@ -18,7 +19,8 @@ data class HistoryRecord(
                 if (range.end < before) break
                 before = minOf(before, range.start)
             }
-            return before
+            val previewBefore = view.entries.filter { it.snapshotPreview }.maxOfOrNull { it.index + 1 } ?: 0
+            return maxOf(before, previewBefore)
         }
 }
 
@@ -41,11 +43,17 @@ data class TranscriptHistory(
     }
 
     fun live(incoming: ThreadView): TranscriptHistory {
+        if (!incoming.pagingValid) return this
         val session = incoming.sessionId ?: return TranscriptHistory()
         val previous = if (rootSession == session && incoming.total >= (thread?.total ?: 0)) this else TranscriptHistory()
         val records = previous.records.toMutableMap()
         var request = previous.request
-        for (view in listOf(incoming) + incoming.stepThreads) {
+        val liveSteps = incoming.stepThreads.filter { it.pagingValid }
+        val liveIds = liveSteps.mapNotNull { it.sessionId }.toSet()
+        for (id in previous.shownSteps.filter { it !in liveIds }) {
+            records[id]?.let { records[id] = it.copy(view = it.view.copy(status = "idle"), live = false) }
+        }
+        for (view in listOf(incoming) + liveSteps) {
             val id = view.sessionId ?: continue
             val old = records[id]?.takeIf { it.view.total <= view.total }
             if (old == null && request?.session == id) request = null
@@ -62,8 +70,7 @@ data class TranscriptHistory(
             val progressed = next != null && old?.nextBefore?.let { next < it } == true
             records[id] = if (next == null || next == 0 || progressed) updated.copy(failure = null) else updated
         }
-        val shownSteps = incoming.stepThreads.mapNotNull { it.sessionId }.filter { it != session }.distinct()
-        if (request != null && request.session != session && request.session !in shownSteps) request = null
+        val shownSteps = (previous.shownSteps + liveSteps.mapNotNull { it.sessionId }).filter { it != session }.distinct()
         return TranscriptHistory(session, shownSteps, records, request)
     }
 
@@ -72,7 +79,7 @@ data class TranscriptHistory(
         val record = records.getValue(session)
         val before = record.nextBefore ?: return this
         return copy(
-            request = HistoryRequest(id, session, before),
+            request = HistoryRequest(id, session, before, record.view.entries.filter { it.snapshotPreview }.associateBy { it.index }),
             records = records + (session to record.copy(failure = null)),
         )
     }
@@ -88,15 +95,22 @@ data class TranscriptHistory(
         val record = records[expected.session] ?: return copy(request = null)
         val next = page.nextBefore
         val end = minOf(expected.before, page.total)
-        if (page.sessionId != expected.session || page.beforeIndex != expected.before || page.total < expected.before ||
+        if (!page.pagingValid || page.sessionId != expected.session || page.beforeIndex != expected.before || page.total < expected.before ||
             next == null || next !in 0 until expected.before || next > end ||
             page.hasMore != (next > 0) || page.entries.any { it.index !in next until end }
         ) return failed(expected)
 
-        // A live snapshot received during the request wins every overlap, even
-        // when its text is shorter due to the snapshot's shared byte budget.
+        // Replace a snapshot preview only if it has not changed since this
+        // request started. A newer live version must still win the overlap.
+        val existing = record.view.entries.associateBy { it.index }
+        val replacements = page.entries.filter { entry ->
+            val current = existing[entry.index]
+            !record.live || current == null ||
+                (current.snapshotPreview && current == expected.previews[entry.index] && !entry.snapshotPreview)
+        }
+        val total = if (record.live) record.view.total else maxOf(record.view.total, page.total)
         val updated = record.copy(
-            view = record.view.copy(entries = mergeEntries(page.entries, record.view.entries, record.view.total)),
+            view = record.view.copy(total = total, entries = mergeEntries(record.view.entries, replacements, total)),
             ranges = mergeRanges(record.ranges + HistoryRange(next, end)),
             failure = null,
         )

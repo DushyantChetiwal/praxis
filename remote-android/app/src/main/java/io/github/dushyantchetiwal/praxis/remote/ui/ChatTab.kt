@@ -245,7 +245,7 @@ private fun ArchitectCard(architect: Architect, vm: MainViewModel) {
                 Text(stringResource(R.string.architect_title), style = MaterialTheme.typography.labelLarge)
                 val line = if (architect.running) {
                     val step = if (architect.stepNumber > 0) architect.stepNumber.toString() else "?"
-                    stringResource(R.string.architect_step, step, architect.steps) +
+                    pluralStringResource(R.plurals.architect_step, architect.steps, step, architect.steps) +
                         (architect.currentStep?.let { " · $it" } ?: "")
                 } else {
                     pluralStringResource(R.plurals.architect_planned, architect.steps, architect.steps)
@@ -433,7 +433,10 @@ private fun TranscriptContent(ui: DeviceUi, vm: MainViewModel) {
         stepThreads.forEach { step ->
             item(key = stepItemKey(step.sessionId)) {
                 Text(
-                    stringResource(R.string.chat_active_step, step.title ?: stringResource(R.string.chat_untitled)),
+                    stringResource(
+                        if (ui.history.records[step.sessionId]?.live == true) R.string.chat_active_step else R.string.chat_step_history,
+                        step.title ?: stringResource(R.string.chat_untitled),
+                    ),
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.primary,
                 )
@@ -531,10 +534,10 @@ private fun TranscriptEmpty(ui: DeviceUi, vm: MainViewModel) {
 
 @Composable
 private fun TranscriptEntry(entry: Entry, entryKey: String, expanded: MutableMap<String, Boolean>) {
-    if (entry.parts.isEmpty()) {
-        EntryView(entry, expanded[entryKey] == true) { expanded[entryKey] = expanded[entryKey] != true }
-    } else {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (entry.parts.isEmpty()) {
+            EntryView(entry, expanded[entryKey] == true) { expanded[entryKey] = expanded[entryKey] != true }
+        } else {
             entry.parts.forEach { part ->
                 val partKey = "$entryKey:part:${part.index}"
                 EntryView(
@@ -542,6 +545,9 @@ private fun TranscriptEntry(entry: Entry, entryKey: String, expanded: MutableMap
                     expanded[partKey] == true,
                 ) { expanded[partKey] = expanded[partKey] != true }
             }
+        }
+        if (entry.truncated) {
+            Text(stringResource(R.string.chat_truncated), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

@@ -168,8 +168,13 @@ class TranscriptHistoryTest {
     }
 
     @Test
-    fun stepHistoryIsIndependentCachedAndNotResurrectedByLateReplies() {
-        val incoming = view().copy(stepThreads = listOf(view("step"), view("parallel")))
+    fun completedStepHistoryStaysVisibleIdleAndPageable() {
+        val step = view("step").let { original ->
+            original.copy(entries = original.entries.map { entry ->
+                if (entry.index == 10) entry.copy(parts = listOf(EntryPart(0, "reasoning", "Provider thought"))) else entry
+            })
+        }
+        val incoming = view().copy(stepThreads = listOf(step, view("parallel")))
         var history = TranscriptHistory().live(incoming).begin("step", 1)
         history = history.complete(history.request!!, page(history.request!!))
         history = history.live(incoming.copy(stepThreads = listOf(view("step", start = 19), view("parallel"))))
@@ -178,12 +183,88 @@ class TranscriptHistoryTest {
         assertEquals(10, history.thread!!.stepThreads.last().entries.size)
         history = history.begin("parallel", 2)
         val request = history.request!!
-        val hidden = history.live(view())
-        assertTrue(hidden.thread!!.stepThreads.isEmpty())
-        assertNull(hidden.request)
-        assertEquals(hidden, hidden.complete(request, page(request)))
-        val returned = hidden.live(incoming)
+        val ended = history.live(view())
+        assertEquals(listOf("step", "parallel"), ended.shownSteps)
+        assertEquals(request, ended.request)
+        assertTrue(ended.thread!!.stepThreads.all { it.status == "idle" })
+        assertEquals("Provider thought", ended.thread!!.stepThreads.first().entries.single { it.index == 10 }.parts.single().text)
+        assertTrue(ended.shownSteps.all { !ended.records.getValue(it).live })
+        val loaded = ended.complete(request, page(request))
+        assertEquals(20, loaded.thread!!.stepThreads.last().entries.size)
+        assertFalse(loaded.records.getValue("parallel").live)
+        val returned = loaded.live(incoming)
         assertEquals(20, returned.thread!!.stepThreads.first().entries.size)
+        assertTrue(returned.records.getValue("step").live)
+        val switched = ended.live(view("other-root"))
+        assertTrue(switched.shownSteps.isEmpty())
+        assertEquals(switched, switched.complete(request, page(request)))
+    }
+
+    @Test
+    fun snapshotPreviewsAreRevisitedWithoutOverwritingNewerLiveVersions() {
+        val incoming = parseThreadView(JSONObject("""{
+            "session_id":"root","total":20,"next_before":20,"has_more":true,
+            "entries":[{"index":19,"role":"assistant","text":"preview…","truncated":true,"truncation":"snapshot_budget"}]
+        }"""))
+        val preview = incoming.entries.single()
+        assertTrue(preview.snapshotPreview)
+        val started = TranscriptHistory().live(incoming).begin("root", 1)
+        val request = started.request!!
+        assertEquals(20, request.before)
+        val restored = started.complete(request, page(request, start = 10))
+        assertEquals("older 19", restored.thread!!.entries.last().text)
+        assertFalse(restored.thread!!.entries.last().truncated)
+        assertEquals(10, restored.records.getValue("root").nextBefore)
+
+        val changed = started.live(incoming.copy(entries = listOf(preview.copy(text = "newer preview…"))))
+        val delayed = changed.complete(request, page(request, start = 10))
+        assertEquals("newer preview…", delayed.thread!!.entries.last().text)
+        assertEquals(20, delayed.records.getValue("root").nextBefore)
+        assertTrue(delayed.canLoad("root"))
+    }
+
+    @Test
+    fun invalidJsonPagingNumbersFailRetryablyInsteadOfCompletingHistory() {
+        val started = TranscriptHistory().live(view()).begin("root", 1)
+        val request = started.request!!
+        val base = """{"session_id":"root","total":20,"before_index":10,"next_before":0,"has_more":false,"entries":[]}"""
+        val badNumbers = listOf(
+            "-0.5", "0.5", "10.5", "20.5", "-1", "2147483648", "4294967296",
+            "4294967306", "4294967316", "1e100", "1.0", "true", "\"0\"", "null",
+        )
+        for (field in listOf("next_before", "before_index", "total")) {
+            for (bad in badNumbers) {
+                val json = JSONObject(base)
+                json.put(field, JSONObject("""{"value":$bad}""").get("value"))
+                val parsed = parseThreadView(json)
+                val failed = started.complete(request, parsed)
+                assertNotNull("$field=$bad", failed.records.getValue("root").failure)
+                assertEquals(10, failed.records.getValue("root").nextBefore)
+                assertTrue(failed.canLoad("root", retry = true))
+            }
+        }
+        val invalidIndex = JSONObject(base).put("entries", org.json.JSONArray("""[{"index":-0.5,"role":"assistant","text":"bad"}]"""))
+        assertNotNull(started.complete(request, parseThreadView(invalidIndex)).records.getValue("root").failure)
+        val invalidPartIndex = JSONObject(base).put("entries", org.json.JSONArray("""[
+            {"index":0,"role":"assistant","text":"","parts":[{"index":-0.5,"role":"reasoning","text":"thought"}]}
+        ]"""))
+        assertNotNull(started.complete(request, parseThreadView(invalidPartIndex)).records.getValue("root").failure)
+        val valid = started.complete(request, parseThreadView(JSONObject(base)))
+        assertNull(valid.records.getValue("root").failure)
+        assertEquals(0, valid.records.getValue("root").nextBefore)
+    }
+
+    @Test
+    fun strictJsonIndicesAcceptRangeEndpointsAndRejectInvalidLiveSnapshots() {
+        assertEquals(0, JSONObject("""{"index":0}""").index("index"))
+        assertEquals(Int.MAX_VALUE, JSONObject("""{"index":2147483647}""").index("index"))
+        assertNull(JSONObject("""{"index":2147483648}""").index("index"))
+        val history = TranscriptHistory().live(view())
+        val malformed = parseThreadView(JSONObject("""{
+            "session_id":"root","total":-0.5,"next_before":0,"has_more":false,"entries":[]
+        }"""))
+        assertFalse(malformed.pagingValid)
+        assertEquals(history, history.live(malformed))
     }
 
     @Test

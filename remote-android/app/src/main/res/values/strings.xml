@@ -130,8 +130,13 @@
 
     <string name="chat_thinking">Thinking</string>
     <string name="chat_active_step">Active step · %1$s</string>
+    <string name="chat_step_history">Step history · %1$s</string>
+    <string name="chat_truncated">Message shortened to fit the remote view.</string>
     <string name="architect_title">Architect plan</string>
-    <string name="architect_step">Visit %1$s · %2$d steps in plan</string>
+    <plurals name="architect_step">
+        <item quantity="one">Visit %1$s · %2$d step in plan</item>
+        <item quantity="other">Visit %1$s · %2$d steps in plan</item>
+    </plurals>
     <plurals name="architect_planned">
         <item quantity="one">%d step planned</item>
         <item quantity="other">%d steps planned</item>

@@ -4149,8 +4149,18 @@ mod tests {
         graph.add_node(node);
         thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
 
-        let (workspace, cx) =
-            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        // A focus regression needs the inspector in the rendered tree, not an
+        // unattached entity whose focus the workspace restores on the next draw.
+        let direct_architect = Rc::new(RefCell::new(None));
+        let direct_architect_for_root = direct_architect.clone();
+        let (test_root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::test_new(project.clone(), window, cx));
+            ArchitectIntegrationRoot {
+                workspace,
+                architect: direct_architect_for_root,
+            }
+        });
+        let workspace = test_root.read_with(cx, |root, _| root.workspace.clone());
         let pane = workspace.update_in(cx, |_workspace, window, cx| {
             let workspace = cx.weak_entity();
             cx.new(|cx| {
@@ -4167,6 +4177,9 @@ mod tests {
                 )
             })
         });
+        *direct_architect.borrow_mut() = Some(pane.clone());
+        test_root.update(cx, |_, cx| cx.notify());
+        cx.simulate_resize(size(px(1500.0), px(900.0)));
         let editors = pane.update_in(cx, |pane, window, cx| {
             pane.set_selection(Some(Selection::Node("step".into())), window, cx);
             pane.inspector
@@ -4244,7 +4257,11 @@ mod tests {
             thread.update_architect_graph(|graph| graph.unlock_all(), cx);
         });
         cx.run_until_parked();
-        pane.update_in(cx, |pane, window, cx| {
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        pane.update_in(cx, |_, window, cx| {
             new_rule.update(cx, |editor, cx| {
                 editor.set_text("Unsubmitted rule", window, cx);
             });
@@ -4254,6 +4271,17 @@ mod tests {
                     selections.select_ranges([text::Point::new(0, 2)..text::Point::new(0, 5)]);
                 });
             });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+            assert!(
+                capture.focus_handle(cx).is_focused(window),
+                "the mounted capture editor must retain focus before testing a revision"
+            );
+        });
+        pane.update_in(cx, |pane, window, cx| {
             goal.update(cx, |editor, cx| editor.set_text("Local typing", window, cx));
             agent::update_architect_step(
                 &thread,
@@ -4274,6 +4302,11 @@ mod tests {
         cx.run_until_parked();
         thread.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
         pane.update_in(cx, |pane, window, cx| {
             assert_eq!(
                 pane.inspector
@@ -4284,7 +4317,10 @@ mod tests {
             );
             assert_eq!(goal.read(cx).text(cx), "Local typing");
             assert_eq!(new_rule.read(cx).text(cx), "Unsubmitted rule");
-            assert!(capture.focus_handle(cx).is_focused(window));
+            assert!(
+                capture.focus_handle(cx).is_focused(window),
+                "revising another field and reselecting the step must preserve capture focus"
+            );
             capture.update(cx, |editor, cx| {
                 let snapshot = editor.snapshot(window, cx);
                 let selection = editor.selections.newest::<text::Point>(&snapshot);
