@@ -2,8 +2,8 @@
 //! retiring the reported checkpoints are separate responsibilities of the caller.
 
 use crate::{
-    ArchitectEdge, ArchitectGraph, ArchitectNode, EdgeId, GraphMutationError, GraphProblem,
-    MAX_PLAN_DEPTH, NodeId, NodePath, Position,
+    ArchitectEdge, ArchitectGraph, ArchitectNode, COLUMN_SPACING, EdgeId, GraphMutationError,
+    GraphProblem, MAX_PLAN_DEPTH, NodeId, NodePath, Position, ROW_SPACING,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -133,8 +133,10 @@ impl From<GraphMutationError> for GraphEditError {
 /// Before topology operations, automatic positions are materialized recursively
 /// from the source layout so surviving nodes do not shift with the new topology.
 /// Explicit moves and inserted positions win; new unpositioned nodes use the
-/// final layout. Materializing positions never invalidates execution. This policy
-/// is specific to targeted edits, not arbitrary replacements or draft merging.
+/// final layout, nudged vertically only when an occupied layout cell conflicts.
+/// The nearest free row wins, preferring downward placement on ties. Materializing
+/// positions never invalidates execution. This policy is specific to targeted
+/// edits, not arbitrary replacements or draft merging.
 pub fn preview_graph_edits(
     graph: &ArchitectGraph,
     operations: &[GraphEdit],
@@ -162,7 +164,7 @@ pub fn preview_graph_edits(
         return Ok(graph_edit_impact(graph, graph.clone()));
     }
     if has_topology_operations {
-        materialize_positions(&mut target);
+        place_inserted_nodes(&mut target, &NodePath::default())?;
     }
     Ok(graph_edit_impact(graph, target))
 }
@@ -174,6 +176,70 @@ fn materialize_positions(graph: &mut ArchitectGraph) {
             materialize_positions(subplan);
         }
     }
+}
+
+fn place_inserted_nodes(
+    graph: &mut ArchitectGraph,
+    parent: &NodePath,
+) -> Result<(), GraphEditError> {
+    if graph.nodes.iter().any(|node| node.position.is_none()) {
+        let defaults = crate::layout_positions(graph);
+        // Reserve explicit positions even when their nodes come later in the
+        // batch. Only nodes inserted without a position remain unpositioned here.
+        let mut occupied: Vec<Position> = graph
+            .nodes
+            .iter()
+            .filter_map(|node| node.position)
+            .collect();
+        for node in &mut graph.nodes {
+            if node.position.is_some() {
+                continue;
+            }
+            let path = parent.child(node.id.clone());
+            let mut position = defaults
+                .get(&node.id)
+                .copied()
+                .ok_or_else(|| GraphEditError::InvalidPosition { path: path.clone() })?;
+            if occupied
+                .iter()
+                .any(|other| layout_cells_overlap(position, *other))
+            {
+                // At a fixed column, the nearest free position must lie on a
+                // boundary of an occupied row. This avoids an unbounded search.
+                position.y = occupied
+                    .iter()
+                    .flat_map(|other| [other.y + ROW_SPACING, other.y - ROW_SPACING])
+                    .filter(|y| {
+                        y.is_finite()
+                            && !occupied.iter().any(|other| {
+                                layout_cells_overlap(
+                                    Position { x: position.x, y: *y },
+                                    *other,
+                                )
+                            })
+                    })
+                    .min_by(|left, right| {
+                        (left - position.y)
+                            .abs()
+                            .total_cmp(&(right - position.y).abs())
+                            .then_with(|| right.total_cmp(left))
+                    })
+                    .ok_or(GraphEditError::InvalidPosition { path })?;
+            }
+            node.position = Some(position);
+            occupied.push(position);
+        }
+    }
+    for node in &mut graph.nodes {
+        if let Some(subplan) = node.subplan.as_deref_mut() {
+            place_inserted_nodes(subplan, &parent.child(node.id.clone()))?;
+        }
+    }
+    Ok(())
+}
+
+fn layout_cells_overlap(left: Position, right: Position) -> bool {
+    (left.x - right.x).abs() < COLUMN_SPACING && (left.y - right.y).abs() < ROW_SPACING
 }
 
 /// Previews replacing one graph snapshot with another without applying it.
@@ -709,6 +775,192 @@ mod tests {
     }
 
     #[test]
+    fn inserting_into_a_chain_nudges_only_the_new_default_position() {
+        let mut before = ArchitectGraph {
+            nodes: ["a", "c"].map(settled_node).to_vec(),
+            edges: vec![ArchitectEdge::new("ac", "a", "c")],
+        };
+        for node in &mut before.nodes {
+            node.position = None;
+        }
+        let snapshot = before.clone();
+        let operations = [
+            GraphEdit::InsertNode {
+                parent: NodePath::default(),
+                node: ArchitectNode::new("b", "B"),
+            },
+            GraphEdit::ReconnectEdge {
+                parent: NodePath::default(),
+                edge_id: "ac".into(),
+                from: "a".into(),
+                to: "b".into(),
+            },
+            GraphEdit::InsertEdge {
+                parent: NodePath::default(),
+                edge: ArchitectEdge::new("bc", "b", "c"),
+            },
+        ];
+        let mut unpreserved = before.clone();
+        for operation in &operations {
+            apply_operation(&mut unpreserved, operation).expect("raw chain edit");
+        }
+        let frozen_c = Position {
+            x: COLUMN_SPACING,
+            y: 0.0,
+        };
+        assert_eq!(effective_position(&before, &path(&["c"])), frozen_c);
+        assert_eq!(effective_position(&unpreserved, &path(&["b"])), frozen_c);
+
+        let preview = preview_graph_edits(&before, &operations).expect("chain insertion");
+        assert_eq!(
+            preview.graph.node(&"a".into()).expect("a").position,
+            Some(Position::ZERO)
+        );
+        assert_eq!(
+            preview.graph.node(&"c".into()).expect("c").position,
+            Some(frozen_c)
+        );
+        let inserted_position = Position {
+            x: COLUMN_SPACING,
+            y: ROW_SPACING,
+        };
+        assert_eq!(
+            preview.graph.node(&"b".into()).expect("b").position,
+            Some(inserted_position)
+        );
+        assert!(!layout_cells_overlap(inserted_position, frozen_c));
+        assert_eq!(
+            preview.invalidated_steps,
+            vec![path(&["a"]), path(&["b"]), path(&["c"])]
+        );
+        assert_eq!(preview.affected_locks, vec![path(&["a"]), path(&["c"])]);
+        assert_eq!(
+            preview_graph_edits(&before, &operations).expect("repeat preview"),
+            preview
+        );
+        assert_eq!(before, snapshot);
+    }
+
+    #[test]
+    fn nested_default_placement_reserves_later_explicit_insertions() {
+        let nested = ArchitectGraph {
+            nodes: vec![ArchitectNode::new("a", "A"), ArchitectNode::new("c", "C")],
+            edges: vec![ArchitectEdge::new("ac", "a", "c")],
+        };
+        let mut container = settled_node("container");
+        container.subplan = Some(Box::new(nested));
+        let before = ArchitectGraph {
+            nodes: vec![container],
+            edges: vec![],
+        };
+        let snapshot = before.clone();
+        let parent = path(&["container"]);
+        let explicit_position = Position {
+            x: COLUMN_SPACING,
+            y: ROW_SPACING,
+        };
+        let mut explicit = ArchitectNode::new("explicit", "Explicit");
+        explicit.position = Some(explicit_position);
+        let operations = [
+            GraphEdit::InsertNode {
+                parent: parent.clone(),
+                node: ArchitectNode::new("b", "B"),
+            },
+            GraphEdit::ReconnectEdge {
+                parent: parent.clone(),
+                edge_id: "ac".into(),
+                from: "a".into(),
+                to: "b".into(),
+            },
+            GraphEdit::InsertEdge {
+                parent: parent.clone(),
+                edge: ArchitectEdge::new("bc", "b", "c"),
+            },
+            GraphEdit::InsertNode {
+                parent: parent.clone(),
+                node: explicit,
+            },
+        ];
+        let preview = preview_graph_edits(&before, &operations).expect("nested insertion");
+        let after = preview.graph.graph_at(&parent).expect("nested graph");
+        assert_eq!(
+            after.node(&"a".into()).expect("a").position,
+            Some(Position::ZERO)
+        );
+        assert_eq!(
+            after.node(&"c".into()).expect("c").position,
+            Some(Position {
+                x: COLUMN_SPACING,
+                y: 0.0,
+            })
+        );
+        assert_eq!(
+            after.node(&"explicit".into()).expect("explicit").position,
+            Some(explicit_position)
+        );
+        assert_eq!(
+            after.node(&"b".into()).expect("b").position,
+            Some(Position {
+                x: COLUMN_SPACING,
+                y: -ROW_SPACING,
+            })
+        );
+        assert_eq!(
+            preview
+                .graph
+                .node(&"container".into())
+                .expect("container")
+                .position,
+            before.node(&"container".into()).expect("container").position
+        );
+        assert_eq!(before, snapshot);
+    }
+
+    #[test]
+    fn new_default_positions_reserve_space_for_each_other_without_touching_existing_state() {
+        let before = ArchitectGraph {
+            nodes: vec![ArchitectNode {
+                position: None,
+                ..settled_node("a")
+            }],
+            edges: vec![],
+        };
+        let preview = preview_graph_edits(
+            &before,
+            &[
+                GraphEdit::InsertNode {
+                    parent: NodePath::default(),
+                    node: ArchitectNode::new("b", "B"),
+                },
+                GraphEdit::InsertNode {
+                    parent: NodePath::default(),
+                    node: ArchitectNode::new("c", "C"),
+                },
+            ],
+        )
+        .expect("two insertions");
+        let mut expected_a = settled_node("a");
+        expected_a.position = Some(Position::ZERO);
+        assert_eq!(preview.graph.node(&"a".into()), Some(&expected_a));
+        assert_eq!(
+            preview.graph.node(&"b".into()).expect("b").position,
+            Some(Position {
+                x: 0.0,
+                y: ROW_SPACING,
+            })
+        );
+        assert_eq!(
+            preview.graph.node(&"c".into()).expect("c").position,
+            Some(Position {
+                x: 0.0,
+                y: ROW_SPACING * 2.0,
+            })
+        );
+        assert_eq!(preview.invalidated_steps, vec![path(&["b"]), path(&["c"])]);
+        assert!(preview.affected_locks.is_empty());
+    }
+
+    #[test]
     fn inserting_a_node_preserves_effective_positions_and_existing_checkpoints() {
         let before = automatic_graph();
         let snapshot = before.clone();
@@ -747,7 +999,7 @@ mod tests {
                 .node(&"new".into())
                 .expect("inserted node")
                 .position,
-            Some(Position { x: 0.0, y: 196.0 })
+            Some(Position { x: 0.0, y: 294.0 })
         );
         assert_eq!(preview.invalidated_steps, vec![path(&["new"])]);
         assert!(preview.affected_locks.is_empty());
