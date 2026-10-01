@@ -24,8 +24,9 @@ const FREEFORM_ANSWER_FIELD: &str = "freeform_answer";
 /// than one. A freeform answer is always available, including with options.
 /// Keep the options concise and use their descriptions to explain meaningful
 /// tradeoffs. Always supply a recommendation when it is safe to proceed
-/// automatically after 10 seconds with all Praxis windows inactive. Otherwise
-/// omit it and wait for a manual answer. Do not use this tool to request secrets.
+/// automatically after 10 seconds with all Praxis windows inactive, or after
+/// 60 seconds without input in foreground Praxis followed by a 10-second countdown.
+/// Otherwise omit it and wait for a manual answer. Do not request secrets.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct AskQuestionToolInput {
@@ -39,11 +40,13 @@ pub struct AskQuestionToolInput {
     pub allow_multiple: bool,
     /// Always supply a recommendation when it is safe to proceed without user input.
     /// Use a string for free text/single select, or a nonempty array of unique option
-    /// values for multi select. After 10 seconds with all Praxis windows inactive
-    /// and no edits or selections, this answer is used automatically. Active time
-    /// never counts toward the timeout. Omit only when no safe recommendation
-    /// exists; then wait for a manual answer. Never use this to authorize tools
-    /// or exit plan mode.
+    /// values for multi select. With no edits or selections, this answer is used
+    /// after 10 continuous seconds with all Praxis windows inactive, or after
+    /// 60 seconds without input anywhere in foreground Praxis and a 10-second
+    /// countdown. Any input resets the foreground wait; editing or selecting an
+    /// answer permanently disables auto-answer for this question. Omit only when
+    /// no safe recommendation exists; then wait for a manual answer. Never use
+    /// this to authorize tools or exit plan mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommendation: Option<AskQuestionAnswer>,
 }
@@ -352,7 +355,7 @@ impl AskQuestionTool {
             AskQuestionToolOutput::TimedOut { answer } => (
                 "Question timed out; used model recommendation",
                 format!(
-                    "**Question:** {}\n\nPraxis was inactive for 10 seconds with no edits or selections. Used the model recommendation (not a user answer): {}",
+                    "**Question:** {}\n\nThe inactivity countdown expired with no edits or selections. Used the model recommendation (not a user answer): {}",
                     input.question,
                     Self::recommendation_label(input, answer)
                 ),
@@ -794,7 +797,10 @@ mod tests {
         assert!(fields.content.unwrap().iter().any(|block| matches!(
             block,
             acp::ToolCallContent::Content(content) if matches!(&content.content,
-                acp::ContentBlock::Text(text) if text.text.contains("not a user answer") && text.text.contains("PostgreSQL")
+                acp::ContentBlock::Text(text) if text.text.contains("not a user answer")
+                                    && text.text.contains("PostgreSQL")
+                                    && text.text.contains("inactivity countdown expired")
+                                    && !text.text.contains("Praxis was inactive")
             )
         )));
     }

@@ -178,12 +178,19 @@ jobs:
           cargo test --locked -p agent --lib built_in_tool_schemas_are_normalized
           cargo test --locked -p settings_ui --lib test_all_tools_are_in_tool_info_or_excluded
 
+      - name: Test GPUI input activity
+        run: |
+          cargo test --locked -p gpui --lib input_activity
+          cargo test --locked -p gpui --lib test_window_activation_is_app_wide_and_precedes_observers
+          cargo test --locked -p gpui --lib direct_text_input_records_activity
+
       - name: Test question recommendations and countdowns
         run: |
           cargo test --locked -p agent --lib tools::ask_question_tool::tests::
           cargo test --locked -p agent --lib internal_tests::test_ask_question_uses_the_owning_session_elicitation -- --exact
           cargo test --locked -p acp_thread --lib test_question_
           cargo test --locked -p agent_ui --lib conversation_view::elicitation::tests::question_
+          cargo test --locked -p agent_ui --lib test_question_timeout_manual_text_and_choices_survive_blur
 
       - name: Test Praxis Remote
         run: "cargo test --locked -p agent_ui --lib remote::"
@@ -263,4 +270,4 @@ jobs:
       - name: Check the Architect packages with Clippy
         run: >-
           ./script/clippy --locked -p architect -p agent -p agent_ui -p auto_update
-          -p context_server -p feedback -p remote
+          -p context_server -p feedback -p remote -p gpui -p acp_thread

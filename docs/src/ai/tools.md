@@ -127,7 +127,13 @@ Stops an existing task in the same conversation and reports its output/status. I
 
 Asks for a preference or missing requirement, with free text, a single choice, or multiple choices. Questions with predefined options also always offer **Or write your own answer**. Nonblank freeform text takes precedence over selected options.
 
-When the agent supplies a valid recommendation, the question can auto-answer after **10 continuous seconds with Praxis inactive**. Reading a question while any Praxis window has focus does not use that time; returning to Praxis resets the countdown. Typing or changing a selection disables automatic continuation for that question, even if you subsequently switch apps. The conversation records a timeout as an automatic recommendation, not as your answer.
+When the agent supplies a valid recommendation, automatic answering depends on input activity:
+
+- **Praxis in the foreground:** after **60 seconds without input**, a visible **10-second countdown** starts. Keyboard input, mouse movement, clicking, scrolling, touch, or text composition in any Praxis window resets the idle wait. Returning to Praxis also starts a fresh wait.
+- **Praxis in the background:** the existing **10-second countdown** applies after you leave the application.
+- **An answer in progress:** typing into the question or changing a selection disables automatic continuation for that question, even if you later stop interacting or switch apps.
+
+Only a local, in-memory timestamp of the last input is retained. Praxis does not record keystrokes or monitor other applications. Input inactivity is an approximation: reading without moving or typing is indistinguishable from being away. The conversation records a timeout as an automatic recommendation, not as your answer.
 
 Decline, Cancel, and stopping the agent never select the recommendation. Questions without a safe recommendation or a known question window wait for a manual answer. This timeout applies only to `ask_question`, not to tool permissions or approval to leave Plan mode.
 

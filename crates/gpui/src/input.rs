@@ -178,6 +178,7 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
         window: &mut Window,
         cx: &mut App,
     ) {
+        cx.record_input_activity();
         self.view.update(cx, |view, cx| {
             view.replace_text_in_range(replacement_range, text, window, cx)
         });
@@ -191,6 +192,7 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
         window: &mut Window,
         cx: &mut App,
     ) {
+        cx.record_input_activity();
         self.view.update(cx, |view, cx| {
             view.replace_and_mark_text_in_range(
                 range_utf16,
@@ -208,6 +210,7 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
     }
 
     fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut App) {
+        cx.record_input_activity();
         self.view
             .update(cx, |view, cx| view.paste(item, window, cx));
     }
@@ -240,6 +243,7 @@ impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
         window: &mut Window,
         cx: &mut App,
     ) {
+        cx.record_input_activity();
         self.view.update(cx, |view, cx| {
             view.set_selected_text_range(range_utf16, window, cx)
         })
@@ -288,8 +292,8 @@ mod tests {
     use super::*;
     use crate::{
         AnyWindowHandle, AppContext as _, FocusHandle, InteractiveElement as _, IntoElement,
-        ParentElement as _, Render, Styled as _, TestAppContext, TextInputAction,
-        TextInputStateChange, canvas, div,
+        ParentElement as _, PlatformWindow as _, Render, Styled as _, TestAppContext,
+        TextInputAction, TextInputStateChange, canvas, div,
     };
 
     #[gpui::test]
@@ -379,6 +383,82 @@ mod tests {
                 TextInputStateChange::FocusLost
             ]
         );
+    }
+
+    #[gpui::test]
+    fn direct_text_input_records_activity_but_queries_and_entity_edits_do_not(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_window(|_, cx| ConfigurationTestView {
+            focus_handle: cx.focus_handle(),
+            configuration: TextInputConfiguration::default(),
+        });
+        window
+            .update(cx, |view, window, cx| {
+                view.replace_text_in_range(None, "programmatic edit", window, cx);
+                view.replace_and_mark_text_in_range(None, "composition", None, window, cx);
+                cx.notify();
+                window.focus(&view.focus_handle, cx);
+            })
+            .expect("window exists");
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .expect("window exists");
+        assert_eq!(cx.read(|cx| cx.last_input_activity()), None);
+
+        let mut input_handler = cx
+            .test_window(window.into())
+            .take_input_handler()
+            .expect("focused view has an input handler");
+        assert!(input_handler.selected_text_range(false).is_none());
+        assert_eq!(input_handler.marked_text_range(), None);
+        assert_eq!(input_handler.text_for_range(0..0, &mut None), None);
+        assert_eq!(input_handler.bounds_for_range(0..0), None);
+        assert_eq!(cx.read(|cx| cx.last_input_activity()), None);
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        input_handler.replace_and_mark_text_in_range(None, "composition", Some(0..0));
+        assert_eq!(
+            cx.read(|cx| cx.last_input_activity()),
+            Some(cx.executor().now())
+        );
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        input_handler.replace_text_in_range(None, "committed text");
+        assert_eq!(
+            cx.read(|cx| cx.last_input_activity()),
+            Some(cx.executor().now())
+        );
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        input_handler.paste(ClipboardItem::new_string("pasted text".into()));
+        assert_eq!(
+            cx.read(|cx| cx.last_input_activity()),
+            Some(cx.executor().now())
+        );
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        input_handler.set_selected_text_range(0..0);
+        let last_activity = Some(cx.executor().now());
+        assert_eq!(cx.read(|cx| cx.last_input_activity()), last_activity);
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        input_handler.unmark_text();
+        assert!(input_handler.selected_text_range(false).is_none());
+        assert_eq!(input_handler.bounds_for_range(0..0), None);
+        window
+            .update(cx, |view, window, cx| {
+                view.replace_text_in_range(None, "another programmatic edit", window, cx);
+                cx.notify();
+            })
+            .expect("window exists");
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .expect("window exists");
+        assert_eq!(cx.read(|cx| cx.last_input_activity()), last_activity);
     }
 
     struct ConfigurationTestView {
