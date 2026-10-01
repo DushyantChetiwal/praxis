@@ -61,6 +61,7 @@ impl Worktree {
                 include_private: false,
             }),
         });
+        let response = with_worktree_connection(response, remote.wait_for_disconnection());
         let probe = cx.spawn(async move |this, cx| {
             let support = match response
                 .with_timeout(FILE_INVENTORY_SUPPORT_TIMEOUT, cx.background_executor())
@@ -128,43 +129,62 @@ impl Worktree {
                         include_private,
                     }),
                 });
+                let disconnected = remote.wait_for_disconnection();
                 cx.spawn(async move |this, cx| {
-                    let response = response.await.context(
-                        "Cannot inventory remote project files. Reconnect to the host and retry",
-                    )?;
-                    let inventory = response.file_inventory.context(
-                        "The host did not return a file inventory. Update Praxis on the host and reconnect",
-                    )?;
-                    // As with expansion, do not admit a turn against worktree state
-                    // older than the host scan that produced this inventory.
-                    this.update(cx, |this, _| {
-                        this.check_file_inventory_support()?;
-                        Ok::<_, anyhow::Error>(
-                            this.as_remote_mut()
-                                .context("The project backend changed during inventory")?
-                                .wait_for_snapshot(response.worktree_scan_id as usize),
-                        )
-                    })??
-                    .await
-                    .context("The project disconnected while waiting for its file inventory. Reconnect and retry")?;
-                    this.read_with(cx, |this, _| this.check_file_inventory_support())??;
-                    anyhow::ensure!(
-                        inventory.entry_count <= MAX_FILE_INVENTORY_ENTRIES as u64
-                            && inventory.files.len() <= MAX_FILE_INVENTORY_ENTRIES
-                            && inventory.skipped_paths.len() <= MAX_FILE_INVENTORY_ENTRIES
-                            && inventory.canonical_paths.len() <= MAX_FILE_INVENTORY_ENTRIES,
-                        "Remote file inventory exceeds the project entry budget"
-                    );
-                    Ok(FileInventory {
-                        root_path: PathBuf::from(inventory.root_path),
-                        files: inventory.files,
-                        skipped_paths: inventory.skipped_paths,
-                        canonical_paths: inventory.canonical_paths.into_iter().collect(),
-                        entry_count: inventory.entry_count as usize,
-                    })
+                    let operation = async move {
+                        let response = response.await.context(
+                            "Cannot inventory remote project files. Reconnect to the host and retry",
+                        )?;
+                        let inventory = response.file_inventory.context(
+                            "The host did not return a file inventory. Update Praxis on the host and reconnect",
+                        )?;
+                        // As with expansion, do not admit a turn against worktree state
+                        // older than the host scan that produced this inventory.
+                        this.update(cx, |this, _| {
+                            this.check_file_inventory_support()?;
+                            Ok::<_, anyhow::Error>(
+                                this.as_remote_mut()
+                                    .context("The project backend changed during inventory")?
+                                    .wait_for_snapshot(response.worktree_scan_id as usize),
+                            )
+                        })??
+                        .await
+                        .context("The project disconnected while waiting for its file inventory. Reconnect and retry")?;
+                        this.read_with(cx, |this, _| this.check_file_inventory_support())??;
+                        anyhow::ensure!(
+                            inventory.entry_count <= MAX_FILE_INVENTORY_ENTRIES as u64
+                                && inventory.files.len() <= MAX_FILE_INVENTORY_ENTRIES
+                                && inventory.skipped_paths.len() <= MAX_FILE_INVENTORY_ENTRIES
+                                && inventory.canonical_paths.len() <= MAX_FILE_INVENTORY_ENTRIES,
+                            "Remote file inventory exceeds the project entry budget"
+                        );
+                        Ok(FileInventory {
+                            root_path: PathBuf::from(inventory.root_path),
+                            files: inventory.files,
+                            skipped_paths: inventory.skipped_paths,
+                            canonical_paths: inventory.canonical_paths.into_iter().collect(),
+                            entry_count: inventory.entry_count as usize,
+                        })
+                    };
+                    with_worktree_connection(operation, disconnected).await
                 })
             }
         }
+    }
+}
+
+async fn with_worktree_connection<T>(
+    operation: impl Future<Output = Result<T>>,
+    disconnected: impl Future<Output = ()>,
+) -> Result<T> {
+    let operation = operation.fuse();
+    let disconnected = disconnected.fuse();
+    futures::pin_mut!(operation, disconnected);
+    futures::select_biased! {
+        _ = disconnected => anyhow::bail!(
+            "The project disconnected while checking its file inventory. Reconnect to the host and retry."
+        ),
+        result = operation => result,
     }
 }
 

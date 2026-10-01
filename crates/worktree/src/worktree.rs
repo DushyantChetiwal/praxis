@@ -179,6 +179,7 @@ pub struct RemoteWorktree {
     replica_id: ReplicaId,
     visible: bool,
     disconnected: bool,
+    disconnection: (watch::Sender<bool>, watch::Receiver<bool>),
     file_inventory_support: Option<Result<(), String>>,
     file_inventory_probe: Option<futures::future::Shared<Task<()>>>,
     received_initial_update: bool,
@@ -669,6 +670,7 @@ impl Worktree {
                 snapshot_subscriptions: Default::default(),
                 visible: worktree.visible,
                 disconnected: false,
+                disconnection: watch::channel_with(false),
                 file_inventory_support: None,
                 file_inventory_probe: None,
                 received_initial_update: false,
@@ -2321,6 +2323,21 @@ impl RemoteWorktree {
         self.updates_tx.take();
         self.snapshot_subscriptions.clear();
         self.disconnected = true;
+        *self.disconnection.0.borrow_mut() = true;
+    }
+
+    fn wait_for_disconnection(&self) -> impl Future<Output = ()> + use<> {
+        let mut receiver = self.disconnection.1.clone();
+        async move {
+            if *receiver.borrow() {
+                return;
+            }
+            while let Some(disconnected) = receiver.recv().await {
+                if disconnected {
+                    return;
+                }
+            }
+        }
     }
 
     pub fn update_from_remote(&self, update: proto::UpdateWorktree) {
