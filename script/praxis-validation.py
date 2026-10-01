@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import time
 from urllib.parse import quote
 import zipfile
@@ -150,10 +151,20 @@ class Validator:
                 "invalid run attempt")
         sha(run["head_sha"])
 
-    def pr_association(self, run):
+    def pr_association(self, run, pr_number=None):
         associations = run["pull_requests"]
+        if not associations:
+            # GitHub can clear run.pull_requests after merge. Corroborate the
+            # event/receipt's PR identity against the immutable run head instead.
+            associations = self.api.get(
+                f"{self.api.root}/commits/{sha(run['head_sha'])}/pulls?per_page=100")
+            require(isinstance(associations, list), "invalid commit/PR association response")
+            if pr_number is not None:
+                associations = [pull for pull in associations if pull["number"] == pr_number]
         require(len(associations) == 1, "missing or ambiguous PR/run association")
         association = associations[0]
+        if pr_number is not None:
+            require(association["number"] == pr_number, "PR association identity mismatch")
 
         for side in ("head", "base"):
             require(association[side]["repo"]["id"] == self.metadata["id"],
@@ -171,7 +182,7 @@ class Validator:
         require(event["repository"]["id"] == self.metadata["id"]
                 and event["repository"]["full_name"] == self.repository, "event repository mismatch")
         pull = event["pull_request"]
-        association = self.pr_association(run)
+        association = self.pr_association(run, pull["number"])
         require(event["number"] == pull["number"] == association["number"], "event PR mismatch")
         for side in ("base", "head"):
             require(pull[side]["repo"]["id"] == self.metadata["id"], "fork PR event")
@@ -200,7 +211,7 @@ class Validator:
         require(commit["tree"]["sha"] == receipt["source_tree"], "receipt tree mismatch")
         definition = sha(receipt["workflow_sha"])
         if run["event"] == "pull_request":
-            association = self.pr_association(run)
+            association = self.pr_association(run, receipt["pr_number"])
             require(receipt["pr_number"] == association["number"], "receipt PR mismatch")
             base = sha(receipt["pr_base_sha"])
             require(sha(receipt["pr_head_sha"]) == run["head_sha"], "receipt PR head/run mismatch")
@@ -525,4 +536,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # GitHub captures stdout through a pipe; show progress before a long join ends.
+    sys.stdout.reconfigure(line_buffering=True)
     raise SystemExit(main())
