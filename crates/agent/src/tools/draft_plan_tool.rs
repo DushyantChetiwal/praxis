@@ -16,21 +16,36 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 /// one step leads to another. Nothing is carried out by this tool: the plan is
 /// a proposal the user reshapes, and they run it when they are ready.
 ///
-/// ### Drawing over a plan that already exists
-/// This replaces the whole plan, so when one is already on the canvas you are
-/// editing rather than starting over. The current plan, with each step's id, is
-/// given to you above; reuse those ids for steps that are staying, so their
-/// history stays attached to them.
+/// ### Choose the right tool
+/// Use draft_plan to create a plan or deliberately replace the whole graph, not
+/// to patch one step. Inspect the authoritative graph with inspect_architect_plan
+/// first. Use edit_architect_plan for targeted node/edge/surface/layout edits;
+/// it can preserve unaffected results and a supported checkpoint after approval.
+/// Use refine_step in an unlocked step's own draft chat, or control_architect_run
+/// for permission-approved pending brief/model updates in the main conversation.
 ///
-/// A step the user has **locked** is settled: its goal, rules, capture and
+/// A changed replacement archives the previous run and clears its current
+/// checkpoint; archived history is inspectable, not a resumable update to the
+/// replacement. Active or resumable runs refuse draft_plan. Do not use redrafting
+/// as recovery from a stopped run; inspect it and use targeted edits or controls.
+/// Reuse the same full node paths for retained steps and send the complete graph.
+///
+/// A step the user has **locked** is settled: its goal, rules, capture, file surface and
 /// routing were argued out, often in a chat of its own. Restate a locked step
 /// exactly as it is, connections included, or this tool will refuse the whole
 /// draft. If a locked step genuinely has to change, say so and ask the user.
 /// Once they agree, unlock it with `set_step_locks` before redrawing, or let
 /// them unlock it on the canvas. Never unlock a step they have not asked you to.
 ///
-/// For an unlocked step you are keeping, anything you leave blank keeps what is
-/// already there, so you need only state what you are actually changing.
+/// For a retained unlocked step, blank responsibility/intent/capture, empty
+/// rules, omitted or null model, and omitted steps preserve their existing
+/// values. A supplied subplan is recursively merged. This is NOT a general
+/// patch rule: title is replaced, outgoing connections come from the new edges,
+/// and file_surface always replaces the declaration, including explicit [].
+/// Use refine_step (or approved control_architect_run brief/model updates) to
+/// explicitly clear rules, goal, capture, or a model override. Matching paths
+/// retain locks, pins, positions, chat links, and results; these retained results
+/// do not make the archived run's checkpoint resumable on a replacement.
 ///
 /// ### What makes a good plan
 /// - One step per meaningful unit of work. A step that says "do the task" is
@@ -39,6 +54,28 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 ///   the user will argue with, and what you will be held to later.
 /// - Put constraints in `rules`, not in the intent. Rules are what must remain
 ///   true regardless of how the step is carried out.
+///
+/// ### Existing files: `file_surface`
+/// Every step, including parents and nested children, MUST declare existing files
+/// it anticipates working on as exact `worktree/path` strings. Use explicit []
+/// when no existing files are anticipated; omission and null are not accepted.
+/// Use '/' separators, no directories, globs, absolute paths, '..', duplicates,
+/// or alternate slash/dot spellings. Keep the actual path's case; comparisons
+/// are case-insensitive. A parent's effective surface includes all descendants.
+/// Steps that may run concurrently must have disjoint effective surfaces. If
+/// they need the same existing file, serialize them instead of hiding the overlap.
+/// This is a planning declaration, not a write allowlist; it does not prohibit
+/// creating new files or otherwise impose tool write restrictions.
+/// The native runtime automatically adds observed new files to reachable
+/// successors and containing scopes, including nested successors, then validates
+/// again before dispatch. Ignored files are excluded from automatic discovery
+/// unless always included; explicitly declared ignored files are still checked.
+/// Newly exposed conflicts stop further dispatch while retaining completed
+/// results. Inspect, correct surfaces or serialize work, review/relock, then
+/// resume. This scheduling guard is not filesystem write enforcement.
+/// Invalid or overlapping declarations are retained on the canvas with actionable
+/// problems, but the plan cannot run until corrected. Use targeted
+/// `edit_architect_plan` set_file_surface or connection edits to repair it.
 ///
 /// ### What each step hands on: `capture`
 /// `capture` says what a step's summary must contain. It is the contract
@@ -73,11 +110,17 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 ///
 /// ### Connections
 /// - Leave out `condition` when a step simply follows another.
-/// - Several connections without a condition out of one step run their
-///   branches at the same time, each in a conversation of its own, until they
-///   meet at a step every branch leads to, which then runs once. Draw steps side
-///   by side only when they work on separate parts of the project, since the
-///   branches share one working tree.
+/// - Unconditional fan-out is not an if/else: all available plain branches are
+///   taken when no conditional route is selected. Structured independent branches
+///   run concurrently in the native runtime and stop before their shared join;
+///   the join runs once after all branches finish. Overlapping dependency regions
+///   run ready steps serially, waiting for every incoming prerequisite to finish
+///   or be explicitly skipped. A node with no selected incoming route is skipped.
+///   Unsupported cyclic overlaps are refused; isolate retry loops in a subplan.
+/// - The current runner evaluates conditional edges in stored order and takes
+///   the first YES; plain edges are the fallback when all answers are NO.
+///   Conditions are not proof of mutual exclusion for file-surface validation:
+///   never hide conflicting parallel work behind condition labels.
 /// - Use `objective` for an externally observable statement, such as whether a
 ///   command succeeded or a file exists. The current runner asks the model to
 ///   evaluate that statement from the step summary; it is not executable code.
@@ -85,13 +128,17 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 ///   phrase it as a yes-or-no question. The user will see which parts of their
 ///   control flow depend on a model's opinion, so do not reach for this to
 ///   avoid stating a real condition.
-/// - Pointing a connection back at an earlier step is how you express a loop,
-///   such as returning to the edit step when tests fail. Loops are expected;
-///   just make sure something can leave the loop.
-///   Give a retry loop a `max_repeats` so it moves on after that many rounds
-///   instead of going round until the run is stopped. A loop in which every
-///   connection is unconditional and unlimited can never be left, and is
-///   reported as a problem.
+/// - Self-loops are supported: from == to repeats the same step. For example,
+///   {"from":"test","to":"test","condition":{"kind":"objective","statement":"tests failed"},"max_repeats":3}.
+///   Back-edges to earlier steps work too. Use a condition or a positive
+///   max_repeats and provide a way out. max_repeats counts edge traversals, not
+///   total step visits: 3 permits three retries after the first visit. Drafting
+///   clamps zero to one; omit for unlimited. Counts belong to the current local
+///   plan invocation, not a lifetime budget across re-entered subplans.
+///   A bounded unconditional loop takes priority over plain exits until spent
+///   (conditional routes are still checked first). An unconditional unlimited
+///   loop with no way out is a validation problem. Run safety limits still apply:
+///   200 total steps, 25 visits to one step, and at most 5 levels of nesting.
 ///
 /// ### Replacing an existing plan
 /// This call replaces the whole plan. Send the complete set of steps every
@@ -101,11 +148,17 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct DraftPlanToolInput {
-    /// The steps of the plan, in any order; the canvas lays them out from the
-    /// connections.
+    /// Complete nonempty replacement node list, not a patch. IDs are local to
+    /// each graph; preserve full paths for retained nodes. Every node, including
+    /// nested steps.nodes, requires file_surface (explicit [] if none). Array
+    /// order does not declare dependencies; use edges for required ordering.
     pub nodes: Vec<ProposedNode>,
-    /// How the steps connect. A plan with more than one step needs these,
-    /// otherwise nothing says what order the work happens in.
+    /// Complete replacement connections at this graph level; omission means [].
+    /// from/to are local node IDs, not full paths; nested edges belong in steps.
+    /// Example: {"from":"build","to":"test"}. Self-loop example:
+    /// {"from":"test","to":"test","max_repeats":3}. Omit condition for a
+    /// plain route. max_repeats limits edge traversals, not total node visits.
+    /// Multiple roots are supported; add edges to express required dependencies.
     #[serde(default)]
     pub edges: Vec<ProposedEdge>,
 }
@@ -116,8 +169,9 @@ pub enum DraftPlanToolOutput {
     Success {
         steps: usize,
         connections: usize,
-        /// Anything wrong with the plan as drawn, such as a connection to a
-        /// step that does not exist. Worth fixing before the user sees it.
+        /// The draft is saved even with invalid/conflicting surfaces. These
+        /// problems block execution until corrected through plan edits (capture
+        /// reminders are advisory). Never describe a saved draft as runnable.
         // Defaulted as well as skipped: output saved without the field has
         // to read back when a conversation is reopened.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -164,6 +218,20 @@ pub(super) fn validate_step_model(model: &StepModel, cx: &App) -> Result<()> {
         model.model,
     );
     Ok(())
+}
+
+pub(super) fn plan_validation_problems(graph: &architect::ArchitectGraph) -> Vec<String> {
+    let mut problems: Vec<_> = graph.problems().iter().map(ToString::to_string).collect();
+    for node in &graph.nodes {
+        if let Some(subplan) = node.subplan() {
+            problems.extend(
+                plan_validation_problems(subplan)
+                    .into_iter()
+                    .map(|problem| format!("inside {}: {problem}", node.id)),
+            );
+        }
+    }
+    problems
 }
 
 fn validate_proposed_models(nodes: &[ProposedNode], cx: &App) -> Result<()> {
@@ -232,7 +300,7 @@ impl AgentTool for DraftPlanTool {
                         !thread
                             .architect_run()
                             .is_some_and(|run| run.is_running() || run.can_resume()),
-                        "This plan has an active or resumable run. Use the main conversation's live model-change tool instead of redrafting it."
+                        "This plan has an active or resumable run. Use control_architect_run for model changes. For file-surface or routing changes, stop execution and preview edit_architect_plan in the main conversation instead of redrafting."
                     );
                     validate_proposed_models(&input.nodes, cx)
                 })
@@ -268,7 +336,7 @@ impl AgentTool for DraftPlanTool {
                     return Err(DraftPlanToolOutput::Error {
                         error: format!(
                             "This draft would have discarded steps the user has locked: {}. A \
-                             locked step is settled — its goal, rules, capture and where it leads \
+                             locked step is settled — its goal, rules, capture, file surface and where it leads \
                              were argued out, often in its own chat. Draw the plan again, \
                              restating those steps and their connections exactly as they are, and \
                              change only what is not locked. If one of them really does have to \
@@ -290,11 +358,7 @@ impl AgentTool for DraftPlanTool {
 
             let steps = graph.nodes.len();
             let connections = graph.edges.len();
-            let mut problems: Vec<String> = graph
-                .problems()
-                .iter()
-                .map(|problem| problem.to_string())
-                .collect();
+            let mut problems = plan_validation_problems(&graph);
             // Not a structural fault, so the plan is still drawn. But a step
             // that leads somewhere while saying nothing about what it hands on
             // leaves the steps after it with only their own goal to work from,
@@ -334,14 +398,164 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn model_description_and_schema_keep_drafting_contracts() {
+        let description = <DraftPlanTool as AgentTool>::description();
+        let guidance = description.split_whitespace().collect::<Vec<_>>().join(" ");
+        for required in [
+            "edit_architect_plan",
+            "refine_step",
+            "control_architect_run",
+            "archives the previous run",
+            "not a resumable update",
+            "empty rules",
+            "file_surface always replaces",
+            "Self-loops are supported",
+            "from == to",
+            "counts edge traversals",
+            "first YES",
+            "not an if/else",
+            "every incoming prerequisite",
+            "reachable successors",
+            "Ignored files",
+            "explicitly declared ignored files",
+            "not filesystem write enforcement",
+        ] {
+            assert!(guidance.contains(required), "missing model guidance: {required}");
+        }
+        let mut schema = DraftPlanTool::input_schema().to_value();
+        language_model::tool_schema::normalize_tool_schema(&mut schema);
+        for (field, required) in [
+            ("nodes", "Complete nonempty replacement"),
+            ("nodes", "requires file_surface"),
+            ("edges", "local node IDs"),
+            ("edges", "Self-loop"),
+            ("edges", "edge traversals"),
+        ] {
+            let description = schema["properties"][field]["description"]
+                .as_str().expect(field)
+                .split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(description.contains(required), "{field}: {required}");
+        }
+        let example = description.lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("{\"from\""))
+            .expect("self-loop JSON example");
+        let value = serde_json::Deserializer::from_str(example)
+            .into_iter::<serde_json::Value>()
+            .next().expect("example").expect("valid JSON prefix");
+        let edge: ProposedEdge = serde_json::from_value(value).expect("valid proposed edge");
+        assert_eq!(edge.from, edge.to);
+        assert_eq!(edge.max_repeats, Some(3));
+    }
+
+    #[test]
+    fn validation_reports_nested_surfaces_with_their_own_paths() {
+        let graph: ProposedGraph = serde_json::from_value(json!({"nodes": [{
+            "id": "parent", "title": "Parent", "file_surface": [],
+            "steps": {"nodes": [{
+                "id": "child", "title": "Child", "file_surface": ["../outside.rs"]
+            }]}
+        }]})).expect("draft");
+        let problems = plan_validation_problems(&graph.into_graph());
+        assert!(problems.iter().any(|problem| {
+            problem.contains("inside parent: child") && problem.contains("invalid file surface")
+        }), "{problems:?}");
+    }
+
+    #[test]
+    fn every_drafted_node_requires_an_explicit_file_surface() {
+        for node in [
+            json!({"id": "step", "title": "Step"}),
+            json!({"id": "step", "title": "Step", "file_surface": null}),
+            json!({"id": "parent", "title": "Parent", "file_surface": [],
+                "steps": {"nodes": [{"id": "child", "title": "Child"}]}}),
+        ] {
+            assert!(serde_json::from_value::<DraftPlanToolInput>(json!({"nodes": [node]})).is_err());
+        }
+        let schema =
+            serde_json::to_value(schemars::schema_for!(DraftPlanToolInput)).expect("schema");
+        assert!(
+            schema["$defs"]["ProposedNode"]["required"]
+                .as_array()
+                .expect("required node fields")
+                .contains(&json!("file_surface"))
+        );
+    }
+
+    #[gpui::test]
+    async fn invalid_and_conflicting_drafts_stay_visible_until_repaired(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_connection, _agent, thread, _session) =
+            super::super::architect_run_tool::architect_tool_test_session(cx).await;
+        for (surface, expected_problem) in [
+            (json!(["../outside.rs"]), "invalid file surface"),
+            (json!(["project/shared.rs"]), "may run concurrently"),
+        ] {
+            let input = ToolInput::ready(json!({
+                "nodes": [
+                    {"id": "start", "title": "Start", "file_surface": []},
+                    {"id": "left", "title": "Left", "file_surface": surface},
+                    {"id": "right", "title": "Right", "file_surface": ["project/shared.rs"]},
+                    {"id": "join", "title": "Join", "file_surface": []}
+                ],
+                "edges": [
+                    {"from": "start", "to": "left"}, {"from": "start", "to": "right"},
+                    {"from": "left", "to": "join"}, {"from": "right", "to": "join"}
+                ]
+            }));
+            let (events, _receiver) = ToolCallEventStream::test();
+            let output = cx
+                .update(|cx| {
+                    Arc::new(DraftPlanTool::new(thread.downgrade())).run(input, events, cx)
+                })
+                .await
+                .expect("invalid drafts should still be saved");
+            let DraftPlanToolOutput::Success { problems, .. } = output else {
+                panic!("expected a saved draft");
+            };
+            assert!(
+                problems.iter().any(|problem| problem.contains(expected_problem)),
+                "{problems:?}"
+            );
+            thread.read_with(cx, |thread, _| {
+                assert_eq!(thread.session_mode(), crate::SessionMode::Architect);
+                let mut graph = thread.architect_graph().expect("retained draft").clone();
+                assert_eq!(
+                    json!(graph.node(&"left".into()).expect("left").file_surface),
+                    surface
+                );
+                graph.lock_all();
+                assert!(
+                    architect::compile_spec(&graph).is_err(),
+                    "locking must not bypass surface validation"
+                );
+                let repaired = architect::preview_graph_edits(
+                    &graph,
+                    &[architect::GraphEdit::SetFileSurface {
+                        path: architect::NodePath::root("left".into()),
+                        file_surface: vec!["project/left.rs".into()],
+                    }],
+                )
+                .expect("surface repair");
+                assert!(repaired.is_valid);
+                assert!(!repaired.ready_to_run, "repair needs lock review");
+                let mut repaired = repaired.graph;
+                repaired.lock_all();
+                assert!(architect::compile_spec(&repaired).is_ok());
+            });
+        }
+    }
+
+    #[test]
     fn whole_replacement_preserves_positions_only_for_matching_full_paths() {
         let proposal = json!({
             "nodes": [
-                {"id": "left", "title": "Left", "steps": {
-                    "nodes": [{"id": "shared", "title": "Shared"}]
+                {"id": "left", "title": "Left", "file_surface": [], "steps": {
+                    "nodes": [{"id": "shared", "title": "Shared", "file_surface": []}]
                 }},
-                {"id": "right", "title": "Right", "steps": {
-                    "nodes": [{"id": "shared", "title": "Shared"}]
+                {"id": "right", "title": "Right", "file_surface": [], "steps": {
+                    "nodes": [{"id": "shared", "title": "Shared", "file_surface": []}]
                 }}
             ]
         });
@@ -362,7 +576,7 @@ mod tests {
         proposal["nodes"][1]["steps"]["nodes"]
             .as_array_mut()
             .expect("right children")
-            .push(json!({"id": "new", "title": "New"}));
+            .push(json!({"id": "new", "title": "New", "file_surface": []}));
         let draft = serde_json::from_value::<ProposedGraph>(proposal)
             .expect("replacement proposal")
             .into_graph();
@@ -398,13 +612,13 @@ mod tests {
 
         let input: DraftPlanToolInput = serde_json::from_value(json!({
             "nodes": [{
-                "id": "parent", "title": "Parent",
+                "id": "parent", "title": "Parent", "file_surface": [],
                 "model": {"provider": "test-provider", "model": "parent-model"},
                 "steps": {"nodes": [{
-                    "id": "child", "title": "Child",
+                    "id": "child", "title": "Child", "file_surface": [],
                     "model": {"provider": "test-provider", "model": "child-model"}
                 }]}
-            }, {"id": "inherited", "title": "Inherited"}]
+            }, {"id": "inherited", "title": "Inherited", "file_surface": []}]
         }))
         .expect("model-bearing drafts should deserialize");
         let graph = ProposedGraph {
@@ -488,11 +702,12 @@ mod tests {
                 {
                     "id": "reproduce",
                     "title": "Reproduce the failure",
+                    "file_surface": [],
                     "intent": "Get a failing test that shows the bug",
                     "rules": ["Do not change behaviour yet"],
                     "capture": "The test file and the assertion that failed",
                 },
-                { "id": "fix", "title": "Fix it", "intent": "Make the test pass" },
+                { "id": "fix", "title": "Fix it", "file_surface": [], "intent": "Make the test pass" },
             ],
             "edges": [
                 { "from": "reproduce", "to": "fix" },
@@ -531,12 +746,13 @@ mod tests {
                 {
                     "id": "handlers",
                     "title": "Write handlers",
+                    "file_surface": [],
                     "intent": "Endpoints behave per the schema",
                     "capture": "Which endpoints you added and their status codes",
                     "steps": {
                         "nodes": [
-                            { "id": "parse", "title": "Parse the body" },
-                            { "id": "respond", "title": "Respond" },
+                            { "id": "parse", "title": "Parse the body", "file_surface": [] },
+                            { "id": "respond", "title": "Respond", "file_surface": [] },
                         ],
                         "edges": [{ "from": "parse", "to": "respond" }],
                     },
@@ -570,8 +786,8 @@ mod tests {
     fn a_step_that_leads_somewhere_without_a_capture_is_reported() {
         let input: DraftPlanToolInput = serde_json::from_value(json!({
             "nodes": [
-                { "id": "first", "title": "First" },
-                { "id": "second", "title": "Second" },
+                { "id": "first", "title": "First", "file_surface": [] },
+                { "id": "second", "title": "Second", "file_surface": [] },
             ],
             "edges": [{ "from": "first", "to": "second" }],
         }))
@@ -594,7 +810,7 @@ mod tests {
     #[test]
     fn a_connection_may_leave_out_its_condition() {
         let input: DraftPlanToolInput = serde_json::from_value(json!({
-            "nodes": [{ "id": "only", "title": "Only step" }],
+            "nodes": [{ "id": "only", "title": "Only step", "file_surface": [] }],
         }))
         .unwrap();
 
@@ -609,15 +825,17 @@ mod tests {
                 {
                     "id": "survey",
                     "title": "Survey the callers",
+                    "file_surface": [],
                     "capture": "Every call site of the old API",
                 },
                 {
                     "id": "migrate",
                     "title": "Migrate the callers",
+                    "file_surface": [],
                     "steps": {
                         "nodes": [
-                            { "id": "rewrite", "title": "Rewrite them", "capture": "Files touched" },
-                            { "id": "compile", "title": "Compile" },
+                            { "id": "rewrite", "title": "Rewrite them", "file_surface": [], "capture": "Files touched" },
+                            { "id": "compile", "title": "Compile", "file_surface": [] },
                         ],
                         "edges": [{ "from": "rewrite", "to": "compile" }],
                     },
@@ -654,9 +872,10 @@ mod tests {
                 {
                     "id": "measure",
                     "title": "Measure the regression",
+                    "file_surface": [],
                     "capture": "The before and after timings, in milliseconds",
                 },
-                { "id": "report", "title": "Report" },
+                { "id": "report", "title": "Report", "file_surface": [] },
             ],
             "edges": [{ "from": "measure", "to": "report" }],
         }))
@@ -684,8 +903,8 @@ mod tests {
     fn a_step_that_leads_somewhere_without_saying_what_it_hands_on_is_reported() {
         let input: DraftPlanToolInput = serde_json::from_value(json!({
             "nodes": [
-                { "id": "build", "title": "Build" },
-                { "id": "ship", "title": "Ship" },
+                { "id": "build", "title": "Build", "file_surface": [] },
+                { "id": "ship", "title": "Ship", "file_surface": [] },
             ],
             "edges": [{ "from": "build", "to": "ship" }],
         }))

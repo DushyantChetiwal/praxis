@@ -19,7 +19,7 @@ use workspace::{
 };
 
 use super::bulk::{self, BulkCounts};
-use super::geometry::{EdgeCurve, NODE_WIDTH, paint_curve};
+use super::geometry::{NODE_WIDTH, paint_curve};
 use super::{
     ArchitectPane, ArchitectWorkspaceMode, Camera, DETAIL_ZOOM_THRESHOLD, DUPLICATE_SHORTCUT,
     EXPANDED_CHILD_LIMIT, HistoryDirection, Interaction, MAX_ZOOM, MIN_ZOOM, REDO_SHORTCUT,
@@ -1884,10 +1884,7 @@ impl ArchitectPane {
         let running = self.running_nodes(cx);
         let mut curves = Vec::new();
         for edge in &graph.edges {
-            let (Some(from), Some(to)) = (
-                graph.node(&edge.from).and_then(|node| node.position),
-                graph.node(&edge.to).and_then(|node| node.position),
-            ) else {
+            let Some(curve) = self.edge_curve(graph, edge) else {
                 continue;
             };
             let selected = self.selection == Some(Selection::Edge(edge.id.clone()));
@@ -1900,7 +1897,6 @@ impl ArchitectPane {
                     .node(&edge.to)
                     .and_then(|node| node.result.as_ref())
                     .is_some_and(|result| !result.summary.trim().is_empty());
-            let curve = EdgeCurve::between(from, to);
             let color = if selected {
                 selected_color
             } else if active {
@@ -2003,9 +1999,7 @@ impl ArchitectPane {
                     .copied()
                     .filter(|_| edge.max_repeats.is_some() || graph.is_loop_edge(edge))
                     .unwrap_or(0);
-                let from = graph.node(&edge.from).and_then(|node| node.position)?;
-                let to = graph.node(&edge.to).and_then(|node| node.position)?;
-                let curve = EdgeCurve::between(from, to);
+                let curve = self.edge_curve(graph, edge)?;
 
                 // Two things can be worth saying about a connection, and never
                 // both: what has to be true for it to be taken, or, once it has
@@ -2128,6 +2122,7 @@ impl ArchitectPane {
                         .child(
                             chip(truncate(&text, 32), icon, color, border, background)
                                 .id(("architect-edge-label", ix))
+                                .debug_selector(move || format!("architect-edge-label-{ix}"))
                                 .tooltip(Tooltip::text(tooltip)),
                         )
                         .into_any(),
@@ -2144,15 +2139,34 @@ impl ArchitectPane {
         // The nodes are copied out before rendering: building elements needs
         // mutable access to the context, which is where the graph is read from.
         let Some((nodes, invalid, step_numbers)) = self.graph(cx).map(|graph| {
-            let invalid: HashMap<NodeId, &'static str> = graph
+            let mut invalid: HashMap<NodeId, &'static str> = graph
                 .problems()
                 .iter()
                 .filter_map(|problem| match problem {
                     GraphProblem::Unreachable(id) => Some((id.clone(), "unreachable")),
                     GraphProblem::EndlessLoop(id) => Some((id.clone(), "endless loop")),
+                    GraphProblem::MissingFileSurface(id) => Some((id.clone(), "declare files")),
+                    GraphProblem::InvalidFileSurface { node, .. } => {
+                        Some((node.clone(), "invalid file surface"))
+                    }
+                    GraphProblem::FileSurfaceOverlap { first, .. } => {
+                        Some((first.clone(), "overlapping files"))
+                    }
                     _ => None,
                 })
                 .collect();
+            for problem in graph.file_surface_problems() {
+                match problem {
+                    GraphProblem::FileSurfaceOverlap { first, second, .. } => {
+                        invalid.insert(first, "overlapping files");
+                        invalid.insert(second, "overlapping files");
+                    }
+                    GraphProblem::InSubplan { node, .. } => {
+                        invalid.insert(node, "review nested files");
+                    }
+                    _ => {}
+                }
+            }
             let step_numbers: HashMap<NodeId, usize> = graph
                 .execution_order()
                 .into_iter()
@@ -2670,6 +2684,23 @@ impl ArchitectPane {
                                 .color(Color::Muted),
                             ),
                         )
+                        .child(
+                            div()
+                                .id(("architect-node-file-surface", ix))
+                                .debug_selector(move || format!("architect-node-file-surface-{ix}"))
+                                .flex_none()
+                                .tooltip(Tooltip::text(self.file_surface_details(&node, cx)))
+                                .child(
+                                    Label::new(super::inspector::file_surface_summary(&node))
+                                        .size(LabelSize::XSmall)
+                                        .color(if node.file_surface.is_none() {
+                                            Color::Warning
+                                        } else {
+                                            Color::Muted
+                                        })
+                                        .truncate(),
+                                ),
+                        )
                         // The steps inside, drawn inside. One level only: a
                         // graph nested in a graph is unreadable, and drilling in
                         // is what goes deeper.
@@ -2763,6 +2794,7 @@ impl ArchitectPane {
                 // wired to the next one.
                 div()
                     .id(("architect-node-handle", ix))
+                    .debug_selector(move || format!("architect-node-handle-{ix}"))
                     .absolute()
                     .right(px(-6.0))
                     .top_1_2()
@@ -2776,7 +2808,9 @@ impl ArchitectPane {
                         theme.element_background
                     })
                     .cursor(CursorStyle::PointingHand)
-                    .tooltip(Tooltip::text("Drag to connect to another step"))
+                    .tooltip(Tooltip::text(
+                        "Drag to connect to a step, or back to itself to repeat",
+                    ))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {

@@ -22,9 +22,17 @@ use crate::{
 const MAX_PAGE_ENTRIES: usize = 20;
 const MAX_CONVERSATION_BYTES: usize = 16_384;
 const MAX_HISTORY_BYTES: usize = 32_768;
-const CONTROL_NOTE: &str = "Pause lets active turns finish but starts no new turns. Interrupt preserves completed work and the checkpoint without cancelling this coordinator; resume retries interrupted steps as new visits. Model changes affect subsequent visits only. revise_step is an explicitly permission-approved change to a locked execution brief (goal, rules, capture), retaining locks and checkpoints, not a topology redraft. Completed work cannot be revised. Interrupt before changing an active step's model or brief, then resume. Use inspect_architect_plan for authoritative topology and edit_architect_plan to preview targeted edits, then permission-approve apply using its fresh token. Execution edits reopen impacted locks; apply never approves them. Unsupported checkpoint rebases are refused, not silently restarted. resume_at only selects a scheduler-ready full path; set_step_models is atomic.";
+const CONTROL_NOTE: &str = "Pause lets active turns finish but starts no new turns. Interrupt preserves completed work and the checkpoint without cancelling this coordinator; resume retries interrupted steps as new visits. Model changes affect subsequent visits only. revise_step is an explicitly permission-approved change to a locked execution brief (goal, rules, capture), retaining locks and checkpoints, not a topology redraft. Completed work cannot be revised. Interrupt before changing an active step's model or brief, then resume. Use inspect_architect_plan for authoritative topology and declared/effective existing-file surfaces. Missing, invalid, or conflicting surfaces block execution; they are not write restrictions. revise_step does not change file surfaces: use edit_architect_plan with set_file_surface. Use edit_architect_plan to preview targeted edits, then permission-approve apply using its fresh token. Execution edits reopen impacted locks; apply never approves them. Unsupported checkpoint rebases are refused, not silently restarted. resume_at only selects a scheduler-ready full path; set_step_models is atomic.";
 
 /// Inspect this main conversation's Architect run without changing execution.
+/// Use inspect_architect_plan for authoritative node fields, connections, and
+/// file surfaces; use this tool for execution history and recovery evidence.
+/// Choose at most one view: archives, readiness, active, after_sequence, or
+/// conversation. With none, read visits. run_id selects archived visits/events/
+/// conversations, not archives/readiness/active. Archived history is not a
+/// command to resume that old run on a replaced graph.
+/// Use readiness before control_architect_run; inspect surface/rebase errors
+/// before previewing repairs with edit_architect_plan, not draft_plan replacement.
 /// Omit conversation to read paginated visit history, including full node paths
 /// and visit IDs. To read an active or finished step conversation, supply both
 /// its exact node_path and visit_id from that history. Never infer a visit from
@@ -38,26 +46,38 @@ const CONTROL_NOTE: &str = "Pause lets active turns finish but starts no new tur
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InspectArchitectRunToolInput {
-    /// Current run when omitted; an exact ID from the archives page otherwise.
+    /// Current run when omitted; exact UUID from archives for historical visits,
+    /// events, or conversations. Not accepted with archives, readiness, or active.
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     pub run_id: Option<Uuid>,
-    /// List archived run metadata instead of visits. Uses offset and limit.
+    /// List archived run metadata instead of visits. Uses offset and limit;
+    /// mutually exclusive with readiness, active, after_sequence, conversation.
+    /// Omit run_id. Archives are inspectable history, not a resume target.
     #[serde(default)]
     pub archives: bool,
-    /// Read paginated scheduler readiness instead of visits (current run only).
+    /// Current-run scheduler readiness and waiting/skipped reasons, paginated.
+    /// Use before resume_at or repairs; a nominal join is not automatically ready.
+    /// Omit run_id and other view selectors.
     #[serde(default)]
     pub readiness: bool,
-    /// Read paginated active tool liveness and user-input waits (current run only).
+    /// Current-run active tool calls and user-input waits, paginated. Timestamps
+    /// are local observations, not backend heartbeats. Omit other view selectors.
     #[serde(default)]
     pub active: bool,
     /// Read retained events strictly after this cursor instead of visits.
     /// Follow next_sequence, not event_sequence, to avoid skipping a page.
     #[serde(default)]
     pub after_sequence: Option<u64>,
+    /// Read a recorded step transcript using BOTH its full node_path and visit_id
+    /// from this selected run's visit history. Example:
+    /// {"node_path":["outer","step"],"visit_id":"<returned visit ID>"}.
+    /// Omit other view selectors; use run_id when reading an archived run.
     #[serde(default)]
     pub conversation: Option<ArchitectConversationSelector>,
-    /// Zero-based history or conversation entry offset. Defaults to zero.
+    /// Zero-based entry offset, default 0. Continue with returned next_offset,
+    /// not offset + limit, because byte caps can shorten pages. Events instead
+    /// use after_sequence and the returned next_sequence cursor.
     #[serde(default)]
     pub offset: usize,
     /// Byte cursor within a conversation entry, returned by the previous page.
@@ -88,15 +108,49 @@ pub struct ArchitectConversationSelector {
 /// Future steps may be changed without interruption. revise_step explicitly
 /// authorizes changing even a locked brief while retaining locks and checkpoints;
 /// completed work is immutable. Use edit_architect_plan for targeted topology
-/// previews and approved updates. draft_plan replaces the graph wholesale.
+/// previews and approved updates, including set_file_surface. Existing-file
+/// surfaces are planning/concurrency declarations, not write restrictions;
+/// revise_step cannot change them. Stop and preview a surface edit, review its
+/// validation and reopened locks, then approve apply. draft_plan replaces the
+/// graph wholesale and is not a checkpoint-preserving recovery tool.
+///
+/// Choose one action and only its fields:
+/// - {"action":"pause"} lets active turns finish, then waits without new dispatch.
+/// - {"action":"interrupt"} cancels active work while retaining completed results
+///   and its checkpoint. Neither action undoes filesystem or external effects.
+/// - {"action":"resume"} continues the current paused/stopped resumable run;
+///   interrupted steps are new attempts, not guaranteed exactly-once execution.
+/// - {"action":"resume_at","node_path":["outer","step"]} selects a scheduler-ready
+///   unfinished step from an inactive checkpoint; it cannot skip prerequisites.
+/// - {"action":"revise_step","node_path":["outer","step"],"rules":[]} clears rules
+///   on an unfinished step. Only goal/rules/capture may be revised; omitted or
+///   null fields are preserved. Explicit "" or [] clears the respective field.
+/// - {"action":"set_step_model","node_path":["outer","step"],"model":null} restores
+///   plan-model inheritance. Use exact provider/model IDs for an override.
+/// - {"action":"set_step_models","models":[{"node_path":["outer","step"],"model":null}]}
+///   applies 1 to 100 distinct full-path model choices atomically.
+/// Requests are capped at 32768 serialized bytes. Approval rechecks graph/run
+/// state; inspect again if stale. Models affect subsequent visits, not history.
+/// For a file-surface conflict after new-file discovery, inspect the error and
+/// preview a targeted surface/routing repair, review reopened locks, then resume.
+/// Completed results are retained; surfaces are advisory planning declarations
+/// enforced at dispatch, not tool write restrictions or a filesystem sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ControlArchitectRunToolInput {
+    /// Required action. pause/interrupt/resume take no step or brief/model fields;
+    /// resume_at requires node_path; revise_step requires node_path and at least
+    /// one of goal/rules/capture; set_step_model uses node_path/model;
+    /// set_step_models uses only models. Never edits topology or file_surface.
     pub action: ArchitectRunAction,
-    /// Only for set_step_models: atomic batch of 1 to 100 full-path overrides.
+    /// Only for set_step_models: atomic batch of 1 to 100 distinct nonempty
+    /// full-path overrides. Example: [{"node_path":["outer","step"],"model":null}].
+    /// Null restores inheritance. Omit node_path/model at the top level.
     #[serde(default)]
     pub models: Vec<ArchitectStepModelInput>,
-    /// Required for set_step_model, revise_step, and resume_at. Full path, not just the leaf ID.
+    /// Required only for set_step_model, revise_step, and resume_at. Full path,
+    /// e.g. ["outer","step"], not a leaf ID or canvas position; [] is invalid.
+    /// For resume_at, use an unfinished path reported scheduler-ready by inspection.
     #[serde(default)]
     pub node_path: Option<NodePath>,
     /// Only for set_step_model: exact provider/model IDs from
@@ -123,8 +177,11 @@ pub struct ControlArchitectRunToolInput {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArchitectStepModelInput {
+    /// Full nonempty path from the plan root, e.g. ["outer","step"]. No duplicate
+    /// paths in a batch; do not use a title or a slash-joined path string.
     pub node_path: NodePath,
-    /// Null restores plan-model inheritance.
+    /// Exact {"provider":"provider-id","model":"model-id"} from the native
+    /// model's models[].configuration, or null to restore plan-model inheritance.
     pub model: Option<StepModel>,
 }
 
@@ -1211,6 +1268,61 @@ pub(super) async fn architect_tool_test_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_descriptions_and_schemas_keep_run_recovery_contracts() {
+        let inspection = <InspectArchitectRunTool as AgentTool>::description()
+            .split_whitespace().collect::<Vec<_>>().join(" ");
+        for required in [
+            "inspect_architect_plan", "at most one view", "visit_id", "full node paths",
+            "not a command to resume", "next_byte_offset", "32768", "16384",
+        ] {
+            assert!(inspection.contains(required), "missing run inspection guidance: {required}");
+        }
+        let control = <ControlArchitectRunTool as AgentTool>::description();
+        let guidance = control.split_whitespace().collect::<Vec<_>>().join(" ");
+        for required in [
+            "Build mode", "permission approval", "edit_architect_plan", "draft_plan",
+            "not a checkpoint-preserving recovery tool", "retaining locks and checkpoints",
+            "unfinished step", "skip prerequisites", "1 to 100", "32768",
+            "not tool write restrictions", "Completed results are retained",
+        ] {
+            assert!(guidance.contains(required), "missing control guidance: {required}");
+        }
+        let examples: Vec<ControlArchitectRunToolInput> = control.lines()
+            .filter_map(|line| line.strip_prefix("- "))
+            .filter(|line| line.starts_with("{\"action\""))
+            .map(|line| {
+                let value = serde_json::Deserializer::from_str(line)
+                    .into_iter::<Value>().next().expect("example").expect("valid JSON prefix");
+                let input: ControlArchitectRunToolInput = serde_json::from_value(value)
+                    .expect("documented control request must deserialize");
+                input.validate().expect("documented fields must match the action");
+                input
+            })
+            .collect();
+        assert_eq!(examples.len(), 7, "document every supported control action");
+        for (mut schema, fields) in [
+            (InspectArchitectRunTool::input_schema().to_value(), vec![
+                ("run_id", "historical visits"), ("archives", "mutually exclusive"),
+                ("readiness", "not automatically ready"), ("active", "not backend heartbeats"),
+                ("conversation", "BOTH"), ("offset", "next_offset"),
+                ("after_sequence", "next_sequence"), ("limit", "1 to 20")]),
+            (ControlArchitectRunTool::input_schema().to_value(), vec![
+                ("action", "Never edits topology"), ("node_path", "scheduler-ready"),
+                ("models", "1 to 100"), ("model", "Null or omission"),
+                ("goal", "empty string clears"), ("rules", "empty list clears"),
+                ("capture", "empty string clears")]),
+        ] {
+            language_model::tool_schema::normalize_tool_schema(&mut schema);
+            for (field, required) in fields {
+                let description = schema["properties"][field]["description"]
+                    .as_str().expect(field)
+                    .split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(description.contains(required), "{field}: {required}");
+            }
+        }
+    }
 
     #[test]
     fn architect_run_schema_and_actions() {

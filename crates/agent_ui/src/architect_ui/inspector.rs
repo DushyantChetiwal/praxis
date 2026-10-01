@@ -1,7 +1,7 @@
 use acp_thread::AcpThread;
 use agent_client_protocol::schema::v1 as acp;
 use architect::{
-    ArchitectEdge, ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, NodeId, NodePath,
+    ArchitectEdge, ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, GraphProblem, NodeId, NodePath,
     StepModel,
 };
 use editor::{Editor, EditorEvent};
@@ -95,7 +95,68 @@ pub(super) fn available_step_models(cx: &App) -> Vec<(StepModel, SharedString)> 
     models
 }
 
+pub(super) fn file_surface_summary(node: &ArchitectNode) -> String {
+    match &node.file_surface {
+        None => "Existing files: not declared".into(),
+        Some(files) if files.is_empty() => "Existing files: none anticipated ([])".into(),
+        Some(files) => format!("Existing files: {}", files.join(", ")),
+    }
+}
+
 impl ArchitectPane {
+    pub(super) fn file_surface_details(
+        &self,
+        node: &ArchitectNode,
+        cx: &Context<Self>,
+    ) -> String {
+        let mut details = file_surface_summary(node);
+        if let Some(graph) = self.graph(cx) {
+            if node.has_subplan() {
+                details.push_str("\nIncluding nested steps (normalized identities): ");
+                match graph.effective_file_surface(&NodePath::root(node.id.clone())) {
+                    Ok(files) if files.is_empty() => details.push_str("[]"),
+                    Ok(files) => details.push_str(&files.join(", ")),
+                    Err(reason) => details.push_str(&reason),
+                }
+            }
+            for problem in graph.file_surface_problems() {
+                if Self::problem_affects_node(&problem, &node.id) {
+                    details.push('\n');
+                    details.push_str(&problem.describe(graph));
+                }
+            }
+        }
+        details
+    }
+
+    fn render_file_surface(&self, node: &ArchitectNode, cx: &Context<Self>) -> AnyElement {
+        v_flex()
+            .id("architect-file-surface")
+            .debug_selector(|| "architect-file-surface".into())
+            .gap_1()
+            .child(
+                Label::new("EXISTING-FILE SURFACE")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(Label::new(self.file_surface_details(node, cx)).size(LabelSize::Small))
+            .child(
+                Label::new(
+                    "Planning information, not a write restriction. Ask the plan chat to preview \
+                     a surface or routing edit, or refine file_surface in an unlocked step's chat. \
+                     Use [] only when no existing files are anticipated.",
+                )
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .into_any()
+    }
+
+    pub(super) fn problem_affects_node(problem: &GraphProblem, node: &NodeId) -> bool {
+        Self::problem_selection(problem) == Selection::Node(node.clone())
+            || matches!(problem, GraphProblem::FileSurfaceOverlap { second, .. } if second == node)
+    }
+
     fn step_model_edit_refusal(&self, path: &NodePath, cx: &Context<Self>) -> Option<&'static str> {
         if self.is_running(cx) || self.can_resume(cx) {
             return Some(
@@ -722,6 +783,11 @@ impl ArchitectPane {
             "We are settling one step of the plan: \"{title}\".\n\n\
              ## Goal so far\n{goal}\n\n\
              ## Rules so far\n{rules}\n\
+             ## Existing-file surface\n{file_surface}\n\
+             Declare exact worktree/path files with refine_step.file_surface; use [] \
+             explicitly if no existing files are anticipated. This is planning \
+             information, not a write allowlist. Parallel steps need disjoint \
+             surfaces, including their nested steps.\n\n\
              ## What follows this step\n{next_steps}\n\
              Help me pin this down. Ask about anything ambiguous instead of \
              guessing, and question the goal if it is vague or wrong. When we \
@@ -730,6 +796,7 @@ impl ArchitectPane {
              You are not building anything here, and no other step is yours to \
              change; that is the main conversation's job.",
             title = node.title,
+            file_surface = self.file_surface_details(node, cx),
         );
 
         // Resolved by reading, and the borrow is over before the composer is
@@ -1858,14 +1925,13 @@ impl ArchitectPane {
             .graph(cx)
             .is_some_and(|graph| graph.edges_from(&node.id).next().is_some());
         let wants_capture = hands_on && node.capture.trim().is_empty();
-        let node_selection = Selection::Node(node.id.clone());
         let validation_issues: Vec<String> = self
             .graph(cx)
             .map(|graph| {
                 graph
                     .blocking_problems()
                     .into_iter()
-                    .filter(|problem| Self::problem_selection(problem) == node_selection)
+                    .filter(|problem| Self::problem_affects_node(problem, &node.id))
                     .map(|problem| problem.describe(graph))
                     .collect()
             })
@@ -2088,6 +2154,7 @@ impl ArchitectPane {
                         .p_3()
                         .gap_3()
                         .child(self.render_step_model(&node, cx))
+                        .child(self.render_file_surface(&node, cx))
                         // The name is already the panel's heading, so the field
                         // is only worth its space while it can still be changed.
                         .when(!locked, |this| {

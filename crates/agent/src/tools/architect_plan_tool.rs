@@ -29,17 +29,33 @@ const PREVIEW_LIFETIME: Duration = Duration::from_secs(300);
 /// Inspect the authoritative plan as paginated records: graphs with full-path
 /// entries, nodes with their own fields (never flattened child briefs), and
 /// edges with full-path endpoints. Execution readiness is attached to nodes.
-/// Follow next_offset; restart at zero if revision changes. No execution occurs.
+/// Node fields include the declared file_surface (null means unreviewed legacy
+/// data, not []). effective_file_surface includes nested declarations as normalized
+/// comparison identities, not paths to open. Errors and graph problems remain
+/// visible even for invalid plans; correct them before running.
+/// Use this before drafting a replacement or previewing targeted edits; do not
+/// infer nested identity from a leaf ID or a canvas position. A node_path such as
+/// ["outer","step"] addresses that exact node; graph parent [] is the root.
+/// Edge fields.from/to are local IDs within their graph, while from_path/to_path
+/// are full paths. Positions describe layout, not execution order.
+/// Use inspect_architect_run for visit IDs, history, and recovery status; use
+/// edit_architect_plan to preview a correction. Inspection never mutates or runs.
+/// Follow next_offset with the returned revision; restart at zero if it changes.
 /// Pages contain at most 20 records and 32768 serialized bytes. A single record
 /// too large to fit returns an error, never silently truncates authoritative fields.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InspectArchitectPlanToolInput {
+    /// Zero-based record offset, initially 0. Continue with next_offset, not
+    /// offset + limit: the byte cap may shorten a page. Null next_offset is done.
     #[serde(default)]
     pub offset: usize,
+    /// Requested records per page, 1 to 20, default 10. The 32768-byte response
+    /// cap can reduce this; an oversized single record errors without truncation.
     #[serde(default = "page_limit")]
     pub limit: usize,
-    /// Optional revision from the preceding page; refuses mixed-revision reads.
+    /// Omit on the first page; send the exact returned revision on every later
+    /// page. A mismatch refuses the read: restart at offset 0, without revision.
     #[serde(default)]
     pub revision: Option<u64>,
 }
@@ -68,6 +84,7 @@ fn graph_records(
         "kind": "graph", "parent": parent,
         "entries": graph.roots().into_iter().map(|id| parent.child(id)).collect::<Vec<_>>(),
         "node_count": graph.nodes.len(), "edge_count": graph.edges.len(),
+        "problems": graph.problems().iter().map(ToString::to_string).collect::<Vec<_>>(),
     }));
     for node in &graph.nodes {
         let path = parent.child(node.id.clone());
@@ -78,9 +95,13 @@ fn graph_records(
             .as_object_mut()
             .context("Expected node fields.")?
             .remove("subplan");
+        let surface = graph.effective_file_surface(&NodePath::root(node.id.clone()));
         records.push(json!({
             "kind": "node", "node_path": path, "fields": fields,
             "has_subplan": node.subplan.is_some(),
+            "file_surface": node.file_surface,
+            "effective_file_surface": surface.as_ref().ok(),
+            "file_surface_error": surface.as_ref().err(),
             "model": node.model,
             "model_source": if node.model.is_some() { "step_override" } else { "plan_inheritance" },
             "execution": readiness["steps"].as_array().and_then(|steps| steps.iter().find(|step| step["path"] == json!(path))),
@@ -190,9 +211,57 @@ pub enum ArchitectPlanEditAction {
     Apply,
 }
 
-/// Preview targeted topology edits without mutating the plan (default action).
-/// To apply, send only action=apply and the exact preview_token returned by a
-/// successful preview. Tokens expire after five minutes and are single-use.
+/// Preview targeted graph edits without mutating the plan (default action).
+/// Prefer this over draft_plan replacement when retaining unaffected work and
+/// a supported checkpoint matters. Inspect full paths and edge IDs first with
+/// inspect_architect_plan. For pending goal/rules/capture or model-only changes,
+/// use control_architect_run; an unlocked step's own draft chat uses refine_step.
+///
+/// ### Addressing and operations
+/// path is a full node path: ["outer","step"] is step inside outer. parent
+/// addresses the containing graph: [] is the root; ["outer"] is an existing
+/// subplan, not a request to create one. Edge from/to are local IDs in parent,
+/// never path arrays. Operations run sequentially on a private clone, so later
+/// operations can refer to nodes inserted earlier in the same batch.
+/// Each following JSON object is ONE entry in the preview's edits array:
+/// - {"kind":"insert_node","parent":[],"node":{"id":"build","title":"Build","intent":"Implement the change","file_surface":[]}}
+/// - {"kind":"remove_node","path":["outer","obsolete"]} also removes incident edges.
+/// - {"kind":"insert_edge","parent":["outer"],"edge":{"id":"build-test","from":"build","to":"test","condition":{"kind":"always"}}}
+/// - {"kind":"remove_edge","parent":["outer"],"edge_id":"build-test"}
+/// - {"kind":"reconnect_edge","parent":["outer"],"edge_id":"build-test","from":"build","to":"verify"} retains its condition and repeat limit.
+/// - {"kind":"move_node","path":["outer","step"],"position":{"x":120.0,"y":80.0}} changes layout only, NOT execution ordering or reparenting. Change connections to change ordering.
+/// - {"kind":"set_file_surface","path":["outer","step"],"file_surface":["worktree/src/main.rs"]} replaces the ENTIRE declaration; [] explicitly anticipates no existing files.
+/// To change an edge's condition or max_repeats, remove and insert that edge in
+/// one preview batch. A self-loop has from == to; use a conditional or bounded
+/// loop. max_repeats counts edge traversals, not total node visits. Omit condition
+/// or use {"kind":"always"} for plain routes. Conditional forms are
+/// {"kind":"objective","statement":"tests failed"} and
+/// {"kind":"llm_evaluated","question":"Does the result need another pass?"};
+/// both are evaluated by the model, not executed as code. The current runner
+/// takes the first conditional YES in stored order. Plain fan-out takes all
+/// fallback branches, not an if/else; joins wait for their incoming prerequisites
+/// to finish or be explicitly skipped. Conditional labels are not proof of mutual
+/// exclusion for file-surface validation.
+/// Include file_surface on inserted nodes and children. Surfaces are planning
+/// declarations, not write restrictions. Serialize work needing the same file
+/// rather than hiding overlaps. Native runtime discovery can widen reachable
+/// successors' surfaces with new files and stop dispatch on conflicts; retain
+/// completed work by correcting the graph through this preview/apply path.
+///
+/// ### Preview, approval, and recovery
+/// Send {"action":"preview","edits":[...]} (action may be omitted). The batch
+/// must contain 1 to 100 operations and serialize to at most 1 MiB. The source
+/// graph and candidate preview each have a 1 MiB storage cap; output is limited
+/// to 32768 serialized bytes. Oversized requests/results error, not truncate.
+/// Review
+/// problem_descriptions, is_valid, can_apply, affected_locks, invalidated_steps,
+/// retained_results, requires_review, ready_to_run, and runtime recovery reasons.
+/// A valid graph or can_apply=true does not mean ready_to_run=true.
+/// To apply, send only {"action":"apply","preview_token":"<returned token>"},
+/// never new edits. Tokens expire after five minutes and are single-use, consumed
+/// even if approval is denied or apply fails. At most 8 previews are retained;
+/// a newer preview can evict the oldest. Reinspect and preview again on expiry,
+/// consumption, eviction, or graph/run/event drift; do not retry an old token.
 /// Apply always checks permission settings, even in Architect mode. Plan mode
 /// cannot mutate. Stop execution before applying; unsupported checkpoint rebases
 /// are refused. Execution edits reopen affected locks; this tool never approves
@@ -202,15 +271,26 @@ pub enum ArchitectPlanEditAction {
 /// Rebases requiring reconstruction support flat acyclic plans only and cannot
 /// infer retained conditional verdicts or discard oversized checkpoint history.
 /// Unchanged topology can preserve existing lanes when the runtime permits it.
+/// Relock reviewed steps explicitly before resuming with control_architect_run.
+/// On a refused rebase, explain the reported restart requirement; do not silently
+/// replace the graph with draft_plan or discard checkpoints to force progress.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditArchitectPlanToolInput {
+    /// preview (default) computes impact only; apply consumes an approved
+    /// candidate identified by preview_token. Apply must not include new edits.
     #[serde(default)]
     pub action: ArchitectPlanEditAction,
-    /// Sequential GraphEdit operations, at most 100. Only for preview.
+    /// Preview only: 1 to 100 sequential operations, at most 1 MiB serialized.
+    /// Example: [{"kind":"set_file_surface","path":["outer","step"],"file_surface":[]}].
+    /// path is a full node path; parent [] means root graph; edge from/to are
+    /// local IDs. move_node is layout only, not ordering or reparenting.
+    /// Omit for apply; repair all validation blockers in the same preview batch.
     #[serde(default)]
     pub edits: Vec<GraphEdit>,
-    /// Only for apply. Bound to the graph, revision, run ID, event cursor, and expiry.
+    /// Apply only: exact UUID token returned by a successful preview, bound to
+    /// graph, revision, run ID, event cursor, and five-minute expiry. Single-use
+    /// even on denial/failure; omit edits. If stale or consumed, preview again.
     #[serde(default)]
     pub preview_token: Option<String>,
 }
@@ -412,6 +492,7 @@ impl EditArchitectPlanTool {
             "retained_results": disclosed.map(|impact| &impact.retained_results),
             "requires_review": disclosed.map(|impact| impact.requires_review),
             "routing_changes": preview.routing_changes,
+            "problem_descriptions": preview.problems.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "problems": preview.problems, "is_valid": preview.is_valid,
             "ready_to_run": disclosed.map(|impact| impact.ready_to_run),
             "requires_approval": true,
@@ -581,6 +662,60 @@ mod tests {
             );
             agent_settings::AgentSettings::override_global(settings, cx);
         });
+    }
+
+    #[test]
+    fn model_descriptions_keep_inspection_and_edit_lifecycle_contracts() {
+        let inspection = <InspectArchitectPlanTool as AgentTool>::description()
+            .split_whitespace().collect::<Vec<_>>().join(" ");
+        for required in [
+            "file_surface", "effective_file_surface", "null means unreviewed legacy",
+            "full paths", "local IDs", "next_offset", "revision", "32768",
+            "inspect_architect_run",
+        ] {
+            assert!(inspection.contains(required), "missing inspection guidance: {required}");
+        }
+        let editing = <EditArchitectPlanTool as AgentTool>::description();
+        let guidance = editing.split_whitespace().collect::<Vec<_>>().join(" ");
+        for required in [
+            "draft_plan", "control_architect_run", "refine_step", "parent",
+            "[] is the root", "local IDs", "NOT execution ordering or reparenting",
+            "ENTIRE declaration", "1 to 100", "1 MiB", "five minutes", "single-use",
+            "approval is denied", "Relock", "unsupported checkpoint rebases",
+            "from == to", "edge traversals", "not write restrictions", "32768",
+            "not proof of mutual exclusion", "explicitly skipped",
+        ] {
+            assert!(guidance.contains(required), "missing edit guidance: {required}");
+        }
+        let examples: Vec<GraphEdit> = editing.lines()
+            .filter_map(|line| line.strip_prefix("- "))
+            .filter(|line| line.starts_with("{\"kind\""))
+            .map(|line| {
+                let value = serde_json::Deserializer::from_str(line)
+                    .into_iter::<Value>().next().expect("example").expect("valid JSON prefix");
+                serde_json::from_value(value).expect("documented GraphEdit must deserialize")
+            })
+            .collect();
+        assert_eq!(examples.len(), 7, "document every supported edit operation");
+        assert!(matches!(&examples[0], GraphEdit::InsertNode { parent, node }
+            if parent.is_empty() && node.file_surface == Some(vec![])));
+        assert!(matches!(&examples[2], GraphEdit::InsertEdge { parent, edge }
+            if parent == &NodePath::root("outer".into()) && edge.from.0 == "build"));
+        for (mut schema, fields) in [
+            (InspectArchitectPlanTool::input_schema().to_value(), vec![
+                ("offset", "next_offset"), ("limit", "1 to 20"), ("revision", "restart")]),
+            (EditArchitectPlanTool::input_schema().to_value(), vec![
+                ("action", "preview_token"), ("edits", "not ordering or reparenting"),
+                ("preview_token", "Single-use")]),
+        ] {
+            language_model::tool_schema::normalize_tool_schema(&mut schema);
+            for (field, required) in fields {
+                let description = schema["properties"][field]["description"]
+                    .as_str().expect(field)
+                    .split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(description.contains(required), "{field}: {required}");
+            }
+        }
     }
 
     #[test]
@@ -754,7 +889,7 @@ mod tests {
         permission(ToolPermissionMode::Allow, cx);
         let tool = Arc::new(EditArchitectPlanTool::new(thread.downgrade()));
         let input: EditArchitectPlanToolInput = serde_json::from_value(json!({"edits": [
-            {"kind": "insert_node", "parent": [], "node": {"id": "next", "title": "Next"}},
+            {"kind": "insert_node", "parent": [], "node": {"id": "next", "title": "Next", "file_surface": []}},
             {"kind": "insert_edge", "parent": [], "edge": {"id": "route", "from": "step", "to": "next"}}
         ]})).unwrap();
         let preview = cx.update(|cx| tool.preview(&input, cx)).unwrap();
@@ -779,6 +914,32 @@ mod tests {
             assert_eq!(graph.nodes.len(), 2);
             assert!(graph.nodes.iter().all(|node| !node.locked));
             assert!(thread.architect_run().is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn surface_edit_repairs_a_legacy_declaration_after_approval(cx: &mut TestAppContext) {
+        let (_connection, _agent, thread, _coordinator) = architect_tool_test_session(cx).await;
+        let mut graph = plan(&thread, cx);
+        graph.nodes[0].file_surface = None;
+        thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+        permission(ToolPermissionMode::Allow, cx);
+        let tool = Arc::new(EditArchitectPlanTool::new(thread.downgrade()));
+        let input = serde_json::from_value(json!({"edits": [
+            {"kind": "set_file_surface", "path": ["step"], "file_surface": []}
+        ]})).expect("surface edit");
+        let preview = cx.update(|cx| tool.preview(&input, cx)).expect("preview");
+        assert_eq!(preview["can_apply"], true);
+        assert_eq!(preview["ready_to_run"], false);
+        assert_eq!(preview["affected_locks"], json!([["step"]]));
+        thread.read_with(cx, |thread, _| assert_eq!(thread.architect_graph(), Some(&graph)));
+        let (events, _receiver) = ToolCallEventStream::test();
+        cx.update(|cx| tool.run(apply_input(&preview), events, cx))
+            .await.expect("approved surface edit");
+        thread.read_with(cx, |thread, _| {
+            let node = thread.architect_graph().expect("graph").node(&"step".into()).expect("step");
+            assert_eq!(node.file_surface, Some(vec![]));
+            assert!(!node.locked);
         });
     }
 
@@ -1024,8 +1185,10 @@ mod tests {
     fn inspection_keeps_nested_own_fields_and_paths() {
         let mut parent = ArchitectNode::new("outer", "Parent");
         parent.intent = "Parent's own goal".into();
+        parent.file_surface = Some(vec!["project/Parent.rs".into()]);
         let mut child = ArchitectNode::new("step", "Child");
         child.intent = "Child goal".into();
+        child.file_surface = Some(vec!["project/Child.rs".into()]);
         child.locked = true;
         parent.subplan = Some(Box::new(ArchitectGraph {
             nodes: vec![child],
@@ -1042,6 +1205,30 @@ mod tests {
         assert_eq!(records[2]["entries"], json!([["outer", "step"]]));
         assert_eq!(records[3]["node_path"], json!(["outer", "step"]));
         assert_eq!(records[3]["fields"]["locked"], true);
+        assert_eq!(records[1]["file_surface"], json!(["project/Parent.rs"]));
+        assert_eq!(records[1]["effective_file_surface"], json!(["project/child.rs", "project/parent.rs"]));
+        assert_eq!(records[3]["effective_file_surface"], json!(["project/child.rs"]));
+        assert!(records[3]["file_surface_error"].is_null());
+    }
+
+    #[test]
+    fn inspection_does_not_treat_missing_or_invalid_surfaces_as_empty() {
+        for declaration in [None, Some(vec!["../outside.rs".into()]), Some(vec![])] {
+            let mut node = ArchitectNode::new("step", "Step");
+            node.file_surface = declaration.clone();
+            let graph = ArchitectGraph { nodes: vec![node], edges: vec![] };
+            let mut records = Vec::new();
+            graph_records(&graph, &NodePath::default(), &json!({}), &mut records).expect("inspect");
+            assert_eq!(records[1]["fields"]["file_surface"], json!(declaration));
+            if declaration == Some(vec![]) {
+                assert_eq!(records[1]["effective_file_surface"], json!([]));
+                assert!(records[1]["file_surface_error"].is_null());
+            } else {
+                assert!(records[1]["effective_file_surface"].is_null());
+                assert!(records[1]["file_surface_error"].is_string());
+                assert!(!records[0]["problems"].as_array().expect("problems").is_empty());
+            }
+        }
     }
 
     #[test]

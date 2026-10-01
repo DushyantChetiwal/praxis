@@ -43,9 +43,23 @@ Each **connection** says when one step leads to another:
 | **Objective**     | An observable statement such as whether a command succeeded. The built-in runner asks the model to evaluate it from the step summary. |
 | **LLM-evaluated** | The decision genuinely needs judgement, phrased as a yes-or-no question.                                                              |
 
-Pointing a connection back at an earlier step forms a loop, which is how you express "go back and fix it if the tests fail". Loops are expected; just make sure something can leave the loop.
+Pointing a connection back at an earlier step forms a loop, which is how you express "go back and fix it if the tests fail". A node can also loop into itself (`from == to`). Use a condition or a positive `max_repeats` and a way out: `max_repeats: 3` allows three edge traversals after the initial visit, not three total visits. Unlimited unconditional loops with no exit are blocked; run safety limits still apply.
 
 Architect mode can read and search your project but cannot change it through native tools. Drawing a plan and carrying it out are separate jobs.
+
+## Existing-file surfaces
+
+Every drafted step must declare `file_surface`: the existing files it anticipates working on, using exact worktree-qualified paths such as `project/src/main.rs`. Include the declaration on parent steps and every nested child. Send explicit `[]` when no existing files are anticipated. Omission is not the same as an empty declaration: older saved steps with no surface remain visible but block execution until reviewed.
+
+Use file paths, not directories or globs. Use `/` separators without absolute paths, `..`, empty or `.` components, or duplicate entries. Keep the file's actual case; concurrency comparisons use normalized, case-insensitive identities. These identities are lexical, not filesystem or symlink resolution. A parent step's effective surface includes its own declaration and every descendant's declaration.
+
+Steps that may run concurrently must have disjoint effective surfaces. If two branches need the same existing file, serialize that work with connections or split it into genuinely disjoint work. The shared join may use those files after the branches finish.
+
+**A surface is planning information, not a write allowlist.** It does not restrict tools from writing other files or creating new ones; ordinary tool permissions still apply. Do not omit anticipated existing files simply to suppress an overlap error.
+
+The native runtime also observes new files and adds them to reachable successors' declarations and containing scopes, including nested successors. Automatic discovery excludes ignored files unless always included; explicitly declared ignored paths are still checked. If this exposes a conflict, further dispatch stops with an actionable error and completed results remain. Inspect, preview a targeted repair, review/relock, then resume; this is a scheduling guard, not write enforcement.
+
+The canvas shows each declaration; its tooltip and the step's **Details** inspector show nested effective surfaces and actionable problems. Invalid or conflicting drafts stay on the canvas for correction, but cannot run. Ask the step chat to update `refine_step.file_surface` (omission preserves the saved declaration; `[]` explicitly clears it; `null` is rejected), or ask the plan chat to preview `edit_architect_plan` with `{"kind":"set_file_surface","path":["step"],"file_surface":["project/src/main.rs"]}`. Surface edits follow existing lock, approval, and checkpoint guards; they are not brief-only `revise_step` updates. Review and relock affected steps before execution.
 
 ## Steps inside steps
 
@@ -91,7 +105,7 @@ A step you are satisfied with should be **locked**. Locking makes it read-only a
 
 You can also ask for it in the main conversation, such as "lock the schema step", "lock everything", or "reopen the tests step so we can change it". The agent changes the locks with the `set_step_locks` tool, the same way the lock button does: locking a step that contains a plan locks everything inside it, and unlocking reopens only the step named. Locks cannot change while a run is in progress or paused.
 
-A plan cannot run until every step is locked and the canvas reports no problems, such as a connection pointing at a step that does not exist, or a step nothing leads to.
+A plan cannot run until every step is locked and the canvas reports no problems, such as a connection pointing at a step that does not exist, a step nothing leads to, or a missing, invalid, or overlapping parallel file surface.
 
 ## Running a plan
 
@@ -140,10 +154,10 @@ When a limit is reached, the run status records why execution stopped. The main 
 
 The main conversation has these coordinator tools:
 
-- `inspect_architect_plan` reads the authoritative graph as paginated graph, node, and edge records, including full nested paths, entry points, model overrides, locks, positions, and execution readiness. Supply the returned revision on later pages to reject mixed-revision reads.
+- `inspect_architect_plan` reads the authoritative graph as paginated graph, node, and edge records, including full nested paths, entry points, model overrides, locks, positions, declared and effective file surfaces, surface errors, and execution readiness. Supply the returned revision on later pages to reject mixed-revision reads.
 - `inspect_architect_run` reads current or archived runs, paginated visits, saved step conversations, dependency readiness, events, and active tool calls. Visit IDs and full paths disambiguate repeated or nested steps.
 - `control_architect_run` can pause, interrupt, resume, change models, or revise pending briefs. `resume_at` selects an unfinished, eligible step from an inactive checkpoint without replaying completed results; unresolved prerequisites are refused. `set_step_models` applies a validated batch atomically without redrawing the graph. Copy each native model's `{provider, model}` object directly from `list_agents_and_models`'s `configuration` field.
-- `edit_architect_plan` previews targeted graph edits and applies only the returned preview token after permission approval. Operations insert/remove nodes and edges, reconnect edges, or move nodes on the canvas; moves do not reparent nodes.
+- `edit_architect_plan` previews targeted graph edits and applies only the returned preview token after permission approval. Operations insert/remove nodes and edges, reconnect edges, move nodes on the canvas, or replace file surfaces with `set_file_surface`; moves do not reparent nodes.
 - `wait_architect_run` subscribes to execution transitions or user-input waits for up to 30 seconds. It returns immediately for available events, failures or stopped execution, or pending user input. Follow its event cursor rather than repeatedly polling. This is an on-demand observer, not a new agent started automatically in the background.
 
 Execution controls require **Build** mode and configured tool permission approval. Topology editing is also available in **Architect** mode but cannot start execution or approve locks. Step agents cannot control sibling steps.
@@ -156,13 +170,24 @@ Preview reports changed paths, affected locks, invalidated results/checkpoints, 
 
 Stop execution before applying a topology edit. Execution-affecting changes reopen impacted locks for review and invalidate downstream consumers, including consumers of pinned summaries. Unaffected positions, results, run history, and transcript links remain. Relock reviewed steps before resuming; apply never silently approves them.
 
-Checkpoint rebasing currently supports flat acyclic topology updates and topology-preserving edits that do not invalidate finished nested work. Unsupported nested/cyclic rebases or uncertain retained branch verdicts are refused before mutation. The preview explains when a separate restart is required. Full `draft_plan` replacement is still available: it preserves positions for matching paths and archives the old run, but is not a checkpoint-preserving edit.
+Checkpoint rebasing currently supports flat acyclic topology updates and topology-preserving edits that do not invalidate finished nested work. Unsupported nested/cyclic rebases or uncertain retained branch verdicts are refused before mutation. The preview explains when a separate restart is required. Full `draft_plan` replacement refuses active or resumable runs. A changed replacement preserves positions for matching paths and archives the old run, but is not a checkpoint-preserving recovery edit; archived history does not make the replacement resumable from the old checkpoint.
 
 ### History and liveness
 
 Completed run histories and child-transcript links remain inspectable across revisions. The event journal keeps the latest 1,024 events and reports cursor gaps. At most 64 full draft revision snapshots are retained; layout movement is coalesced instead of storing a whole graph for every mouse move. Evicting old draft snapshots does not remove run histories or transcripts.
 
 Active-call inspection reports locally observed start and last-update times, status, known wait reasons, and cancellation requests. These are not backend heartbeats: a quiet tool may still be working, and a cancellation request does not prove that a backend process has stopped. Timestamps reconstructed during replay are not original execution times.
+
+## Where the model's tool descriptions live
+
+The model-facing instructions are the Rust `///` comments on tool input types; field comments become parameter descriptions in JSON Schema:
+
+- [`draft_plan_tool.rs`](../../../crates/agent/src/tools/draft_plan_tool.rs): whole-plan creation/replacement, merge rules, and routing examples.
+- [`refine_step_tool.rs`](../../../crates/agent/src/tools/refine_step_tool.rs): updates bound to one draft step.
+- [`architect_plan_tool.rs`](../../../crates/agent/src/tools/architect_plan_tool.rs): authoritative inspection and targeted preview/apply operations.
+- [`architect_run_tool.rs`](../../../crates/agent/src/tools/architect_run_tool.rs): execution inspection and approved brief/model/recovery controls.
+
+[`thread.rs`](../../../crates/agent/src/thread.rs) turns these into model requests: `AgentTool::description()` reads the input type's schema description, `AgentTool::input_schema()` generates its parameter schema, and `Thread::build_completion_request()` includes available tools. Contract tests in the tool files check the descriptions and normalized parameter schemas, including parseable JSON examples, rather than maintaining a second copy here.
 
 ## Related settings
 

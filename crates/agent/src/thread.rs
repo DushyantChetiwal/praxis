@@ -3402,6 +3402,26 @@ impl Thread {
         Ok((title, attempt))
     }
 
+    /// Records filesystem-observed creation without replacing the run or
+    /// invalidating reviewed locks and completed results.
+    pub(crate) fn record_architect_created_files(
+        &mut self,
+        source: &architect::NodePath,
+        files: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        if files.is_empty() {
+            return;
+        }
+        if let Some(graph) = &mut self.architect_graph {
+            graph.record_created_files(source, files);
+        }
+        if let Some(graph) = self.architect_run.as_mut().and_then(|run| run.graph.as_mut()) {
+            graph.record_created_files(source, files);
+        }
+        self.note_architect_graph_change(cx);
+    }
+
     /// Edits the plan without detaching its run. No-ops are silent; layout-only
     /// edits save positions without adding execution revisions or events.
     /// Does nothing when the thread has no plan.

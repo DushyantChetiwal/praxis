@@ -43,6 +43,10 @@ pub enum GraphEdit {
         path: NodePath,
         position: NodePosition,
     },
+    SetFileSurface {
+        path: NodePath,
+        file_surface: Vec<String>,
+    },
     InsertEdge {
         parent: NodePath,
         edge: ArchitectEdge,
@@ -142,9 +146,12 @@ pub fn preview_graph_edits(
     operations: &[GraphEdit],
 ) -> Result<GraphEditPreview, GraphEditError> {
     validate_addressability(graph, &NodePath::default())?;
-    let has_topology_operations = operations
-        .iter()
-        .any(|operation| !matches!(operation, GraphEdit::MoveNode { .. }));
+    let has_topology_operations = operations.iter().any(|operation| {
+        !matches!(
+            operation,
+            GraphEdit::MoveNode { .. } | GraphEdit::SetFileSurface { .. }
+        )
+    });
     let mut target = graph.clone();
     let positioned_source = has_topology_operations.then(|| {
         materialize_positions(&mut target);
@@ -571,6 +578,15 @@ fn apply_operation(
                 return Err(GraphEditError::InvalidPosition { path: path.clone() });
             }
             graph.move_node_at(path, (*position).into())?;
+        }
+        GraphEdit::SetFileSurface { path, file_surface } => {
+            if path.is_empty() {
+                return Err(GraphMutationError::EmptyPath.into());
+            }
+            let node = graph
+                .node_at_mut(path)
+                .ok_or_else(|| GraphMutationError::NodeNotFound { path: path.clone() })?;
+            node.file_surface = Some(file_surface.clone());
         }
         GraphEdit::InsertEdge { parent, edge } => {
             let local = graph_at_mut(graph, parent)?;
@@ -1840,6 +1856,81 @@ mod tests {
     }
 
     #[test]
+    fn setting_a_nested_file_surface_invalidates_results_and_reopens_affected_locks() {
+        let graph = nested_graph();
+        let changed = path(&["left", "a"]);
+        let preview = preview_graph_edits(&graph, &[GraphEdit::SetFileSurface {
+            path: changed.clone(),
+            file_surface: vec!["worktree/src/a.rs".into()],
+        }]).expect("surface edit");
+        for affected in [
+            path(&["left"]), changed.clone(), path(&["left", "b"]),
+            path(&["left", "c"]), path(&["ship"]),
+        ] {
+            assert!(preview.invalidated_steps.contains(&affected));
+            assert!(preview.affected_locks.contains(&affected));
+            let node = preview.graph.node_at(&affected).expect("affected step");
+            assert!(!node.locked);
+            assert!(node.result.is_none());
+            assert!(graph.node_at(&affected).expect("original").locked);
+        }
+        for untouched in [path(&["left", "sibling"]), path(&["right"]), path(&["right", "a"])] {
+            assert_eq!(preview.graph.node_at(&untouched), graph.node_at(&untouched));
+        }
+        assert_eq!(preview.graph.node_at(&changed).expect("changed").file_surface,
+            Some(vec!["worktree/src/a.rs".into()]));
+        assert!(preview.routing_changes.is_empty());
+        assert!(preview.requires_approval);
+        assert!(preview.is_valid);
+        let mut replacement = graph.clone();
+        replacement.node_at_mut(&changed).expect("changed").file_surface = Some(vec!["worktree/src/a.rs".into()]);
+        let replacement = preview_graph_replacement(&graph, replacement).expect("replacement");
+        assert_eq!(replacement.invalidated_steps, preview.invalidated_steps);
+        assert_eq!(replacement.affected_locks, preview.affected_locks);
+    }
+
+    #[test]
+    fn file_surface_edits_retain_conflicts_and_legacy_corrections_for_review() {
+        let mut graph = local_graph();
+        graph.node_mut(&"a".into()).expect("a").file_surface = None;
+        let corrected = preview_graph_edits(&graph, &[GraphEdit::SetFileSurface {
+            path: path(&["a"]), file_surface: Vec::new(),
+        }]).expect("legacy correction");
+        assert!(corrected.is_valid);
+        assert!(corrected.requires_approval);
+        assert!(!corrected.ready_to_run);
+        let conflicting = preview_graph_edits(&graph, &[
+            GraphEdit::SetFileSurface { path: path(&["a"]), file_surface: vec!["worktree/a.rs".into()] },
+            GraphEdit::SetFileSurface { path: path(&["sibling"]), file_surface: vec!["WORKTREE/a.rs".into()] },
+        ]).expect("conflicting draft stays inspectable");
+        assert!(!conflicting.is_valid);
+        assert!(conflicting.problems.iter().any(|problem| matches!(problem, GraphProblem::FileSurfaceOverlap { .. })));
+        assert!(crate::PlanRun::start(&conflicting.graph).is_err());
+        assert!(preview_graph_edits(&graph, &[GraphEdit::SetFileSurface {
+            path: NodePath::default(), file_surface: Vec::new(),
+        }]).is_err());
+        assert!(preview_graph_edits(&graph, &[GraphEdit::SetFileSurface {
+            path: path(&["missing"]), file_surface: Vec::new(),
+        }]).is_err());
+    }
+
+    #[test]
+    fn file_surface_no_ops_preserve_automatic_positions_and_checkpoints() {
+        let graph = automatic_graph();
+        let first = graph.nodes.first().expect("first");
+        let preview = preview_graph_edits(&graph, &[GraphEdit::SetFileSurface {
+            path: NodePath::root(first.id.clone()), file_surface: Vec::new(),
+        }]).expect("no op");
+        assert_eq!(preview.graph, graph);
+        assert!(!preview.requires_approval);
+        assert!(preview.invalidated_steps.is_empty());
+        let preview = preview_graph_edits(&graph, &[GraphEdit::SetFileSurface {
+            path: NodePath::root(first.id.clone()), file_surface: vec!["worktree/first.rs".into()],
+        }]).expect("changed surface");
+        assert!(preview.graph.nodes.iter().all(|node| node.position.is_none()));
+    }
+
+    #[test]
     fn graph_edit_schema_and_json_cover_full_nested_payloads() {
         let mut node = settled_node("parent");
         node.subplan = Some(Box::new(local_graph()));
@@ -1851,6 +1942,10 @@ mod tests {
             GraphEdit::MoveNode {
                 path: path(&["parent", "a"]),
                 position: NodePosition { x: 2.5, y: -4.0 },
+            },
+            GraphEdit::SetFileSurface {
+                path: path(&["parent", "a"]),
+                file_surface: vec!["worktree/src/a.rs".into()],
             },
             GraphEdit::InsertEdge {
                 parent: path(&["parent"]),
@@ -1883,6 +1978,8 @@ mod tests {
             "insert_edge",
             "remove_edge",
             "reconnect_edge",
+            "set_file_surface",
+            "file_surface",
             "position",
             "parent",
             "subplan",

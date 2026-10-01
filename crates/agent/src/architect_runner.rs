@@ -1,15 +1,18 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use acp_thread::{AcpThread, AgentConnection as _, AgentThreadEntry, AssistantMessageChunk};
 use agent_client_protocol::schema::v1 as acp;
+use anyhow::Context as _;
 use architect::{
     ArchitectGraph, Branch, Decision, MAX_NODE_VISITS, MAX_PLAN_DEPTH, MAX_RUN_STEPS, NodePath,
     PlanRun, RunOutcome, RunRefusal,
 };
-use futures::FutureExt as _;
 use futures::channel::oneshot;
 use futures::future::{LocalBoxFuture, join_all};
+use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AsyncApp, Context, Entity, SharedString, WeakEntity};
 use language_model::{LanguageModel, LanguageModelProviderId, LanguageModelRegistry};
 use serde::{Deserialize, Serialize};
@@ -94,6 +97,13 @@ pub(crate) struct RunState {
     rebase_error: Option<String>,
     invalidated: Vec<NodePath>,
     rebased: bool,
+    #[serde(default)]
+    surface_error: Option<String>,
+    #[serde(default)]
+    pending_file_observations: Vec<FileObservation>,
+    #[cfg(test)]
+    #[serde(skip)]
+    scan_gate: Option<oneshot::Receiver<()>>,
 }
 
 // Containers and not-yet-selected branches do not each consume a model turn,
@@ -200,6 +210,10 @@ impl RunState {
             rebase_error: None,
             invalidated: Vec::new(),
             rebased: false,
+            surface_error: None,
+            pending_file_observations: Vec::new(),
+            #[cfg(test)]
+            scan_gate: None,
         }
     }
 
@@ -268,13 +282,31 @@ impl RunState {
             total_attempts == state.steps,
             "Checkpoint attempt counters disagree with the total steps started"
         );
-        PlanRun::validate_structure(&state.graph).map_err(anyhow::Error::msg)?;
+        // Surface conflicts can be introduced by observed creation. They must
+        // block dispatch, not make the completed history impossible to reload.
+        // Validate routing on a copy only; execution always checks the real graph.
+        let routing_graph = routing_validation_graph(&state.graph);
+        PlanRun::validate_structure(&routing_graph).map_err(anyhow::Error::msg)?;
+        for observation in &state.pending_file_observations {
+            anyhow::ensure!(
+                state.graph.node_at(&observation.source).is_some(),
+                "A pending file observation refers to a missing step"
+            );
+            observation.snapshot.validate()?;
+        }
         let mut owned = std::collections::HashSet::new();
         let mut history_steps = 0usize;
         for (index, lane) in state.lanes.iter().enumerate() {
             lane.run
-                .validate_checkpoint(&state.graph)
+                .validate_checkpoint(&routing_graph)
                 .map_err(anyhow::Error::msg)?;
+            if let Some(observation) = &lane.file_observation {
+                anyhow::ensure!(
+                    state.graph.node_at(&observation.source).is_some(),
+                    "A file observation refers to a missing step"
+                );
+                observation.snapshot.validate()?;
+            }
             history_steps = history_steps
                 .checked_add(lane.run.steps_taken())
                 .ok_or_else(|| anyhow::anyhow!("Checkpoint lane counters overflow"))?;
@@ -426,6 +458,7 @@ impl RunState {
         self.halted = false;
         self.paused = false;
         self.rebased = false;
+        self.surface_error = None;
         self.in_flight.clear();
         self.waiters.clear();
         for lane in &mut self.lanes {
@@ -493,6 +526,8 @@ struct Lane {
     #[serde(skip)]
     last_step_thread: Option<WeakEntity<AcpThread>>,
     last_step_session_id: Option<acp::SessionId>,
+    #[serde(default)]
+    file_observation: Option<FileObservation>,
 }
 
 impl Lane {
@@ -505,8 +540,312 @@ impl Lane {
             interrupted: false,
             last_step_thread: None,
             last_step_session_id: None,
+            file_observation: None,
         }
     }
+}
+
+// The scanner's refresh barrier is released even on scan errors, and an idle
+// scanner need not have received pending watcher events. Use worktree snapshots
+// for root identity, but read the inventory through Fs rather than trusting the
+// cached entries. Worktree refreshes supply ignore classification, while Fs
+// supplies existence and scan errors. Declared ignored files are checked directly.
+const MAX_OBSERVED_FILES: usize = 100_000;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileSnapshot {
+    roots: BTreeMap<String, PathBuf>,
+    files: BTreeMap<String, String>,
+}
+
+impl FileSnapshot {
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.roots.is_empty() && self.files.len() <= MAX_OBSERVED_FILES,
+            "The file snapshot has no roots or exceeds the file budget"
+        );
+        for (identity, file) in &self.files {
+            anyhow::ensure!(
+                ArchitectGraph::normalize_file_surface_path(file).as_ref() == Ok(identity),
+                "Invalid file snapshot identity for {file}"
+            );
+        }
+        Ok(())
+    }
+
+    fn created_since(&self, previous: &Self) -> anyhow::Result<Vec<String>> {
+        anyhow::ensure!(
+            self.roots == previous.roots,
+            "Project worktree roots changed during the run. Restore the original roots before resuming."
+        );
+        Ok(self
+            .files
+            .iter()
+            .filter(|(identity, _)| !previous.files.contains_key(*identity))
+            .map(|(_, file)| file.clone())
+            .collect())
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileObservation {
+    source: NodePath,
+    snapshot: FileSnapshot,
+}
+
+fn participating_worktrees(
+    project: &Entity<project::Project>,
+    cx: &App,
+) -> anyhow::Result<BTreeMap<String, Entity<project::Worktree>>> {
+    let mut worktrees = BTreeMap::new();
+    for worktree in project.read(cx).visible_worktrees(cx) {
+        let tree = worktree.read(cx);
+        if tree.is_single_file() {
+            continue;
+        }
+        anyhow::ensure!(tree.is_local(), "Creation tracking requires local project folders.");
+        let name = tree.snapshot().root_name_str().to_string();
+        let identity = ArchitectGraph::normalize_file_surface_path(&format!("{name}/file"))
+            .map_err(anyhow::Error::msg)?;
+        for existing in worktrees.keys() {
+            anyhow::ensure!(
+                ArchitectGraph::normalize_file_surface_path(&format!("{existing}/file"))
+                    .map_err(anyhow::Error::msg)? != identity,
+                "Visible project folders have ambiguous names: {name}. Give them distinct names before resuming."
+            );
+        }
+        worktrees.insert(name, worktree);
+    }
+    anyhow::ensure!(!worktrees.is_empty(), "Open a local project folder before running the plan.");
+    Ok(worktrees)
+}
+
+fn inventory_relative_path(path: &std::path::Path) -> anyhow::Result<String> {
+    let components = path.iter().map(|component| {
+        let component = component.to_str().context("A project file name is not valid UTF-8")?;
+        anyhow::ensure!(!component.contains('\\'), "A project file name contains a literal backslash: {}", path.display());
+        Ok(component)
+    }).collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(components.join("/"))
+}
+
+async fn refresh_inventory_entry(
+    worktree: &Entity<project::Worktree>,
+    relative: &str,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<Option<project::Entry>> {
+    let path = util::rel_path::RelPath::from_unix_str(relative)?.into_arc();
+    let task = worktree.update(cx, |worktree, cx| {
+        worktree.as_local().context("The participating worktree is no longer local")
+            .map(|local| local.refresh_entry(path, None, cx))
+    })?;
+    task.await
+}
+
+async fn project_file_snapshot(
+    project: &Entity<project::Project>,
+    graph: &ArchitectGraph,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<FileSnapshot> {
+    let (fs, worktrees, roots) = cx.update(|cx| -> anyhow::Result<_> {
+        let worktrees = participating_worktrees(project, cx)?;
+        let roots = worktrees.iter().map(|(name, tree)| {
+            (name.clone(), tree.read(cx).abs_path().to_path_buf())
+        }).collect();
+        Ok((project.read(cx).fs().clone(), worktrees, roots))
+    })?;
+    let mut snapshot = FileSnapshot {
+        roots,
+        files: BTreeMap::new(),
+    };
+    let mut visited = 0;
+    for (name, worktree) in &worktrees {
+        let root = snapshot.roots.get(name).context("Missing participating root")?;
+        let (settings, initial_scan) = worktree.read_with(cx, |tree, _| {
+            let local = tree.as_local().context("The participating worktree is no longer local")?;
+            Ok::<_, anyhow::Error>((local.settings(), local.scan_complete()))
+        })?;
+        initial_scan.await;
+        let metadata = fs
+            .metadata(root)
+            .await
+            .with_context(|| format!("Cannot inspect project root {}", root.display()))?
+            .with_context(|| format!("Project root {} disappeared", root.display()))?;
+        anyhow::ensure!(
+            metadata.is_dir,
+            "Creation tracking requires a project directory: {}",
+            root.display()
+        );
+        let mut directories = vec![root.clone()];
+        while let Some(directory) = directories.pop() {
+            let mut entries = match fs.read_dir(&directory).await {
+                Ok(entries) => entries,
+                Err(error) => {
+                    if &directory != root && fs.metadata(&directory).await?.is_none() {
+                        continue;
+                    }
+                    return Err(error).with_context(|| format!("Cannot list {}", directory.display()));
+                }
+            };
+            // Refresh ignore files before their children. This loads newly written
+            // rules even when filesystem watcher notifications are still buffered.
+            let ignore_path = directory.join(".gitignore");
+            if fs.metadata(&ignore_path).await?.is_some() {
+                if let Err(error) = fs.load(&ignore_path).await {
+                    if fs.metadata(&ignore_path).await?.is_some() {
+                        return Err(error).context("Cannot read project ignore rules");
+                    }
+                }
+                let relative = inventory_relative_path(ignore_path.strip_prefix(root)?)?;
+                if let Err(error) = refresh_inventory_entry(worktree, &relative, cx).await {
+                    if fs.metadata(&ignore_path).await?.is_some() {
+                        return Err(error).context("Cannot refresh project ignore rules");
+                    }
+                }
+            }
+            let mut candidates = Vec::new();
+            while let Some(entry) = entries.next().await {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) if error.downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => continue,
+                    Err(error) => return Err(error).with_context(|| format!("Cannot list {}", directory.display())),
+                };
+                let relative = inventory_relative_path(entry.strip_prefix(root)?)?;
+                let path = util::rel_path::RelPath::from_unix_str(&relative)?;
+                if settings.is_path_excluded(path) || path.file_name().is_some_and(|name| name == ".git") {
+                    continue;
+                }
+                let Some(metadata) = fs.metadata(&entry).await
+                    .with_context(|| format!("Cannot inspect {}", entry.display()))?
+                else {
+                    continue;
+                };
+                if metadata.is_dir && (metadata.is_symlink
+                    || (!settings.is_path_always_included(path, true)
+                        && worktree.read_with(cx, |tree, _| tree.snapshot().is_path_ignored(path))))
+                {
+                    continue;
+                }
+                // Schedule a directory's classification requests together so the
+                // worktree scanner can coalesce them into one refresh batch.
+                let task = worktree.update(cx, |tree, cx| {
+                    tree.as_local().context("The participating worktree is no longer local")
+                        .map(|local| local.refresh_entry(path.into_arc(), None, cx))
+                })?;
+                candidates.push((entry, relative, metadata, task));
+            }
+            for (entry, relative, metadata, task) in candidates {
+                let classified = match task.await {
+                    Ok(Some(classified)) => classified,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        if fs.metadata(&entry).await?.is_none() {
+                            continue;
+                        }
+                        // A dangling symlink has no existing target to discover.
+                        if metadata.is_symlink && fs.canonicalize(&entry).await.is_err() {
+                            log::debug!("Architect: skipping dangling symlink {}", entry.display());
+                            continue;
+                        }
+                        return Err(error).with_context(|| format!("Cannot classify {} with project ignore rules", entry.display()));
+                    }
+                };
+                if classified.is_ignored && !classified.is_always_included {
+                    continue;
+                }
+                visited += 1;
+                anyhow::ensure!(visited <= MAX_OBSERVED_FILES,
+                    "Creation inventory exceeds {MAX_OBSERVED_FILES} project entries. Exclude generated folders before resuming.");
+                if classified.is_dir() {
+                    if classified.canonical_path.is_none() {
+                        directories.push(entry);
+                    }
+                } else {
+                    let file = format!("{name}/{relative}");
+                    let identity = ArchitectGraph::normalize_file_surface_path(&file)
+                        .map_err(anyhow::Error::msg)?;
+                    snapshot.files.insert(identity, file);
+                }
+            }
+        }
+    }
+    // Resolve only declared surfaces, including declared ignored files and paths
+    // through directory symlinks. Unrelated symlinks never gate the whole run.
+    let roots_by_identity = snapshot.roots.iter().map(|(name, root)| {
+        Ok((ArchitectGraph::normalize_file_surface_path(&format!("{name}/file"))
+            .map_err(anyhow::Error::msg)?, root))
+    }).collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+    let mut canonical_files = BTreeMap::<PathBuf, String>::new();
+    let mut aliases = BTreeMap::new();
+    for node in graph_paths(graph) {
+        for file in graph.node_at(&node).and_then(|node| node.file_surface.as_ref()).into_iter().flatten() {
+            let (name, relative) = file.split_once('/').context("A declared file needs a worktree-qualified path")?;
+            let root_identity = ArchitectGraph::normalize_file_surface_path(&format!("{name}/file"))
+                .map_err(anyhow::Error::msg)?;
+            let Some(root) = roots_by_identity.get(&root_identity) else {
+                continue;
+            };
+            let absolute = root.join(relative);
+            let Some(metadata) = fs.metadata(&absolute).await
+                .with_context(|| format!("Cannot inspect declared file {file}"))?
+            else {
+                continue;
+            };
+            if metadata.is_dir {
+                continue;
+            }
+            let canonical = fs.canonicalize(&absolute).await
+                .with_context(|| format!("Cannot resolve declared file {file}"))?;
+            let representative = canonical_files.entry(canonical).or_insert_with(|| file.clone());
+            aliases.insert(file.clone(), representative.clone());
+            snapshot.files.insert(ArchitectGraph::normalize_file_surface_path(file).map_err(anyhow::Error::msg)?, file.clone());
+        }
+    }
+    let mut resolved_graph = graph.clone();
+    for path in graph_paths(graph) {
+        if let Some(surface) = resolved_graph.node_at_mut(&path).and_then(|node| node.file_surface.as_mut()) {
+            for file in surface.iter_mut() {
+                if let Some(representative) = aliases.get(file) {
+                    *file = representative.clone();
+                }
+            }
+            surface.sort();
+            surface.dedup();
+        }
+    }
+    let alias_problems = resolved_graph.file_surface_problems();
+    anyhow::ensure!(alias_problems.is_empty(),
+        "Declared file paths resolve to overlapping surfaces: {}. Use consistent paths or serialize the affected steps before resuming.",
+        RunRefusal::NotReady(alias_problems));
+    // Use exactly the same participation rule after the asynchronous scan.
+    let current_roots = cx.update(|cx| -> anyhow::Result<BTreeMap<_, _>> {
+        Ok(participating_worktrees(project, cx)?.into_iter().map(|(name, tree)| {
+            (name, tree.read(cx).abs_path().to_path_buf())
+        }).collect())
+    })?;
+    anyhow::ensure!(
+        snapshot.roots == current_roots,
+        "Project roots changed while scanning. Restore the original roots and resume."
+    );
+    snapshot.validate()?;
+    Ok(snapshot)
+}
+
+fn routing_validation_graph(graph: &ArchitectGraph) -> ArchitectGraph {
+    fn clear_surfaces(graph: &mut ArchitectGraph) {
+        for node in &mut graph.nodes {
+            node.file_surface = Some(Vec::new());
+            if let Some(nested) = node.subplan.as_deref_mut() {
+                clear_surfaces(nested);
+            }
+        }
+    }
+    let mut graph = graph.clone();
+    clear_surfaces(&mut graph);
+    graph
 }
 
 /// Starts the application-owned execution of an Architect graph.
@@ -899,6 +1238,12 @@ pub fn architect_run_readiness(thread: &Thread) -> serde_json::Value {
                 step["status"] = "invalidated".into();
                 step["reason"] =
                     "The approved graph update invalidated this result; history is retained".into();
+            } else if let Some(message) = &state.surface_error
+                && step["status"] != "completed"
+                && step["status"] != "running"
+            {
+                step["status"] = "waiting".into();
+                step["reason"] = message.clone().into();
             } else if state.rebase_error.is_some() && step["status"] != "completed" {
                 step["status"] = "waiting".into();
                 step["reason"] =
@@ -935,11 +1280,13 @@ pub fn architect_run_readiness(thread: &Thread) -> serde_json::Value {
         "checkpoint_error": checkpoint_error,
         "ready_to_run": !read_only && !graph.is_empty() && run_problems.is_empty()
             && state.as_ref().is_none_or(|state| state.rebase_error.is_none()
+                && state.surface_error.is_none()
                 && !state.lanes.first().is_some_and(|lane| matches!(lane.next, Decision::Done(_)))),
         "run_problems": run_problems,
         "paused": state.as_ref().is_some_and(|state| state.paused),
         "halted": state.as_ref().is_some_and(|state| state.halted),
         "rebase_error": state.as_ref().and_then(|state| state.rebase_error.as_deref()),
+        "file_surface_error": state.as_ref().and_then(|state| state.surface_error.as_deref()),
         "invalidated_steps": state.as_ref().map(|state| &state.invalidated),
         "steps_started": state.as_ref().map(|state| state.steps).unwrap_or(0),
         "attempts": state.as_ref().map(|state| &state.attempts),
@@ -1073,6 +1420,18 @@ fn stage_graph_update(state: &RunState, prepared: &PreparedGraphUpdate) -> RunSt
         rebase_error: None,
         invalidated: prepared.invalidated.clone(),
         rebased: prepared.run.is_some() || state.rebased,
+        surface_error: state.surface_error.clone(),
+        #[cfg(test)]
+        scan_gate: None,
+        pending_file_observations: state
+            .pending_file_observations
+            .iter()
+            .cloned()
+            .chain(
+                state.lanes.iter().filter(|_| prepared.run.is_some())
+                    .filter_map(|lane| lane.file_observation.clone()),
+            )
+            .collect(),
     }
 }
 
@@ -1138,6 +1497,15 @@ fn prepare_graph_update_with_budget(
     let mut run = None;
     let mut rebase_error = None;
     if let Some(state) = state {
+        for observation in state.pending_file_observations.iter().chain(
+            state.lanes.iter().filter_map(|lane| lane.file_observation.as_ref()),
+        ) {
+            anyhow::ensure!(
+                graph.node_at(&observation.source).is_some(),
+                "Reconcile the saved file observation for step {} by resuming before removing it from the plan.",
+                observation.source
+            );
+        }
         if topology(old) == topology(&graph) && can_retain_lanes(state, &affected) {
             for lane in &state.lanes {
                 lane.run
@@ -1452,6 +1820,7 @@ pub fn resume_architect_run(
                 return Err(RunRefusal::NotReady(problems).into());
             }
             state.paused = false;
+            state.surface_error = None;
             std::mem::take(&mut state.waiters)
         };
         for waiter in waiters {
@@ -1537,6 +1906,7 @@ struct Driver {
     /// own conversation, one at a time.
     step_threads: Option<(Rc<NativeAgentConnection>, acp::SessionId)>,
     plan_title: SharedString,
+    file_gate: Rc<futures::lock::Mutex<()>>,
 }
 
 impl Driver {
@@ -1562,11 +1932,40 @@ impl Driver {
             plan_thread,
             step_threads,
             plan_title,
+            file_gate: Rc::new(futures::lock::Mutex::new(())),
         }
     }
 
     async fn run_to_end(self, cx: &mut AsyncApp) {
-        let outcome = drive_lane(self.clone(), 0, cx.clone()).await;
+        // A stopped process may have left writes after its last saved boundary.
+        // Reconcile persisted observations before retrying any interrupted turn.
+        let needs_recovery = {
+            let state = self.state.borrow();
+            !state.pending_file_observations.is_empty()
+                || state.lanes.iter().any(|lane| lane.file_observation.is_some())
+        };
+        let restored = if needs_recovery {
+            self.observe_project_files(cx).await.map(|_| ())
+        } else {
+            Ok(())
+        };
+        let outcome = match restored {
+            Ok(()) => {
+                {
+                    let mut state = self.state.borrow_mut();
+                    state.pending_file_observations.clear();
+                    for lane in &mut state.lanes {
+                        lane.file_observation = None;
+                    }
+                }
+                if let Some(message) = self.file_dispatch_problem() {
+                    self.block_file_dispatch(anyhow::anyhow!(message), cx)
+                } else {
+                    drive_lane(self.clone(), 0, cx.clone()).await
+                }
+            }
+            Err(error) => self.block_file_dispatch(error, cx),
+        };
 
         if let Err(error) = self.thread.update(cx, |thread, cx| {
             thread.finish_architect_run(outcome, cx);
@@ -1579,6 +1978,9 @@ impl Driver {
         loop {
             if self.state.borrow().halted {
                 return RunOutcome::Cancelled;
+            }
+            if let Some(message) = self.state.borrow().surface_error.clone() {
+                return RunOutcome::Failed { message };
             }
             let next = self.state.borrow().lanes[lane].next.clone();
             let starts_turn = matches!(next, Decision::Run(_) | Decision::Ask(_));
@@ -1603,6 +2005,199 @@ impl Driver {
         }
     }
 
+    async fn observe_project_files(&self, cx: &mut AsyncApp) -> anyhow::Result<FileSnapshot> {
+        let project = self
+            .thread
+            .read_with(cx, |thread, _| thread.project().clone())?;
+        #[cfg(test)]
+        {
+            let gate = self.state.borrow_mut().scan_gate.take();
+            if let Some(gate) = gate {
+                gate.await.context("Test file scan was cancelled")?;
+            }
+        }
+        let timeout = cx
+            .background_executor()
+            .timer(std::time::Duration::from_secs(60))
+            .fuse();
+        let graph = self.state.borrow().graph.clone();
+        let snapshot = {
+            let scan = project_file_snapshot(&project, &graph, cx).fuse();
+            futures::pin_mut!(scan, timeout);
+            futures::select_biased! {
+                result = scan => result?,
+                _ = timeout => anyhow::bail!("Project file inventory timed out after 60 seconds. Check filesystem access before resuming"),
+            }
+        };
+        let changes = {
+            let state = self.state.borrow();
+            state
+                .pending_file_observations
+                .iter()
+                .chain(state.lanes.iter().filter_map(|lane| lane.file_observation.as_ref()))
+                .map(|observation| {
+                    Ok((
+                        observation.source.clone(),
+                        snapshot.created_since(&observation.snapshot)?,
+                    ))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?
+        };
+        // There is no trustworthy writer identity in filesystem notifications.
+        // Attribute overlapping observations to every possible source, then let
+        // graph reachability (not lane/list order) determine the consumers.
+        if !changes.is_empty() {
+            self.thread.update(cx, |thread, cx| -> anyhow::Result<()> {
+                let live = thread.architect_graph().context("The authoritative plan is missing")?;
+                for (source, _) in &changes {
+                    anyhow::ensure!(
+                        live.node_at(source).is_some(),
+                        "The authoritative plan no longer contains creating step {source}. Restore the plan before resuming."
+                    );
+                }
+                {
+                    let mut state = self.state.borrow_mut();
+                    let mut graph = state.graph.clone();
+                    for (source, files) in &changes {
+                        graph.record_created_files(source, files);
+                    }
+                    let mut checkpoint = state.checkpoint();
+                    checkpoint["state"]["graph"] = serde_json::to_value(&graph)?;
+                    let saved_snapshot = serde_json::to_value(&snapshot)?;
+                    for observation in checkpoint["state"]["pending_file_observations"]
+                        .as_array_mut().context("Missing pending observations")?
+                    {
+                        observation["snapshot"] = saved_snapshot.clone();
+                    }
+                    for lane in checkpoint["state"]["lanes"].as_array_mut().context("Missing lanes")? {
+                        if !lane["file_observation"].is_null() {
+                            lane["file_observation"]["snapshot"] = saved_snapshot.clone();
+                        }
+                    }
+                    validate_checkpoint_value(&checkpoint)
+                        .context("Observed file surfaces exceed the checkpoint budget; no history was discarded")?;
+                    state.graph = graph;
+                    for observation in &mut state.pending_file_observations {
+                        observation.snapshot = snapshot.clone();
+                    }
+                    for lane in &mut state.lanes {
+                        if let Some(observation) = &mut lane.file_observation {
+                            observation.snapshot = snapshot.clone();
+                        }
+                    }
+                }
+                for (source, files) in &changes {
+                    thread.record_architect_created_files(source, files, cx);
+                }
+                thread.checkpoint_architect_run(cx);
+                Ok(())
+            })??;
+        }
+        Ok(snapshot)
+    }
+
+    fn file_dispatch_problem(&self) -> Option<String> {
+        let state = self.state.borrow();
+        if let Some(message) = &state.surface_error {
+            return Some(message.clone());
+        }
+        let problems = state.graph.blocking_problems();
+        (!problems.is_empty()).then(|| {
+            format!(
+                "Existing-file surfaces are not ready: {}. Correct the declarations or serialize overlapping steps, apply and review the plan, then resume. Completed results are retained.",
+                RunRefusal::NotReady(problems)
+            )
+        })
+    }
+
+    fn block_file_dispatch(&self, error: anyhow::Error, cx: &mut AsyncApp) -> RunOutcome {
+        let message = format!(
+            "Praxis stopped dispatching work: {error:#}. Resolve the file tracking or surface problem and resume; completed results are retained."
+        );
+        log::error!("Architect: {message}");
+        let waiters = {
+            let mut state = self.state.borrow_mut();
+            state.surface_error = Some(message.clone());
+            std::mem::take(&mut state.waiters)
+        };
+        for waiter in waiters {
+            if waiter.send(()).is_err() {
+                log::debug!("Architect: a paused lane stopped waiting before file tracking failed");
+            }
+        }
+        if let Err(outcome) = self.checkpoint(cx) {
+            return outcome;
+        }
+        RunOutcome::Failed { message }
+    }
+
+    async fn prepare_file_observation(
+        &self,
+        lane: usize,
+        source: NodePath,
+        cx: &mut AsyncApp,
+    ) -> Result<(), RunOutcome> {
+        loop {
+            if let Some(outcome) = self.wait_while_paused(cx).await {
+                return Err(outcome);
+            }
+            let guard = self.file_gate.lock().await;
+            if self.state.borrow().halted {
+                return Err(RunOutcome::Cancelled);
+            }
+            if self.state.borrow().paused {
+                drop(guard);
+                continue;
+            }
+            let snapshot = self
+                .observe_project_files(cx)
+                .await
+                .map_err(|error| self.block_file_dispatch(error, cx))?;
+            if self.state.borrow().halted {
+                return Err(RunOutcome::Cancelled);
+            }
+            if self.state.borrow().paused {
+                drop(guard);
+                continue;
+            }
+            if let Some(message) = self.file_dispatch_problem() {
+                return Err(self.block_file_dispatch(anyhow::anyhow!(message), cx));
+            }
+            let previous = self.state.borrow_mut().lanes[lane]
+                .file_observation
+                .replace(FileObservation { source, snapshot });
+            let budget = validate_checkpoint_value(&self.state.borrow().checkpoint());
+            if let Err(error) = budget {
+                self.state.borrow_mut().lanes[lane].file_observation = previous;
+                return Err(self.block_file_dispatch(
+                    error.context("File tracking exceeds the checkpoint budget"),
+                    cx,
+                ));
+            }
+            self.checkpoint(cx)?;
+            return Ok(());
+        }
+    }
+
+    async fn finish_file_observation(&self, lane: usize, cx: &mut AsyncApp) {
+        let _guard = self.file_gate.lock().await;
+        match self.observe_project_files(cx).await {
+            Ok(_) => {
+                self.state.borrow_mut().lanes[lane].file_observation = None;
+                let already_blocked = self.state.borrow().surface_error.is_some();
+                if !already_blocked && let Some(message) = self.file_dispatch_problem()
+                {
+                    self.block_file_dispatch(anyhow::anyhow!(message), cx);
+                }
+            }
+            Err(error) => {
+                // Retain the baseline so a resumed run can reconcile writes
+                // after a failed scan without repeating completed model work.
+                self.block_file_dispatch(error, cx);
+            }
+        }
+    }
+
     /// Carries out one step, and reports it to the lane's run, which says what
     /// the lane does next.
     async fn run_step(
@@ -1611,6 +2206,7 @@ impl Driver {
         node: NodePath,
         cx: &mut AsyncApp,
     ) -> Result<Decision, RunOutcome> {
+        self.prepare_file_observation(lane, node.clone(), cx).await?;
         let concurrent = self.step_threads.is_some();
         let (step_number, attempt, title, mut prompt, model, note) = {
             let mut guard = self.state.borrow_mut();
@@ -1729,11 +2325,13 @@ impl Driver {
         let halted = self.end_turn(lane, cx)?;
         let reported_on_visit =
             self.update_thread(cx, |thread, _cx| thread.clear_architect_step_visit(visit))?;
-        if halted || matches!(sent, Err(RunOutcome::Cancelled)) {
+        if matches!(sent, Err(RunOutcome::Cancelled)) {
             self.finish_visit(visit, None, ArchitectRunOutcome::Cancelled, cx)?;
+            self.finish_file_observation(lane, cx).await;
             return Err(RunOutcome::Cancelled);
         }
         if let Err(outcome) = sent {
+            self.finish_file_observation(lane, cx).await;
             return Err(match outcome {
                 RunOutcome::Failed { message } => self.fail_step(
                     visit,
@@ -1753,12 +2351,7 @@ impl Driver {
         };
         let summary = match reported {
             Some(summary) => summary,
-            // Another lane failed and stopped this step before it reported,
-            // so it is left to be run again.
-            None if halted => {
-                self.finish_visit(visit, None, ArchitectRunOutcome::Cancelled, cx)?;
-                return Err(RunOutcome::Cancelled);
-            }
+
             None => {
                 log::warn!(
                     "Architect: {node} ended without calling complete_step; using its closing \
@@ -1805,6 +2398,14 @@ impl Driver {
             ArchitectRunOutcome::Completed,
             cx,
         )?;
+        // A successful turn may have performed non-idempotent work. Persist its
+        // result and routing decision, retaining the observation, before any
+        // scanner await (including waiting for another lane's scan lock).
+        self.checkpoint(cx)?;
+        self.finish_file_observation(lane, cx).await;
+        if halted {
+            return Err(RunOutcome::Cancelled);
+        }
         Ok(next)
     }
 
@@ -1900,21 +2501,35 @@ impl Driver {
             })?;
         }
 
+        let source = self.state.borrow().lanes[lane].run.current();
+        self.prepare_file_observation(lane, source, cx).await?;
         self.begin_turn(lane, &asked, cx)?;
         let sent = send_and_wait(&asked, prompt, cx).await;
-        if self.end_turn(lane, cx)? {
-            return Err(RunOutcome::Cancelled);
+        let halted = self.end_turn(lane, cx)?;
+        if let Err(outcome) = sent {
+            self.finish_file_observation(lane, cx).await;
+            return Err(outcome);
         }
-        sent?;
 
         let reply = closing_message(&asked, cx);
         drop(restored_conversation);
         let taken = architect::parse_verdict(&reply).ok_or_else(|| RunOutcome::Failed {
             message: format!("The reply for branch {} did not begin with YES or NO. Resume to ask again; no route was selected.", branch.edge.0),
         })?;
-        let mut guard = self.state.borrow_mut();
-        let state = &mut *guard;
-        Ok(state.lanes[lane].run.answer(&state.graph, taken))
+        let next = {
+            let mut guard = self.state.borrow_mut();
+            let state = &mut *guard;
+            let next = state.lanes[lane].run.answer(&state.graph, taken);
+            state.lanes[lane].next = next.clone();
+            state.lanes[lane].interrupted = false;
+            next
+        };
+        self.checkpoint(cx)?;
+        self.finish_file_observation(lane, cx).await;
+        if halted {
+            return Err(RunOutcome::Cancelled);
+        }
+        Ok(next)
     }
 
     /// Runs every branch of the fork the lane is waiting on, then carries the
@@ -1989,6 +2604,11 @@ impl Driver {
                 let mut state = self.state.borrow_mut();
                 if state.halted {
                     return Some(RunOutcome::Cancelled);
+                }
+                if let Some(message) = &state.surface_error {
+                    return Some(RunOutcome::Failed {
+                        message: message.clone(),
+                    });
                 }
                 if !state.paused {
                     return None;
@@ -2105,7 +2725,7 @@ fn drive_lane(
 ) -> LocalBoxFuture<'static, RunOutcome> {
     async move {
         let outcome = driver.drive(lane, &mut cx).await;
-        if !outcome.is_success() {
+        if !outcome.is_success() && driver.state.borrow().surface_error.is_none() {
             driver.halt(&mut cx);
         }
         outcome
@@ -2189,7 +2809,7 @@ async fn send_and_wait(
 mod checkpoint_tests {
     use super::*;
     use architect::{ArchitectNode, EdgeCondition, NodeId};
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::{AppContext as _, TestAppContext, UpdateGlobal as _};
     use language_model::fake_provider::FakeLanguageModelProvider;
     use std::path::Path;
     use std::sync::Arc;
@@ -2359,6 +2979,521 @@ mod checkpoint_tests {
         cx.run_until_parked();
         let restored = cx.update(|cx| connection.thread(&restored_id, cx).unwrap());
         (restored, restored_acp)
+    }
+
+    fn linear_graph(steps: &[&str]) -> ArchitectGraph {
+        let mut graph = ArchitectGraph::default();
+        for step in steps {
+            graph.add_node(ArchitectNode::new(*step, *step));
+        }
+        for pair in steps.windows(2) {
+            graph.connect(pair[0], pair[1]);
+        }
+        graph.lock_all();
+        graph
+    }
+
+    fn project_fs(thread: &Entity<Thread>, cx: &TestAppContext) -> Arc<fs::FakeFs> {
+        thread.read_with(cx, |thread, cx| thread.project().read(cx).fs().as_fake())
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn unflushed_external_creation_reaches_nested_successors_and_both_saved_graphs(
+        cx: &mut TestAppContext,
+    ) {
+        let (_connection, thread, acp_thread, fake) = native_session(cx).await;
+        let fs = project_fs(&thread, cx);
+        fs.insert_tree("/a", serde_json::json!({
+            ".gitignore": "ignored/\ntarget/\nnode_modules/",
+            "existing.rs": "before"
+        })).await;
+        let mut graph = linear_graph(&["source", "container", "after"]);
+        graph.node_at_mut(&path("container")).unwrap().subplan =
+            Some(Box::new(linear_graph(&["nested"])));
+        let mut unrelated = ArchitectNode::new("unrelated", "Unrelated");
+        unrelated.locked = true;
+        graph.add_node(unrelated);
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
+        });
+        cx.run_until_parked();
+        assert_running(&thread, "source", cx);
+        fs.pause_events();
+        fs.insert_tree("/a", serde_json::json!({
+            "existing.rs": "edited externally",
+            "src": { "Created.rs": "created externally" },
+            "ignored": { "cache.rs": "incidental" },
+            "target": { "generated.rs": "incidental" },
+            "node_modules": { "cache.js": "incidental" }
+        })).await;
+        finish_pending_step(&fake);
+        cx.run_until_parked();
+        let expected = Some(vec!["a/src/Created.rs".to_string()]);
+        thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().unwrap();
+            let saved = run.snapshot();
+            let state = RunState::from_checkpoint(saved.checkpoint.clone().unwrap()).unwrap();
+            for graph in [thread.architect_graph().unwrap(), saved.graph.as_ref().unwrap(), &state.graph] {
+                for target in [path("container"), path("container").child("nested".into()), path("after")] {
+                    assert_eq!(graph.node_at(&target).unwrap().file_surface, expected);
+                    assert!(graph.node_at(&target).unwrap().locked);
+                }
+                assert_eq!(graph.node_at(&path("unrelated")).unwrap().file_surface, Some(Vec::new()));
+            }
+            assert!(state.graph.node_at(&path("source")).unwrap().result.is_some());
+            assert_eq!(state.steps, 2);
+            assert!(state.lanes.iter().any(|lane| lane.file_observation.is_some()));
+        });
+        cx.update(|cx| stop_architect_run(&thread, Some(&acp_thread), cx));
+        fs.unpause_events_and_flush();
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn creation_conflict_preserves_the_finished_step_and_refuses_dispatch_and_resume(
+        cx: &mut TestAppContext,
+    ) {
+        let (_connection, thread, acp_thread, fake) = native_session(cx).await;
+        let fs = project_fs(&thread, cx);
+        let mut graph = linear_graph(&["source", "left"]);
+        let mut right = ArchitectNode::new("right", "Right");
+        right.locked = true;
+        graph.add_node(right);
+        graph.connect("source", "right");
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
+        });
+        cx.run_until_parked();
+        fs.pause_events();
+        fs.insert_tree("/a", serde_json::json!({ "shared.rs": "new" })).await;
+        finish_pending_step(&fake);
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().unwrap();
+            assert!(matches!(run.outcome, Some(RunOutcome::Failed { .. })));
+            assert_eq!(run.history().len(), 1);
+            let state = RunState::from_checkpoint(run.snapshot().checkpoint.unwrap()).unwrap();
+            assert_eq!(state.steps, 1);
+            assert!(state.graph.node_at(&path("source")).unwrap().result.is_some());
+            assert!(matches!(state.lanes[0].next, Decision::Fork { .. }));
+            assert!(state.surface_error.as_ref().unwrap().contains("shared.rs"));
+            for target in ["left", "right"] {
+                assert_eq!(state.graph.node_at(&path(target)).unwrap().file_surface,
+                    Some(vec!["a/shared.rs".into()]));
+            }
+            assert_eq!(architect_run_readiness(thread)["ready_to_run"], false);
+        });
+        cx.update(|cx| {
+            assert!(matches!(resume_architect_run(thread.clone(), acp_thread.clone(), cx),
+                Err(ArchitectRunStartError::Refused(RunRefusal::NotReady(_)))));
+        });
+        assert!(fake.pending_completions().iter().all(|request| !request.messages.iter().any(|message| {
+            let text = message.string_contents();
+            text.contains("## Step") && (text.contains("Right") || text.contains("left"))
+        })));
+        fs.unpause_events_and_flush();
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn parallel_creation_is_overattributed_without_losing_completed_results(
+        cx: &mut TestAppContext,
+    ) {
+        let (_connection, thread, acp_thread, fake) = native_session(cx).await;
+        let fs = project_fs(&thread, cx);
+        let mut graph = linear_graph(&["start", "left", "left_next"]);
+        for step in ["right", "right_next"] {
+            let mut node = ArchitectNode::new(step, step);
+            node.locked = true;
+            graph.add_node(node);
+        }
+        graph.connect("start", "right");
+        graph.connect("right", "right_next");
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
+        });
+        cx.run_until_parked();
+        finish_pending_step(&fake);
+        cx.run_until_parked();
+        let pending: Vec<_> = fake.pending_completions().into_iter().filter(|request| {
+            request.messages.last().is_some_and(|message| message.string_contents().contains("## Step"))
+        }).collect();
+        assert_eq!(pending.len(), 2);
+        fs.pause_events();
+        fs.insert_tree("/a", serde_json::json!({ "shared.rs": "unknown parallel writer" })).await;
+        // End one turn first: the other must not be cancelled by the safety gate.
+        let model = fake.model("fake");
+        fake.send_text(&model, &pending[0], "First lane completed.");
+        fake.end_stream(&model, &pending[0]);
+        cx.run_until_parked();
+        assert_eq!(thread.read_with(cx, |thread, _| thread.architect_run().unwrap().history().len()), 3);
+        fake.send_text(&model, &pending[1], "Second lane completed.");
+        fake.end_stream(&model, &pending[1]);
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().unwrap();
+            assert!(matches!(run.outcome, Some(RunOutcome::Failed { .. })));
+            assert_eq!(run.history().len(), 3, "neither successor may be dispatched");
+            let state = RunState::from_checkpoint(run.snapshot().checkpoint.unwrap()).unwrap();
+            for source in ["left", "right"] {
+                assert!(state.graph.node_at(&path(source)).unwrap().result.is_some());
+            }
+            for target in ["left_next", "right_next"] {
+                assert_eq!(state.graph.node_at(&path(target)).unwrap().file_surface,
+                    Some(vec!["a/shared.rs".into()]));
+            }
+            assert_eq!(state.steps, 3);
+        });
+        fs.unpause_events_and_flush();
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn interrupted_creation_baseline_survives_reload_and_resume(cx: &mut TestAppContext) {
+        let (_connection, thread, acp_thread, _fake) = native_session(cx).await;
+        let fs = project_fs(&thread, cx);
+        let graph = linear_graph(&["source", "after"]);
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
+        });
+        cx.run_until_parked();
+        fs.pause_events();
+        fs.insert_tree("/a", serde_json::json!({ "interrupted.rs": "created before stop" })).await;
+        cx.update(|cx| stop_architect_run(&thread, Some(&acp_thread), cx));
+        cx.run_until_parked();
+        let checkpoint = thread.read_with(cx, |thread, _| thread.architect_run().unwrap().snapshot().checkpoint.unwrap());
+        let restored = RunState::from_checkpoint(checkpoint).unwrap();
+        assert!(restored.lanes[0].file_observation.is_some());
+        cx.update(|cx| {
+            thread.update(cx, |thread, _| thread.set_architect_run_control(Rc::new(RefCell::new(restored))));
+            resume_architect_run(thread.clone(), acp_thread.clone(), cx).unwrap();
+        });
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.architect_graph().unwrap().node_at(&path("after")).unwrap().file_surface,
+                Some(vec!["a/interrupted.rs".into()]));
+            let run = thread.architect_run().unwrap();
+            assert_eq!(run.history().len(), 2);
+            assert_eq!(run.control().unwrap().borrow().attempts, vec![(path("source"), 2)]);
+        });
+        cx.update(|cx| stop_architect_run(&thread, Some(&acp_thread), cx));
+        fs.unpause_events_and_flush();
+    }
+
+    #[gpui::test]
+    async fn unrelated_symlinks_do_not_block_a_project(cx: &mut TestAppContext) {
+        let (_connection, thread, acp_thread, fake) = native_session(cx).await;
+        let fs = project_fs(&thread, cx);
+        fs.insert_tree("/a", serde_json::json!({ "target.rs": "existing" })).await;
+        fs::Fs::create_symlink(
+            fs.as_ref(),
+            Path::new("/a/alias"),
+            PathBuf::from("/a/target.rs"),
+        )
+        .await
+        .unwrap();
+        fs::Fs::create_symlink(fs.as_ref(), Path::new("/a/directory_alias"), PathBuf::from("/a"))
+            .await.unwrap();
+        let project = thread.read_with(cx, |thread, _| thread.project().clone());
+        let graph = linear_graph(&["source"]);
+        let snapshot = project_file_snapshot(&project, &graph, &mut cx.to_async()).await.unwrap();
+        assert!(snapshot.files.contains_key("a/alias"));
+        assert!(!snapshot.files.keys().any(|file| file.contains("directory_alias/")));
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
+        });
+        cx.run_until_parked();
+        assert_running(&thread, "source", cx);
+        finish_pending_step(&fake);
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.architect_run().unwrap().outcome, Some(RunOutcome::Completed));
+        });
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn failed_post_turn_snapshot_resumes_without_repeating_completed_work(cx: &mut TestAppContext) {
+        let (_connection, thread, acp_thread, fake) = native_session(cx).await;
+        let fs = project_fs(&thread, cx);
+        let graph = linear_graph(&["source", "after"]);
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
+        });
+        cx.run_until_parked();
+        fs.pause_events();
+        fs::Fs::remove_dir(fs.as_ref(), Path::new("/a"), fs::RemoveOptions {
+            recursive: true,
+            ignore_if_not_exists: false,
+        }).await.unwrap();
+        finish_pending_step(&fake);
+        cx.run_until_parked();
+        let run_id = thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().unwrap();
+            assert!(matches!(run.outcome, Some(RunOutcome::Failed { .. })));
+            let state = RunState::from_checkpoint(run.snapshot().checkpoint.unwrap()).unwrap();
+            assert_eq!(state.lanes[0].next, Decision::Run(path("after")));
+            assert!(state.lanes[0].file_observation.is_some());
+            assert!(state.graph.node_at(&path("source")).unwrap().result.is_some());
+            run.snapshot().id
+        });
+        fs.insert_tree("/", serde_json::json!({ "a": { "recovered.rs": "recovered" } })).await;
+        cx.update(|cx| resume_architect_run(thread.clone(), acp_thread.clone(), cx).unwrap());
+        cx.run_until_parked();
+        assert_running(&thread, "after", cx);
+        thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().unwrap();
+            assert_eq!(run.snapshot().id, run_id);
+            assert_eq!(run.history().len(), 2);
+            let state = run.control().unwrap().borrow();
+            assert_eq!(state.attempts, vec![(path("source"), 1), (path("after"), 1)]);
+            assert_eq!(state.graph.node_at(&path("after")).unwrap().file_surface,
+                Some(vec!["a/recovered.rs".into()]));
+        });
+        finish_pending_step(&fake);
+        cx.run_until_parked();
+        fs.unpause_events_and_flush();
+    }
+
+    #[gpui::test]
+    async fn start_refuses_missing_and_case_aliased_parallel_surfaces(cx: &mut TestAppContext) {
+        let (_connection, thread, acp_thread, _fake) = native_session(cx).await;
+        for missing in [true, false] {
+            let mut graph = linear_graph(&["start", "left"]);
+            let mut right = ArchitectNode::new("right", "Right");
+            right.locked = true;
+            right.file_surface = Some(vec!["A/Shared.rs".into()]);
+            graph.add_node(right);
+            graph.connect("start", "right");
+            graph.node_at_mut(&path("left")).unwrap().file_surface =
+                if missing { None } else { Some(vec!["a/shared.rs".into()]) };
+            cx.update(|cx| {
+                thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+                assert!(matches!(start_architect_run(thread.clone(), acp_thread.clone(), graph, cx),
+                    Err(ArchitectRunStartError::Refused(RunRefusal::NotReady(_)))));
+            });
+            thread.read_with(cx, |thread, _| assert!(thread.architect_run().is_none()));
+        }
+    }
+
+    async fn successful_turn_survives_suspended_scan(cx: &mut TestAppContext, question: bool) {
+        let (connection, thread, acp_thread, fake) = native_session(cx).await;
+        let fs = project_fs(&thread, cx);
+        let mut graph = linear_graph(&["source", "after"]);
+        if question {
+            graph.edges[0].condition = EdgeCondition::LlmEvaluated {
+                question: "Continue after the non-idempotent operation?".into(),
+            };
+        }
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
+        });
+        cx.run_until_parked();
+        if question {
+            finish_pending_step(&fake);
+            cx.run_until_parked();
+        }
+        let (release_scan, scan_gate) = oneshot::channel();
+        thread.read_with(cx, |thread, _| {
+            thread.architect_run().unwrap().control().unwrap().borrow_mut().scan_gate = Some(scan_gate);
+        });
+        fs.pause_events();
+        fs.insert_tree("/a", serde_json::json!({ "created.rs": "non-idempotent output" })).await;
+        if question {
+            let requests: Vec<_> = fake.pending_completions().into_iter().filter(|request| {
+                request.messages.last().is_some_and(|message| {
+                    message.string_contents().contains("Continue after the non-idempotent operation?")
+                })
+            }).collect();
+            assert_eq!(requests.len(), 1);
+            fake.send_text(&fake.model("fake"), &requests[0], "YES");
+            fake.end_stream(&fake.model("fake"), &requests[0]);
+        } else {
+            finish_pending_step(&fake);
+        }
+        cx.run_until_parked();
+        let run_id = thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().unwrap();
+            let state = run.control().unwrap().borrow();
+            assert!(state.scan_gate.is_none(), "the post-turn scan reached its suspension point");
+            assert!(state.in_flight.is_empty());
+            assert!(!state.lanes[0].interrupted);
+            assert_eq!(state.lanes[0].next, Decision::Run(path("after")));
+            assert!(state.lanes[0].file_observation.is_some());
+            assert!(state.graph.node_at(&path("source")).unwrap().result.is_some());
+            run.snapshot().id
+        });
+        cx.update(|cx| stop_architect_run(&thread, Some(&acp_thread), cx));
+        drop(release_scan);
+        let saved = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
+        let (project, work_dirs) = acp_thread.read_with(cx, |thread, _| {
+            (thread.project().clone(), thread.work_dirs().cloned().unwrap_or_default())
+        });
+        let id = acp::SessionId::new(format!("{run_id}-suspended-scan-{question}"));
+        let database = cx.update(|cx| crate::ThreadsDatabase::connect(cx)).await.unwrap();
+        database.save_thread(id.clone(), saved, work_dirs.clone()).await.unwrap();
+        let restored_acp = cx.update(|cx| {
+            connection.clone().load_session(id.clone(), project, work_dirs, None, cx)
+        }).await.unwrap();
+        let restored = cx.update(|cx| connection.thread(&id, cx).unwrap());
+        cx.update(|cx| resume_architect_run(restored.clone(), restored_acp.clone(), cx).unwrap());
+        cx.run_until_parked();
+        assert_running(&restored, "after", cx);
+        restored.read_with(cx, |thread, _| {
+            let run = thread.architect_run().unwrap();
+            assert_eq!(run.snapshot().id, run_id);
+            let state = run.control().unwrap().borrow();
+            assert_eq!(state.attempts, vec![(path("source"), 1), (path("after"), 1)]);
+            assert_eq!(state.graph.node_at(&path("after")).unwrap().file_surface,
+                Some(vec!["a/created.rs".into()]));
+            assert_eq!(run.history().len(), 2);
+        });
+        finish_pending_step(&fake);
+        cx.run_until_parked();
+        fs.unpause_events_and_flush();
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn successful_step_is_not_repeated_after_stop_during_scan(cx: &mut TestAppContext) {
+        successful_turn_survives_suspended_scan(cx, false).await;
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn successful_verdict_is_not_repeated_after_stop_during_scan(cx: &mut TestAppContext) {
+        successful_turn_survives_suspended_scan(cx, true).await;
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn reconciled_observations_do_not_reapply_corrected_surfaces(cx: &mut TestAppContext) {
+        let (_connection, thread, acp_thread, _fake) = native_session(cx).await;
+        let fs = project_fs(&thread, cx);
+        let project = thread.read_with(cx, |thread, _| thread.project().clone());
+        let graph = linear_graph(&["source", "after"]);
+        let baseline = project_file_snapshot(&project, &graph, &mut cx.to_async()).await.unwrap();
+        let mut state = RunState::new(graph.clone(), PlanRun::start(&graph).unwrap());
+        state.lanes[0].file_observation = Some(FileObservation {
+            source: path("source"), snapshot: baseline.clone(),
+        });
+        state.pending_file_observations.push(FileObservation {
+            source: path("source"), snapshot: baseline,
+        });
+        let control = Rc::new(RefCell::new(state));
+        thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+        let driver = cx.update(|cx| Driver::new(&thread, acp_thread.clone(), control.clone(), cx));
+        fs.pause_events();
+        fs.insert_tree("/a", serde_json::json!({ "created.rs": "new" })).await;
+        driver.observe_project_files(&mut cx.to_async()).await.unwrap();
+        {
+            let state = control.borrow();
+            assert!(state.lanes[0].file_observation.as_ref().unwrap().snapshot.files.contains_key("a/created.rs"));
+            assert!(state.pending_file_observations[0].snapshot.files.contains_key("a/created.rs"));
+        }
+        let before = control.borrow().graph.clone();
+        let mut corrected = before.clone();
+        corrected.node_at_mut(&path("after")).unwrap().file_surface = Some(Vec::new());
+        let prepared = prepare_graph_update(&before, &corrected, &[], Some(&control.borrow())).unwrap();
+        let mut corrected_state = prepared.checkpoint.unwrap();
+        corrected_state.graph.lock_all();
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(|graph| *graph = corrected_state.graph.clone(), cx);
+        });
+        *control.borrow_mut() = corrected_state;
+        fs::Fs::remove_dir(fs.as_ref(), Path::new("/a"), fs::RemoveOptions {
+            recursive: true, ignore_if_not_exists: false,
+        }).await.unwrap();
+        assert!(driver.observe_project_files(&mut cx.to_async()).await.is_err());
+        let restored = RunState::from_checkpoint(control.borrow().checkpoint()).unwrap();
+        *control.borrow_mut() = restored;
+        fs.insert_tree("/", serde_json::json!({ "a": { "created.rs": "restored" } })).await;
+        driver.observe_project_files(&mut cx.to_async()).await.unwrap();
+        assert_eq!(control.borrow().graph.node_at(&path("after")).unwrap().file_surface, Some(Vec::new()));
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.architect_graph().unwrap().node_at(&path("after")).unwrap().file_surface, Some(Vec::new()));
+        });
+        fs.unpause_events_and_flush();
+    }
+
+    #[gpui::test]
+    async fn inventory_uses_visible_directories_and_includes_only_declared_ignored_files(cx: &mut TestAppContext) {
+        let (_connection, thread, _acp_thread, _fake) = native_session(cx).await;
+        let fs = project_fs(&thread, cx);
+        let project = thread.read_with(cx, |thread, _| thread.project().clone());
+        cx.update(|cx| {
+            settings::SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.project.worktree.file_scan_exclusions = Some(vec!["**/excluded".into()].into());
+                });
+            });
+        });
+        fs.insert_tree("/a", serde_json::json!({
+            ".gitignore": "target/\nnode_modules/\nignored/",
+            "source.rs": "source",
+            "target": { "build.rs": "build cache" },
+            "node_modules": { "dependency.js": "cache" },
+            "ignored": { "declared.rs": "explicit", "incidental.rs": "incidental" },
+            "excluded": { "generated.rs": "excluded" }
+        })).await;
+        let mut graph = linear_graph(&["source"]);
+        graph.node_at_mut(&path("source")).unwrap().file_surface = Some(vec!["a/ignored/declared.rs".into()]);
+        let before = project_file_snapshot(&project, &graph, &mut cx.to_async()).await.unwrap();
+        fs.insert_tree("/", serde_json::json!({
+            "external.rs": "external file",
+            "visible.rs": "single file",
+            "hidden": { "incidental.rs": "invisible project" }
+        })).await;
+        let _invisible_file = project.update(cx, |project, cx| project.create_worktree(Path::new("/external.rs"), false, cx)).await.unwrap();
+        let _visible_file = project.update(cx, |project, cx| project.create_worktree(Path::new("/visible.rs"), true, cx)).await.unwrap();
+        let _invisible_directory = project.update(cx, |project, cx| project.create_worktree(Path::new("/hidden"), false, cx)).await.unwrap();
+        let after = project_file_snapshot(&project, &graph, &mut cx.to_async()).await.unwrap();
+        assert!(after.created_since(&before).unwrap().is_empty());
+        assert_eq!(after.roots.len(), 1);
+        assert!(after.files.contains_key("a/source.rs"));
+        assert!(after.files.contains_key("a/ignored/declared.rs"));
+        for file in ["a/target/build.rs", "a/node_modules/dependency.js", "a/ignored/incidental.rs", "a/excluded/generated.rs"] {
+            assert!(!after.files.contains_key(file), "incidental file was discovered: {file}");
+        }
+    }
+
+    #[gpui::test(iterations = 20)]
+    async fn disappearing_incidental_entries_do_not_fail_inventory(cx: &mut TestAppContext) {
+        let (_connection, thread, _acp_thread, _fake) = native_session(cx).await;
+        let fs = project_fs(&thread, cx);
+        fs.insert_tree("/a", serde_json::json!({
+            "source.rs": "retained",
+            "temporary": { "one.rs": "temporary", "two.rs": "temporary", "nested": { "three.rs": "temporary" } }
+        })).await;
+        cx.run_until_parked();
+        fs.pause_events();
+        let project = thread.read_with(cx, |thread, _| thread.project().clone());
+        let graph = linear_graph(&["source"]);
+        let mut async_cx = cx.to_async();
+        let scan = project_file_snapshot(&project, &graph, &mut async_cx);
+        let remove = fs::Fs::remove_dir(fs.as_ref(), Path::new("/a/temporary"), fs::RemoveOptions {
+            recursive: true, ignore_if_not_exists: true,
+        });
+        let (snapshot, removed) = futures::join!(scan, remove);
+        removed.unwrap();
+        assert!(snapshot.unwrap().files.contains_key("a/source.rs"));
+        fs.unpause_events_and_flush();
+    }
+
+    #[gpui::test]
+    async fn only_concurrent_declared_aliases_block_inventory(cx: &mut TestAppContext) {
+        let (_connection, thread, _acp_thread, _fake) = native_session(cx).await;
+        let fs = project_fs(&thread, cx);
+        fs.insert_tree("/a", serde_json::json!({ "shared.rs": "existing" })).await;
+        fs::Fs::create_symlink(fs.as_ref(), Path::new("/a/alias.rs"), PathBuf::from("/a/shared.rs")).await.unwrap();
+        let project = thread.read_with(cx, |thread, _| thread.project().clone());
+        let mut graph = linear_graph(&["first", "second"]);
+        graph.node_at_mut(&path("first")).unwrap().file_surface = Some(vec!["a/shared.rs".into()]);
+        graph.node_at_mut(&path("second")).unwrap().file_surface = Some(vec!["a/alias.rs".into()]);
+        assert!(project_file_snapshot(&project, &graph, &mut cx.to_async()).await.is_ok());
+        graph.edges.clear();
+        let error = project_file_snapshot(&project, &graph, &mut cx.to_async()).await.err().unwrap();
+        assert!(error.to_string().contains("overlapping surfaces"));
     }
 
     fn checkpoint_value_count(value: &serde_json::Value) -> usize {

@@ -22,7 +22,7 @@
 //! is easy to get wrong testable without a model in the loop.
 
 use crate::{ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, GraphProblem, NodeId, NodePath};
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt::{self, Display, Write};
@@ -786,6 +786,7 @@ impl PlanRun {
 
     /// Validates deserialized positions before any driver can execute them.
     pub fn validate_checkpoint(&self, graph: &ArchitectGraph) -> Result<(), String> {
+        Self::validate_structure(graph).map_err(|error| error.to_string())?;
         if self.stack.len() > MAX_PLAN_DEPTH || self.history.len() > MAX_RUN_STEPS + MAX_NODE_VISITS
         {
             return Err("Checkpoint counters exceed run limits".into());
@@ -1368,6 +1369,95 @@ fn fork_needs_prerequisites(
         })
 }
 
+/// Pairs whose repeated visits cannot be ordered by reachability alone.
+/// Keep the proof beside the runner's fork/join and exclusive-repeat semantics.
+/// Both pair orientations are returned for callers iterating in graph order.
+pub(crate) fn potentially_concurrent_loop_steps(
+    graph: &ArchitectGraph,
+) -> HashSet<(NodeId, NodeId)> {
+    // Disabled routes cannot establish a join or a loop. Only routing is needed;
+    // copying nested plans and recorded results would make this proof expensive.
+    let graph = ArchitectGraph {
+        nodes: graph
+            .nodes
+            .iter()
+            .map(|node| ArchitectNode::new(node.id.clone(), ""))
+            .collect(),
+        edges: graph
+            .edges
+            .iter()
+            .filter(|edge| edge.max_repeats != Some(0))
+            .cloned()
+            .collect(),
+    };
+    let loop_edges: HashSet<_> = graph
+        .edges
+        .iter()
+        .filter(|edge| graph.is_loop_edge(edge))
+        .map(|edge| (&edge.from, &edge.to))
+        .collect();
+    let mut concurrent = HashSet::default();
+    if loop_edges.is_empty() {
+        return concurrent;
+    }
+    for node in &graph.nodes {
+        let conditional_destinations: HashSet<_> = graph
+            .edges_from(&node.id)
+            .filter(|edge| !edge.condition.is_always())
+            .map(|edge| &edge.to)
+            .collect();
+        let mut branches: Vec<(EdgeId, NodeId)> = Vec::new();
+        for edge in graph.edges_from(&node.id) {
+            // finish_step takes bounded plain repeats alone; answer takes a
+            // successful retry directly, not alongside its fallback exits.
+            // Multiple conditional destinations remain conservative candidates,
+            // rather than assuming their predicates are mutually exclusive.
+            let exclusive_repeat = loop_edges.contains(&(&edge.from, &edge.to))
+                && ((edge.condition.is_always() && edge.max_repeats.is_some())
+                    || (!edge.condition.is_always() && conditional_destinations.len() == 1));
+            if !exclusive_repeat && !branches.iter().any(|(_, target)| target == &edge.to) {
+                branches.push((edge.id.clone(), edge.to.clone()));
+            }
+        }
+        if branches.len() < 2 {
+            continue;
+        }
+        let entries: Vec<_> = branches.iter().map(|(_, target)| target.clone()).collect();
+        let region = reachable_before(&graph, &entries, &[]);
+        if !graph.edges.iter().any(|edge| {
+            region.contains(&edge.from) && loop_edges.contains(&(&edge.from, &edge.to))
+        }) {
+            continue;
+        }
+        let join = join_of(&graph, &node.id, &branches);
+        // Structured lanes stop at their join, so earlier work and work beyond
+        // that barrier do not conflict with the loop. Overlapping cyclic regions
+        // cannot use the prerequisite scheduler; keep those branches fail-closed.
+        let stops: Vec<_> = if fork_needs_prerequisites(&graph, &branches, &join) {
+            Vec::new()
+        } else {
+            join.into_iter().collect()
+        };
+        let regions: Vec<_> = entries
+            .iter()
+            .map(|entry| reachable_before(&graph, std::slice::from_ref(entry), &stops))
+            .collect();
+        for (index, first_region) in regions.iter().enumerate() {
+            for second_region in regions.iter().skip(index + 1) {
+                for first in first_region {
+                    for second in second_region {
+                        if first != second {
+                            concurrent.insert((first.clone(), second.clone()));
+                            concurrent.insert((second.clone(), first.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    concurrent
+}
+
 fn overlapping_regions(graph: &ArchitectGraph, entries: &[NodeId], stops: &[NodeId]) -> bool {
     let mut seen = Vec::new();
     for entry in entries {
@@ -1440,9 +1530,8 @@ fn distances_from(local: &ArchitectGraph, start: &NodeId) -> HashMap<NodeId, usi
 
 /// What a step running alongside others is told about them.
 ///
-/// Parallel steps share one working tree. Nothing isolates them from each
-/// other, so the brief has to: each keeps to its own work, and leaves alone
-/// what the others own and the commands that act on the whole repository.
+/// Parallel steps share one working tree. Their anticipated file surfaces
+/// provide coordination context, not permissions or modification restrictions.
 pub fn parallel_steps_prompt(graph: &ArchitectGraph, others: &[NodePath]) -> String {
     if others.is_empty() {
         return String::new();
@@ -1461,12 +1550,27 @@ pub fn parallel_steps_prompt(graph: &ArchitectGraph, others: &[NodePath]) -> Str
         } else {
             let _ = writeln!(prompt, "- {}: {intent}", node.title);
         }
+        let _ = writeln!(
+            prompt,
+            "  Existing-file surface: {}",
+            node.file_surface_description()
+        );
+        if node.has_subplan() {
+            match graph.effective_file_surface(path) {
+                Ok(files) => {
+                    let _ = writeln!(prompt, "  Including nested steps: {files:?}");
+                }
+                Err(reason) => {
+                    let _ = writeln!(prompt, "  Nested file surface is not ready: {reason}");
+                }
+            }
+        }
     }
     prompt.push_str(
-        "\nKeep to this step's own work. Do not change files or state that those steps own. Do \
-         not run commands that act on the whole repository, such as git commit, checkout, reset, \
-         stash or rebase, formatting or regenerating the whole project, or installing \
-         dependencies, unless this step requires it.\n",
+        "\nThese surfaces describe anticipated scope for advisory scheduling, not file \
+         permissions. Account for concurrent work when planning edits or repository-wide \
+         commands such as git commit, checkout, reset, stash, rebase, formatting, regeneration, \
+         or dependency installation. Report scope changes to keep coordination current.\n",
     );
     prompt
 }
@@ -1503,6 +1607,18 @@ pub fn step_prompt(
     }
 
     let _ = writeln!(prompt, "## Step {step_number}: {}", node.title);
+    let _ = writeln!(
+        prompt,
+        "\nExisting-file surface: {}",
+        node.file_surface_description()
+    );
+    prompt.push_str(
+        "This surface describes anticipated existing-file scope for advisory scheduling, \
+         not an edit allowlist or a restriction on which files you may modify. [] means no \
+         existing files are anticipated. Report scope changes using worktree-qualified \
+         paths (worktree/path) to keep scheduling information current. Report every newly \
+         created file by its worktree-qualified path so it can be added to downstream steps.\n",
+    );
 
     let handed_on = incoming_summaries(local, node);
     if !handed_on.is_empty() {
@@ -2474,6 +2590,139 @@ mod tests {
     }
 
     #[test]
+    fn an_outer_retry_restarts_all_nested_roots_after_a_local_retry_finishes() {
+        let mut nested = plain_graph(
+            &["before", "source", "next", "sibling"],
+            &[("before", "source"), ("source", "next")],
+        );
+        let mut local_retry = ArchitectEdge::new("local-retry", "next", "source");
+        local_retry.max_repeats = Some(1);
+        nested.edges.push(local_retry);
+        let mut graph = plain_graph(&["parent", "after"], &[("parent", "after")]);
+        graph.node_mut(&id("parent")).expect("parent").subplan = Some(Box::new(nested));
+        let mut outer_retry = ArchitectEdge::new("outer-retry", "after", "parent");
+        outer_retry.max_repeats = Some(1);
+        graph.edges.push(outer_retry);
+        let mut run = PlanRun::start(&graph).expect("nested retry plan");
+        let (steps, outcome) = run_lane(&mut run, &graph);
+        let iteration = vec![
+            path(&["parent", "before"]),
+            path(&["parent", "source"]),
+            path(&["parent", "next"]),
+            path(&["parent", "source"]),
+            path(&["parent", "next"]),
+            path(&["parent", "sibling"]),
+            path(&["after"]),
+        ];
+        assert_eq!(steps, [iteration.clone(), iteration].concat());
+        assert_eq!(outcome, RunOutcome::Completed);
+    }
+
+    #[test]
+    fn serial_retries_can_share_files_with_their_predecessors_and_successors() {
+        for conditional in [false, true] {
+            let mut graph = plain_graph(
+                &["before", "edit", "review", "after", "tail"],
+                &[("before", "edit"), ("edit", "review"), ("review", "after"), ("after", "tail")],
+            );
+            for node in &mut graph.nodes {
+                node.file_surface = Some(vec!["worktree/src/shared.rs".into()]);
+            }
+            let mut retry = ArchitectEdge::new("retry", "review", "edit");
+            retry.max_repeats = Some(1);
+            if conditional {
+                retry.condition = EdgeCondition::Objective { statement: "Needs another edit".into() };
+            }
+            graph.edges.push(retry);
+            assert!(graph.file_surface_problems().is_empty());
+            assert!(crate::compile_spec(&graph).is_ok());
+            let mut run = PlanRun::start(&graph).expect("serial file sharing");
+            assert_eq!(run.current(), path(&["before"]));
+            assert_eq!(run.finish_step(&graph), Decision::Run(path(&["edit"])));
+            assert_eq!(run.finish_step(&graph), Decision::Run(path(&["review"])));
+            let mut decision = run.finish_step(&graph);
+            if conditional {
+                assert!(matches!(decision, Decision::Ask(_)));
+                decision = run.answer(&graph, true);
+            }
+            assert_eq!(decision, Decision::Run(path(&["edit"])));
+            run.validate_checkpoint(&graph).expect("serial loop checkpoint");
+            assert_eq!(run.finish_step(&graph), Decision::Run(path(&["review"])));
+            assert_eq!(run.finish_step(&graph), Decision::Run(path(&["after"])));
+            assert_eq!(run.finish_step(&graph), Decision::Run(path(&["tail"])));
+            assert_eq!(run.finish_step(&graph), Decision::Done(RunOutcome::Completed));
+        }
+    }
+
+    #[test]
+    fn a_loop_lane_conflicts_with_its_peer_but_not_with_work_before_or_after_the_fork() {
+        let mut graph = plain_graph(
+            &["before", "split", "edit", "review", "peer", "join", "after"],
+            &[
+                ("before", "split"), ("split", "edit"), ("split", "peer"),
+                ("edit", "review"), ("review", "join"), ("peer", "join"), ("join", "after"),
+            ],
+        );
+        let mut retry = ArchitectEdge::new("retry", "review", "edit");
+        retry.max_repeats = Some(1);
+        graph.edges.push(retry);
+        for node in &mut graph.nodes {
+            node.file_surface = Some(vec!["worktree/src/shared.rs".into()]);
+        }
+        assert_eq!(graph.file_surface_problems(), vec![
+            GraphProblem::FileSurfaceOverlap {
+                first: id("edit"), second: id("peer"), file: "worktree/src/shared.rs".into(),
+            },
+            GraphProblem::FileSurfaceOverlap {
+                first: id("review"), second: id("peer"), file: "worktree/src/shared.rs".into(),
+            },
+        ]);
+        graph.node_mut(&id("peer")).expect("peer").file_surface = Some(vec!["worktree/peer.rs".into()]);
+        assert!(graph.file_surface_problems().is_empty());
+        let mut run = PlanRun::start(&graph).expect("disjoint loop lane");
+        assert_eq!(run.finish_step(&graph), Decision::Run(path(&["split"])));
+        assert!(matches!(run.finish_step(&graph), Decision::Fork { .. }));
+        let mut lanes = run.fork_lanes(&graph);
+        assert_eq!(lanes.len(), 2);
+        let (steps, outcome) = run_lane(lanes.first_mut().expect("loop lane"), &graph);
+        assert_eq!(steps, vec![path(&["edit"]), path(&["review"]), path(&["edit"]), path(&["review"])]);
+        assert_eq!(outcome, RunOutcome::Completed);
+        let (steps, outcome) = run_lane(lanes.get_mut(1).expect("peer lane"), &graph);
+        assert_eq!(steps, vec![path(&["peer"])]);
+        assert_eq!(outcome, RunOutcome::Completed);
+        assert_eq!(run.join(&graph), Decision::Run(path(&["join"])));
+        assert_eq!(run.finish_step(&graph), Decision::Run(path(&["after"])));
+        assert_eq!(run.finish_step(&graph), Decision::Done(RunOutcome::Completed));
+    }
+
+    #[test]
+    fn overlapping_loop_branches_remain_fail_closed_without_tainting_predecessors() {
+        let mut graph = plain_graph(
+            &["before", "split", "left", "right", "join", "after"],
+            &[
+                ("before", "split"), ("split", "left"), ("split", "right"),
+                ("left", "join"), ("right", "join"), ("join", "after"),
+            ],
+        );
+        let mut retry = ArchitectEdge::new("retry", "join", "left");
+        retry.max_repeats = Some(1);
+        graph.edges.push(retry);
+        for node in &mut graph.nodes {
+            node.file_surface = Some(vec!["worktree/src/shared.rs".into()]);
+        }
+        let problems = graph.file_surface_problems();
+        assert!(problems.contains(&GraphProblem::FileSurfaceOverlap {
+            first: id("left"), second: id("right"), file: "worktree/src/shared.rs".into(),
+        }));
+        assert!(!problems.iter().any(|problem| matches!(problem,
+            GraphProblem::FileSurfaceOverlap { first, second, .. }
+                if [id("before"), id("split")].contains(first)
+                    || [id("before"), id("split")].contains(second)
+        )));
+        assert!(PlanRun::start(&graph).is_err());
+    }
+
+    #[test]
     fn a_limited_plain_loop_repeats_on_its_own_before_the_fork() {
         let mut graph = plain_graph(
             &["draft", "polish", "left", "right"],
@@ -2482,6 +2731,13 @@ mod tests {
         let mut again = ArchitectEdge::new("again", "polish", "draft");
         again.max_repeats = Some(1);
         graph.edges.push(again);
+        for node in &mut graph.nodes {
+            node.file_surface = Some(vec![if node.id == id("right") {
+                "worktree/right.rs".into()
+            } else {
+                "worktree/shared.rs".into()
+            }]);
+        }
         assert_eq!(graph.blocking_problems(), vec![]);
 
         let mut run = PlanRun::start(&graph).unwrap();
@@ -2505,13 +2761,14 @@ mod tests {
     }
 
     #[test]
-    fn a_step_running_alongside_others_is_told_to_keep_to_its_own_work() {
+    fn a_parallel_step_receives_advisory_coordination_context() {
         let mut graph = plain_graph(&["a", "b", "c"], &[("a", "b"), ("a", "c")]);
         graph.node_mut(&id("c")).unwrap().intent = "Write the migration".into();
         let prompt = parallel_steps_prompt(&graph, &[path(&["c"])]);
         assert!(prompt.contains("C: Write the migration"), "{prompt}");
         assert!(prompt.contains("git commit"), "{prompt}");
-        assert!(prompt.contains("Keep to this step's own work"), "{prompt}");
+        assert!(prompt.contains("anticipated scope for advisory scheduling"), "{prompt}");
+        assert!(!prompt.contains("Do not change files"), "{prompt}");
         assert_eq!(parallel_steps_prompt(&graph, &[]), "");
     }
 
@@ -3031,6 +3288,47 @@ mod tests {
         value["stack"][0]["visits"]["join"] = serde_json::json!(1);
         let restored: PlanRun = serde_json::from_value(value).unwrap();
         assert!(restored.validate_checkpoint(&graph).is_err());
+    }
+
+    #[test]
+    fn starting_and_restoring_checkpoints_refuse_missing_or_conflicting_surfaces() {
+        let mut graph = plain_graph(&["root", "left", "right"], &[("root", "left"), ("root", "right")]);
+        let run = PlanRun::start(&graph).expect("empty explicit surfaces are runnable");
+        let saved = serde_json::to_value(&run).expect("save checkpoint");
+        let restored: PlanRun = serde_json::from_value(saved).expect("restore checkpoint");
+        for surface in [None, Some(vec!["worktree/../invalid.rs".into()])] {
+            graph.node_mut(&id("left")).expect("left").file_surface = surface;
+            assert!(PlanRun::start(&graph).is_err());
+            assert!(PlanRun::start_at(&graph, &path(&["left"])).is_err());
+            assert!(restored.validate_checkpoint(&graph).is_err());
+        }
+        for step in ["left", "right"] {
+            graph.node_mut(&id(step)).expect("branch").file_surface = Some(vec!["worktree/shared.rs".into()]);
+        }
+        assert!(PlanRun::start(&graph).is_err());
+        assert!(PlanRun::validate_structure(&graph).is_err());
+        assert!(restored.validate_checkpoint(&graph).is_err());
+        assert!(PlanRun::rebase_remaining(&graph, &[]).is_err());
+        graph.node_mut(&id("right")).expect("right").file_surface = Some(Vec::new());
+        restored.validate_checkpoint(&graph).expect("corrected surface");
+    }
+
+    #[test]
+    fn step_and_parallel_prompts_include_existing_file_contracts() {
+        let mut graph = plain_graph(&["left", "right"], &[]);
+        graph.node_mut(&id("left")).expect("left").file_surface = Some(vec!["worktree/src/left.rs".into()]);
+        let prompt = step_prompt(&graph, &path(&["left"]), 1, 1);
+        assert!(prompt.contains("worktree/src/left.rs"));
+        assert!(prompt.contains("anticipated existing-file scope for advisory scheduling"));
+        assert!(prompt.contains("not an edit allowlist or a restriction"));
+        assert!(!prompt.contains("Only touch existing files"));
+        assert!(!prompt.contains("stop and request a surface correction"));
+        assert!(prompt.contains("created file by its worktree-qualified path"));
+        let prompt = parallel_steps_prompt(&graph, &[path(&["left"])]);
+        assert!(prompt.contains("worktree/src/left.rs"));
+        assert!(step_prompt(&graph, &path(&["right"]), 1, 1).contains("no existing files anticipated"));
+        graph.node_mut(&id("right")).expect("right").file_surface = None;
+        assert!(step_prompt(&graph, &path(&["right"]), 1, 1).contains("MISSING"));
     }
 
     #[test]
