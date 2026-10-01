@@ -110,7 +110,9 @@ Every step runs as an ordinary turn, so tool permissions, sandboxing, and cancel
 
 ### Parallel branches {#parallel-branches}
 
-When a step has several plain connections out of it, every branch runs at the same time, each step in a conversation of its own. The branches meet at their join: the step every branch can reach that the slowest branch reaches soonest. Each branch stops short of the join, and once all of them have finished the join runs once, told what every branch reported. Branches that never meet run to their ends, and the plan then carries on as if that level had run out of steps.
+Independent branches of a structured fork run at the same time, each step in a conversation of its own. Each branch stops before the shared join, which runs once after the branches finish.
+
+When multiple roots or partially overlapping branches feed the same downstream work, the runner uses prerequisite tracking instead. These dependency regions execute ready steps serially: every incoming prerequisite must finish or be explicitly skipped by routing before a successor starts. A step with no selected incoming route is skipped, not executed merely because it is a nominal join. Unsupported cyclic overlaps stop with an explanation rather than executing out of order. `inspect_architect_run` with `readiness: true` reports readiness, routing selections, and waiting or skipped reasons.
 
 The branches share your working tree, so each parallel step is told which steps are running alongside it and asked to keep to its own work, leave alone what those steps own, and avoid commands that act on the whole repository, such as committing or formatting everything, unless its step needs them. If one branch fails, the others are stopped and the run ends with that failure.
 
@@ -120,7 +122,7 @@ Agents other than Zed's own run every step in the plan's conversation, so there 
 
 **Pause** starts no new steps and lets the steps already running finish, then waits. **Resume** carries on from exactly where the run paused.
 
-A run that was stopped or that failed can also be resumed, including after an API-key or provider error. Fix the configuration and choose **Resume**: interrupted steps run again as new attempts, while completed branches and their summaries are kept. Failures stay in run status and the affected step conversation; they do not send a new prompt into the main conversation. **Run** always starts again from the beginning with a clean slate. Checkpoints are kept in memory only, so a run cannot be resumed after Praxis restarts.
+A run that was stopped or that failed can also be resumed, including after an API-key or provider error. Fix the configuration and choose **Resume**: interrupted steps run again as new attempts, while completed branches and their summaries are kept. Failures stay in run status and the affected step conversation; they do not send a new prompt into the main conversation. **Run** always starts again from the beginning with a clean slate. Run checkpoints, events, visit history, and step-conversation links are saved with the thread. After a restart, interrupted execution stays stopped until you explicitly resume. In-flight work may need to be retried; this is not a transaction guaranteeing exactly-once filesystem or external-service effects. If a checkpoint is incompatible with the saved plan, history remains available but resume is refused.
 
 To start part way through, choose **Run From Here** on a step's right-click menu, or the play button in its inspector. The run starts at that step, even inside a nested plan, and the steps before it are not run again: what they last reported is what the later steps are told.
 
@@ -136,14 +138,31 @@ When a limit is reached, the run status records why execution stopped. The main 
 
 ### Editing a plan mid-run
 
-The main conversation has two coordinator tools:
+The main conversation has these coordinator tools:
 
-- `inspect_architect_run` reads status, paginated visit history, and the conversation for a specific step visit, addressed by its full nested path and visit ID. It can inspect both active and finished visits without changing execution.
-- `control_architect_run` can pause, interrupt, resume, change a step's model, or revise its goal, rules, and capture requirements. These execution changes require **Build** mode and the configured tool permission approval. Step agents cannot control sibling steps.
+- `inspect_architect_plan` reads the authoritative graph as paginated graph, node, and edge records, including full nested paths, entry points, model overrides, locks, positions, and execution readiness. Supply the returned revision on later pages to reject mixed-revision reads.
+- `inspect_architect_run` reads current or archived runs, paginated visits, saved step conversations, dependency readiness, events, and active tool calls. Visit IDs and full paths disambiguate repeated or nested steps.
+- `control_architect_run` can pause, interrupt, resume, change models, or revise pending briefs. `resume_at` selects an unfinished, eligible step from an inactive checkpoint without replaying completed results; unresolved prerequisites are refused. `set_step_models` applies a validated batch atomically without redrawing the graph. Copy each native model's `{provider, model}` object directly from `list_agents_and_models`'s `configuration` field.
+- `edit_architect_plan` previews targeted graph edits and applies only the returned preview token after permission approval. Operations insert/remove nodes and edges, reconnect edges, or move nodes on the canvas; moves do not reparent nodes.
+- `wait_architect_run` subscribes to execution transitions or user-input waits for up to 30 seconds. It returns immediately for available events, failures or stopped execution, or pending user input. Follow its event cursor rather than repeatedly polling. This is an on-demand observer, not a new agent started automatically in the background.
+
+Execution controls require **Build** mode and configured tool permission approval. Topology editing is also available in **Architect** mode but cannot start execution or approve locks. Step agents cannot control sibling steps.
 
 Pending step briefs and models can be changed during execution. Active work must be interrupted first, then revised and resumed. Approved brief revisions preserve locks and checkpoints; completed briefs cannot be rewritten. Model changes affect subsequent visits, never past conversations. Approval is rejected if the plan changes while permission is pending.
 
-These tools let you ask the main conversation to monitor and steer the run while it is executing; they do not start an independent, continuously polling coordinator. Structural changes still require redrafting, which clears the checkpoint and requires a new run. Ordinary canvas edits are not a substitute for the coordinator's checkpoint-preserving revision operation.
+### Previewing topology edits
+
+Preview reports changed paths, affected locks, invalidated results/checkpoints, retained results, routing consequences, validation problems, and whether the runtime can safely preserve its checkpoint. Nothing changes during preview. Tokens expire after five minutes, are single-use, and are rejected if the graph or run changes before approval.
+
+Stop execution before applying a topology edit. Execution-affecting changes reopen impacted locks for review and invalidate downstream consumers, including consumers of pinned summaries. Unaffected positions, results, run history, and transcript links remain. Relock reviewed steps before resuming; apply never silently approves them.
+
+Checkpoint rebasing currently supports flat acyclic topology updates and topology-preserving edits that do not invalidate finished nested work. Unsupported nested/cyclic rebases or uncertain retained branch verdicts are refused before mutation. The preview explains when a separate restart is required. Full `draft_plan` replacement is still available: it preserves positions for matching paths and archives the old run, but is not a checkpoint-preserving edit.
+
+### History and liveness
+
+Completed run histories and child-transcript links remain inspectable across revisions. The event journal keeps the latest 1,024 events and reports cursor gaps. At most 64 full draft revision snapshots are retained; layout movement is coalesced instead of storing a whole graph for every mouse move. Evicting old draft snapshots does not remove run histories or transcripts.
+
+Active-call inspection reports locally observed start and last-update times, status, known wait reasons, and cancellation requests. These are not backend heartbeats: a quiet tool may still be working, and a cancellation request does not prove that a backend process has stopped. Timestamps reconstructed during replay are not original execution times.
 
 ## Related settings
 

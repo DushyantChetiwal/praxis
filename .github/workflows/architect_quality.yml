@@ -122,6 +122,8 @@ jobs:
           cargo test --locked -p agent --lib tools::set_step_locks_tool::tests::
           cargo test --locked -p agent --lib internal_tests::test_set_step_locks_streaming_and_replay_avoid_thread_self_read -- --exact
           cargo test --locked -p agent --lib tools::architect_run_tool::tests::
+          cargo test --locked -p agent --lib tools::architect_plan_tool::tests::
+          cargo test --locked -p agent --lib internal_tests::test_available_native_agent_exposes_step_configuration -- --exact
           cargo test --locked -p agent --lib internal_tests::architect_coordinator_tool_tests::
           cargo test --locked -p agent --lib tools::exit_plan_mode_tool::tests::
           cargo test --locked -p agent --lib templates::tests::
@@ -156,6 +158,13 @@ jobs:
           cargo test --locked -p agent --lib internal_tests::test_cancelled_architect_turn_does_not_complete_a_reported_step -- --exact
           cargo test --locked -p agent --lib internal_tests::test_stopping_architect_execution_keeps_the_coordinator_turn_alive -- --exact
           cargo test --locked -p settings_ui --lib tool_permissions_setup::tests::
+
+      - name: Test Architect scheduling and durable history
+        run: |
+          cargo test --locked -p agent --lib architect_runner::checkpoint_tests::
+          cargo test --locked -p agent --lib internal_tests::architect_persistence_tests::
+          cargo test --locked -p agent --lib db::tests::test_architect_state_legacy_migration -- --exact
+          cargo test --locked -p acp_thread --lib test_tool_call_liveness
 
       - name: Test context limits and compaction
         run: |

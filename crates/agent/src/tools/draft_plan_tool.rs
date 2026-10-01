@@ -95,9 +95,9 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 ///
 /// ### Replacing an existing plan
 /// This call replaces the whole plan. Send the complete set of steps every
-/// time, including the ones that are unchanged. Positions the user has
-/// arranged are not preserved across a replacement, so do not redraw a plan
-/// the user has already arranged unless they ask for changes.
+/// time, including the ones that are unchanged. Reuse the same full node paths
+/// to preserve the user's canvas positions, including in nested plans. Only new
+/// steps use the proposed layout; replacing a plan does not rearrange kept steps.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct DraftPlanToolInput {
@@ -332,6 +332,64 @@ impl AgentTool for DraftPlanTool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn whole_replacement_preserves_positions_only_for_matching_full_paths() {
+        let proposal = json!({
+            "nodes": [
+                {"id": "left", "title": "Left", "steps": {
+                    "nodes": [{"id": "shared", "title": "Shared"}]
+                }},
+                {"id": "right", "title": "Right", "steps": {
+                    "nodes": [{"id": "shared", "title": "Shared"}]
+                }}
+            ]
+        });
+        let mut existing = serde_json::from_value::<ProposedGraph>(proposal.clone())
+            .expect("existing proposal")
+            .into_graph();
+        let left_path = architect::NodePath(vec!["left".into(), "shared".into()]);
+        let right_path = architect::NodePath(vec!["right".into(), "shared".into()]);
+        existing
+            .move_node_at(&left_path, architect::Position { x: -301.5, y: 77.0 })
+            .expect("left position");
+        existing
+            .move_node_at(&right_path, architect::Position { x: 925.0, y: -41.5 })
+            .expect("right position");
+        existing
+            .node_mut(&"left".into())
+            .expect("left")
+            .position = None;
+        let snapshot = existing.clone();
+        let mut proposal = proposal;
+        proposal["nodes"][1]["steps"]["nodes"]
+            .as_array_mut()
+            .expect("right children")
+            .push(json!({"id": "new", "title": "New"}));
+        let draft = serde_json::from_value::<ProposedGraph>(proposal)
+            .expect("replacement proposal")
+            .into_graph();
+        let new_path = architect::NodePath(vec!["right".into(), "new".into()]);
+        let new_position = draft.node_at(&new_path).expect("new node").position;
+        let merged = existing.merge_draft(draft).expect("merge replacement");
+        assert_eq!(existing, snapshot);
+        for path in [
+            architect::NodePath::root("left".into()),
+            architect::NodePath::root("right".into()),
+            left_path,
+            right_path,
+        ] {
+            assert_eq!(
+                merged.graph.node_at(&path).expect("retained node").position,
+                existing.node_at(&path).expect("existing node").position,
+            );
+        }
+        assert_eq!(
+            merged.graph.node_at(&new_path).expect("new node").position,
+            new_position,
+        );
+        assert!(new_position.is_some());
+    }
 
     #[test]
     fn draft_schema_and_nested_input_include_execution_models() {

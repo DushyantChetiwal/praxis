@@ -2739,6 +2739,7 @@ fn run_multi_workspace_sidebar_visual_tests(
                             ui_scroll_position: None,
                             draft_prompt: None,
                             architect_graph: None,
+                            persistent_architect: None,
                             session_mode: agent::SessionMode::default(),
                             sandboxed_terminal_temp_dir: None,
                             sandbox_grants: Default::default(),

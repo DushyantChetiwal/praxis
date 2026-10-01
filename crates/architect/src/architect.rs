@@ -8,10 +8,15 @@
 //! This crate is deliberately free of UI and app dependencies so the graph can
 //! be stored alongside a thread and exercised in plain unit tests.
 
+mod edit;
 mod layout;
 mod run;
 mod spec;
 
+pub use edit::{
+    GraphEdit, GraphEditError, GraphEditPreview, NodePosition, preview_graph_edits,
+    preview_graph_replacement,
+};
 pub use layout::{COLUMN_SPACING, Position, ROW_SPACING, layout_positions};
 pub use run::{
     Branch, Decision, MAX_NODE_VISITS, MAX_PLAN_DEPTH, MAX_RUN_STEPS, PlanRun, RunOutcome,
@@ -49,7 +54,7 @@ impl From<String> for NodeId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
 pub struct EdgeId(pub String);
 
 impl From<&str> for EdgeId {
@@ -96,7 +101,7 @@ impl EdgeCondition {
 ///
 /// This is what travels along an edge to the steps that follow, and what the
 /// step itself is reminded of when a loop brings it round again.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct StepResult {
     /// The step's own account of what it did, answering its `capture`.
     pub summary: String,
@@ -114,7 +119,7 @@ pub struct StepModel {
 }
 
 /// A single step in the plan.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ArchitectNode {
     pub id: NodeId,
     pub title: String,
@@ -142,12 +147,14 @@ pub struct ArchitectNode {
     pub pinned: bool,
     /// Where the node sits on the canvas. `None` until it has been laid out.
     #[serde(default)]
+    #[schemars(with = "Option<NodePosition>")]
     pub position: Option<Position>,
     /// A locked node is finished being deliberated and can no longer be edited.
     #[serde(default)]
     pub locked: bool,
     /// The thread used to deliberate this step, created on first use.
     #[serde(default)]
+    #[schemars(with = "Option<String>")]
     pub chat: Option<acp::SessionId>,
     /// A plan nested inside this step. Running the step runs this plan, and the
     /// step is done when the plan is.
@@ -207,7 +214,7 @@ impl From<&str> for ArchitectNode {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ArchitectEdge {
     pub id: EdgeId,
     pub from: NodeId,
@@ -242,7 +249,7 @@ impl ArchitectEdge {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ArchitectGraph {
     #[serde(default)]
     pub nodes: Vec<ArchitectNode>,
@@ -251,7 +258,7 @@ pub struct ArchitectGraph {
 }
 
 /// Something wrong with the graph that the user should see before running it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum GraphProblem {
     DuplicateNode(NodeId),
     /// An edge referring to a node that is not in the graph.

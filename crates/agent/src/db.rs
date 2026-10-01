@@ -84,6 +84,8 @@ pub struct DbThread {
     /// is deleted along with the thread.
     #[serde(default)]
     pub architect_graph: Option<architect::ArchitectGraph>,
+    #[serde(default)]
+    pub persistent_architect: Option<crate::PersistentArchitectState>,
     /// Whether the thread was last used for planning or building. Older saved
     /// threads default to Build to preserve their previous behavior.
     #[serde(default)]
@@ -177,6 +179,7 @@ impl SharedThread {
             draft_prompt: None,
             ui_scroll_position: None,
             architect_graph: None,
+            persistent_architect: None,
             session_mode: crate::SessionMode::default(),
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
@@ -365,6 +368,7 @@ impl DbThread {
             draft_prompt: None,
             ui_scroll_position: None,
             architect_graph: None,
+            persistent_architect: None,
             session_mode: crate::SessionMode::default(),
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
@@ -838,6 +842,7 @@ mod tests {
             draft_prompt: None,
             ui_scroll_position: None,
             architect_graph: None,
+            persistent_architect: None,
             session_mode: crate::SessionMode::default(),
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
@@ -957,6 +962,33 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    async fn test_architect_state_legacy_migration(cx: &mut TestAppContext) {
+        let database = ThreadsDatabase::new(cx.executor()).expect("database");
+        let legacy = DbThread::from_json(br#"{
+            "version": "0.3.0",
+            "title": "Legacy Architect conversation",
+            "messages": [],
+            "updated_at": "2024-01-01T00:00:00Z"
+        }"#).expect("pre-checkpoint thread must still deserialize");
+        assert!(legacy.persistent_architect.is_none());
+        let id = session_id("architect-legacy-state");
+        database.save_thread(id.clone(), legacy, PathList::default())
+            .await.expect("save migrated legacy thread");
+        let loaded = database.load_thread(id).await.expect("load")
+            .expect("legacy thread");
+        assert!(loaded.persistent_architect.is_none());
+        assert_eq!(loaded.session_mode, crate::SessionMode::Build);
+        let defaults: crate::PersistentArchitectState = serde_json::from_str("{}")
+            .expect("new state fields have backwards-compatible defaults");
+        assert_eq!(defaults.version, crate::ARCHITECT_STATE_VERSION);
+        assert_eq!(defaults.sequence, 0);
+        assert_eq!(defaults.discarded_revision_snapshots, 0);
+        assert!(defaults.events.is_empty());
+        assert!(defaults.archive.is_empty());
+        assert!(defaults.current.is_none());
+    }
+
     #[test]
     fn test_architect_graph_defaults_to_none() {
         let json = r#"{
@@ -971,6 +1003,7 @@ mod tests {
             db_thread.architect_graph.is_none(),
             "threads saved before Architect existed should still load"
         );
+        assert!(db_thread.persistent_architect.is_none());
         assert_eq!(
             db_thread.session_mode,
             crate::SessionMode::Build,

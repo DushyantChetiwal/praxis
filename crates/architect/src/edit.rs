@@ -1,0 +1,1322 @@
+//! Pure topology previews. Applying a preview, approving reopened locks, and
+//! retiring the reported checkpoints are separate responsibilities of the caller.
+
+use crate::{
+    ArchitectEdge, ArchitectGraph, ArchitectNode, EdgeId, GraphMutationError, GraphProblem,
+    MAX_PLAN_DEPTH, NodeId, NodePath, Position,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
+
+/// Canvas coordinates only; moving never reparents a step or changes its identity.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct NodePosition {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl From<NodePosition> for Position {
+    fn from(position: NodePosition) -> Self {
+        Self {
+            x: position.x,
+            y: position.y,
+        }
+    }
+}
+
+/// `parent: []` addresses the root graph; other parents address an existing
+/// subplan, including an empty one. Edge endpoints are IDs local to that graph.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GraphEdit {
+    InsertNode {
+        parent: NodePath,
+        node: ArchitectNode,
+    },
+    /// Incident edges are removed too, and listed in the routing consequences.
+    RemoveNode { path: NodePath },
+    MoveNode {
+        path: NodePath,
+        position: NodePosition,
+    },
+    InsertEdge {
+        parent: NodePath,
+        edge: ArchitectEdge,
+    },
+    RemoveEdge {
+        parent: NodePath,
+        edge_id: EdgeId,
+    },
+    ReconnectEdge {
+        parent: NodePath,
+        edge_id: EdgeId,
+        from: NodeId,
+        to: NodeId,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GraphEditPreview {
+    /// Candidate only. The caller must obtain approval and compare the live
+    /// graph with the source snapshot before replacing it (including positions).
+    pub graph: ArchitectGraph,
+    /// Directly changed paths, including layout, runtime state, and edge endpoints.
+    pub changed_steps: Vec<NodePath>,
+    /// Existing paths locked in either snapshot that are reopened or removed,
+    /// including composite parents. Newly inserted nodes are not existing locks.
+    pub affected_locks: Vec<NodePath>,
+    /// Checkpoint keys to retire, whether or not a result is currently attached.
+    /// Removed paths are included; historical run records are never modified.
+    pub invalidated_steps: Vec<NodePath>,
+    pub routing_changes: Vec<String>,
+    /// Existing graph validation, including nested paths and unlocked steps.
+    pub problems: Vec<GraphProblem>,
+    /// Structural validity alone does not authorize applying or running a plan.
+    pub is_valid: bool,
+    pub ready_to_run: bool,
+    /// Any actual edit needs approval, even when it changes only the layout.
+    pub requires_approval: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphEditError {
+    Mutation(GraphMutationError),
+    Problem(GraphProblem),
+    DuplicateEdge { parent: NodePath, edge_id: EdgeId },
+    DepthLimit { path: NodePath },
+    InvalidPosition { path: NodePath },
+}
+
+impl fmt::Display for GraphEditError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Mutation(error) => fmt::Display::fmt(error, formatter),
+            Self::Problem(problem) => fmt::Display::fmt(problem, formatter),
+            Self::DuplicateEdge { parent, edge_id } => write!(
+                formatter,
+                "duplicate connection {} in graph {}",
+                edge_id.0,
+                graph_name(parent)
+            ),
+            Self::DepthLimit { path } => write!(
+                formatter,
+                "step {path} exceeds the maximum plan depth of {MAX_PLAN_DEPTH}"
+            ),
+            Self::InvalidPosition { path } => {
+                write!(formatter, "step {path} needs finite canvas coordinates")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GraphEditError {}
+
+impl From<GraphMutationError> for GraphEditError {
+    fn from(error: GraphMutationError) -> Self {
+        Self::Mutation(error)
+    }
+}
+
+/// Applies operations sequentially to a private clone, then computes net impact
+/// against the source. Failure never exposes a partially applied graph. Cycles
+/// and other execution blockers are reported using the existing GraphProblem
+/// semantics: bounded/conditional loops are not arbitrarily rejected.
+///
+/// This deliberately bypasses mutation-time lock refusals only on the clone.
+/// Execution-affecting edits reopen impacted steps for explicit review; they
+/// never approve or relock them. No runner or checkpoint history is mutated.
+pub fn preview_graph_edits(
+    graph: &ArchitectGraph,
+    operations: &[GraphEdit],
+) -> Result<GraphEditPreview, GraphEditError> {
+    validate_addressability(graph, &NodePath::default())?;
+    let mut target = graph.clone();
+    for operation in operations {
+        apply_operation(&mut target, operation)?;
+        validate_addressability(&target, &NodePath::default())?;
+    }
+    Ok(graph_edit_impact(graph, target))
+}
+
+/// Previews replacing one graph snapshot with another without applying it.
+/// Both snapshots must have unambiguous paths, supported depths, and finite
+/// positions. Execution blockers are reported in the preview's `problems`.
+///
+/// Result-only and lock-only drift is reported in `changed_steps`, but does not
+/// invalidate execution. Unaffected results and locks come from `after`; semantic
+/// changes clear results and reopen locks only in the returned clone. Dependency
+/// traversal uses both snapshots, including their pinned-summary consumers.
+/// Neither input nor external checkpoint history is modified.
+pub fn preview_graph_replacement(
+    before: &ArchitectGraph,
+    after: &ArchitectGraph,
+) -> Result<GraphEditPreview, GraphEditError> {
+    validate_addressability(before, &NodePath::default())?;
+    validate_addressability(after, &NodePath::default())?;
+    Ok(graph_edit_impact(before, after.clone()))
+}
+
+fn graph_edit_impact(graph: &ArchitectGraph, mut target: ArchitectGraph) -> GraphEditPreview {
+    let mut before_nodes = BTreeMap::new();
+    let mut before_graphs = BTreeMap::new();
+    index_graph(
+        graph,
+        &NodePath::default(),
+        &mut before_nodes,
+        &mut before_graphs,
+    );
+    let mut after_nodes = BTreeMap::new();
+    let mut after_graphs = BTreeMap::new();
+    index_graph(
+        &target,
+        &NodePath::default(),
+        &mut after_nodes,
+        &mut after_graphs,
+    );
+
+    let mut changed = BTreeSet::new();
+    let mut execution_changes = BTreeSet::new();
+    for path in before_nodes.keys().chain(after_nodes.keys()) {
+        match (before_nodes.get(path), after_nodes.get(path)) {
+            (Some(before), Some(after)) => {
+                // A nested edit invalidates its composite result, not unrelated
+                // children of that composite. Compare each node's own payload.
+                let mut before_payload = (**before).clone();
+                let mut after_payload = (**after).clone();
+                before_payload.subplan = None;
+                after_payload.subplan = None;
+                before_payload.position = None;
+                after_payload.position = None;
+                // A frozen run may lag behind live results and review state.
+                // Those differences are not changes to what a step executes.
+                before_payload.result = None;
+                after_payload.result = None;
+                before_payload.locked = false;
+                after_payload.locked = false;
+                if before_payload != after_payload {
+                    changed.insert(path.clone());
+                    execution_changes.insert(path.clone());
+                }
+                if before.position != after.position
+                    || before.result != after.result
+                    || before.locked != after.locked
+                {
+                    changed.insert(path.clone());
+                }
+            }
+            _ => {
+                changed.insert(path.clone());
+                execution_changes.insert(path.clone());
+            }
+        }
+    }
+
+    let mut routing_changes = Vec::new();
+    let parents: BTreeSet<_> = before_graphs
+        .keys()
+        .chain(after_graphs.keys())
+        .cloned()
+        .collect();
+    for parent in parents {
+        let before = before_graphs.get(&parent).copied();
+        let after = after_graphs.get(&parent).copied();
+        let before_edges = before.map(|graph| graph.edges.as_slice()).unwrap_or_default();
+        let after_edges = after.map(|graph| graph.edges.as_slice()).unwrap_or_default();
+        let edge_ids: BTreeSet<_> = before_edges
+            .iter()
+            .chain(after_edges)
+            .map(|edge| edge.id.clone())
+            .collect();
+        for edge_id in edge_ids {
+            let old = before_edges.iter().find(|edge| edge.id == edge_id);
+            let new = after_edges.iter().find(|edge| edge.id == edge_id);
+            if old == new {
+                continue;
+            }
+            routing_changes.push(format!(
+                "Graph {}, connection {}: {} -> {}",
+                graph_name(&parent),
+                edge_id.0,
+                describe_route(old),
+                describe_route(new)
+            ));
+            for edge in old.into_iter().chain(new) {
+                for endpoint in [&edge.from, &edge.to] {
+                    let path = parent.child(endpoint.clone());
+                    changed.insert(path.clone());
+                    execution_changes.insert(path);
+                }
+            }
+        }
+        // Connection order can change branch/loop routing even when every
+        // connection keeps the same ID and payload.
+        let old_order: Vec<_> = before_edges.iter().map(|edge| &edge.id).collect();
+        let new_order: Vec<_> = after_edges.iter().map(|edge| &edge.id).collect();
+        if old_order != new_order
+            && before_edges.len() == after_edges.len()
+            && before_edges.iter().all(|edge| after_edges.contains(edge))
+        {
+            routing_changes.push(format!(
+                "Graph {}: connection order changed",
+                graph_name(&parent)
+            ));
+            for edge in before_edges {
+                let path = parent.child(edge.from.clone());
+                changed.insert(path.clone());
+                execution_changes.insert(path);
+            }
+        }
+        let old_nodes: Vec<_> = before
+            .into_iter()
+            .flat_map(|graph| graph.nodes.iter().map(|node| &node.id))
+            .collect();
+        let new_nodes: Vec<_> = after
+            .into_iter()
+            .flat_map(|graph| graph.nodes.iter().map(|node| &node.id))
+            .collect();
+        if old_nodes != new_nodes
+            && old_nodes.len() == new_nodes.len()
+            && old_nodes.iter().all(|id| new_nodes.contains(id))
+        {
+            routing_changes.push(format!("Graph {}: step order changed", graph_name(&parent)));
+            for id in old_nodes {
+                let path = parent.child(id.clone());
+                changed.insert(path.clone());
+                execution_changes.insert(path);
+            }
+        }
+        let old_roots = root_ids(before);
+        let new_roots = root_ids(after);
+        if old_roots != new_roots {
+            routing_changes.push(format!(
+                "Graph {}: entry steps changed from {old_roots:?} to {new_roots:?}",
+                graph_name(&parent)
+            ));
+            for id in old_roots.iter().chain(&new_roots) {
+                if !old_roots.contains(id) || !new_roots.contains(id) {
+                    execution_changes.insert(parent.child(id.clone()));
+                }
+            }
+        }
+    }
+
+    let invalidated = invalidation_closure(&execution_changes, &before_graphs, &after_graphs);
+    let affected_locks = invalidated
+        .iter()
+        .filter(|path| {
+            before_nodes.get(*path).is_some_and(|node| {
+                node.locked || after_nodes.get(*path).is_some_and(|node| node.locked)
+            })
+        })
+        .cloned()
+        .collect();
+    let requires_approval = graph != &target;
+    for path in &invalidated {
+        if let Some(node) = target.node_at_mut(path) {
+            node.result = None;
+            node.locked = false;
+        }
+    }
+    let problems = target.blocking_problems();
+    let is_valid = problems.iter().all(only_unlocked);
+    let ready_to_run = !target.is_empty() && problems.is_empty();
+    GraphEditPreview {
+        graph: target,
+        changed_steps: changed.into_iter().collect(),
+        affected_locks,
+        invalidated_steps: invalidated.into_iter().collect(),
+        routing_changes,
+        problems,
+        is_valid,
+        ready_to_run,
+        requires_approval,
+    }
+}
+
+fn only_unlocked(problem: &GraphProblem) -> bool {
+    match problem {
+        GraphProblem::Unlocked(_) => true,
+        GraphProblem::InSubplan { problem, .. } => only_unlocked(problem),
+        _ => false,
+    }
+}
+
+fn scoped_problem(parent: &NodePath, mut problem: GraphProblem) -> GraphProblem {
+    for node in parent.as_slice().iter().rev() {
+        problem = GraphProblem::InSubplan {
+            node: node.clone(),
+            problem: Box::new(problem),
+        };
+    }
+    problem
+}
+
+fn validate_addressability(graph: &ArchitectGraph, parent: &NodePath) -> Result<(), GraphEditError> {
+    let mut node_ids = BTreeSet::new();
+    for node in &graph.nodes {
+        let path = parent.child(node.id.clone());
+        if path.depth() > MAX_PLAN_DEPTH {
+            return Err(GraphEditError::DepthLimit { path });
+        }
+        if !node_ids.insert(&node.id) {
+            return Err(GraphEditError::Problem(scoped_problem(
+                parent,
+                GraphProblem::DuplicateNode(node.id.clone()),
+            )));
+        }
+        if node
+            .position
+            .is_some_and(|position| !position.x.is_finite() || !position.y.is_finite())
+        {
+            return Err(GraphEditError::InvalidPosition { path });
+        }
+        if let Some(subplan) = &node.subplan {
+            validate_addressability(subplan, &path)?;
+        }
+    }
+    let mut edge_ids = BTreeSet::new();
+    for edge in &graph.edges {
+        if !edge_ids.insert(&edge.id) {
+            return Err(GraphEditError::DuplicateEdge {
+                parent: parent.clone(),
+                edge_id: edge.id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn graph_at_mut<'a>(
+    mut graph: &'a mut ArchitectGraph,
+    parent: &NodePath,
+) -> Result<&'a mut ArchitectGraph, GraphMutationError> {
+    let mut walked = NodePath::default();
+    for id in parent.iter() {
+        walked = walked.child(id.clone());
+        let node = graph
+            .node_mut(id)
+            .ok_or_else(|| GraphMutationError::NodeNotFound {
+                path: walked.clone(),
+            })?;
+        graph = node
+            .subplan
+            .as_deref_mut()
+            .ok_or_else(|| GraphMutationError::MissingSubplan {
+                path: walked.clone(),
+            })?;
+    }
+    Ok(graph)
+}
+
+fn check_endpoints(
+    graph: &ArchitectGraph,
+    parent: &NodePath,
+    edge: &ArchitectEdge,
+) -> Result<(), GraphEditError> {
+    for endpoint in [&edge.from, &edge.to] {
+        if graph.node(endpoint).is_none() {
+            return Err(GraphEditError::Problem(scoped_problem(
+                parent,
+                GraphProblem::DanglingEdge {
+                    edge: edge.id.clone(),
+                    missing: endpoint.clone(),
+                },
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn apply_operation(graph: &mut ArchitectGraph, operation: &GraphEdit) -> Result<(), GraphEditError> {
+    match operation {
+        GraphEdit::InsertNode { parent, node } => {
+            let local = graph_at_mut(graph, parent)?;
+            if local.node(&node.id).is_some() {
+                return Err(GraphEditError::Problem(scoped_problem(
+                    parent,
+                    GraphProblem::DuplicateNode(node.id.clone()),
+                )));
+            }
+            local.nodes.push(node.clone());
+        }
+        GraphEdit::RemoveNode { path } => {
+            let id = path.leaf().ok_or(GraphMutationError::EmptyPath)?;
+            let parent = path.parent().unwrap_or_default();
+            let local = graph_at_mut(graph, &parent)?;
+            if local.node(id).is_none() {
+                return Err(GraphMutationError::NodeNotFound { path: path.clone() }.into());
+            }
+            local.remove_node(id);
+        }
+        GraphEdit::MoveNode { path, position } => {
+            if !position.x.is_finite() || !position.y.is_finite() {
+                return Err(GraphEditError::InvalidPosition { path: path.clone() });
+            }
+            graph.move_node_at(path, (*position).into())?;
+        }
+        GraphEdit::InsertEdge { parent, edge } => {
+            let local = graph_at_mut(graph, parent)?;
+            if local.edges.iter().any(|existing| existing.id == edge.id) {
+                return Err(GraphEditError::DuplicateEdge {
+                    parent: parent.clone(),
+                    edge_id: edge.id.clone(),
+                });
+            }
+            check_endpoints(local, parent, edge)?;
+            local.edges.push(edge.clone());
+        }
+        GraphEdit::RemoveEdge { parent, edge_id } => {
+            let local = graph_at_mut(graph, parent)?;
+            if !local.edges.iter().any(|edge| &edge.id == edge_id) {
+                return Err(GraphMutationError::EdgeNotFound {
+                    graph: parent.clone(),
+                    edge: edge_id.clone(),
+                }
+                .into());
+            }
+            local.disconnect(edge_id);
+        }
+        GraphEdit::ReconnectEdge {
+            parent,
+            edge_id,
+            from,
+            to,
+        } => {
+            let local = graph_at_mut(graph, parent)?;
+            let mut replacement = local
+                .edges
+                .iter()
+                .find(|edge| &edge.id == edge_id)
+                .cloned()
+                .ok_or_else(|| GraphMutationError::EdgeNotFound {
+                    graph: parent.clone(),
+                    edge: edge_id.clone(),
+                })?;
+            replacement.from = from.clone();
+            replacement.to = to.clone();
+            check_endpoints(local, parent, &replacement)?;
+            if let Some(edge) = local.edges.iter_mut().find(|edge| &edge.id == edge_id) {
+                *edge = replacement;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn index_graph<'a>(
+    graph: &'a ArchitectGraph,
+    parent: &NodePath,
+    nodes: &mut BTreeMap<NodePath, &'a ArchitectNode>,
+    graphs: &mut BTreeMap<NodePath, &'a ArchitectGraph>,
+) {
+    graphs.insert(parent.clone(), graph);
+    for node in &graph.nodes {
+        let path = parent.child(node.id.clone());
+        nodes.insert(path.clone(), node);
+        if let Some(subplan) = &node.subplan {
+            index_graph(subplan, &path, nodes, graphs);
+        }
+    }
+}
+
+fn graph_name(parent: &NodePath) -> String {
+    if parent.is_empty() {
+        "(root)".into()
+    } else {
+        parent.to_string()
+    }
+}
+
+fn describe_route(edge: Option<&ArchitectEdge>) -> String {
+    match edge {
+        Some(edge) => format!(
+            "{} -> {} ({:?}, max_repeats={:?})",
+            edge.from, edge.to, edge.condition, edge.max_repeats
+        ),
+        None => "absent".into(),
+    }
+}
+
+fn root_ids(graph: Option<&ArchitectGraph>) -> Vec<NodeId> {
+    graph.map(ArchitectGraph::roots).unwrap_or_default()
+}
+
+fn invalidation_closure(
+    seeds: &BTreeSet<NodePath>,
+    before: &BTreeMap<NodePath, &ArchitectGraph>,
+    after: &BTreeMap<NodePath, &ArchitectGraph>,
+) -> BTreeSet<NodePath> {
+    let mut queue: VecDeque<_> = seeds.iter().cloned().map(|path| (path, true)).collect();
+    let mut invalidated = BTreeSet::new();
+    let mut expanded = BTreeSet::new();
+    while let Some((path, descend)) = queue.pop_front() {
+        let first_visit = invalidated.insert(path.clone());
+        let expand_children = descend && expanded.insert(path.clone());
+        if !first_visit && !expand_children {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            // Recompute the composite handoff, but preserve unaffected siblings.
+            queue.push_back((parent, false));
+        }
+        let parent = path.parent().unwrap_or_default();
+        let Some(id) = path.leaf() else {
+            continue;
+        };
+        for graphs in [before, after] {
+            let Some(local) = graphs.get(&parent) else {
+                continue;
+            };
+            if expand_children {
+                if let Some(subplan) = graphs.get(&path) {
+                    queue.extend(
+                        subplan
+                            .nodes
+                            .iter()
+                            .map(|node| (path.child(node.id.clone()), true)),
+                    );
+                }
+            }
+            for edge in local.edges_from(id) {
+                queue.push_back((parent.child(edge.to.clone()), true));
+            }
+            // Pinned summaries feed all steps in their containing graph, not
+            // just explicit successors (the same scope as incoming_summaries).
+            if local.node(id).is_some_and(|node| node.pinned) {
+                queue.extend(
+                    local
+                        .nodes
+                        .iter()
+                        .filter(|node| &node.id != id)
+                        .map(|node| (parent.child(node.id.clone()), true)),
+                );
+            }
+        }
+    }
+    invalidated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{EdgeCondition, StepResult};
+
+    fn path(ids: &[&str]) -> NodePath {
+        NodePath(ids.iter().map(|id| NodeId::from(*id)).collect())
+    }
+
+    fn settled_node(id: &str) -> ArchitectNode {
+        let mut node = ArchitectNode::new(id, id);
+        node.locked = true;
+        node.position = Some(Position { x: 13.5, y: -27.0 });
+        node.result = Some(StepResult {
+            summary: format!("Completed {id}"),
+            attempt: 2,
+        });
+        node.chat = Some(crate::acp::SessionId::new(format!("chat-{id}")));
+        node
+    }
+
+    fn local_graph() -> ArchitectGraph {
+        ArchitectGraph {
+            nodes: ["a", "b", "c", "sibling"].map(settled_node).to_vec(),
+            edges: vec![
+                ArchitectEdge::new("ab", "a", "b"),
+                ArchitectEdge::new("bc", "b", "c"),
+            ],
+        }
+    }
+
+    fn nested_graph() -> ArchitectGraph {
+        let mut left = settled_node("left");
+        left.subplan = Some(Box::new(local_graph()));
+        let mut right = settled_node("right");
+        right.subplan = Some(Box::new(local_graph()));
+        ArchitectGraph {
+            nodes: vec![left, right, settled_node("ship")],
+            edges: vec![ArchitectEdge::new("ship-left", "left", "ship")],
+        }
+    }
+
+    #[test]
+    fn replacement_and_targeted_edits_share_the_same_impact() {
+        let before = nested_graph();
+        let operations = [
+            GraphEdit::RemoveNode {
+                path: path(&["left", "b"]),
+            },
+            GraphEdit::MoveNode {
+                path: path(&["right", "a"]),
+                position: NodePosition { x: 42.0, y: -19.0 },
+            },
+        ];
+        let mut after = before.clone();
+        for operation in &operations {
+            apply_operation(&mut after, operation).expect("candidate edit");
+        }
+        let before_snapshot = before.clone();
+        let after_snapshot = after.clone();
+        assert_eq!(
+            preview_graph_replacement(&before, &after).expect("replacement preview"),
+            preview_graph_edits(&before, &operations).expect("targeted preview")
+        );
+        assert_eq!(before, before_snapshot);
+        assert_eq!(after, after_snapshot);
+    }
+
+    #[test]
+    fn replacement_invalidation_uses_pinned_consumers_in_both_snapshots() {
+        for (was_pinned, is_pinned) in [(true, true), (true, false), (false, true)] {
+            let mut before = nested_graph();
+            let changed_path = path(&["left", "a"]);
+            let consumer_path = path(&["left", "sibling"]);
+            before.node_at_mut(&changed_path).expect("changed node").pinned = was_pinned;
+            before.node_at_mut(&consumer_path).expect("consumer").locked = false;
+            let mut after = before.clone();
+            let changed_node = after.node_at_mut(&changed_path).expect("changed node");
+            changed_node.intent = "A different execution contract".into();
+            changed_node.pinned = is_pinned;
+            after.node_at_mut(&consumer_path).expect("consumer").locked = true;
+            let unaffected = after.node_at_mut(&path(&["right", "a"])).expect("unaffected");
+            unaffected.result = Some(StepResult {
+                summary: "New live result unrelated to this edit".into(),
+                attempt: 5,
+            });
+            unaffected.locked = false;
+            let before_snapshot = before.clone();
+            let after_snapshot = after.clone();
+            let preview = preview_graph_replacement(&before, &after).expect("replacement");
+            let expected = vec![
+                path(&["left"]),
+                path(&["left", "a"]),
+                path(&["left", "b"]),
+                path(&["left", "c"]),
+                consumer_path,
+                path(&["ship"]),
+            ];
+            assert_eq!(preview.invalidated_steps, expected);
+            assert_eq!(preview.affected_locks, expected);
+            for invalidated in &preview.invalidated_steps {
+                let node = preview.graph.node_at(invalidated).expect("invalidated node");
+                assert!(node.result.is_none());
+                assert!(!node.locked);
+            }
+            assert_eq!(preview.graph.node(&"right".into()), after.node(&"right".into()));
+            assert_eq!(before, before_snapshot);
+            assert_eq!(after, after_snapshot);
+        }
+    }
+
+    #[test]
+    fn replacement_result_and_lock_drift_does_not_invalidate_execution() {
+        let mut before = nested_graph();
+        let changed_path = path(&["left", "a"]);
+        before.node_mut(&"left".into()).expect("parent").pinned = true;
+        let changed_node = before.node_at_mut(&changed_path).expect("changed node");
+        changed_node.pinned = true;
+        let old_result = changed_node.result.clone();
+        let new_result = Some(StepResult {
+            summary: "A new runtime checkpoint".into(),
+            attempt: 7,
+        });
+        let before_snapshot = before.clone();
+        for (result, locked) in [
+            (None, true),
+            (new_result.clone(), true),
+            (old_result, false),
+            (new_result, false),
+        ] {
+            let mut after = before.clone();
+            let changed_node = after.node_at_mut(&changed_path).expect("changed node");
+            changed_node.result = result;
+            changed_node.locked = locked;
+            let after_snapshot = after.clone();
+            let preview = preview_graph_replacement(&before, &after).expect("runtime drift");
+            assert_eq!(preview.graph, after);
+            assert_eq!(preview.changed_steps, vec![changed_path.clone()]);
+            assert!(preview.invalidated_steps.is_empty());
+            assert!(preview.affected_locks.is_empty());
+            assert!(preview.routing_changes.is_empty());
+            assert!(preview.is_valid);
+            assert_eq!(preview.ready_to_run, locked);
+            assert!(preview.requires_approval);
+            assert_eq!(before, before_snapshot);
+            assert_eq!(after, after_snapshot);
+        }
+    }
+
+    #[test]
+    fn replacement_validates_target_addressability_before_computing_impact() {
+        let before = nested_graph();
+        let before_snapshot = before.clone();
+        let mut duplicate_node = before.clone();
+        duplicate_node.nodes.push(settled_node("left"));
+        assert!(matches!(
+            preview_graph_replacement(&before, &duplicate_node),
+            Err(GraphEditError::Problem(GraphProblem::DuplicateNode(_)))
+        ));
+        let mut duplicate_edge = before.clone();
+        duplicate_edge.edges.push(ArchitectEdge::new("ship-left", "right", "ship"));
+        assert!(matches!(
+            preview_graph_replacement(&before, &duplicate_edge),
+            Err(GraphEditError::DuplicateEdge { .. })
+        ));
+        let mut invalid_position = before.clone();
+        invalid_position.node_mut(&"left".into()).expect("left").position = Some(Position {
+            x: f32::INFINITY,
+            y: 0.0,
+        });
+        assert!(matches!(
+            preview_graph_replacement(&before, &invalid_position),
+            Err(GraphEditError::InvalidPosition { .. })
+        ));
+        let mut too_deep = local_graph();
+        for _ in 0..MAX_PLAN_DEPTH {
+            let mut parent = settled_node("parent");
+            parent.subplan = Some(Box::new(too_deep));
+            too_deep = ArchitectGraph {
+                nodes: vec![parent],
+                edges: vec![],
+            };
+        }
+        assert!(matches!(
+            preview_graph_replacement(&before, &too_deep),
+            Err(GraphEditError::DepthLimit { .. })
+        ));
+        assert_eq!(before, before_snapshot);
+    }
+
+    #[test]
+    fn replacement_reports_execution_blockers_without_applying_the_candidate() {
+        let before = local_graph();
+        let mut after = before.clone();
+        after.edges.push(ArchitectEdge::new("loop", "c", "a"));
+        let after_snapshot = after.clone();
+        let preview = preview_graph_replacement(&before, &after).expect("loop preview");
+        assert!(
+            preview
+                .problems
+                .iter()
+                .any(|problem| matches!(problem, GraphProblem::EndlessLoop(_)))
+        );
+        assert!(!preview.is_valid);
+        assert!(!preview.ready_to_run);
+        assert_eq!(after, after_snapshot);
+    }
+
+    #[test]
+    fn nested_removal_reopens_impact_without_touching_siblings_or_source() {
+        let graph = nested_graph();
+        let snapshot = graph.clone();
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::RemoveNode {
+                path: path(&["left", "b"]),
+            }],
+        )
+        .expect("removal should preview");
+        let expected = vec![
+            path(&["left"]),
+            path(&["left", "a"]),
+            path(&["left", "b"]),
+            path(&["left", "c"]),
+            path(&["ship"]),
+        ];
+        assert_eq!(graph, snapshot);
+        assert_eq!(preview.invalidated_steps, expected);
+        assert_eq!(preview.affected_locks, expected);
+        assert_eq!(
+            preview.changed_steps,
+            vec![
+                path(&["left", "a"]),
+                path(&["left", "b"]),
+                path(&["left", "c"]),
+            ]
+        );
+        for retained in [path(&["right"]), path(&["left", "sibling"])] {
+            assert_eq!(preview.graph.node_at(&retained), graph.node_at(&retained));
+        }
+        for invalidated in &preview.invalidated_steps {
+            if let Some(node) = preview.graph.node_at(invalidated) {
+                assert!(!node.locked);
+                assert!(node.result.is_none());
+                let original = graph.node_at(invalidated).expect("original node");
+                assert_eq!(node.position, original.position);
+                assert_eq!(node.chat, original.chat);
+            }
+        }
+        assert_eq!(preview.graph.edges, graph.edges);
+        for removed_edge in ["ab", "bc"] {
+            assert!(
+                preview.routing_changes.iter().any(|change| {
+                    change.contains(removed_edge) && change.contains("absent")
+                })
+            );
+        }
+        assert!(preview.is_valid);
+        assert!(!preview.ready_to_run);
+        assert!(preview.requires_approval);
+        assert!(
+            preview
+                .problems
+                .contains(&GraphProblem::Unlocked("left".into()))
+        );
+    }
+
+    #[test]
+    fn canvas_move_preserves_nested_locks_results_and_routing() {
+        let graph = nested_graph();
+        let moved = path(&["left", "a"]);
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::MoveNode {
+                path: moved.clone(),
+                position: NodePosition {
+                    x: -100.25,
+                    y: 45.0,
+                },
+            }],
+        )
+        .expect("locked steps may move");
+        let mut expected = graph.clone();
+        expected.node_at_mut(&moved).expect("moved node").position = Some(Position {
+            x: -100.25,
+            y: 45.0,
+        });
+        assert_eq!(preview.graph, expected);
+        assert_eq!(preview.changed_steps, vec![moved]);
+        assert!(preview.invalidated_steps.is_empty());
+        assert!(preview.affected_locks.is_empty());
+        assert!(preview.routing_changes.is_empty());
+        assert!(preview.problems.is_empty());
+        assert!(preview.ready_to_run);
+        assert!(preview.requires_approval);
+        assert_ne!(
+            preview.graph, graph,
+            "position changes must stale a revision snapshot"
+        );
+    }
+
+    #[test]
+    fn reconnect_invalidates_transitively_in_both_graphs_and_preserves_edge_metadata() {
+        let mut graph = local_graph();
+        graph.nodes.extend([settled_node("d"), settled_node("e")]);
+        graph.edges.push(ArchitectEdge::new("de", "d", "e"));
+        let edge = graph
+            .edges
+            .iter_mut()
+            .find(|edge| edge.id == EdgeId::from("ab"))
+            .expect("edge");
+        edge.condition = EdgeCondition::Objective {
+            statement: "Tests passed".into(),
+        };
+        edge.max_repeats = Some(3);
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::ReconnectEdge {
+                parent: NodePath::default(),
+                edge_id: "ab".into(),
+                from: "a".into(),
+                to: "d".into(),
+            }],
+        )
+        .expect("reconnect");
+        assert_eq!(
+            preview.invalidated_steps,
+            ["a", "b", "c", "d", "e"].map(|id| path(&[id]))
+        );
+        assert_eq!(
+            preview.graph.node(&"sibling".into()),
+            graph.node(&"sibling".into())
+        );
+        let original = graph.edges.first().expect("original edge");
+        let edited = preview.graph.edges.first().expect("edited edge");
+        assert_eq!(edited.id, original.id);
+        assert_eq!(edited.condition, original.condition);
+        assert_eq!(edited.max_repeats, original.max_repeats);
+        assert_eq!(edited.to, NodeId::from("d"));
+        assert_eq!(preview.graph.edges.get(1..), graph.edges.get(1..));
+    }
+
+    #[test]
+    fn removal_of_a_composite_includes_all_checkpoint_descendants() {
+        let graph = nested_graph();
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::RemoveNode {
+                path: path(&["left"]),
+            }],
+        )
+        .expect("remove composite");
+        for removed in ["a", "b", "c", "sibling"] {
+            assert!(
+                preview
+                    .invalidated_steps
+                    .contains(&path(&["left", removed]))
+            );
+        }
+        assert!(preview.invalidated_steps.contains(&path(&["ship"])));
+        assert_eq!(
+            preview.graph.node(&"right".into()),
+            graph.node(&"right".into())
+        );
+        assert!(preview.graph.edges.is_empty());
+    }
+
+    #[test]
+    fn incoming_edits_invalidate_descendants_of_a_downstream_composite() {
+        let mut graph = nested_graph();
+        graph.nodes.push(settled_node("start"));
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::InsertEdge {
+                parent: NodePath::default(),
+                edge: ArchitectEdge::new("enter", "start", "left"),
+            }],
+        )
+        .expect("insert edge");
+        for child in ["a", "b", "c", "sibling"] {
+            assert!(preview.invalidated_steps.contains(&path(&["left", child])));
+        }
+        assert_eq!(
+            preview.graph.node(&"right".into()),
+            graph.node(&"right".into())
+        );
+    }
+
+    #[test]
+    fn insert_into_empty_nested_graph_uses_full_path_and_drops_supplied_completion() {
+        let mut graph = nested_graph();
+        graph.node_mut(&"left".into()).expect("left").subplan = Some(Box::default());
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::InsertNode {
+                parent: path(&["left"]),
+                node: settled_node("a"),
+            }],
+        )
+        .expect("insert into empty subplan");
+        let inserted = preview
+            .graph
+            .node_at(&path(&["left", "a"]))
+            .expect("inserted");
+        assert!(!inserted.locked);
+        assert!(inserted.result.is_none());
+        assert_eq!(inserted.position, settled_node("a").position);
+        assert_eq!(
+            preview.graph.node(&"right".into()),
+            graph.node(&"right".into())
+        );
+        assert_eq!(
+            preview.affected_locks,
+            vec![path(&["left"]), path(&["ship"])]
+        );
+    }
+
+    #[test]
+    fn pinned_result_invalidation_includes_implicit_consumers() {
+        let mut graph = local_graph();
+        graph.node_mut(&"a".into()).expect("a").pinned = true;
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::RemoveNode { path: path(&["a"]) }],
+        )
+        .expect("remove pinned");
+        assert!(preview.invalidated_steps.contains(&path(&["sibling"])));
+        assert!(
+            preview
+                .graph
+                .node(&"sibling".into())
+                .expect("sibling")
+                .result
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn operations_are_atomic_and_reject_ambiguous_or_missing_addresses() {
+        let graph = nested_graph();
+        let snapshot = graph.clone();
+        let failures = vec![
+            GraphEdit::InsertNode {
+                parent: path(&["left"]),
+                node: settled_node("a"),
+            },
+            GraphEdit::InsertEdge {
+                parent: path(&["left"]),
+                edge: ArchitectEdge::new("ab", "a", "b"),
+            },
+            GraphEdit::InsertEdge {
+                parent: path(&["left"]),
+                edge: ArchitectEdge::new("cross", "a", "ship"),
+            },
+            GraphEdit::ReconnectEdge {
+                parent: path(&["left"]),
+                edge_id: "ab".into(),
+                from: "missing".into(),
+                to: "b".into(),
+            },
+            GraphEdit::RemoveNode {
+                path: NodePath::default(),
+            },
+            GraphEdit::RemoveNode {
+                path: path(&["missing"]),
+            },
+            GraphEdit::RemoveEdge {
+                parent: path(&["left"]),
+                edge_id: "missing".into(),
+            },
+            GraphEdit::InsertNode {
+                parent: path(&["ship"]),
+                node: settled_node("new"),
+            },
+        ];
+        for failure in failures {
+            let operations = [
+                GraphEdit::RemoveNode {
+                    path: path(&["right"]),
+                },
+                failure,
+            ];
+            assert!(preview_graph_edits(&graph, &operations).is_err());
+            assert_eq!(graph, snapshot);
+        }
+    }
+
+    #[test]
+    fn coordinates_must_be_finite_even_when_inserting_a_subtree() {
+        let graph = nested_graph();
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for position in [
+                NodePosition { x: invalid, y: 0.0 },
+                NodePosition { x: 0.0, y: invalid },
+            ] {
+                assert!(matches!(
+                    preview_graph_edits(
+                        &graph,
+                        &[GraphEdit::MoveNode {
+                            path: path(&["left", "a"]),
+                            position,
+                        }]
+                    ),
+                    Err(GraphEditError::InvalidPosition { .. })
+                ));
+                let mut node = settled_node("new");
+                node.position = Some(position.into());
+                assert!(matches!(
+                    preview_graph_edits(
+                        &graph,
+                        &[GraphEdit::InsertNode {
+                            parent: path(&["left"]),
+                            node,
+                        }]
+                    ),
+                    Err(GraphEditError::InvalidPosition { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn inserted_subtrees_validate_duplicate_ids_and_depth() {
+        let mut node = settled_node("container");
+        let mut subplan = local_graph();
+        subplan.nodes.push(settled_node("a"));
+        node.subplan = Some(Box::new(subplan));
+        assert!(matches!(
+            preview_graph_edits(
+                &ArchitectGraph::default(),
+                &[GraphEdit::InsertNode {
+                    parent: NodePath::default(),
+                    node,
+                }]
+            ),
+            Err(GraphEditError::Problem(GraphProblem::InSubplan { .. }))
+        ));
+
+        let mut node = settled_node("leaf");
+        for _ in 1..MAX_PLAN_DEPTH {
+            let mut parent = settled_node("container");
+            parent.subplan = Some(Box::new(ArchitectGraph {
+                nodes: vec![node],
+                edges: vec![],
+            }));
+            node = parent;
+        }
+        assert!(
+            preview_graph_edits(
+                &ArchitectGraph::default(),
+                &[GraphEdit::InsertNode {
+                    parent: NodePath::default(),
+                    node: node.clone(),
+                }]
+            )
+            .is_ok()
+        );
+        let mut parent = settled_node("too-deep");
+        parent.subplan = Some(Box::new(ArchitectGraph {
+            nodes: vec![node],
+            edges: vec![],
+        }));
+        assert!(matches!(
+            preview_graph_edits(
+                &ArchitectGraph::default(),
+                &[GraphEdit::InsertNode {
+                    parent: NodePath::default(),
+                    node: parent,
+                }]
+            ),
+            Err(GraphEditError::DepthLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn previews_use_existing_cycle_and_condition_validation_and_never_fake_readiness() {
+        let graph = ArchitectGraph {
+            nodes: vec![settled_node("a")],
+            edges: vec![],
+        };
+        let mut edge = ArchitectEdge::new("loop", "a", "a");
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::InsertEdge {
+                parent: NodePath::default(),
+                edge: edge.clone(),
+            }],
+        )
+        .expect("invalid execution still has a preview");
+        assert!(
+            preview
+                .problems
+                .contains(&GraphProblem::EndlessLoop("a".into()))
+        );
+        assert!(!preview.is_valid);
+        assert!(!preview.ready_to_run);
+        edge.max_repeats = Some(2);
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::InsertEdge {
+                parent: NodePath::default(),
+                edge: edge.clone(),
+            }],
+        )
+        .expect("bounded loop");
+        assert!(preview.is_valid);
+        assert!(!preview.ready_to_run, "editing reopened the lock");
+        edge.condition = EdgeCondition::Objective {
+            statement: " ".into(),
+        };
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::InsertEdge {
+                parent: NodePath::default(),
+                edge,
+            }],
+        )
+        .expect("blank condition preview");
+        assert!(
+            preview
+                .problems
+                .contains(&GraphProblem::EmptyCondition("loop".into()))
+        );
+        assert!(!preview.is_valid);
+        assert!(
+            !preview_graph_edits(&ArchitectGraph::default(), &[])
+                .expect("empty preview")
+                .ready_to_run
+        );
+    }
+
+    #[test]
+    fn net_no_op_preserves_everything_and_needs_no_approval() {
+        let graph = local_graph();
+        let edge = ArchitectEdge::new("temporary", "a", "c");
+        let preview = preview_graph_edits(
+            &graph,
+            &[
+                GraphEdit::InsertEdge {
+                    parent: NodePath::default(),
+                    edge: edge.clone(),
+                },
+                GraphEdit::RemoveEdge {
+                    parent: NodePath::default(),
+                    edge_id: edge.id,
+                },
+                GraphEdit::ReconnectEdge {
+                    parent: NodePath::default(),
+                    edge_id: "ab".into(),
+                    from: "a".into(),
+                    to: "b".into(),
+                },
+            ],
+        )
+        .expect("net no-op");
+        assert_eq!(preview.graph, graph);
+        assert!(preview.changed_steps.is_empty());
+        assert!(preview.invalidated_steps.is_empty());
+        assert!(preview.affected_locks.is_empty());
+        assert!(preview.routing_changes.is_empty());
+        assert!(!preview.requires_approval);
+        assert!(preview.ready_to_run);
+    }
+
+    #[test]
+    fn graph_edit_schema_and_json_cover_full_nested_payloads() {
+        let mut node = settled_node("parent");
+        node.subplan = Some(Box::new(local_graph()));
+        let operations = vec![
+            GraphEdit::InsertNode {
+                parent: NodePath::default(),
+                node,
+            },
+            GraphEdit::MoveNode {
+                path: path(&["parent", "a"]),
+                position: NodePosition { x: 2.5, y: -4.0 },
+            },
+            GraphEdit::InsertEdge {
+                parent: path(&["parent"]),
+                edge: ArchitectEdge::new("ac", "a", "c"),
+            },
+            GraphEdit::ReconnectEdge {
+                parent: path(&["parent"]),
+                edge_id: "ac".into(),
+                from: "b".into(),
+                to: "c".into(),
+            },
+            GraphEdit::RemoveEdge {
+                parent: path(&["parent"]),
+                edge_id: "ac".into(),
+            },
+            GraphEdit::RemoveNode {
+                path: path(&["parent", "sibling"]),
+            },
+        ];
+        let json = serde_json::to_value(&operations).expect("serialize operations");
+        assert_eq!(
+            serde_json::from_value::<Vec<GraphEdit>>(json).expect("deserialize operations"),
+            operations
+        );
+        let schema = serde_json::to_string(&schemars::schema_for!(GraphEdit)).expect("schema");
+        for field in [
+            "insert_node",
+            "remove_node",
+            "move_node",
+            "insert_edge",
+            "remove_edge",
+            "reconnect_edge",
+            "position",
+            "parent",
+            "subplan",
+        ] {
+            assert!(schema.contains(field), "missing {field}");
+        }
+        let preview = preview_graph_edits(&ArchitectGraph::default(), &operations).expect("preview");
+        let json = serde_json::to_value(&preview).expect("serialize preview");
+        assert_eq!(
+            serde_json::from_value::<GraphEditPreview>(json).expect("deserialize preview"),
+            preview
+        );
+    }
+}
