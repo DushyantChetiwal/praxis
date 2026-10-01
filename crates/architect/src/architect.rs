@@ -34,7 +34,7 @@ use std::fmt::{self, Display};
 #[derive(
     Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
-pub struct NodeId(pub String);
+pub struct NodeId(#[schemars(length(min = 1))] pub String);
 
 impl Display for NodeId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -57,7 +57,7 @@ impl From<String> for NodeId {
 #[derive(
     Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
-pub struct EdgeId(pub String);
+pub struct EdgeId(#[schemars(length(min = 1))] pub String);
 
 impl From<&str> for EdgeId {
     fn from(value: &str) -> Self {
@@ -277,7 +277,10 @@ pub struct ArchitectGraph {
 /// Something wrong with the graph that the user should see before running it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum GraphProblem {
+    InvalidNodeId(NodeId),
+    InvalidEdgeId(EdgeId),
     DuplicateNode(NodeId),
+    DuplicateEdge(EdgeId),
     /// An edge referring to a node that is not in the graph.
     DanglingEdge {
         edge: EdgeId,
@@ -314,8 +317,21 @@ pub enum GraphProblem {
 impl Display for GraphProblem {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            GraphProblem::InvalidNodeId(id) => write!(
+                formatter,
+                "step identifier {:?} is blank; use a non-blank stable id",
+                id.0
+            ),
+            GraphProblem::InvalidEdgeId(id) => write!(
+                formatter,
+                "connection identifier {:?} is blank; use a non-blank stable id",
+                id.0
+            ),
             GraphProblem::DuplicateNode(id) => {
                 write!(formatter, "more than one step uses the id {id}")
+            }
+            GraphProblem::DuplicateEdge(id) => {
+                write!(formatter, "more than one connection uses the id {}", id.0)
             }
             GraphProblem::DanglingEdge { edge, missing } => write!(
                 formatter,
@@ -378,6 +394,18 @@ impl GraphProblem {
                 .map(|edge| (title(&edge.from), title(&edge.to)))
         };
         match self {
+            GraphProblem::InvalidNodeId(id) => {
+                format!("\"{}\" needs a non-blank step ID", title(id))
+            }
+            GraphProblem::InvalidEdgeId(edge) => match edge_ends(edge) {
+                Some((from, to)) => {
+                    format!("The connection from \"{from}\" to \"{to}\" needs a non-blank ID")
+                }
+                None => "A connection needs a non-blank ID".to_string(),
+            },
+            GraphProblem::DuplicateEdge(id) => {
+                format!("More than one connection uses the id {}", id.0)
+            }
             GraphProblem::DuplicateNode(id) => format!("More than one step uses the id {id}"),
             GraphProblem::DanglingEdge { edge, .. } => match edge_ends(edge) {
                 Some((from, _)) => format!("A connection from \"{from}\" leads to a missing step"),
@@ -1164,12 +1192,13 @@ impl ArchitectGraph {
     pub fn connect(&mut self, from: impl Into<NodeId>, to: impl Into<NodeId>) -> EdgeId {
         let from = from.into();
         let to = to.into();
-        let id = EdgeId(format!("{}->{}", from.0, to.0));
-        let id = if self.edges.iter().any(|edge| edge.id == id) {
-            EdgeId(format!("{}-{}", id.0, self.edges.len()))
-        } else {
-            id
-        };
+        let base = format!("{}->{}", from.0, to.0);
+        let mut id = EdgeId(base.clone());
+        let mut suffix = self.edges.len();
+        while self.edges.iter().any(|edge| edge.id == id) {
+            id = EdgeId(format!("{base}-{suffix}"));
+            suffix += 1;
+        }
         self.edges.push(ArchitectEdge {
             id: id.clone(),
             from,
@@ -1762,12 +1791,22 @@ impl ArchitectGraph {
 
         let mut seen = HashSet::default();
         for node in &self.nodes {
+            if node.id.0.trim().is_empty() {
+                problems.push(GraphProblem::InvalidNodeId(node.id.clone()));
+            }
             if !seen.insert(node.id.clone()) {
                 problems.push(GraphProblem::DuplicateNode(node.id.clone()));
             }
         }
 
+        let mut edge_ids = HashSet::default();
         for edge in &self.edges {
+            if edge.id.0.trim().is_empty() {
+                problems.push(GraphProblem::InvalidEdgeId(edge.id.clone()));
+            }
+            if !edge_ids.insert(edge.id.clone()) {
+                problems.push(GraphProblem::DuplicateEdge(edge.id.clone()));
+            }
             for endpoint in [&edge.from, &edge.to] {
                 if self.node(endpoint).is_none() {
                     problems.push(GraphProblem::DanglingEdge {
@@ -1954,7 +1993,8 @@ impl ArchitectGraph {
 /// has not reviewed.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ProposedNode {
-    /// A short stable identifier, such as `run-tests`.
+    /// A non-blank stable identifier, such as `run-tests`, unique within this
+    /// graph. Nested graphs have separate ID namespaces; never rely on renaming.
     pub id: NodeId,
     /// A short human-readable name for the step.
     pub title: String,
@@ -2019,7 +2059,7 @@ impl ProposedGraph {
     pub fn into_graph(self) -> ArchitectGraph {
         let mut graph = ArchitectGraph::default();
         for node in self.nodes {
-            graph.add_node(ArchitectNode {
+            graph.nodes.push(ArchitectNode {
                 id: node.id,
                 title: node.title,
                 model: node.model,
@@ -2663,6 +2703,79 @@ mod tests {
                 },
             ));
         graph
+    }
+
+    #[test]
+    fn connecting_after_deletions_never_reuses_a_live_edge_id() {
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(ArchitectNode::new("a", "A"));
+        graph.add_node(ArchitectNode::new("b", "B"));
+        let first = graph.connect("a", "b");
+        let removed = graph.connect("a", "b");
+        let retained = graph.connect("a", "b");
+        graph.disconnect(&removed);
+        let added = graph.connect("a", "b");
+        assert_ne!(added, retained);
+        assert_ne!(added, first);
+        let ids: HashSet<_> = graph.edges.iter().map(|edge| &edge.id).collect();
+        assert_eq!(ids.len(), graph.edges.len());
+        assert!(graph.edges.iter().any(|edge| edge.id == retained));
+    }
+
+    #[test]
+    fn blank_and_duplicate_graph_ids_block_execution_at_every_depth() {
+        for blank in ["", " \t"] {
+            let mut graph = ArchitectGraph::default();
+            graph.add_node(ArchitectNode::new(blank, "Invalid step"));
+            graph.lock_all();
+            assert!(
+                graph.problems().iter().any(|problem| matches!(problem, GraphProblem::InvalidNodeId(_)))
+            );
+            assert!(PlanRun::start(&graph).is_err());
+
+            let mut nested = ArchitectGraph::default();
+            nested.add_node(ArchitectNode::new("a", "A"));
+            nested.add_node(ArchitectNode::new("b", "B"));
+            nested.edges.push(ArchitectEdge::new(blank, "a", "b"));
+            nested.lock_all();
+            assert!(
+                nested.problems().iter().any(|problem| matches!(problem, GraphProblem::InvalidEdgeId(_)))
+            );
+            graph.nodes.clear();
+            let mut parent = ArchitectNode::new("parent", "Parent");
+            parent.subplan = Some(Box::new(nested));
+            graph.add_node(parent);
+            graph.lock_all();
+            assert!(PlanRun::start(&graph).is_err());
+        }
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(ArchitectNode::new("a", "A"));
+        graph.add_node(ArchitectNode::new("b", "B"));
+        graph.edges.push(ArchitectEdge::new("same", "a", "b"));
+        graph.edges.push(ArchitectEdge::new("same", "a", "b"));
+        graph.lock_all();
+        assert!(
+            graph.problems().contains(&GraphProblem::DuplicateEdge("same".into()))
+        );
+        assert!(PlanRun::start(&graph).is_err());
+        assert!(PlanRun::validate_structure(&graph).is_err());
+    }
+
+    #[test]
+    fn proposals_do_not_silently_rename_duplicate_ids() {
+        let proposal: ProposedGraph = serde_json::from_value(serde_json::json!({"nodes": [
+            {"id":"same", "title":"First", "file_surface":[]},
+            {"id":"same", "title":"Second", "file_surface":[]}
+        ]})).unwrap();
+        let graph = proposal.into_graph();
+        assert!(
+            graph.problems().contains(&GraphProblem::DuplicateNode("same".into()))
+        );
+        assert!(graph.node(&"same-2".into()).is_none());
+        let node_schema = serde_json::to_value(schemars::schema_for!(NodeId)).unwrap();
+        let edge_schema = serde_json::to_value(schemars::schema_for!(EdgeId)).unwrap();
+        assert_eq!(node_schema["minLength"], 1);
+        assert_eq!(edge_schema["minLength"], 1);
     }
 
     #[test]

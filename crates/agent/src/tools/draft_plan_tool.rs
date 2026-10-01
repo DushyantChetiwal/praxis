@@ -1,5 +1,5 @@
 use agent_client_protocol::schema::v1 as acp;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use architect::{ArchitectGraph, ProposedEdge, ProposedGraph, ProposedNode, StepModel};
 use gpui::{App, Entity, SharedString, Task, WeakEntity};
 use language_model::{LanguageModelRegistry, LanguageModelToolResultContent};
@@ -29,6 +29,9 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 /// replacement. Active or resumable runs refuse draft_plan. Do not use redrafting
 /// as recovery from a stopped run; inspect it and use targeted edits or controls.
 /// Reuse the same full node paths for retained steps and send the complete graph.
+/// Step IDs must be non-blank and unique within each graph. Nested graphs have
+/// separate namespaces. Duplicate IDs are rejected before saving, never silently
+/// renamed or used to redirect connections.
 ///
 /// A step the user has **locked** is settled: its goal, rules, capture, file surface and
 /// routing were argued out, often in a chat of its own. Restate a locked step
@@ -157,8 +160,9 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct DraftPlanToolInput {
-    /// Complete nonempty replacement node list, not a patch. IDs are local to
-    /// each graph; preserve full paths for retained nodes. Every node, including
+    /// Complete nonempty replacement node list, not a patch. IDs must be non-blank
+    /// and unique within each graph; duplicates are rejected, never renamed.
+    /// Nested graphs have separate ID namespaces. Preserve full paths for retained nodes. Every node, including
     /// nested steps.nodes, requires file_surface (explicit [] if none). Array
     /// order does not declare dependencies; use edges for required ordering.
     pub nodes: Vec<ProposedNode>,
@@ -341,6 +345,19 @@ pub(super) fn plan_validation_problems(graph: &architect::ArchitectGraph) -> Vec
     problems
 }
 
+fn validate_proposed_ids(nodes: &[ProposedNode]) -> Result<()> {
+    let mut ids = std::collections::HashSet::new();
+    for node in nodes {
+        anyhow::ensure!(!node.id.0.trim().is_empty(), "Every step needs a non-blank stable id.");
+        anyhow::ensure!(ids.insert(&node.id), "Step id {:?} is duplicated. Use a unique id for each step in the same graph; IDs are never silently renamed.", node.id.0);
+        if let Some(subplan) = &node.steps {
+            validate_proposed_ids(&subplan.nodes)
+                .with_context(|| format!("Inside step {:?}", node.id.0))?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_proposed_models(nodes: &[ProposedNode], cx: &App) -> Result<()> {
     for node in nodes {
         if let Some(model) = &node.model {
@@ -400,6 +417,9 @@ impl AgentTool for DraftPlanTool {
                     error: "A plan needs at least one step.".into(),
                 });
             }
+            validate_proposed_ids(&input.nodes).map_err(|error| DraftPlanToolOutput::Error {
+                error: format!("{error:#}"),
+            })?;
 
             self.thread
                 .read_with(cx, |thread, cx| {
@@ -509,6 +529,56 @@ impl AgentTool for DraftPlanTool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[gpui::test]
+    async fn invalid_proposed_ids_leave_the_existing_plan_untouched(cx: &mut gpui::TestAppContext) {
+        let (_connection, _agent, thread, _session) =
+            super::super::architect_run_tool::architect_tool_test_session(cx).await;
+        let mut before = ArchitectGraph::default();
+        before.add_node(architect::ArchitectNode::new("keep", "Keep"));
+        thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(before.clone()), cx);
+            thread.set_session_mode(crate::SessionMode::Architect, cx);
+        });
+        let revision = thread.read_with(cx, |thread, _| thread.architect_revision());
+        for nodes in [
+            json!([{"id":"", "title":"Blank", "file_surface":[]}]),
+            json!([{"id":" \t", "title":"Blank", "file_surface":[]}]),
+            json!([
+                {"id":"same", "title":"First", "file_surface":[]},
+                {"id":"same", "title":"Second", "file_surface":[]}
+            ]),
+            json!([{"id":"parent", "title":"Parent", "file_surface":[], "steps":{"nodes":[
+                {"id":"same", "title":"First", "file_surface":[]},
+                {"id":"same", "title":"Second", "file_surface":[]}
+            ]}}]),
+        ] {
+            let (events, _receiver) = ToolCallEventStream::test();
+            let input = ToolInput::ready(json!({"nodes": nodes}));
+            let error = cx.update(|cx| {
+                Arc::new(DraftPlanTool::new(thread.downgrade())).run(input, events, cx)
+            }).await.expect_err("invalid IDs must not rewrite the plan");
+            assert!(matches!(error, DraftPlanToolOutput::Error { .. }));
+            thread.read_with(cx, |thread, _| {
+                assert_eq!(thread.architect_graph(), Some(&before));
+                assert_eq!(thread.architect_revision(), revision);
+                assert_eq!(thread.session_mode(), crate::SessionMode::Architect);
+            });
+        }
+    }
+
+    #[test]
+    fn nested_graphs_have_separate_proposed_id_namespaces() {
+        let proposal: ProposedGraph = serde_json::from_value(json!({"nodes": [
+            {"id":"left", "title":"Left", "file_surface":[], "steps":{"nodes":[
+                {"id":"step", "title":"Step", "file_surface":[]}
+            ]}},
+            {"id":"right", "title":"Right", "file_surface":[], "steps":{"nodes":[
+                {"id":"step", "title":"Step", "file_surface":[]}
+            ]}}
+        ]})).unwrap();
+        validate_proposed_ids(&proposal.nodes).expect("IDs are local to each graph");
+    }
 
     #[gpui::test]
     async fn file_surface_paths_resolve_against_project_roots(cx: &mut gpui::TestAppContext) {

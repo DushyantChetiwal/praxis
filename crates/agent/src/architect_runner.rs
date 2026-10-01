@@ -136,13 +136,13 @@ fn validate_graph_budget(graph: &ArchitectGraph) -> anyhow::Result<()> {
         let mut edge_ids = std::collections::HashSet::new();
         for edge in &graph.edges {
             anyhow::ensure!(
-                !edge.id.0.is_empty() && edge_ids.insert(&edge.id),
+                !edge.id.0.trim().is_empty() && edge_ids.insert(&edge.id),
                 "Checkpoint graph contains an empty or duplicate edge ID"
             );
         }
         for node in &graph.nodes {
             anyhow::ensure!(
-                !node.id.0.is_empty(),
+                !node.id.0.trim().is_empty(),
                 "Checkpoint graph contains an empty node ID"
             );
             anyhow::ensure!(

@@ -485,6 +485,12 @@ fn validate_addressability(
         if path.depth() > MAX_PLAN_DEPTH {
             return Err(GraphEditError::DepthLimit { path });
         }
+        if node.id.0.trim().is_empty() {
+            return Err(GraphEditError::Problem(scoped_problem(
+                parent,
+                GraphProblem::InvalidNodeId(node.id.clone()),
+            )));
+        }
         if !node_ids.insert(&node.id) {
             return Err(GraphEditError::Problem(scoped_problem(
                 parent,
@@ -503,6 +509,12 @@ fn validate_addressability(
     }
     let mut edge_ids = BTreeSet::new();
     for edge in &graph.edges {
+        if edge.id.0.trim().is_empty() {
+            return Err(GraphEditError::Problem(scoped_problem(
+                parent,
+                GraphProblem::InvalidEdgeId(edge.id.clone()),
+            )));
+        }
         if !edge_ids.insert(&edge.id) {
             return Err(GraphEditError::DuplicateEdge {
                 parent: parent.clone(),
@@ -1170,6 +1182,32 @@ mod tests {
             Some(Position { x: 0.0, y: 294.0 })
         );
         assert_eq!(before, snapshot);
+    }
+
+    #[test]
+    fn blank_identifiers_are_refused_without_changing_the_source_graph() {
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(settled_node("a"));
+        graph.add_node(settled_node("b"));
+        let before = graph.clone();
+        for operation in [
+            GraphEdit::InsertNode {
+                parent: NodePath::default(),
+                node: ArchitectNode::new("", "Blank"),
+            },
+            GraphEdit::InsertEdge {
+                parent: NodePath::default(),
+                edge: ArchitectEdge::new("", "a", "b"),
+            },
+        ] {
+            assert!(matches!(
+                preview_graph_edits(&graph, &[operation]),
+                Err(GraphEditError::Problem(
+                    GraphProblem::InvalidNodeId(_) | GraphProblem::InvalidEdgeId(_)
+                ))
+            ));
+            assert_eq!(graph, before);
+        }
     }
 
     #[test]
