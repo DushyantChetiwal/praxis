@@ -929,7 +929,7 @@ mod tests {
             }],
         )
         .expect("explicit move to the automatic position");
-        let mut expected = before.clone();
+        let mut expected = before;
         expected.node_mut(&"a".into()).expect("a").position = Some(Position { x: 0.0, y: -98.0 });
         assert_eq!(preview.graph, expected);
         assert!(preview.invalidated_steps.is_empty());
