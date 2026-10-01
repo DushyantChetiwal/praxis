@@ -111,7 +111,11 @@ mod tests {
     fn architect_production_instructions_follow_individual_tool_visibility() {
         let project = prompt_store::ProjectContext::default();
         let templates = Templates::new();
-        let tools = ["inspect_architect_plan", "edit_architect_plan", "wait_architect_run"];
+        let tools = [
+            "inspect_architect_plan",
+            "edit_architect_plan",
+            "wait_architect_run",
+        ];
         for name in ["system_prompt.hbs", "experimental_system_prompt.hbs"] {
             for visible in tools {
                 let template = SystemPromptTemplate {

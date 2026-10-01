@@ -409,10 +409,19 @@ pub struct ArchitectRunStepSnapshot {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ArchitectRunOutcome {
     Completed,
-    StepLimit { steps: usize },
-    NodeLimit { node: architect::NodeId, visits: usize },
-    DepthLimit { node: architect::NodeId },
-    Failed { message: String },
+    StepLimit {
+        steps: usize,
+    },
+    NodeLimit {
+        node: architect::NodeId,
+        visits: usize,
+    },
+    DepthLimit {
+        node: architect::NodeId,
+    },
+    Failed {
+        message: String,
+    },
     Cancelled,
     Interrupted,
 }
@@ -427,7 +436,9 @@ impl From<&architect::RunOutcome> for ArchitectRunOutcome {
                 visits: *visits,
             },
             architect::RunOutcome::DepthLimit { node } => Self::DepthLimit { node: node.clone() },
-            architect::RunOutcome::Failed { message } => Self::Failed { message: message.clone() },
+            architect::RunOutcome::Failed { message } => Self::Failed {
+                message: message.clone(),
+            },
             architect::RunOutcome::Cancelled => Self::Cancelled,
         }
     }
@@ -443,7 +454,9 @@ impl ArchitectRunOutcome {
                 visits: *visits,
             },
             Self::DepthLimit { node } => architect::RunOutcome::DepthLimit { node: node.clone() },
-            Self::Failed { message } => architect::RunOutcome::Failed { message: message.clone() },
+            Self::Failed { message } => architect::RunOutcome::Failed {
+                message: message.clone(),
+            },
             Self::Cancelled | Self::Interrupted => architect::RunOutcome::Cancelled,
         }
     }
@@ -753,6 +766,11 @@ impl ArchitectRun {
 
     pub(crate) fn control(&self) -> Option<&Rc<RefCell<crate::architect_runner::RunState>>> {
         self.control.as_ref()
+    }
+
+    /// Inspection data only: a saved terminal checkpoint does not authorize resume.
+    pub(crate) fn saved_checkpoint(&self) -> Option<&serde_json::Value> {
+        self.saved_checkpoint.as_ref()
     }
 
     fn close_running_steps(&mut self) {
@@ -2636,7 +2654,10 @@ impl Thread {
         if let Some(event) = persistent_architect.events.last() {
             persistent_architect.sequence = persistent_architect.sequence.max(event.sequence);
         }
-        let excess = persistent_architect.events.len().saturating_sub(MAX_ARCHITECT_EVENTS);
+        let excess = persistent_architect
+            .events
+            .len()
+            .saturating_sub(MAX_ARCHITECT_EVENTS);
         persistent_architect.events.drain(..excess);
         persistent_architect.trim_revision_snapshots();
         let mut architect_run = persistent_architect
@@ -2673,9 +2694,9 @@ impl Thread {
                     "run_restored",
                     None,
                     Some(ArchitectRunOutcome::Interrupted),
-                    run.recovery_error.clone().or_else(|| {
-                        Some("Run interrupted. Resume explicitly to continue.".into())
-                    }),
+                    run.recovery_error
+                        .clone()
+                        .or_else(|| Some("Run interrupted. Resume explicitly to continue.".into())),
                 );
                 let thread = cx.weak_entity();
                 cx.defer(move |cx| {
@@ -2992,10 +3013,9 @@ impl Thread {
         if self.architect_revision_baseline == self.architect_graph {
             return;
         }
-        if let (Some(previous), Some(graph)) = (
-            &mut self.architect_revision_baseline,
-            &self.architect_graph,
-        ) {
+        if let (Some(previous), Some(graph)) =
+            (&mut self.architect_revision_baseline, &self.architect_graph)
+        {
             coalesce_architect_layout(previous, graph);
         }
         if self.architect_revision_baseline != self.architect_graph {
@@ -3250,8 +3270,10 @@ impl Thread {
             run.current = None;
             // Only a run that was cut short can be picked up again.
             if !outcome.is_resumable() {
+                if let Some(control) = &run.control {
+                    run.saved_checkpoint = Some(control.borrow().checkpoint());
+                }
                 run.control = None;
-                run.saved_checkpoint = None;
             }
             run.outcome = Some(outcome);
             run.result_dismissed = false;

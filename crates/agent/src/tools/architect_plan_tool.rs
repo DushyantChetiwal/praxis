@@ -16,9 +16,9 @@ use uuid::Uuid;
 
 use super::architect_run_tool::main_thread;
 use crate::{
-    AgentTool, ArchitectRunToolOutput, Thread, ToolCallEventStream,
-    ToolCapability, ToolInput, ToolPermissionContext, apply_architect_graph_update,
-    architect_run_readiness, preview_architect_graph_update,
+    AgentTool, ArchitectRunToolOutput, Thread, ToolCallEventStream, ToolCapability, ToolInput,
+    ToolPermissionContext, apply_architect_graph_update, architect_run_readiness,
+    preview_architect_graph_update,
 };
 
 const MAX_OUTPUT_BYTES: usize = 32_768;
@@ -74,7 +74,10 @@ fn graph_records(
         let mut own = node.clone();
         own.subplan = None;
         let mut fields = serde_json::to_value(own)?;
-        fields.as_object_mut().context("Expected node fields.")?.remove("subplan");
+        fields
+            .as_object_mut()
+            .context("Expected node fields.")?
+            .remove("subplan");
         records.push(json!({
             "kind": "node", "node_path": path, "fields": fields,
             "has_subplan": node.subplan.is_some(),
@@ -96,8 +99,10 @@ fn graph_records(
 }
 
 fn checked_output(value: Value) -> Result<Value> {
-    ensure!(serde_json::to_vec(&json!({"data": &value}))?.len() <= MAX_OUTPUT_BYTES,
-        "The response exceeds 32768 bytes. Use a smaller, targeted edit or inspection page.");
+    ensure!(
+        serde_json::to_vec(&json!({"data": &value}))?.len() <= MAX_OUTPUT_BYTES,
+        "The response exceeds 32768 bytes. Use a smaller, targeted edit or inspection page."
+    );
     Ok(value)
 }
 
@@ -145,16 +150,33 @@ impl AgentTool for InspectArchitectPlanTool {
                 cx.update(|cx| {
                     let thread = main_thread(&self.thread, cx)?;
                     let owner = thread.read(cx);
-                    ensure!(input.revision.is_none_or(|revision| revision == owner.architect_revision()),
-                        "The plan changed. Restart inspection at offset zero.");
-                    let graph = owner.architect_graph().context("There is no plan to inspect.")?;
+                    ensure!(
+                        input
+                            .revision
+                            .is_none_or(|revision| revision == owner.architect_revision()),
+                        "The plan changed. Restart inspection at offset zero."
+                    );
+                    let graph = owner
+                        .architect_graph()
+                        .context("There is no plan to inspect.")?;
                     let mut records = Vec::new();
-                    graph_records(graph, &NodePath::default(), &architect_run_readiness(owner), &mut records)?;
-                    record_page(&records, input.offset, input.limit, owner.architect_revision())
+                    graph_records(
+                        graph,
+                        &NodePath::default(),
+                        &architect_run_readiness(owner),
+                        &mut records,
+                    )?;
+                    record_page(
+                        &records,
+                        input.offset,
+                        input.limit,
+                        owner.architect_revision(),
+                    )
                 })
             }
             .await;
-            result.map(|data| ArchitectRunToolOutput::Success { data })
+            result
+                .map(|data| ArchitectRunToolOutput::Success { data })
                 .map_err(ArchitectRunToolOutput::error)
         })
     }
@@ -197,14 +219,29 @@ impl EditArchitectPlanToolInput {
     fn validate(&self) -> Result<()> {
         match self.action {
             ArchitectPlanEditAction::Preview => {
-                ensure!(self.preview_token.is_none(), "Preview does not accept a token.");
-                ensure!((1..=100).contains(&self.edits.len()), "Preview requires 1 to 100 edits.");
-                ensure!(serde_json::to_vec(&self.edits)?.len() <= MAX_PREVIEW_BYTES,
-                    "The edit batch exceeds the one-MiB input limit.");
+                ensure!(
+                    self.preview_token.is_none(),
+                    "Preview does not accept a token."
+                );
+                ensure!(
+                    (1..=100).contains(&self.edits.len()),
+                    "Preview requires 1 to 100 edits."
+                );
+                ensure!(
+                    serde_json::to_vec(&self.edits)?.len() <= MAX_PREVIEW_BYTES,
+                    "The edit batch exceeds the one-MiB input limit."
+                );
             }
             ArchitectPlanEditAction::Apply => {
-                ensure!(self.edits.is_empty(), "Apply accepts only a preview_token, never new edits.");
-                Uuid::parse_str(self.preview_token.as_deref().context("Apply requires a preview_token.")?)?;
+                ensure!(
+                    self.edits.is_empty(),
+                    "Apply accepts only a preview_token, never new edits."
+                );
+                Uuid::parse_str(
+                    self.preview_token
+                        .as_deref()
+                        .context("Apply requires a preview_token.")?,
+                )?;
             }
         }
         Ok(())
@@ -227,21 +264,44 @@ impl RuntimeImpact {
         // No defaults: an absent field is unknown impact, never an empty set.
         let mut impact: Self = serde_json::from_value(runtime.clone())
             .context("Runtime impact is incomplete; changed_steps, invalidated_paths, affected_locks, retained_results, requires_review, ready_to_run, and can_apply are required. Preview again after the runtime exposes them.")?;
-        ensure!(impact.changed_steps.iter().chain(&impact.invalidated_paths)
-            .chain(&impact.affected_locks).chain(&impact.retained_results)
-            .all(|path| !path.is_empty()),
-            "Runtime impact contains an empty step path. No apply token can be issued.");
-        impact.changed_steps = impact.changed_steps.into_iter()
+        ensure!(
+            impact
+                .changed_steps
+                .iter()
+                .chain(&impact.invalidated_paths)
+                .chain(&impact.affected_locks)
+                .chain(&impact.retained_results)
+                .all(|path| !path.is_empty()),
+            "Runtime impact contains an empty step path. No apply token can be issued."
+        );
+        impact.changed_steps = impact
+            .changed_steps
+            .into_iter()
             .chain(preview.changed_steps.iter().cloned())
-            .collect::<BTreeSet<_>>().into_iter().collect();
-        impact.invalidated_paths = impact.invalidated_paths.into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        impact.invalidated_paths = impact
+            .invalidated_paths
+            .into_iter()
             .chain(preview.invalidated_steps.iter().cloned())
-            .collect::<BTreeSet<_>>().into_iter().collect();
-        impact.affected_locks = impact.affected_locks.into_iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        impact.affected_locks = impact
+            .affected_locks
+            .into_iter()
             .chain(preview.affected_locks.iter().cloned())
-            .collect::<BTreeSet<_>>().into_iter().collect();
-        ensure!(impact.retained_results.iter().all(|path| !impact.invalidated_paths.contains(path)),
-            "Runtime impact both retains and invalidates a result. Preview again after the runtime is consistent.");
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        ensure!(
+            impact
+                .retained_results
+                .iter()
+                .all(|path| !impact.invalidated_paths.contains(path)),
+            "Runtime impact both retains and invalidates a result. Preview again after the runtime is consistent."
+        );
         Ok(impact)
     }
 }
@@ -267,19 +327,31 @@ impl StoredPreview {
         event_sequence: u64,
         now: Instant,
     ) -> Result<()> {
-        ensure!(now < self.expires, "Preview expired. Preview the edit again.");
-        ensure!(graph == Some(&self.source) && revision == self.revision
-            && run_id == self.run_id && event_sequence == self.event_sequence,
-            "The plan or run changed. Preview the edit again before applying.");
+        ensure!(
+            now < self.expires,
+            "Preview expired. Preview the edit again."
+        );
+        ensure!(
+            graph == Some(&self.source)
+                && revision == self.revision
+                && run_id == self.run_id
+                && event_sequence == self.event_sequence,
+            "The plan or run changed. Preview the edit again before applying."
+        );
         Ok(())
     }
 
     fn check_runtime(&self, runtime: &Value) -> Result<()> {
         let impact = RuntimeImpact::read(runtime, &self.preview)?;
-        ensure!(runtime == &self.runtime && impact == self.impact,
-            "Runtime impact changed after preview. Preview the edit again before applying.");
-        ensure!(self.preview.is_valid && impact.can_apply,
-            "The edit cannot be applied safely: {}. Preview it again.", runtime["reason"]);
+        ensure!(
+            runtime == &self.runtime && impact == self.impact,
+            "Runtime impact changed after preview. Preview the edit again before applying."
+        );
+        ensure!(
+            self.preview.is_valid && impact.can_apply,
+            "The edit cannot be applied safely: {}. Preview it again.",
+            runtime["reason"]
+        );
         Ok(())
     }
 
@@ -312,13 +384,20 @@ impl EditArchitectPlanTool {
     fn preview(&self, input: &EditArchitectPlanToolInput, cx: &App) -> Result<Value> {
         let thread = main_thread(&self.thread, cx)?;
         let owner = thread.read(cx);
-        let source = owner.architect_graph().context("There is no plan to edit.")?;
-        ensure!(serde_json::to_vec(source)?.len() <= MAX_PREVIEW_BYTES,
-            "The source graph exceeds the one-MiB preview storage limit.");
+        let source = owner
+            .architect_graph()
+            .context("There is no plan to edit.")?;
+        ensure!(
+            serde_json::to_vec(source)?.len() <= MAX_PREVIEW_BYTES,
+            "The source graph exceeds the one-MiB preview storage limit."
+        );
         let preview = preview_graph_edits(source, &input.edits)?;
-        ensure!(serde_json::to_vec(&preview)?.len() <= MAX_PREVIEW_BYTES,
-            "The candidate exceeds the one-MiB preview storage limit.");
-        let runtime = preview_architect_graph_update(owner, &preview.graph, &preview.invalidated_steps);
+        ensure!(
+            serde_json::to_vec(&preview)?.len() <= MAX_PREVIEW_BYTES,
+            "The candidate exceeds the one-MiB preview storage limit."
+        );
+        let runtime =
+            preview_architect_graph_update(owner, &preview.graph, &preview.invalidated_steps);
         let impact = RuntimeImpact::read(&runtime, &preview);
         let can_apply = preview.is_valid && impact.as_ref().is_ok_and(|impact| impact.can_apply);
         let token = can_apply.then(Uuid::new_v4);
@@ -348,11 +427,15 @@ impl EditArchitectPlanTool {
                 previews.remove(0);
             }
             previews.push(StoredPreview {
-                token, source: source.clone(), revision: owner.architect_revision(),
+                token,
+                source: source.clone(),
+                revision: owner.architect_revision(),
                 run_id: owner.architect_run().map(|run| run.id()),
                 event_sequence: owner.architect_event_sequence(),
-                expires: now + PREVIEW_LIFETIME, preview,
-                runtime, impact: impact?,
+                expires: now + PREVIEW_LIFETIME,
+                preview,
+                runtime,
+                impact: impact?,
             });
         }
         Ok(output)
@@ -361,8 +444,10 @@ impl EditArchitectPlanTool {
     fn check_apply(&self, stored: &StoredPreview, cx: &App) -> Result<gpui::Entity<Thread>> {
         let thread = main_thread(&self.thread, cx)?;
         let owner = thread.read(cx);
-        ensure!(Self::capability().is_allowed_in(owner.session_mode()),
-            "Plan mode cannot apply edits. Ask the user to switch to Architect or Build.");
+        ensure!(
+            Self::capability().is_allowed_in(owner.session_mode()),
+            "Plan mode cannot apply edits. Ask the user to switch to Architect or Build."
+        );
         stored.check(
             owner.architect_graph(),
             owner.architect_revision(),
@@ -370,7 +455,11 @@ impl EditArchitectPlanTool {
             owner.architect_event_sequence(),
             Instant::now(),
         )?;
-        let runtime = preview_architect_graph_update(owner, &stored.preview.graph, &stored.preview.invalidated_steps);
+        let runtime = preview_architect_graph_update(
+            owner,
+            &stored.preview.graph,
+            &stored.preview.invalidated_steps,
+        );
         stored.check_runtime(&runtime)?;
         Ok(thread)
     }
@@ -408,28 +497,47 @@ impl AgentTool for EditArchitectPlanTool {
                 if input.action == ArchitectPlanEditAction::Preview {
                     return cx.update(|cx| self.preview(&input, cx));
                 }
-                let token = Uuid::parse_str(input.preview_token.as_deref().context("Missing preview token.")?)?;
+                let token = Uuid::parse_str(
+                    input
+                        .preview_token
+                        .as_deref()
+                        .context("Missing preview token.")?,
+                )?;
                 // Consume before awaiting approval: concurrent calls cannot reuse an approval.
                 let stored = {
                     let mut previews = self.previews.borrow_mut();
-                    let index = previews.iter().position(|preview| preview.token == token)
+                    let index = previews
+                        .iter()
+                        .position(|preview| preview.token == token)
                         .context("Unknown or consumed preview token. Preview the edit again.")?;
                     previews.remove(index)
                 };
                 cx.update(|cx| self.check_apply(&stored, cx))?;
-                cx.update(|cx| events.authorize(
-                    stored.permission_title(),
-                    ToolPermissionContext::new(Self::NAME, vec!["apply".into()]), cx,
-                )).await?;
+                cx.update(|cx| {
+                    events.authorize(
+                        stored.permission_title(),
+                        ToolPermissionContext::new(Self::NAME, vec!["apply".into()]),
+                        cx,
+                    )
+                })
+                .await?;
                 cx.update(|cx| {
                     let thread = self.check_apply(&stored, cx)?;
-                    apply_architect_graph_update(&thread, stored.preview.graph, &stored.preview.invalidated_steps, cx)?;
-                    Ok(json!({"applied": true, "revision": thread.read(cx).architect_revision(),
-                        "note": "Review and explicitly approve reopened locks before execution."}))
+                    apply_architect_graph_update(
+                        &thread,
+                        stored.preview.graph,
+                        &stored.preview.invalidated_steps,
+                        cx,
+                    )?;
+                    Ok(
+                        json!({"applied": true, "revision": thread.read(cx).architect_revision(),
+                        "note": "Review and explicitly approve reopened locks before execution."}),
+                    )
                 })
             }
             .await;
-            result.map(|data| ArchitectRunToolOutput::Success { data })
+            result
+                .map(|data| ArchitectRunToolOutput::Success { data })
                 .map_err(ArchitectRunToolOutput::error)
         })
     }
@@ -438,16 +546,19 @@ impl AgentTool for EditArchitectPlanTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use architect::ArchitectNode;
     use crate::SessionMode;
     use crate::tools::architect_run_tool::architect_tool_test_session;
+    use architect::ArchitectNode;
     use gpui::{Entity, TestAppContext};
     use settings::{Settings as _, ToolPermissionMode};
 
     fn plan(thread: &Entity<Thread>, cx: &mut TestAppContext) -> ArchitectGraph {
         let mut step = ArchitectNode::new("step", "Step");
         step.locked = true;
-        let graph = ArchitectGraph { nodes: vec![step], edges: vec![] };
+        let graph = ArchitectGraph {
+            nodes: vec![step],
+            edges: vec![],
+        };
         thread.update(cx, |thread, cx| {
             thread.set_session_mode(SessionMode::Architect, cx);
             thread.set_architect_graph(Some(graph.clone()), cx);
@@ -458,10 +569,16 @@ mod tests {
     fn permission(mode: ToolPermissionMode, cx: &mut TestAppContext) {
         cx.update(|cx| {
             let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
-            settings.tool_permissions.tools.insert(EditArchitectPlanTool::NAME.into(), agent_settings::ToolRules {
-                default: Some(mode), always_allow: vec![], always_deny: vec![],
-                always_confirm: vec![], invalid_patterns: vec![],
-            });
+            settings.tool_permissions.tools.insert(
+                EditArchitectPlanTool::NAME.into(),
+                agent_settings::ToolRules {
+                    default: Some(mode),
+                    always_allow: vec![],
+                    always_deny: vec![],
+                    always_confirm: vec![],
+                    invalid_patterns: vec![],
+                },
+            );
             agent_settings::AgentSettings::override_global(settings, cx);
         });
     }
@@ -483,15 +600,23 @@ mod tests {
         let preview = preview_graph_edits(&ArchitectGraph::default(), &[]).unwrap();
         let runtime = runtime_impact_fixture();
         for field in [
-            "changed_steps", "invalidated_paths", "affected_locks", "retained_results",
-            "requires_review", "ready_to_run", "can_apply",
+            "changed_steps",
+            "invalidated_paths",
+            "affected_locks",
+            "retained_results",
+            "requires_review",
+            "ready_to_run",
+            "can_apply",
         ] {
             let mut missing = runtime.clone();
             missing.as_object_mut().unwrap().remove(field);
             assert!(RuntimeImpact::read(&missing, &preview).is_err(), "{field}");
             let mut malformed = runtime.clone();
             malformed[field] = Value::Null;
-            assert!(RuntimeImpact::read(&malformed, &preview).is_err(), "{field}");
+            assert!(
+                RuntimeImpact::read(&malformed, &preview).is_err(),
+                "{field}"
+            );
         }
     }
 
@@ -501,9 +626,13 @@ mod tests {
         let mut node = ArchitectNode::new("step", "Step");
         node.locked = true;
         graph.nodes.push(node);
-        let preview = preview_graph_edits(&graph, &[GraphEdit::RemoveNode {
-            path: NodePath::root("step".into()),
-        }]).unwrap();
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::RemoveNode {
+                path: NodePath::root("step".into()),
+            }],
+        )
+        .unwrap();
         let mut runtime = runtime_impact_fixture();
         runtime["changed_steps"] = json!([["outer", "frozen"]]);
         runtime["invalidated_paths"] = json!([["outer", "frozen"], ["step"]]);
@@ -511,9 +640,18 @@ mod tests {
         runtime["requires_review"] = json!(true);
         runtime["ready_to_run"] = json!(false);
         let impact = RuntimeImpact::read(&runtime, &preview).unwrap();
-        assert_eq!(json!(impact.changed_steps), json!([["outer", "frozen"], ["step"]]));
-        assert_eq!(json!(impact.invalidated_paths), json!([["outer", "frozen"], ["step"]]));
-        assert_eq!(json!(impact.affected_locks), json!([["outer"], ["outer", "frozen"], ["step"]]));
+        assert_eq!(
+            json!(impact.changed_steps),
+            json!([["outer", "frozen"], ["step"]])
+        );
+        assert_eq!(
+            json!(impact.invalidated_paths),
+            json!([["outer", "frozen"], ["step"]])
+        );
+        assert_eq!(
+            json!(impact.affected_locks),
+            json!([["outer"], ["outer", "frozen"], ["step"]])
+        );
         runtime["retained_results"] = json!([["step"]]);
         assert!(RuntimeImpact::read(&runtime, &preview).is_err());
     }
@@ -524,10 +662,15 @@ mod tests {
         let preview = preview_graph_edits(&graph, &[]).unwrap();
         let runtime = runtime_impact_fixture();
         let stored = StoredPreview {
-            token: Uuid::new_v4(), source: graph, revision: 0, run_id: None,
-            event_sequence: 0, expires: Instant::now() + PREVIEW_LIFETIME,
+            token: Uuid::new_v4(),
+            source: graph,
+            revision: 0,
+            run_id: None,
+            event_sequence: 0,
+            expires: Instant::now() + PREVIEW_LIFETIME,
             impact: RuntimeImpact::read(&runtime, &preview).unwrap(),
-            preview, runtime: runtime.clone(),
+            preview,
+            runtime: runtime.clone(),
         };
         stored.check_runtime(&runtime).unwrap();
         for (field, changed) in [
@@ -539,7 +682,10 @@ mod tests {
             ("ready_to_run", json!(false)),
             ("can_apply", json!(false)),
             ("requires_restart", json!(true)),
-            ("checkpoint_error", json!("Checkpoint exceeds the save budget")),
+            (
+                "checkpoint_error",
+                json!("Checkpoint exceeds the save budget"),
+            ),
         ] {
             let mut current = runtime.clone();
             current[field] = changed;
@@ -550,7 +696,8 @@ mod tests {
     fn move_input() -> EditArchitectPlanToolInput {
         serde_json::from_value(json!({"edits": [{
             "kind": "move_node", "path": ["step"], "position": {"x": 12.0, "y": 24.0}
-        }]})).unwrap()
+        }]}))
+        .unwrap()
     }
 
     fn apply_input(preview: &Value) -> ToolInput<EditArchitectPlanToolInput> {
@@ -565,8 +712,16 @@ mod tests {
         let tool = Arc::new(EditArchitectPlanTool::new(thread.downgrade()));
         let revision = thread.read_with(cx, |thread, _| thread.architect_revision());
         let (events, _receiver) = ToolCallEventStream::test();
-        let result = cx.update(|cx| tool.clone().run(ToolInput::resolved(move_input()), events, cx)).await.unwrap();
-        let ArchitectRunToolOutput::Success { data: preview } = result else { panic!("expected preview"); };
+        let result = cx
+            .update(|cx| {
+                tool.clone()
+                    .run(ToolInput::resolved(move_input()), events, cx)
+            })
+            .await
+            .unwrap();
+        let ArchitectRunToolOutput::Success { data: preview } = result else {
+            panic!("expected preview");
+        };
         assert_eq!(preview["can_apply"], true);
         assert_eq!(preview["invalidated_steps"], json!([]));
         thread.read_with(cx, |thread, _| {
@@ -575,9 +730,18 @@ mod tests {
             assert!(thread.architect_run().is_none());
         });
         let (events, _receiver) = ToolCallEventStream::test();
-        assert!(cx.update(|cx| tool.clone().run(apply_input(&preview), events, cx)).await.is_err());
-        thread.read_with(cx, |thread, _| assert_eq!(thread.architect_graph(), Some(&graph)));
-        assert!(tool.previews.borrow().is_empty(), "denied token is consumed");
+        assert!(
+            cx.update(|cx| tool.clone().run(apply_input(&preview), events, cx))
+                .await
+                .is_err()
+        );
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.architect_graph(), Some(&graph))
+        });
+        assert!(
+            tool.previews.borrow().is_empty(),
+            "denied token is consumed"
+        );
     }
 
     #[gpui::test]
@@ -592,12 +756,21 @@ mod tests {
         ]})).unwrap();
         let preview = cx.update(|cx| tool.preview(&input, cx)).unwrap();
         assert_eq!(preview["ready_to_run"], false);
-        assert!(preview["affected_locks"].as_array().unwrap().contains(&json!(["step"])));
+        assert!(
+            preview["affected_locks"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(["step"]))
+        );
         assert_eq!(preview["can_apply"], true);
         assert_eq!(preview["requires_review"], true);
         assert!(preview["preview_token"].is_string());
         let (events, _receiver) = ToolCallEventStream::test();
-        assert!(cx.update(|cx| tool.run(apply_input(&preview), events, cx)).await.is_ok());
+        assert!(
+            cx.update(|cx| tool.run(apply_input(&preview), events, cx))
+                .await
+                .is_ok()
+        );
         thread.read_with(cx, |thread, _| {
             let graph = thread.architect_graph().unwrap();
             assert_eq!(graph.nodes.len(), 2);
@@ -616,32 +789,58 @@ mod tests {
             cx.update(|cx| tool.preview(&move_input(), cx)).unwrap();
         }
         assert_eq!(tool.previews.borrow().len(), MAX_PREVIEWS);
-        assert!(!tool.previews.borrow().iter().any(|stored| json!(stored.token) == first["preview_token"]));
+        assert!(
+            !tool
+                .previews
+                .borrow()
+                .iter()
+                .any(|stored| json!(stored.token) == first["preview_token"])
+        );
         thread.update(cx, |thread, cx| {
-            thread.start_architect_run(NodePath::root("step".into()), "Step".into(), Task::ready(()), cx);
+            thread.start_architect_run(
+                NodePath::root("step".into()),
+                "Step".into(),
+                Task::ready(()),
+                cx,
+            );
         });
         let preview = cx.update(|cx| tool.preview(&move_input(), cx)).unwrap();
         assert_eq!(preview["can_apply"], false);
         assert!(preview["preview_token"].is_null());
-        assert!(preview["runtime"]["reason"].as_str().unwrap().contains("Stop the run"));
+        assert!(
+            preview["runtime"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Stop the run")
+        );
     }
 
     #[gpui::test]
-    async fn stopped_run_move_discloses_frozen_impact_and_rechecks_it_after_approval(cx: &mut TestAppContext) {
+    async fn stopped_run_move_discloses_frozen_impact_and_rechecks_it_after_approval(
+        cx: &mut TestAppContext,
+    ) {
         let (_connection, _agent, thread, coordinator) = architect_tool_test_session(cx).await;
         let mut graph = plan(&thread, cx);
         let mut other = ArchitectNode::new("other", "Other");
         other.locked = true;
         graph.nodes.push(other);
         cx.update(|cx| {
-            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph.clone()), cx)
+            });
             crate::start_architect_run(thread.clone(), coordinator.clone(), graph, cx).unwrap();
             crate::stop_architect_run(&thread, None, cx);
         });
         thread.update(cx, |thread, cx| {
-            thread.update_architect_graph(|graph| {
-                graph.node_at_mut(&NodePath::root("step".into())).unwrap().intent = "Changed on the live canvas".into();
-            }, cx);
+            thread.update_architect_graph(
+                |graph| {
+                    graph
+                        .node_at_mut(&NodePath::root("step".into()))
+                        .unwrap()
+                        .intent = "Changed on the live canvas".into();
+                },
+                cx,
+            );
         });
         permission(ToolPermissionMode::Confirm, cx);
         let tool = Arc::new(EditArchitectPlanTool::new(thread.downgrade()));
@@ -655,7 +854,10 @@ mod tests {
         {
             let stored = tool.previews.borrow();
             let stored = stored.first().unwrap();
-            assert!(stored.preview.invalidated_steps.is_empty(), "the canvas move alone has no execution impact");
+            assert!(
+                stored.preview.invalidated_steps.is_empty(),
+                "the canvas move alone has no execution impact"
+            );
             assert!(stored.preview.affected_locks.is_empty());
         }
         let (events, mut receiver) = ToolCallEventStream::test();
@@ -670,17 +872,25 @@ mod tests {
             let run = thread.architect_run().unwrap();
             assert!(!run.is_running());
             (
-                thread.architect_graph().unwrap().clone(), thread.architect_revision(),
-                thread.architect_event_sequence(), run.id(), run.control().unwrap().clone(),
+                thread.architect_graph().unwrap().clone(),
+                thread.architect_revision(),
+                thread.architect_event_sequence(),
+                run.id(),
+                run.control().unwrap().clone(),
             )
         });
         // Change only the frozen execution state, leaving all root bindings intact.
         // This specifically exercises the post-authorization impact comparison.
         let mut checkpoint = control.borrow().checkpoint();
-        let mut frozen: ArchitectGraph = serde_json::from_value(checkpoint["state"]["graph"].clone()).unwrap();
-        frozen.node_at_mut(&NodePath::root("other".into())).unwrap().intent = "Additional frozen change".into();
+        let mut frozen: ArchitectGraph =
+            serde_json::from_value(checkpoint["state"]["graph"].clone()).unwrap();
+        frozen
+            .node_at_mut(&NodePath::root("other".into()))
+            .unwrap()
+            .intent = "Additional frozen change".into();
         checkpoint["state"]["graph"] = json!(frozen);
-        *control.borrow_mut() = crate::architect_runner::RunState::from_checkpoint(checkpoint).unwrap();
+        *control.borrow_mut() =
+            crate::architect_runner::RunState::from_checkpoint(checkpoint).unwrap();
         let before = control.borrow().checkpoint();
         thread.read_with(cx, |thread, _| {
             assert_eq!(thread.architect_graph(), Some(&live));
@@ -688,13 +898,28 @@ mod tests {
             assert_eq!(thread.architect_event_sequence(), sequence);
             assert_eq!(thread.architect_run().unwrap().id(), run_id);
             let candidate = preview_graph_edits(&live, &move_input().edits).unwrap();
-            let runtime = preview_architect_graph_update(thread, &candidate.graph, &candidate.invalidated_steps);
-            assert!(runtime["invalidated_paths"].as_array().unwrap().contains(&json!(["other"])));
+            let runtime = preview_architect_graph_update(
+                thread,
+                &candidate.graph,
+                &candidate.invalidated_steps,
+            );
+            assert!(
+                runtime["invalidated_paths"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(["other"]))
+            );
         });
-        authorization.response.send(acp_thread::SelectedPermissionOutcome::new(
-            acp::PermissionOptionId::new("allow"), acp::PermissionOptionKind::AllowOnce,
-        )).unwrap();
-        let ArchitectRunToolOutput::Error { error } = task.await.unwrap_err() else { panic!("expected stale impact error"); };
+        authorization
+            .response
+            .send(acp_thread::SelectedPermissionOutcome::new(
+                acp::PermissionOptionId::new("allow"),
+                acp::PermissionOptionKind::AllowOnce,
+            ))
+            .unwrap();
+        let ArchitectRunToolOutput::Error { error } = task.await.unwrap_err() else {
+            panic!("expected stale impact error");
+        };
         assert!(error.contains("Runtime impact changed"), "{error}");
         assert_eq!(control.borrow().checkpoint(), before);
         thread.read_with(cx, |thread, _| {
@@ -715,7 +940,10 @@ mod tests {
             let (events, mut receiver) = ToolCallEventStream::test();
             let task = cx.update(|cx| tool.run(apply_input(&preview), events, cx));
             let authorization = receiver.expect_authorization().await;
-            assert_eq!(authorization.context.as_ref().unwrap().tool_name, EditArchitectPlanTool::NAME);
+            assert_eq!(
+                authorization.context.as_ref().unwrap().tool_name,
+                EditArchitectPlanTool::NAME
+            );
             thread.update(cx, |thread, cx| {
                 if change_mode {
                     thread.set_session_mode(SessionMode::Plan, cx);
@@ -725,31 +953,56 @@ mod tests {
                     thread.set_architect_graph(Some(changed), cx);
                 }
             });
-            authorization.response.send(acp_thread::SelectedPermissionOutcome::new(
-                acp::PermissionOptionId::new("allow"), acp::PermissionOptionKind::AllowOnce,
-            )).unwrap();
+            authorization
+                .response
+                .send(acp_thread::SelectedPermissionOutcome::new(
+                    acp::PermissionOptionId::new("allow"),
+                    acp::PermissionOptionKind::AllowOnce,
+                ))
+                .unwrap();
             assert!(task.await.is_err());
             thread.read_with(cx, |thread, _| {
-                assert!(thread.architect_graph().unwrap().nodes.first().unwrap().position.is_none());
+                assert!(
+                    thread
+                        .architect_graph()
+                        .unwrap()
+                        .nodes
+                        .first()
+                        .unwrap()
+                        .position
+                        .is_none()
+                );
                 assert!(thread.architect_run().is_none());
             });
         }
     }
 
     #[gpui::test]
-    async fn approved_apply_changes_only_preview_and_titles_never_read_owner(cx: &mut TestAppContext) {
+    async fn approved_apply_changes_only_preview_and_titles_never_read_owner(
+        cx: &mut TestAppContext,
+    ) {
         let (_connection, _agent, thread, _coordinator) = architect_tool_test_session(cx).await;
         plan(&thread, cx);
         permission(ToolPermissionMode::Allow, cx);
         let tool = Arc::new(EditArchitectPlanTool::new(thread.downgrade()));
         let inspect = InspectArchitectPlanTool::new(thread.downgrade());
         thread.update(cx, |_, cx| {
-            assert_eq!(tool.initial_title(Err(Value::Null), cx), "Preview Architect plan edit");
-            assert_eq!(inspect.initial_title(Err(Value::Null), cx), "Inspect Architect plan");
+            assert_eq!(
+                tool.initial_title(Err(Value::Null), cx),
+                "Preview Architect plan edit"
+            );
+            assert_eq!(
+                inspect.initial_title(Err(Value::Null), cx),
+                "Inspect Architect plan"
+            );
         });
         let preview = cx.update(|cx| tool.preview(&move_input(), cx)).unwrap();
         let (events, _receiver) = ToolCallEventStream::test();
-        assert!(cx.update(|cx| tool.clone().run(apply_input(&preview), events, cx)).await.is_ok());
+        assert!(
+            cx.update(|cx| tool.clone().run(apply_input(&preview), events, cx))
+                .await
+                .is_ok()
+        );
         thread.read_with(cx, |thread, _| {
             let step = thread.architect_graph().unwrap().nodes.first().unwrap();
             assert_eq!(step.position.unwrap().x, 12.0);
@@ -757,7 +1010,11 @@ mod tests {
             assert!(thread.architect_run().is_none());
         });
         let (events, _receiver) = ToolCallEventStream::test();
-        assert!(cx.update(|cx| tool.run(apply_input(&preview), events, cx)).await.is_err());
+        assert!(
+            cx.update(|cx| tool.run(apply_input(&preview), events, cx))
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -767,8 +1024,14 @@ mod tests {
         let mut child = ArchitectNode::new("step", "Child");
         child.intent = "Child goal".into();
         child.locked = true;
-        parent.subplan = Some(Box::new(ArchitectGraph { nodes: vec![child], edges: vec![] }));
-        let graph = ArchitectGraph { nodes: vec![parent], edges: vec![] };
+        parent.subplan = Some(Box::new(ArchitectGraph {
+            nodes: vec![child],
+            edges: vec![],
+        }));
+        let graph = ArchitectGraph {
+            nodes: vec![parent],
+            edges: vec![],
+        };
         let mut records = Vec::new();
         graph_records(&graph, &NodePath::default(), &json!({}), &mut records).unwrap();
         assert_eq!(records[1]["fields"]["intent"], "Parent's own goal");
@@ -783,26 +1046,58 @@ mod tests {
         let graph = ArchitectGraph::default();
         let now = Instant::now();
         let stored = StoredPreview {
-            token: Uuid::new_v4(), source: graph.clone(), revision: 4,
-            run_id: Some(Uuid::new_v4()), event_sequence: 10, expires: now + PREVIEW_LIFETIME,
+            token: Uuid::new_v4(),
+            source: graph.clone(),
+            revision: 4,
+            run_id: Some(Uuid::new_v4()),
+            event_sequence: 10,
+            expires: now + PREVIEW_LIFETIME,
             preview: preview_graph_edits(&graph, &[]).unwrap(),
             runtime: runtime_impact_fixture(),
             impact: serde_json::from_value(runtime_impact_fixture()).unwrap(),
         };
-        assert!(stored.check(Some(&graph), 4, stored.run_id, 10, now).is_ok());
-        assert!(stored.check(Some(&graph), 4, stored.run_id, 11, now).is_err());
-        assert!(stored.check(Some(&graph), 5, stored.run_id, 10, now).is_err());
-        assert!(stored.check(Some(&graph), 4, Some(Uuid::new_v4()), 10, now).is_err());
-        assert!(stored.check(Some(&graph), 4, stored.run_id, 10, stored.expires).is_err());
-        let changed = ArchitectGraph { nodes: vec![ArchitectNode::new("new", "New")], edges: vec![] };
-        assert!(stored.check(Some(&changed), 4, stored.run_id, 10, now).is_err());
+        assert!(
+            stored
+                .check(Some(&graph), 4, stored.run_id, 10, now)
+                .is_ok()
+        );
+        assert!(
+            stored
+                .check(Some(&graph), 4, stored.run_id, 11, now)
+                .is_err()
+        );
+        assert!(
+            stored
+                .check(Some(&graph), 5, stored.run_id, 10, now)
+                .is_err()
+        );
+        assert!(
+            stored
+                .check(Some(&graph), 4, Some(Uuid::new_v4()), 10, now)
+                .is_err()
+        );
+        assert!(
+            stored
+                .check(Some(&graph), 4, stored.run_id, 10, stored.expires)
+                .is_err()
+        );
+        let changed = ArchitectGraph {
+            nodes: vec![ArchitectNode::new("new", "New")],
+            edges: vec![],
+        };
+        assert!(
+            stored
+                .check(Some(&changed), 4, stored.run_id, 10, now)
+                .is_err()
+        );
     }
 
     #[test]
     fn apply_cannot_smuggle_edits_and_preview_is_default() {
         let preview: EditArchitectPlanToolInput = serde_json::from_value(json!({
             "edits": [{"kind": "remove_node", "path": ["outer", "step"]}]
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(preview.action, ArchitectPlanEditAction::Preview);
         preview.validate().unwrap();
         let mut apply = preview;
@@ -811,7 +1106,10 @@ mod tests {
         assert!(apply.validate().is_err());
         apply.edits.clear();
         apply.validate().unwrap();
-        assert_eq!(InspectArchitectPlanTool::capability(), ToolCapability::ReadOnly);
+        assert_eq!(
+            InspectArchitectPlanTool::capability(),
+            ToolCapability::ReadOnly
+        );
         assert!(!EditArchitectPlanTool::capability().is_allowed_in(SessionMode::Plan));
         assert!(EditArchitectPlanTool::capability().is_allowed_in(SessionMode::Architect));
     }
@@ -825,6 +1123,14 @@ mod tests {
         assert!(count < 20);
         assert_eq!(page["next_offset"], count);
         assert_eq!(page["records"][0], record);
-        assert!(record_page(&[json!({"node_path": ["x".repeat(MAX_OUTPUT_BYTES)]})], 0, 1, 0).is_err());
+        assert!(
+            record_page(
+                &[json!({"node_path": ["x".repeat(MAX_OUTPUT_BYTES)]})],
+                0,
+                1,
+                0
+            )
+            .is_err()
+        );
     }
 }

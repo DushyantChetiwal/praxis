@@ -1171,7 +1171,8 @@ impl ToolCall {
             ToolCallStatus::Rejected => ("rejected", None),
             ToolCallStatus::Canceled => ("canceled", None),
         };
-        let cancellation_requested_at = self.cancellation_requested_at.map(|time| time.to_rfc3339());
+        let cancellation_requested_at =
+            self.cancellation_requested_at.map(|time| time.to_rfc3339());
         serde_json::json!({
             "started_at": self.started_at.to_rfc3339(),
             "last_activity": self.last_activity.to_rfc3339(),
@@ -8168,10 +8169,9 @@ mod tests {
                 "replay": "unknown",
             })
         );
-        let timestamp = DateTime::parse_from_rfc3339(
-            initial["started_at"].as_str().expect("UTC timestamp"),
-        )
-        .expect("timestamp should be RFC 3339");
+        let timestamp =
+            DateTime::parse_from_rfc3339(initial["started_at"].as_str().expect("UTC timestamp"))
+                .expect("timestamp should be RFC 3339");
         assert_eq!(timestamp.offset().local_minus_utc(), 0);
 
         for (status, expected) in [
@@ -8325,7 +8325,9 @@ mod tests {
 
         let permission = request_test_permission(&thread, id.clone(), cx);
         let previous = age_tool_call_activity(&thread, &id, cx);
-        thread.update(cx, |thread, cx| thread.cancel_tool_call_authorization(&id, cx));
+        thread.update(cx, |thread, cx| {
+            thread.cancel_tool_call_authorization(&id, cx)
+        });
         assert!(matches!(
             permission.await,
             RequestPermissionOutcome::Cancelled
@@ -8339,7 +8341,9 @@ mod tests {
             canceled["last_activity"]
         );
         assert_ne!(canceled["last_activity"], previous["last_activity"]);
-        thread.update(cx, |thread, cx| thread.cancel_tool_call_authorization(&id, cx));
+        thread.update(cx, |thread, cx| {
+            thread.cancel_tool_call_authorization(&id, cx)
+        });
         assert_eq!(tool_call_liveness(&thread, &id, cx), canceled);
     }
 
@@ -8476,10 +8480,7 @@ mod tests {
         thread.update(cx, |thread, cx| {
             thread
                 .update_tool_call(
-                    acp::ToolCallUpdate::new(
-                        missing_id.clone(),
-                        acp::ToolCallUpdateFields::new(),
-                    ),
+                    acp::ToolCallUpdate::new(missing_id.clone(), acp::ToolCallUpdateFields::new()),
                     cx,
                 )
                 .expect("unknown call should produce a failed entry");

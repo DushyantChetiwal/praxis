@@ -242,16 +242,23 @@ impl Prerequisites {
 
     fn activated(&self, graph: &ArchitectGraph, node: &NodeId) -> bool {
         self.entries.contains(node)
-            || graph.edges.iter().any(|edge| {
-                &edge.to == node && self.selected.contains(&edge.id)
-            })
+            || graph
+                .edges
+                .iter()
+                .any(|edge| &edge.to == node && self.selected.contains(&edge.id))
     }
 
     fn close_skipped(&mut self, graph: &ArchitectGraph) {
         loop {
-            let skipped = self.nodes.iter().find(|node| {
-                !self.settled(node) && !self.waiting(graph, node) && !self.activated(graph, node)
-            }).cloned();
+            let skipped = self
+                .nodes
+                .iter()
+                .find(|node| {
+                    !self.settled(node)
+                        && !self.waiting(graph, node)
+                        && !self.activated(graph, node)
+                })
+                .cloned();
             match skipped {
                 Some(node) => self.skipped.push(node),
                 None => break,
@@ -306,8 +313,11 @@ impl PlanRun {
                 _ => false,
             }
         }
-        let problems: Vec<_> = graph.blocking_problems().into_iter()
-            .filter(|problem| !only_unlocked(problem)).collect();
+        let problems: Vec<_> = graph
+            .blocking_problems()
+            .into_iter()
+            .filter(|problem| !only_unlocked(problem))
+            .collect();
         if problems.is_empty() {
             Ok(())
         } else {
@@ -405,8 +415,13 @@ impl PlanRun {
                 run.stops = self.stops.clone();
             }
             let entries = branches.iter().map(|(_, node)| node.clone()).collect();
-            run.push_frame(graph_path.0.clone(), entries, graph);
-            if !run.is_finished() && run.stack.last().is_some_and(|frame| frame.prerequisites.is_none()) {
+            run.push_frame(graph_path.0, entries, graph);
+            if !run.is_finished()
+                && run
+                    .stack
+                    .last()
+                    .is_some_and(|frame| frame.prerequisites.is_none())
+            {
                 run.enable_prerequisites(graph);
             }
             if !run.is_finished() {
@@ -472,9 +487,9 @@ impl PlanRun {
     }
 
     fn push_frame(&mut self, parents: Vec<NodeId>, entries: Vec<NodeId>, graph: &ArchitectGraph) {
-        let needs_prerequisites = graph.graph_at(&NodePath(parents.clone())).is_some_and(|local| {
-            overlapping_regions(local, &entries, &[])
-        });
+        let needs_prerequisites = graph
+            .graph_at(&NodePath(parents.clone()))
+            .is_some_and(|local| overlapping_regions(local, &entries, &[]));
         let mut entries = entries.into_iter();
         let Some(current) = entries.next() else {
             return;
@@ -499,7 +514,11 @@ impl PlanRun {
     }
 
     fn enable_prerequisites(&mut self, graph: &ArchitectGraph) {
-        let stops = if self.stack.len() == 1 { self.stops.clone() } else { Vec::new() };
+        let stops = if self.stack.len() == 1 {
+            self.stops.clone()
+        } else {
+            Vec::new()
+        };
         let Some(frame) = self.stack.last_mut() else {
             return;
         };
@@ -528,9 +547,13 @@ impl PlanRun {
         // entry rather than letting the order of outgoing edges bypass a parent.
         if let Some(prerequisites) = &frame.prerequisites
             && prerequisites.waiting(local, &frame.current)
-            && let Some(ready) = prerequisites.nodes.iter().find(|node| {
-                !prerequisites.waiting(local, node) && prerequisites.activated(local, node)
-            }).cloned()
+            && let Some(ready) = prerequisites
+                .nodes
+                .iter()
+                .find(|node| {
+                    !prerequisites.waiting(local, node) && prerequisites.activated(local, node)
+                })
+                .cloned()
         {
             frame.visits.remove(&frame.current);
             frame.current = ready.clone();
@@ -546,7 +569,9 @@ impl PlanRun {
             return self.finish(RunOutcome::Completed);
         };
         let Some(local) = graph.graph_at(&frame.graph_path()) else {
-            return self.finish(RunOutcome::Failed { message: "The checkpoint plan is missing.".into() });
+            return self.finish(RunOutcome::Failed {
+                message: "The checkpoint plan is missing.".into(),
+            });
         };
         let Some(prerequisites) = &mut frame.prerequisites else {
             return self.decide(graph);
@@ -557,14 +582,23 @@ impl PlanRun {
         }
         prerequisites.selected.extend(selected);
         prerequisites.close_skipped(local);
-        let next = prerequisites.nodes.iter().find(|node| {
-            !prerequisites.settled(node) && !prerequisites.waiting(local, node)
-                && prerequisites.activated(local, node)
-        }).cloned();
+        let next = prerequisites
+            .nodes
+            .iter()
+            .find(|node| {
+                !prerequisites.settled(node)
+                    && !prerequisites.waiting(local, node)
+                    && prerequisites.activated(local, node)
+            })
+            .cloned();
         if let Some(next) = next {
             return self.enter(next, graph);
         }
-        if prerequisites.nodes.iter().any(|node| !prerequisites.settled(node)) {
+        if prerequisites
+            .nodes
+            .iter()
+            .any(|node| !prerequisites.settled(node))
+        {
             return self.finish(RunOutcome::Failed {
                 message: "No step is ready: unresolved cyclic prerequisites remain.".into(),
             });
@@ -577,24 +611,36 @@ impl PlanRun {
     pub fn readiness(&self, graph: &ArchitectGraph) -> Vec<StepReadiness> {
         let mut readiness = self.settled_readiness.clone();
         for frame in &self.stack {
-            let Some(prerequisites) = &frame.prerequisites else { continue };
-            let Some(local) = graph.graph_at(&frame.graph_path()) else { continue };
+            let Some(prerequisites) = &frame.prerequisites else {
+                continue;
+            };
+            let Some(local) = graph.graph_at(&frame.graph_path()) else {
+                continue;
+            };
             for node in &prerequisites.nodes {
                 let (status, reason) = if prerequisites.completed.contains(node) {
                     ("completed", "Step and outgoing routing completed")
                 } else if prerequisites.skipped.contains(node) {
                     ("skipped", "Every incoming route was closed")
                 } else if prerequisites.waiting(local, node) {
-                    ("waiting", "Incoming prerequisites or branch decisions are unfinished")
+                    (
+                        "waiting",
+                        "Incoming prerequisites or branch decisions are unfinished",
+                    )
                 } else if prerequisites.activated(local, node) {
-                    ("ready", "All incoming prerequisites are settled and a route is selected")
+                    (
+                        "ready",
+                        "All incoming prerequisites are settled and a route is selected",
+                    )
                 } else {
                     ("waiting", "No incoming route has been selected")
                 };
                 let mut path = frame.parents.clone();
                 path.push(node.clone());
                 readiness.push(StepReadiness {
-                    path: NodePath(path), status: status.into(), reason: reason.into(),
+                    path: NodePath(path),
+                    status: status.into(),
+                    reason: reason.into(),
                 });
             }
         }
@@ -604,7 +650,10 @@ impl PlanRun {
     /// Rebuilds a flat acyclic checkpoint without reexecuting retained results.
     /// This does not authorize execution: the runner must gate resume on review.
     /// Conditional routing cannot be inferred from a completed summary.
-    pub fn rebase_remaining(graph: &ArchitectGraph, completed: &[NodePath]) -> Result<Self, String> {
+    pub fn rebase_remaining(
+        graph: &ArchitectGraph,
+        completed: &[NodePath],
+    ) -> Result<Self, String> {
         if graph.is_empty() {
             return Err(RunRefusal::NothingToRun.to_string());
         }
@@ -614,39 +663,64 @@ impl PlanRun {
         {
             return Err("Topology rebasing requires a flat acyclic plan; the original checkpoint was preserved".into());
         }
-        let completed: Vec<NodeId> = completed.iter().map(|path| {
-            if path.depth() != 1 || graph.node_at(path).is_none() {
-                return Err(format!("Cannot retain missing completed step {path}"));
-            }
-            path.leaf().cloned().ok_or_else(|| "An empty step cannot be completed".into())
-        }).collect::<Result<_, String>>()?;
-        if graph.edges.iter().any(|edge| completed.contains(&edge.from) && !edge.condition.is_always()) {
+        let completed: Vec<NodeId> = completed
+            .iter()
+            .map(|path| {
+                if path.depth() != 1 || graph.node_at(path).is_none() {
+                    return Err(format!("Cannot retain missing completed step {path}"));
+                }
+                path.leaf()
+                    .cloned()
+                    .ok_or_else(|| "An empty step cannot be completed".into())
+            })
+            .collect::<Result<_, String>>()?;
+        if graph
+            .edges
+            .iter()
+            .any(|edge| completed.contains(&edge.from) && !edge.condition.is_always())
+        {
             return Err("Topology rebasing cannot infer a completed branch verdict; invalidate that step explicitly".into());
         }
         let mut prerequisites = Prerequisites {
             nodes: graph.nodes.iter().map(|node| node.id.clone()).collect(),
             entries: entries_of(graph),
-            selected: graph.edges.iter().filter(|edge| completed.contains(&edge.from) && edge.max_repeats != Some(0)).map(|edge| edge.id.clone()).collect(),
+            selected: graph
+                .edges
+                .iter()
+                .filter(|edge| completed.contains(&edge.from) && edge.max_repeats != Some(0))
+                .map(|edge| edge.id.clone())
+                .collect(),
             completed,
             skipped: Vec::new(),
         };
         prerequisites.close_skipped(graph);
-        if prerequisites.completed.iter().any(|node| prerequisites.waiting(graph, node)
-            || !prerequisites.activated(graph, node))
+        if prerequisites
+            .completed
+            .iter()
+            .any(|node| prerequisites.waiting(graph, node) || !prerequisites.activated(graph, node))
         {
             return Err("Retained results have unfinished incoming prerequisites; invalidate those results first".into());
         }
-        let next = prerequisites.nodes.iter().find(|node| {
-            !prerequisites.settled(node) && !prerequisites.waiting(graph, node)
-                && prerequisites.activated(graph, node)
-        }).cloned();
+        let next = prerequisites
+            .nodes
+            .iter()
+            .find(|node| {
+                !prerequisites.settled(node)
+                    && !prerequisites.waiting(graph, node)
+                    && prerequisites.activated(graph, node)
+            })
+            .cloned();
         let mut run = Self::empty();
         if let Some(next) = next {
             run.push_frame(Vec::new(), vec![next], graph);
             if let Some(frame) = run.stack.last_mut() {
                 frame.prerequisites = Some(prerequisites);
             }
-        } else if prerequisites.nodes.iter().all(|node| prerequisites.settled(node)) {
+        } else if prerequisites
+            .nodes
+            .iter()
+            .all(|node| prerequisites.settled(node))
+        {
             run.outcome = Some(RunOutcome::Completed);
         } else {
             return Err("No remaining step has satisfied prerequisites".into());
@@ -656,24 +730,49 @@ impl PlanRun {
 
     /// Changes only the next ready step in a dependency region, never its
     /// completed work. The caller must ensure the displaced step has not begun.
-    pub fn prioritize_ready(&mut self, path: &NodePath, graph: &ArchitectGraph) -> Result<(), String> {
-        if self.is_finished() || !self.stack.last().is_some_and(|frame| frame.phase == Phase::Working) {
+    pub fn prioritize_ready(
+        &mut self,
+        path: &NodePath,
+        graph: &ArchitectGraph,
+    ) -> Result<(), String> {
+        if self.is_finished()
+            || !self
+                .stack
+                .last()
+                .is_some_and(|frame| frame.phase == Phase::Working)
+        {
             return Err("The lane is not waiting on an executable step".into());
         }
         if &self.current() == path {
             return Ok(());
         }
-        let frame = self.stack.last_mut().ok_or_else(|| "The run has finished".to_string())?;
-        let local = graph.graph_at(&frame.graph_path()).ok_or_else(|| "The plan is missing".to_string())?;
+        let frame = self
+            .stack
+            .last_mut()
+            .ok_or_else(|| "The run has finished".to_string())?;
+        let local = graph
+            .graph_at(&frame.graph_path())
+            .ok_or_else(|| "The plan is missing".to_string())?;
         let node = path.leaf().ok_or_else(|| "Select a step".to_string())?;
-        let prerequisites = frame.prerequisites.as_ref().ok_or_else(|| "Only the checkpoint's current step is ready in this lane".to_string())?;
-        if frame.phase != Phase::Working || path.0[..path.depth() - 1] != frame.parents
-            || !prerequisites.nodes.contains(node) || prerequisites.settled(node)
-            || prerequisites.waiting(local, node) || !prerequisites.activated(local, node)
+        let prerequisites = frame.prerequisites.as_ref().ok_or_else(|| {
+            "Only the checkpoint's current step is ready in this lane".to_string()
+        })?;
+        if frame.phase != Phase::Working
+            || path.0[..path.depth() - 1] != frame.parents
+            || !prerequisites.nodes.contains(node)
+            || prerequisites.settled(node)
+            || prerequisites.waiting(local, node)
+            || !prerequisites.activated(local, node)
         {
-            return Err("The selected step is completed, skipped, or still waiting for prerequisites".into());
+            return Err(
+                "The selected step is completed, skipped, or still waiting for prerequisites"
+                    .into(),
+            );
         }
-        if graph.node_at(path).is_some_and(|node| node.subplan().is_some()) {
+        if graph
+            .node_at(path)
+            .is_some_and(|node| node.subplan().is_some())
+        {
             return Err("Resume a nested plan at its admitted leaf step".into());
         }
         frame.visits.remove(&frame.current);
@@ -687,7 +786,8 @@ impl PlanRun {
 
     /// Validates deserialized positions before any driver can execute them.
     pub fn validate_checkpoint(&self, graph: &ArchitectGraph) -> Result<(), String> {
-        if self.stack.len() > MAX_PLAN_DEPTH || self.history.len() > MAX_RUN_STEPS + MAX_NODE_VISITS {
+        if self.stack.len() > MAX_PLAN_DEPTH || self.history.len() > MAX_RUN_STEPS + MAX_NODE_VISITS
+        {
             return Err("Checkpoint counters exceed run limits".into());
         }
         if self.outcome.is_none() && self.stack.is_empty() {
@@ -695,11 +795,14 @@ impl PlanRun {
         }
         for path in &self.history {
             if path.is_empty() || path.depth() > MAX_PLAN_DEPTH || graph.node_at(path).is_none() {
-                return Err(format!("Checkpoint history refers to an invalid or missing step {path}"));
+                return Err(format!(
+                    "Checkpoint history refers to an invalid or missing step {path}"
+                ));
             }
         }
         for step in &self.settled_readiness {
-            if step.path.is_empty() || step.path.depth() > MAX_PLAN_DEPTH
+            if step.path.is_empty()
+                || step.path.depth() > MAX_PLAN_DEPTH
                 || graph.node_at(&step.path).is_none()
                 || !matches!(step.status.as_str(), "completed" | "skipped")
             {
@@ -707,37 +810,61 @@ impl PlanRun {
             }
         }
         for (index, frame) in self.stack.iter().enumerate() {
-            if index > 0 && self.stack.get(index - 1).is_none_or(|parent| parent.path().0 != frame.parents) {
+            if index > 0
+                && self
+                    .stack
+                    .get(index - 1)
+                    .is_none_or(|parent| parent.path().0 != frame.parents)
+            {
                 return Err("Checkpoint nesting does not match its parent step".into());
             }
-            let local = graph.graph_at(&frame.graph_path())
+            let local = graph
+                .graph_at(&frame.graph_path())
                 .ok_or_else(|| "Checkpoint contains a missing nested plan".to_string())?;
             if local.node(&frame.current).is_none()
                 || !frame.visits.contains_key(&frame.current)
                 || (index == 0 && self.stops.iter().any(|node| local.node(node).is_none()))
-                || frame.remaining_roots.iter().enumerate().any(|(index, node)| {
-                    local.node(node).is_none() || frame.remaining_roots[..index].contains(node)
+                || frame
+                    .remaining_roots
+                    .iter()
+                    .enumerate()
+                    .any(|(index, node)| {
+                        local.node(node).is_none() || frame.remaining_roots[..index].contains(node)
+                    })
+                || frame.visits.iter().any(|(node, visits)| {
+                    local.node(node).is_none() || *visits == 0 || *visits > MAX_NODE_VISITS + 1
                 })
-                || frame.visits.iter().any(|(node, visits)| local.node(node).is_none() || *visits == 0 || *visits > MAX_NODE_VISITS + 1)
-                || frame.edge_uses.iter().any(|(id, uses)| *uses == 0 || *uses > MAX_RUN_STEPS
-                    || !local.edges.iter().any(|edge| &edge.id == id))
+                || frame.edge_uses.iter().any(|(id, uses)| {
+                    *uses == 0
+                        || *uses > MAX_RUN_STEPS
+                        || !local.edges.iter().any(|edge| &edge.id == id)
+                })
             {
                 return Err("Checkpoint contains invalid node or edge counters".into());
             }
-            let valid_edge = |id: &EdgeId, to: &NodeId| local.edges.iter().any(|edge| {
-                &edge.id == id && &edge.to == to && edge.from == frame.current
-            });
+            let valid_edge = |id: &EdgeId, to: &NodeId| {
+                local
+                    .edges
+                    .iter()
+                    .any(|edge| &edge.id == id && &edge.to == to && edge.from == frame.current)
+            };
             match &frame.phase {
                 Phase::Deciding { remaining, plain } => {
                     let mut edges = std::collections::HashSet::new();
-                    if remaining.iter().map(|branch| &branch.edge).chain(plain.iter().map(|(edge, _)| edge))
+                    if remaining
+                        .iter()
+                        .map(|branch| &branch.edge)
+                        .chain(plain.iter().map(|(edge, _)| edge))
                         .any(|edge| !edges.insert(edge))
                     {
                         return Err("Checkpoint repeats a pending branch decision".into());
                     }
-                    if remaining.iter().any(|branch| !valid_edge(&branch.edge, &branch.to)
-                        || !local.edges.iter().any(|edge| edge.id == branch.edge && edge.condition == branch.condition))
-                        || plain.iter().any(|(edge, to)| !valid_edge(edge, to))
+                    if remaining.iter().any(|branch| {
+                        !valid_edge(&branch.edge, &branch.to)
+                            || !local.edges.iter().any(|edge| {
+                                edge.id == branch.edge && edge.condition == branch.condition
+                            })
+                    }) || plain.iter().any(|(edge, to)| !valid_edge(edge, to))
                     {
                         return Err("Checkpoint branch decision does not match the graph".into());
                     }
@@ -747,7 +874,8 @@ impl PlanRun {
                     if branches.iter().any(|(edge, _)| !edges.insert(edge)) {
                         return Err("Checkpoint repeats a fork branch".into());
                     }
-                    if branches.is_empty() || branches.iter().any(|(edge, to)| !valid_edge(edge, to))
+                    if branches.is_empty()
+                        || branches.iter().any(|(edge, to)| !valid_edge(edge, to))
                         || *join != join_of(local, &frame.current, branches)
                         || frame.dependency_fork != fork_needs_prerequisites(local, branches, join)
                     {
@@ -757,29 +885,67 @@ impl PlanRun {
                 Phase::Working => {}
             }
             if let Some(prerequisites) = &frame.prerequisites {
-                let stops = if index == 0 { self.stops.as_slice() } else { &[] };
+                let stops = if index == 0 {
+                    self.stops.as_slice()
+                } else {
+                    &[]
+                };
                 if !prerequisites.nodes.contains(&frame.current)
                     || prerequisites.nodes != reachable_before(local, &prerequisites.entries, stops)
-                    || prerequisites.entries.iter().enumerate().any(|(index, node)| prerequisites.entries[..index].contains(node))
-                    || prerequisites.selected.iter().enumerate().any(|(index, edge)| prerequisites.selected[..index].contains(edge))
-                    || prerequisites.completed.iter().enumerate().any(|(index, node)| prerequisites.completed[..index].contains(node))
-                    || prerequisites.skipped.iter().enumerate().any(|(index, node)| prerequisites.skipped[..index].contains(node))
-                    || prerequisites.nodes.iter().any(|node| local.node(node).is_none())
-                    || local.edges.iter().any(|edge| prerequisites.nodes.contains(&edge.from)
-                        && prerequisites.nodes.contains(&edge.to) && local.is_loop_edge(edge))
-                    || prerequisites.completed.iter().any(|node| prerequisites.waiting(local, node)
-                        || !prerequisites.activated(local, node))
-                    || prerequisites.skipped.iter().any(|node| prerequisites.waiting(local, node)
-                        || prerequisites.activated(local, node))
-                    || prerequisites.entries.iter().chain(&prerequisites.completed).chain(&prerequisites.skipped)
+                    || prerequisites
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .any(|(index, node)| prerequisites.entries[..index].contains(node))
+                    || prerequisites
+                        .selected
+                        .iter()
+                        .enumerate()
+                        .any(|(index, edge)| prerequisites.selected[..index].contains(edge))
+                    || prerequisites
+                        .completed
+                        .iter()
+                        .enumerate()
+                        .any(|(index, node)| prerequisites.completed[..index].contains(node))
+                    || prerequisites
+                        .skipped
+                        .iter()
+                        .enumerate()
+                        .any(|(index, node)| prerequisites.skipped[..index].contains(node))
+                    || prerequisites
+                        .nodes
+                        .iter()
+                        .any(|node| local.node(node).is_none())
+                    || local.edges.iter().any(|edge| {
+                        prerequisites.nodes.contains(&edge.from)
+                            && prerequisites.nodes.contains(&edge.to)
+                            && local.is_loop_edge(edge)
+                    })
+                    || prerequisites.completed.iter().any(|node| {
+                        prerequisites.waiting(local, node) || !prerequisites.activated(local, node)
+                    })
+                    || prerequisites.skipped.iter().any(|node| {
+                        prerequisites.waiting(local, node) || prerequisites.activated(local, node)
+                    })
+                    || prerequisites
+                        .entries
+                        .iter()
+                        .chain(&prerequisites.completed)
+                        .chain(&prerequisites.skipped)
                         .any(|node| !prerequisites.nodes.contains(node))
-                    || prerequisites.completed.iter().any(|node| prerequisites.skipped.contains(node))
-                    || prerequisites.selected.iter().any(|id| !local.edges.iter().any(|edge| {
-                        &edge.id == id && prerequisites.completed.contains(&edge.from)
-                    }))
-                    || (frame.phase == Phase::Working && (prerequisites.settled(&frame.current)
-                        || prerequisites.waiting(local, &frame.current)
-                        || !prerequisites.activated(local, &frame.current)))
+                    || prerequisites
+                        .completed
+                        .iter()
+                        .any(|node| prerequisites.skipped.contains(node))
+                    || prerequisites.selected.iter().any(|id| {
+                        !local.edges.iter().any(|edge| {
+                            &edge.id == id && prerequisites.completed.contains(&edge.from)
+                        })
+                    })
+                    || (frame.phase == Phase::Working
+                        && (prerequisites.settled(&frame.current)
+                            || prerequisites.waiting(local, &frame.current)
+                            || !prerequisites.activated(local, &frame.current)))
                 {
                     return Err("Checkpoint prerequisite state is inconsistent".into());
                 }
@@ -966,8 +1132,13 @@ impl PlanRun {
     /// Leaves the current step by its plain connections: nowhere, one step,
     /// or several at once.
     fn follow_plain(&mut self, plain: Vec<(EdgeId, NodeId)>, graph: &ArchitectGraph) -> Decision {
-        if self.stack.last().is_some_and(|frame| frame.prerequisites.is_some()) {
-            return self.settle_prerequisites(plain.into_iter().map(|(edge, _)| edge).collect(), graph);
+        if self
+            .stack
+            .last()
+            .is_some_and(|frame| frame.prerequisites.is_some())
+        {
+            return self
+                .settle_prerequisites(plain.into_iter().map(|(edge, _)| edge).collect(), graph);
         }
         let mut branches: Vec<(EdgeId, NodeId)> = Vec::new();
         for (edge, to) in plain {
@@ -1013,7 +1184,11 @@ impl PlanRun {
     /// Follows a connection out of the current step, counting it against any
     /// repeat limit it has.
     fn take(&mut self, edge: EdgeId, to: NodeId, graph: &ArchitectGraph) -> Decision {
-        if self.stack.last().is_some_and(|frame| frame.prerequisites.is_some()) {
+        if self
+            .stack
+            .last()
+            .is_some_and(|frame| frame.prerequisites.is_some())
+        {
             return self.settle_prerequisites(vec![edge], graph);
         }
         if let Some(frame) = self.stack.last_mut() {
@@ -1130,10 +1305,18 @@ impl PlanRun {
         }
 
         let depth = self.stack.last().map(|frame| frame.parents.len() + 1);
-        let settled: Vec<_> = self.readiness(graph).into_iter().filter(|step| {
-            Some(step.path.depth()) == depth && matches!(step.status.as_str(), "completed" | "skipped")
-                && !self.settled_readiness.iter().any(|previous| previous.path == step.path)
-        }).collect();
+        let settled: Vec<_> = self
+            .readiness(graph)
+            .into_iter()
+            .filter(|step| {
+                Some(step.path.depth()) == depth
+                    && matches!(step.status.as_str(), "completed" | "skipped")
+                    && !self
+                        .settled_readiness
+                        .iter()
+                        .any(|previous| previous.path == step.path)
+            })
+            .collect();
         self.settled_readiness.extend(settled);
         self.stack.pop();
         if self.stack.is_empty() {
@@ -1158,7 +1341,12 @@ fn reachable_before(graph: &ArchitectGraph, entries: &[NodeId], stops: &[NodeId]
         reached.push(node.clone());
         queue.extend(graph.edges_from(&node).map(|edge| edge.to.clone()));
     }
-    graph.nodes.iter().filter(|node| reached.contains(&node.id)).map(|node| node.id.clone()).collect()
+    graph
+        .nodes
+        .iter()
+        .filter(|node| reached.contains(&node.id))
+        .map(|node| node.id.clone())
+        .collect()
 }
 
 fn fork_needs_prerequisites(
@@ -2466,67 +2654,156 @@ mod tests {
         let mut run = PlanRun::start(&graph).unwrap();
         assert_eq!(run.finish_step(&graph), Decision::Run(path(&["b"])));
         let readiness = run.readiness(&graph);
-        assert_eq!(readiness.iter().find(|step| step.path == path(&["join"])).unwrap().status, "waiting");
+        assert_eq!(
+            readiness
+                .iter()
+                .find(|step| step.path == path(&["join"]))
+                .unwrap()
+                .status,
+            "waiting"
+        );
         assert_eq!(run.finish_step(&graph), Decision::Run(path(&["join"])));
-        assert_eq!(run.finish_step(&graph), Decision::Done(RunOutcome::Completed));
-        assert_eq!(run.history(), &[path(&["a"]), path(&["b"]), path(&["join"])]);
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Done(RunOutcome::Completed)
+        );
+        assert_eq!(
+            run.history(),
+            &[path(&["a"]), path(&["b"]), path(&["join"])]
+        );
     }
 
     #[test]
     fn a_partial_join_has_one_owner_and_waits_for_both_branches() {
         let graph = plain_graph(
             &["a", "b", "e", "c", "f", "d"],
-            &[("a", "b"), ("a", "c"), ("a", "d"), ("b", "e"), ("c", "e"), ("e", "f"), ("d", "f")],
+            &[
+                ("a", "b"),
+                ("a", "c"),
+                ("a", "d"),
+                ("b", "e"),
+                ("c", "e"),
+                ("e", "f"),
+                ("d", "f"),
+            ],
         );
         let mut run = PlanRun::start(&graph).unwrap();
-        assert_eq!(run_all(&mut run, &graph), vec![
-            path(&["a"]), path(&["b"]), path(&["c"]), path(&["e"]), path(&["d"]), path(&["f"]),
-        ]);
+        assert_eq!(
+            run_all(&mut run, &graph),
+            vec![
+                path(&["a"]),
+                path(&["b"]),
+                path(&["c"]),
+                path(&["e"]),
+                path(&["d"]),
+                path(&["f"]),
+            ]
+        );
     }
 
     #[test]
     fn a_branch_bypassing_the_nominal_join_cannot_run_its_successors_early() {
         let graph = plain_graph(
             &["a", "b", "e", "f", "k", "later", "c", "join"],
-            &[("a", "b"), ("a", "c"), ("b", "e"), ("b", "f"), ("e", "join"), ("f", "k"), ("k", "later"), ("c", "join"), ("join", "later")],
+            &[
+                ("a", "b"),
+                ("a", "c"),
+                ("b", "e"),
+                ("b", "f"),
+                ("e", "join"),
+                ("f", "k"),
+                ("k", "later"),
+                ("c", "join"),
+                ("join", "later"),
+            ],
         );
         let mut run = PlanRun::start(&graph).unwrap();
         let paths = run_all(&mut run, &graph);
-        assert_eq!(paths.iter().filter(|node| **node == path(&["later"])).count(), 1);
-        assert!(paths.iter().position(|node| *node == path(&["later"]))
-            > paths.iter().position(|node| *node == path(&["join"])));
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|node| **node == path(&["later"]))
+                .count(),
+            1
+        );
+        assert!(
+            paths.iter().position(|node| *node == path(&["later"]))
+                > paths.iter().position(|node| *node == path(&["join"]))
+        );
     }
 
     #[test]
     fn multiple_shared_successors_each_run_once() {
         let graph = plain_graph(
             &["a", "b", "c", "y", "x"],
-            &[("a", "b"), ("a", "c"), ("b", "x"), ("b", "y"), ("c", "x"), ("c", "y")],
+            &[
+                ("a", "b"),
+                ("a", "c"),
+                ("b", "x"),
+                ("b", "y"),
+                ("c", "x"),
+                ("c", "y"),
+            ],
         );
         let mut run = PlanRun::start(&graph).unwrap();
-        assert_eq!(run_all(&mut run, &graph), vec![
-            path(&["a"]), path(&["b"]), path(&["c"]), path(&["y"]), path(&["x"]),
-        ]);
+        assert_eq!(
+            run_all(&mut run, &graph),
+            vec![
+                path(&["a"]),
+                path(&["b"]),
+                path(&["c"]),
+                path(&["y"]),
+                path(&["x"]),
+            ]
+        );
     }
 
     #[test]
     fn a_closed_conditional_prerequisite_is_skipped_not_executed() {
-        let mut graph = plain_graph(&["a", "b", "join", "root"], &[("a", "b"), ("b", "join"), ("root", "join")]);
-        graph.edges[0].condition = EdgeCondition::LlmEvaluated { question: "Run b?".into() };
+        let mut graph = plain_graph(
+            &["a", "b", "join", "root"],
+            &[("a", "b"), ("b", "join"), ("root", "join")],
+        );
+        graph.edges[0].condition = EdgeCondition::LlmEvaluated {
+            question: "Run b?".into(),
+        };
         let mut run = PlanRun::start(&graph).unwrap();
         assert!(matches!(run.finish_step(&graph), Decision::Ask(_)));
         assert_eq!(run.answer(&graph, false), Decision::Run(path(&["root"])));
-        assert_eq!(run.readiness(&graph).iter().find(|step| step.path == path(&["b"])).unwrap().status, "skipped");
+        assert_eq!(
+            run.readiness(&graph)
+                .iter()
+                .find(|step| step.path == path(&["b"]))
+                .unwrap()
+                .status,
+            "skipped"
+        );
         assert_eq!(run.finish_step(&graph), Decision::Run(path(&["join"])));
-        assert_eq!(run.finish_step(&graph), Decision::Done(RunOutcome::Completed));
-        assert_eq!(run.readiness(&graph).iter().find(|step| step.path == path(&["b"])).unwrap().status, "skipped");
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Done(RunOutcome::Completed)
+        );
+        assert_eq!(
+            run.readiness(&graph)
+                .iter()
+                .find(|step| step.path == path(&["b"]))
+                .unwrap()
+                .status,
+            "skipped"
+        );
     }
 
     #[test]
     fn a_disabled_internal_loop_preserves_structured_fork_lanes() {
         let mut graph = plain_graph(
             &["start", "a", "check", "b", "join"],
-            &[("start", "a"), ("start", "b"), ("a", "check"), ("check", "join"), ("b", "join")],
+            &[
+                ("start", "a"),
+                ("start", "b"),
+                ("a", "check"),
+                ("check", "join"),
+                ("b", "join"),
+            ],
         );
         let mut disabled = ArchitectEdge::new("disabled", "check", "a");
         disabled.max_repeats = Some(0);
@@ -2541,12 +2818,20 @@ mod tests {
         }
         assert_eq!(ran, vec![path(&["a"]), path(&["check"]), path(&["b"])]);
         assert_eq!(run.join(&graph), Decision::Run(path(&["join"])));
-        assert_eq!(run.finish_step(&graph), Decision::Done(RunOutcome::Completed));
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Done(RunOutcome::Completed)
+        );
     }
 
     #[test]
     fn repeat_limits_gate_a_nominal_join_even_for_unconditional_routes() {
-        for limits in [(Some(0), Some(0)), (Some(1), Some(0)), (Some(0), None), (Some(1), Some(1))] {
+        for limits in [
+            (Some(0), Some(0)),
+            (Some(1), Some(0)),
+            (Some(0), None),
+            (Some(1), Some(1)),
+        ] {
             let mut graph = plain_graph(
                 &["start", "a", "b", "join"],
                 &[("start", "a"), ("start", "b"), ("a", "join"), ("b", "join")],
@@ -2564,49 +2849,98 @@ mod tests {
             assert_eq!(lanes.len(), 1, "the dependency region must own the join");
             let mut lane = lanes.remove(0);
             assert_eq!(lane.finish_step(&graph), Decision::Run(path(&["b"])));
-            assert_eq!(lane.readiness(&graph).iter().find(|step| step.path == path(&["join"])).unwrap().status,
-                "waiting", "a selected route still waits for the other branch");
+            assert_eq!(
+                lane.readiness(&graph)
+                    .iter()
+                    .find(|step| step.path == path(&["join"]))
+                    .unwrap()
+                    .status,
+                "waiting",
+                "a selected route still waits for the other branch"
+            );
             let next = lane.finish_step(&graph);
             if limits == (Some(0), Some(0)) {
                 assert_eq!(next, Decision::Done(RunOutcome::Completed));
-                assert_eq!(lane.readiness(&graph).iter().find(|step| step.path == path(&["join"])).unwrap().status, "skipped");
+                assert_eq!(
+                    lane.readiness(&graph)
+                        .iter()
+                        .find(|step| step.path == path(&["join"]))
+                        .unwrap()
+                        .status,
+                    "skipped"
+                );
                 assert!(!lane.history().contains(&path(&["join"])));
             } else {
                 assert_eq!(next, Decision::Run(path(&["join"])));
-                assert_eq!(lane.finish_step(&graph), Decision::Done(RunOutcome::Completed));
-                assert_eq!(lane.history().iter().filter(|step| **step == path(&["join"])).count(), 1);
+                assert_eq!(
+                    lane.finish_step(&graph),
+                    Decision::Done(RunOutcome::Completed)
+                );
+                assert_eq!(
+                    lane.history()
+                        .iter()
+                        .filter(|step| **step == path(&["join"]))
+                        .count(),
+                    1
+                );
             }
             assert_eq!(run.join(&graph), Decision::Done(RunOutcome::Completed));
-            assert!(!run.history().contains(&path(&["join"])), "the parent must not run it again");
+            assert!(
+                !run.history().contains(&path(&["join"])),
+                "the parent must not run it again"
+            );
         }
     }
 
     #[test]
     fn a_nominal_join_is_skipped_when_every_branch_closes_its_route() {
-        let mut graph = plain_graph(&["a", "b", "c", "join"], &[("a", "b"), ("a", "c"), ("b", "join"), ("c", "join")]);
+        let mut graph = plain_graph(
+            &["a", "b", "c", "join"],
+            &[("a", "b"), ("a", "c"), ("b", "join"), ("c", "join")],
+        );
         for edge in &mut graph.edges {
             if edge.to == id("join") {
-                edge.condition = EdgeCondition::LlmEvaluated { question: "Continue?".into() };
+                edge.condition = EdgeCondition::LlmEvaluated {
+                    question: "Continue?".into(),
+                };
             }
         }
         let mut run = PlanRun::start(&graph).unwrap();
-        assert_eq!(run_all(&mut run, &graph), vec![path(&["a"]), path(&["b"]), path(&["c"])]);
+        assert_eq!(
+            run_all(&mut run, &graph),
+            vec![path(&["a"]), path(&["b"]), path(&["c"])]
+        );
     }
 
     #[test]
     fn overlapping_cyclic_prerequisites_fail_closed() {
-        let mut graph = plain_graph(&["a", "root", "b", "check", "done"], &[("a", "b"), ("root", "b"), ("b", "check"), ("check", "done")]);
-        graph.edges.push(ArchitectEdge::new("again", "check", "b").with_condition(
-            EdgeCondition::LlmEvaluated { question: "Again?".into() },
-        ));
+        let mut graph = plain_graph(
+            &["a", "root", "b", "check", "done"],
+            &[("a", "b"), ("root", "b"), ("b", "check"), ("check", "done")],
+        );
+        graph
+            .edges
+            .push(ArchitectEdge::new("again", "check", "b").with_condition(
+                EdgeCondition::LlmEvaluated {
+                    question: "Again?".into(),
+                },
+            ));
         let mut run = PlanRun::start(&graph).unwrap();
-        assert!(matches!(run.decide(&graph), Decision::Done(RunOutcome::Failed { .. })));
+        assert!(matches!(
+            run.decide(&graph),
+            Decision::Done(RunOutcome::Failed { .. })
+        ));
     }
 
     #[test]
     fn dependency_checkpoint_roundtrip_keeps_decisions_and_completed_steps() {
-        let mut graph = plain_graph(&["a", "b", "join", "root"], &[("a", "b"), ("b", "join"), ("root", "join")]);
-        graph.edges[0].condition = EdgeCondition::LlmEvaluated { question: "Run b?".into() };
+        let mut graph = plain_graph(
+            &["a", "b", "join", "root"],
+            &[("a", "b"), ("b", "join"), ("root", "join")],
+        );
+        graph.edges[0].condition = EdgeCondition::LlmEvaluated {
+            question: "Run b?".into(),
+        };
         let mut run = PlanRun::start(&graph).unwrap();
         let question = run.finish_step(&graph);
         let value = serde_json::to_value(&run).unwrap();
@@ -2618,7 +2952,10 @@ mod tests {
         let value = serde_json::to_value(&restored).unwrap();
         let mut restored: PlanRun = serde_json::from_value(value).unwrap();
         restored.validate_checkpoint(&graph).unwrap();
-        assert_eq!(run_all(&mut restored, &graph), vec![path(&["root"]), path(&["join"])]);
+        assert_eq!(
+            run_all(&mut restored, &graph),
+            vec![path(&["root"]), path(&["join"])]
+        );
     }
 
     #[test]
@@ -2636,7 +2973,10 @@ mod tests {
         assert_eq!(serde_json::to_value(&restored).unwrap(), value);
         assert_eq!(restored.finish_step(&graph), Decision::Run(path(&["test"])));
         assert!(matches!(restored.finish_step(&graph), Decision::Ask(_)));
-        assert_eq!(restored.answer(&graph, false), Decision::Done(RunOutcome::Completed));
+        assert_eq!(
+            restored.answer(&graph, false),
+            Decision::Done(RunOutcome::Completed)
+        );
     }
 
     #[test]
@@ -2646,7 +2986,10 @@ mod tests {
         assert!(run.prioritize_ready(&path(&["join"]), &graph).is_err());
         run.prioritize_ready(&path(&["b"]), &graph).unwrap();
         run.validate_checkpoint(&graph).unwrap();
-        assert_eq!(run_all(&mut run, &graph), vec![path(&["b"]), path(&["a"]), path(&["join"])]);
+        assert_eq!(
+            run_all(&mut run, &graph),
+            vec![path(&["b"]), path(&["a"]), path(&["join"])]
+        );
     }
 
     #[test]
@@ -2657,7 +3000,10 @@ mod tests {
         run.validate_checkpoint(&graph).unwrap();
         assert_eq!(run.current(), path(&["b"]));
         assert!(!graph.node(&id("b")).unwrap().locked);
-        assert!(matches!(PlanRun::start(&graph), Err(RunRefusal::NotReady(_))));
+        assert!(matches!(
+            PlanRun::start(&graph),
+            Err(RunRefusal::NotReady(_))
+        ));
         // Capture warnings remain attached to the draft; structural validation
         // neither approves locks nor rewrites the requirements being reviewed.
         assert_eq!(graph.steps_without_capture(), vec![id("a"), id("b")]);
@@ -2670,7 +3016,10 @@ mod tests {
         let graph = plain_graph(&["a", "join", "b"], &[("a", "join"), ("b", "join")]);
         let mut run = PlanRun::rebase_remaining(&graph, &[path(&["a"])]).unwrap();
         run.validate_checkpoint(&graph).unwrap();
-        assert_eq!(run_all(&mut run, &graph), vec![path(&["b"]), path(&["join"])]);
+        assert_eq!(
+            run_all(&mut run, &graph),
+            vec![path(&["b"]), path(&["join"])]
+        );
     }
 
     #[test]

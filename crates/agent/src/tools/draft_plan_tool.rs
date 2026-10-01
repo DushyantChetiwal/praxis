@@ -356,10 +356,7 @@ mod tests {
         existing
             .move_node_at(&right_path, architect::Position { x: 925.0, y: -41.5 })
             .expect("right position");
-        existing
-            .node_mut(&"left".into())
-            .expect("left")
-            .position = None;
+        existing.node_mut(&"left".into()).expect("left").position = None;
         let snapshot = existing.clone();
         let mut proposal = proposal;
         proposal["nodes"][1]["steps"]["nodes"]

@@ -175,22 +175,38 @@ impl ArchitectRunAction {
 
 impl ControlArchitectRunToolInput {
     fn validate(&self) -> Result<()> {
-        ensure!(serde_json::to_vec(self)?.len() <= MAX_HISTORY_BYTES,
-            "Control input exceeds 32768 bytes. Use a smaller targeted request.");
+        ensure!(
+            serde_json::to_vec(self)?.len() <= MAX_HISTORY_BYTES,
+            "Control input exceeds 32768 bytes. Use a smaller targeted request."
+        );
         let has_revision = self.goal.is_some() || self.rules.is_some() || self.capture.is_some();
         if self.action == ArchitectRunAction::SetStepModels {
-            ensure!((1..=100).contains(&self.models.len()), "Provide 1 to 100 model updates.");
+            ensure!(
+                (1..=100).contains(&self.models.len()),
+                "Provide 1 to 100 model updates."
+            );
             let mut paths = std::collections::HashSet::new();
             for model in &self.models {
-                ensure!(!model.node_path.is_empty(), "Model updates require full nonempty paths.");
-                ensure!(paths.insert(&model.node_path), "Duplicate path in model updates.");
+                ensure!(
+                    !model.node_path.is_empty(),
+                    "Model updates require full nonempty paths."
+                );
+                ensure!(
+                    paths.insert(&model.node_path),
+                    "Duplicate path in model updates."
+                );
             }
         } else {
-            ensure!(self.models.is_empty(), "models is only accepted for set_step_models.");
+            ensure!(
+                self.models.is_empty(),
+                "models is only accepted for set_step_models."
+            );
         }
         if matches!(
             self.action,
-            ArchitectRunAction::SetStepModel | ArchitectRunAction::ReviseStep | ArchitectRunAction::ResumeAt
+            ArchitectRunAction::SetStepModel
+                | ArchitectRunAction::ReviseStep
+                | ArchitectRunAction::ResumeAt
         ) {
             ensure!(
                 self.node_path.as_ref().is_some_and(|path| !path.is_empty()),
@@ -321,7 +337,9 @@ impl ControlArchitectRunTool {
                 resume_architect_run_at(thread.clone(), acp_thread, path, cx)?;
             }
             ArchitectRunAction::SetStepModels => {
-                let models: Vec<_> = input.models.iter()
+                let models: Vec<_> = input
+                    .models
+                    .iter()
                     .map(|model| (model.node_path.clone(), model.model.clone()))
                     .collect();
                 set_architect_step_models(&thread, &models, cx)?;
@@ -394,9 +412,19 @@ fn run_status(thread: &Thread) -> Value {
     }
 }
 
-fn inspect_history(thread: &Thread, run_id: Option<Uuid>, offset: usize, limit: usize) -> Result<Value> {
-    if let Some(run_id) = run_id.filter(|id| thread.architect_run().is_none_or(|run| run.id() != *id)) {
-        let run = thread.architect_run_archive().iter().find(|run| run.id == run_id)
+fn inspect_history(
+    thread: &Thread,
+    run_id: Option<Uuid>,
+    offset: usize,
+    limit: usize,
+) -> Result<Value> {
+    if let Some(run_id) =
+        run_id.filter(|id| thread.architect_run().is_none_or(|run| run.id() != *id))
+    {
+        let run = thread
+            .architect_run_archive()
+            .iter()
+            .find(|run| run.id == run_id)
             .context("Unknown archived run_id. Inspect archives first.")?;
         let visits: Vec<_> = run.history.iter().map(|step| json!({
             "node_path": step.path, "visit_id": step.session_id,
@@ -404,10 +432,16 @@ fn inspect_history(thread: &Thread, run_id: Option<Uuid>, offset: usize, limit: 
             "running": false, "summary": step.summary.as_deref().map(|text| bounded_text(text, 1024)),
             "summary_truncated": step.summary.as_ref().is_some_and(|text| text.len() > 1024),
         })).collect();
-        return bounded_page("visits", &visits, offset, limit, json!({
-            "run_id": run.id, "archived": true, "total_visits": visits.len(),
-            "note": "Archived visits are immutable. Use this run_id with the exact full path and visit_id to read a transcript.",
-        }));
+        return bounded_page(
+            "visits",
+            &visits,
+            offset,
+            limit,
+            json!({
+                "run_id": run.id, "archived": true, "total_visits": visits.len(),
+                "note": "Archived visits are immutable. Use this run_id with the exact full path and visit_id to read a transcript.",
+            }),
+        );
     }
     let history = thread.architect_run().map_or(&[][..], |run| run.history());
     ensure!(
@@ -447,8 +481,17 @@ fn inspect_history(thread: &Thread, run_id: Option<Uuid>, offset: usize, limit: 
     )
 }
 
-fn bounded_page(key: &str, entries: &[Value], offset: usize, limit: usize, mut page: Value) -> Result<Value> {
-    ensure!(offset <= entries.len(), "Page offset is out of range. Start at zero.");
+fn bounded_page(
+    key: &str,
+    entries: &[Value],
+    offset: usize,
+    limit: usize,
+    mut page: Value,
+) -> Result<Value> {
+    ensure!(
+        offset <= entries.len(),
+        "Page offset is out of range. Start at zero."
+    );
     let mut end = offset.saturating_add(limit).min(entries.len());
     loop {
         page[key] = json!(&entries[offset..end]);
@@ -457,7 +500,10 @@ fn bounded_page(key: &str, entries: &[Value], offset: usize, limit: usize, mut p
         if serde_json::to_vec(&json!({"data": &page}))?.len() <= MAX_HISTORY_BYTES {
             return Ok(page);
         }
-        ensure!(end > offset + 1, "A single entry or its metadata exceeds the 32768-byte response limit.");
+        ensure!(
+            end > offset + 1,
+            "A single entry or its metadata exceeds the 32768-byte response limit."
+        );
         end -= 1;
     }
 }
@@ -470,20 +516,37 @@ fn inspect_archives(thread: &Thread, offset: usize, limit: usize) -> Result<Valu
         "outcome": run.outcome.as_ref().map(|outcome| bounded_text(&format!("{outcome:?}"), 1024).to_owned()),
         "recovery_error": run.recovery_error.as_deref().map(|error| bounded_text(error, 1024)),
     })).collect();
-    bounded_page("archives", &archives, offset, limit, json!({
-        "current_run_id": thread.architect_run().map(|run| run.id()),
-        "event_sequence": thread.architect_event_sequence(),
-    }))
+    bounded_page(
+        "archives",
+        &archives,
+        offset,
+        limit,
+        json!({
+            "current_run_id": thread.architect_run().map(|run| run.id()),
+            "event_sequence": thread.architect_event_sequence(),
+        }),
+    )
 }
 
 fn event_page(thread: &Thread, after: u64, limit: usize, run_id: Option<Uuid>) -> Result<Value> {
-    ensure!(after <= thread.architect_event_sequence(), "Event cursor is ahead of this conversation. Inspect from zero.");
+    ensure!(
+        after <= thread.architect_event_sequence(),
+        "Event cursor is ahead of this conversation. Inspect from zero."
+    );
     if let Some(run_id) = run_id {
-        ensure!(thread.architect_run().is_some_and(|run| run.id() == run_id)
-            || thread.architect_run_archive().iter().any(|run| run.id == run_id),
-            "Unknown run_id. Inspect archives first.");
+        ensure!(
+            thread.architect_run().is_some_and(|run| run.id() == run_id)
+                || thread
+                    .architect_run_archive()
+                    .iter()
+                    .any(|run| run.id == run_id),
+            "Unknown run_id. Inspect archives first."
+        );
     }
-    let oldest = thread.architect_events(0, 1).first().map(|event| event.sequence);
+    let oldest = thread
+        .architect_events(0, 1)
+        .first()
+        .map(|event| event.sequence);
     let events = thread.architect_events(after, limit);
     let mut count = events.len();
     loop {
@@ -502,7 +565,11 @@ fn event_page(thread: &Thread, after: u64, limit: usize, run_id: Option<Uuid>) -
                     "summary_truncated": step.summary.as_ref().is_some_and(|text| text.len() > 1024),
                 })),
             })).collect();
-        let next = events.iter().take(count).last().map_or(after, |event| event.sequence);
+        let next = events
+            .iter()
+            .take(count)
+            .last()
+            .map_or(after, |event| event.sequence);
         let page = json!({
             "events": entries, "next_sequence": next, "event_sequence": thread.architect_event_sequence(),
             "has_more": next < thread.architect_event_sequence(), "oldest_sequence": oldest,
@@ -522,24 +589,37 @@ fn active_threads(thread: &Thread) -> Vec<Entity<AcpThread>> {
     if let Some(run) = thread.architect_run().filter(|run| run.is_running()) {
         for step in run.running_steps() {
             if let Some(thread) = step.step_thread() {
-                if !threads.contains(&thread) { threads.push(thread); }
+                if !threads.contains(&thread) {
+                    threads.push(thread);
+                }
             }
         }
         // Branch-verdict questions may run after the step leaves running_steps.
         if let Some(thread) = run.step_thread() {
-            if !threads.contains(&thread) { threads.push(thread); }
+            if !threads.contains(&thread) {
+                threads.push(thread);
+            }
         }
     }
     threads
 }
 
 fn thread_activity(thread: &AcpThread) -> Value {
-    let calls: Vec<_> = thread.entries().iter().filter_map(|entry| {
-        let acp_thread::AgentThreadEntry::ToolCall(call) = entry else { return None; };
-        let liveness = call.liveness();
-        matches!(liveness["status"].as_str(), Some("pending" | "in_progress" | "awaiting_confirmation"))
+    let calls: Vec<_> = thread
+        .entries()
+        .iter()
+        .filter_map(|entry| {
+            let acp_thread::AgentThreadEntry::ToolCall(call) = entry else {
+                return None;
+            };
+            let liveness = call.liveness();
+            matches!(
+                liveness["status"].as_str(),
+                Some("pending" | "in_progress" | "awaiting_confirmation")
+            )
             .then(|| json!({"call_id": call.id, "liveness": liveness}))
-    }).collect();
+        })
+        .collect();
     json!({"session_id": thread.session_id(), "waiting_for_user_input": thread.is_waiting_for_confirmation(), "calls": calls})
 }
 
@@ -548,16 +628,22 @@ fn active_records(thread: &Thread, cx: &App) -> Vec<Value> {
     for active in active_threads(thread) {
         let activity = thread_activity(active.read(cx));
         let node_path = thread.architect_run().and_then(|run| {
-            run.history().iter().rev().find(|step| {
-                step.session_id.as_ref() == Some(active.read(cx).session_id())
-            }).map(|step| &step.path)
+            run.history()
+                .iter()
+                .rev()
+                .find(|step| step.session_id.as_ref() == Some(active.read(cx).session_id()))
+                .map(|step| &step.path)
         });
-        records.push(json!({"session_id": activity["session_id"], "node_path": node_path,
-            "waiting_for_user_input": activity["waiting_for_user_input"]}));
+        records.push(
+            json!({"session_id": activity["session_id"], "node_path": node_path,
+            "waiting_for_user_input": activity["waiting_for_user_input"]}),
+        );
         if let Some(calls) = activity["calls"].as_array() {
             for call in calls {
-                records.push(json!({"session_id": activity["session_id"], "node_path": node_path,
-                    "call_id": call["call_id"], "liveness": call["liveness"]}));
+                records.push(
+                    json!({"session_id": activity["session_id"], "node_path": node_path,
+                    "call_id": call["call_id"], "liveness": call["liveness"]}),
+                );
             }
         }
     }
@@ -591,14 +677,27 @@ fn selected_session(
         !selector.node_path.is_empty(),
         "Use the full nonempty node_path from run history."
     );
-    if let Some(run_id) = run_id.filter(|id| thread.architect_run().is_none_or(|run| run.id() != *id)) {
-        return thread.architect_run_archive().iter().find(|run| run.id == run_id)
-            .and_then(|run| run.history.iter().find_map(|step| {
-                step.session_id.as_ref().filter(|session_id| {
-                    step.path == selector.node_path && session_id.to_string() == selector.visit_id
-                }).cloned()
-            }))
-            .context("No archived conversation matches that run_id, full node_path, and visit_id.");
+    if let Some(run_id) =
+        run_id.filter(|id| thread.architect_run().is_none_or(|run| run.id() != *id))
+    {
+        return thread
+            .architect_run_archive()
+            .iter()
+            .find(|run| run.id == run_id)
+            .and_then(|run| {
+                run.history.iter().find_map(|step| {
+                    step.session_id
+                        .as_ref()
+                        .filter(|session_id| {
+                            step.path == selector.node_path
+                                && session_id.to_string() == selector.visit_id
+                        })
+                        .cloned()
+                })
+            })
+            .context(
+                "No archived conversation matches that run_id, full node_path, and visit_id.",
+            );
     }
     thread
         .architect_run()
@@ -862,9 +961,12 @@ impl AgentTool for ControlArchitectRunTool {
                         _ => false,
                     };
                     ensure!(
-                        thread.read(cx).architect_revision() == revision
-                            && thread.read(cx).architect_run().map(|run| run.id()) == run_id,
+                        thread.read(cx).architect_run().map(|run| run.id()) == run_id,
                         "The run changed while awaiting permission. Inspect it and request control again."
+                    );
+                    ensure!(
+                        thread.read(cx).architect_revision() == revision,
+                        "The plan changed while awaiting permission. Inspect it and request control again."
                     );
                     ensure!(
                         same_checkpoint,
@@ -921,7 +1023,9 @@ type WaitSender = Rc<RefCell<Option<oneshot::Sender<&'static str>>>>;
 fn wake_wait(sender: &WaitSender, reason: &'static str) {
     if let Some(sender) = sender.borrow_mut().take() {
         // A cancelled tool drops its receiver; that is not an execution failure.
-        if sender.send(reason).is_err() { return; }
+        if sender.send(reason).is_err() {
+            return;
+        }
     }
 }
 
@@ -939,7 +1043,9 @@ fn observe_run_wait(
         move |thread, cx| {
             let owner = thread.read(cx);
             if owner.architect_event_sequence() != sequence
-                || owner.architect_revision() != revision || run_status(owner) != status {
+                || owner.architect_revision() != revision
+                || run_status(owner) != status
+            {
                 wake_wait(&sender, "run_transition");
             }
         }
@@ -950,9 +1056,14 @@ fn observe_run_wait(
         observers.push(cx.observe(&active, move |active, cx| {
             let activity = thread_activity(active.read(cx));
             if activity != before {
-                wake_wait(&sender, if activity["waiting_for_user_input"] == true {
-                    "user_input"
-                } else { "active_call_changed" });
+                wake_wait(
+                    &sender,
+                    if activity["waiting_for_user_input"] == true {
+                        "user_input"
+                    } else {
+                        "active_call_changed"
+                    },
+                );
             }
         }));
     }
@@ -966,17 +1077,29 @@ fn observe_run_wait(
     observers
 }
 
-fn wait_snapshot(thread: &Thread, coordinator: &AcpThread, after: u64, reason: &str, cx: &App) -> Result<Value> {
+fn wait_snapshot(
+    thread: &Thread,
+    coordinator: &AcpThread,
+    after: u64,
+    reason: &str,
+    cx: &App,
+) -> Result<Value> {
     let events = event_page(thread, after, 10, None)?;
-    bounded_page("active", &active_records(thread, cx), 0, 10, json!({
-        "wait_reason": reason, "state": run_status(thread),
-        "waiting_for_user_input": coordinator.is_waiting_for_confirmation()
-            || active_threads(thread).iter().any(|thread| thread.read(cx).is_waiting_for_confirmation()),
-        "events": events["events"], "next_sequence": events["next_sequence"],
-        "event_sequence": events["event_sequence"], "has_more": events["has_more"],
-        "cursor_gap": events["cursor_gap"], "oldest_sequence": events["oldest_sequence"],
-        "note": "next_offset pages active records via inspect_architect_run(active=true). Follow next_sequence for events; user-input changes may leave it unchanged. Liveness timestamps are local observations, not backend heartbeats.",
-    }))
+    bounded_page(
+        "active",
+        &active_records(thread, cx),
+        0,
+        10,
+        json!({
+            "wait_reason": reason, "state": run_status(thread),
+            "waiting_for_user_input": coordinator.is_waiting_for_confirmation()
+                || active_threads(thread).iter().any(|thread| thread.read(cx).is_waiting_for_confirmation()),
+            "events": events["events"], "next_sequence": events["next_sequence"],
+            "event_sequence": events["event_sequence"], "has_more": events["has_more"],
+            "cursor_gap": events["cursor_gap"], "oldest_sequence": events["oldest_sequence"],
+            "note": "next_offset pages active records via inspect_architect_run(active=true). Follow next_sequence for events; user-input changes may leave it unchanged. Liveness timestamps are local observations, not backend heartbeats.",
+        }),
+    )
 }
 
 impl AgentTool for WaitArchitectRunTool {
@@ -1041,8 +1164,13 @@ impl AgentTool for WaitArchitectRunTool {
 }
 
 #[cfg(test)]
-pub(super) async fn architect_tool_test_session(cx: &mut gpui::TestAppContext) -> (
-    Rc<crate::NativeAgentConnection>, Entity<NativeAgent>, Entity<Thread>, Entity<AcpThread>,
+pub(super) async fn architect_tool_test_session(
+    cx: &mut gpui::TestAppContext,
+) -> (
+    Rc<crate::NativeAgentConnection>,
+    Entity<NativeAgent>,
+    Entity<Thread>,
+    Entity<AcpThread>,
 ) {
     use acp_thread::AgentConnection as _;
     use gpui::AppContext as _;
@@ -1060,11 +1188,23 @@ pub(super) async fn architect_tool_test_session(cx: &mut gpui::TestAppContext) -
     let store = cx.new(crate::ThreadStore::new);
     let agent = cx.update(|cx| NativeAgent::new(store, crate::templates::Templates::new(), fs, cx));
     let connection = Rc::new(crate::NativeAgentConnection(agent.clone()));
-    let acp_thread = cx.update(|cx| connection.clone().new_session(
-        project, PathList::new(&[Path::new("/a")]), cx,
-    )).await.expect("create coordinator");
+    let acp_thread = cx
+        .update(|cx| {
+            connection
+                .clone()
+                .new_session(project, PathList::new(&[Path::new("/a")]), cx)
+        })
+        .await
+        .expect("create coordinator");
     let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
-    let thread = agent.read_with(cx, |agent, _| agent.sessions.get(&session_id).expect("registered session").thread.clone());
+    let thread = agent.read_with(cx, |agent, _| {
+        agent
+            .sessions
+            .get(&session_id)
+            .expect("registered session")
+            .thread
+            .clone()
+    });
     (connection, agent, thread, acp_thread)
 }
 
@@ -1139,7 +1279,12 @@ mod tests {
                 {"node_path": ["outer", "step"], "model": null}
             ]}),
         ] {
-            assert!(serde_json::from_value::<ControlArchitectRunToolInput>(value).unwrap().validate().is_err());
+            assert!(
+                serde_json::from_value::<ControlArchitectRunToolInput>(value)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
         }
         for value in [
             json!({"action": "resume_at", "node_path": ["outer", "step"]}),
@@ -1148,15 +1293,27 @@ mod tests {
                 {"node_path": ["other", "step"], "model": {"provider": "p", "model": "m"}}
             ]}),
         ] {
-            serde_json::from_value::<ControlArchitectRunToolInput>(value).unwrap().validate().unwrap();
+            serde_json::from_value::<ControlArchitectRunToolInput>(value)
+                .unwrap()
+                .validate()
+                .unwrap();
         }
     }
 
     #[gpui::test]
-    async fn wait_observes_checkpoints_and_ignores_unrelated_notifications(cx: &mut gpui::TestAppContext) {
+    async fn wait_observes_checkpoints_and_ignores_unrelated_notifications(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (_connection, _agent, thread, coordinator) = architect_tool_test_session(cx).await;
         let (sender, mut receiver) = oneshot::channel();
-        let observers = cx.update(|cx| observe_run_wait(&thread, &coordinator, Rc::new(RefCell::new(Some(sender))), cx));
+        let observers = cx.update(|cx| {
+            observe_run_wait(
+                &thread,
+                &coordinator,
+                Rc::new(RefCell::new(Some(sender))),
+                cx,
+            )
+        });
         thread.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
         assert!(receiver.try_recv().unwrap().is_none());
@@ -1168,7 +1325,9 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn active_permission_wakes_wait_without_advancing_event_cursor(cx: &mut gpui::TestAppContext) {
+    async fn active_permission_wakes_wait_without_advancing_event_cursor(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (connection, _agent, thread, coordinator) = architect_tool_test_session(cx).await;
         let visit = thread.update(cx, |thread, cx| {
             let path = NodePath::root("step".into());
@@ -1176,56 +1335,114 @@ mod tests {
             thread.note_architect_run_position(path, "Step".into(), 1, 1, cx)
         });
         let session_id = thread.read_with(cx, |thread, _| thread.id().clone());
-        let child = cx.update(|cx| connection.create_architect_run_step_thread(
-            &session_id, "Step".into(), visit, None, cx,
-        )).unwrap();
-        thread.update(cx, |thread, cx| thread.set_architect_run_step_thread(visit, &child, cx));
+        let child = cx
+            .update(|cx| {
+                connection.create_architect_run_step_thread(
+                    &session_id,
+                    "Step".into(),
+                    visit,
+                    None,
+                    cx,
+                )
+            })
+            .unwrap();
+        thread.update(cx, |thread, cx| {
+            thread.set_architect_run_step_thread(visit, &child, cx)
+        });
         cx.run_until_parked();
         let sequence = thread.read_with(cx, |thread, _| thread.architect_event_sequence());
         let (sender, receiver) = oneshot::channel();
-        let observers = cx.update(|cx| observe_run_wait(&thread, &coordinator, Rc::new(RefCell::new(Some(sender))), cx));
+        let observers = cx.update(|cx| {
+            observe_run_wait(
+                &thread,
+                &coordinator,
+                Rc::new(RefCell::new(Some(sender))),
+                cx,
+            )
+        });
         let call_id = acp::ToolCallId::new("opaque-active-call");
-        let permission = child.update(cx, |thread, cx| thread.request_tool_call_authorization(
-            acp::ToolCallUpdate::new(call_id.clone(), acp::ToolCallUpdateFields::new().title("Needs approval")),
-            acp_thread::PermissionOptions::Dropdown(vec![]),
-            acp_thread::AuthorizationKind::PermissionGrant, cx,
-        )).unwrap();
+        let permission = child
+            .update(cx, |thread, cx| {
+                thread.request_tool_call_authorization(
+                    acp::ToolCallUpdate::new(
+                        call_id.clone(),
+                        acp::ToolCallUpdateFields::new().title("Needs approval"),
+                    ),
+                    acp_thread::PermissionOptions::Dropdown(vec![]),
+                    acp_thread::AuthorizationKind::PermissionGrant,
+                    cx,
+                )
+            })
+            .unwrap();
         assert_eq!(receiver.await.unwrap(), "user_input");
         thread.read_with(cx, |thread, cx| {
             assert_eq!(thread.architect_event_sequence(), sequence);
             let records = active_records(thread, cx);
-            let call = records.iter().find(|record| record["call_id"] == json!(call_id)).unwrap();
+            let call = records
+                .iter()
+                .find(|record| record["call_id"] == json!(call_id))
+                .unwrap();
             assert_eq!(call["liveness"]["status"], "awaiting_confirmation");
             assert!(call.get("content").is_none());
-            assert!(records.iter().any(|record| record["waiting_for_user_input"] == true));
+            assert!(
+                records
+                    .iter()
+                    .any(|record| record["waiting_for_user_input"] == true)
+            );
         });
         drop(observers);
-        child.update(cx, |thread, cx| thread.cancel_tool_call_authorization(&call_id, cx));
+        child.update(cx, |thread, cx| {
+            thread.cancel_tool_call_authorization(&call_id, cx)
+        });
         drop(permission);
     }
 
     #[gpui::test]
-    async fn wait_timeout_is_bounded_and_title_does_not_reenter_owner(cx: &mut gpui::TestAppContext) {
+    async fn wait_timeout_is_bounded_and_title_does_not_reenter_owner(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (_connection, _agent, thread, coordinator) = architect_tool_test_session(cx).await;
         thread.update(cx, |thread, cx| {
-            thread.start_architect_run(NodePath::root("step".into()), "Step".into(), Task::ready(()), cx);
+            thread.start_architect_run(
+                NodePath::root("step".into()),
+                "Step".into(),
+                Task::ready(()),
+                cx,
+            );
         });
-        let tool = Arc::new(WaitArchitectRunTool::new(thread.downgrade(), coordinator.downgrade()));
+        let tool = Arc::new(WaitArchitectRunTool::new(
+            thread.downgrade(),
+            coordinator.downgrade(),
+        ));
         thread.update(cx, |_, cx| {
-            assert_eq!(tool.initial_title(Err(Value::Null), cx), "Wait for Architect run");
+            assert_eq!(
+                tool.initial_title(Err(Value::Null), cx),
+                "Wait for Architect run"
+            );
         });
         let after_sequence = thread.read_with(cx, |thread, _| thread.architect_event_sequence());
         let (events, _receiver) = ToolCallEventStream::test();
-        let task = cx.update(|cx| tool.run(ToolInput::resolved(WaitArchitectRunToolInput {
-            after_sequence, timeout_ms: 0,
-        }), events, cx));
-        let ArchitectRunToolOutput::Success { data } = task.await.unwrap() else { panic!("expected snapshot"); };
+        let task = cx.update(|cx| {
+            tool.run(
+                ToolInput::resolved(WaitArchitectRunToolInput {
+                    after_sequence,
+                    timeout_ms: 0,
+                }),
+                events,
+                cx,
+            )
+        });
+        let ArchitectRunToolOutput::Success { data } = task.await.unwrap() else {
+            panic!("expected snapshot");
+        };
         assert_eq!(data["wait_reason"], "timeout");
         assert_eq!(data["next_sequence"], after_sequence);
     }
 
     #[gpui::test]
-    async fn archived_visit_selection_requires_exact_run_path_and_session(cx: &mut gpui::TestAppContext) {
+    async fn archived_visit_selection_requires_exact_run_path_and_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (connection, agent, thread, _coordinator) = architect_tool_test_session(cx).await;
         let path = NodePath::root("step".into());
         let visit = thread.update(cx, |thread, cx| {
@@ -1233,9 +1450,17 @@ mod tests {
             thread.note_architect_run_position(path.clone(), "First".into(), 1, 1, cx)
         });
         let session_id = thread.read_with(cx, |thread, _| thread.id().clone());
-        let child = cx.update(|cx| connection.create_architect_run_step_thread(
-            &session_id, "First".into(), visit, None, cx,
-        )).unwrap();
+        let child = cx
+            .update(|cx| {
+                connection.create_architect_run_step_thread(
+                    &session_id,
+                    "First".into(),
+                    visit,
+                    None,
+                    cx,
+                )
+            })
+            .unwrap();
         let child_id = child.read_with(cx, |thread, _| thread.session_id().clone());
         let archived_id = thread.update(cx, |thread, cx| {
             thread.set_architect_run_step_thread(visit, &child, cx);
@@ -1251,23 +1476,54 @@ mod tests {
             let history = inspect_history(thread, Some(archived_id), 0, 20).unwrap();
             assert_eq!(history["visits"][0]["node_path"], json!(path));
             assert!(inspect_history(thread, Some(Uuid::new_v4()), 0, 20).is_err());
-            assert_eq!(selected_session(thread, Some(archived_id), &ArchitectConversationSelector {
-                node_path: path.clone(), visit_id: child_id.to_string(),
-            }).unwrap(), child_id);
-            assert!(selected_session(thread, Some(archived_id), &ArchitectConversationSelector {
-                node_path: path.clone(), visit_id: "unrecorded-session".into(),
-            }).is_err());
+            assert_eq!(
+                selected_session(
+                    thread,
+                    Some(archived_id),
+                    &ArchitectConversationSelector {
+                        node_path: path.clone(),
+                        visit_id: child_id.to_string(),
+                    }
+                )
+                .unwrap(),
+                child_id
+            );
+            assert!(
+                selected_session(
+                    thread,
+                    Some(archived_id),
+                    &ArchitectConversationSelector {
+                        node_path: path.clone(),
+                        visit_id: "unrecorded-session".into(),
+                    }
+                )
+                .is_err()
+            );
             let events = event_page(thread, 0, 1, None).unwrap();
             assert!(events["has_more"].as_bool().unwrap());
             assert!(events["next_sequence"].as_u64().unwrap() < thread.architect_event_sequence());
         });
-        let tool = Arc::new(InspectArchitectRunTool::new(thread.downgrade(), agent.downgrade()));
+        let tool = Arc::new(InspectArchitectRunTool::new(
+            thread.downgrade(),
+            agent.downgrade(),
+        ));
         let (events, _receiver) = ToolCallEventStream::test();
-        let result = cx.update(|cx| tool.run(ToolInput::ready(json!({
-            "run_id": archived_id,
-            "conversation": {"node_path": path, "visit_id": child_id},
-        })), events, cx)).await.unwrap();
-        let ArchitectRunToolOutput::Success { data } = result else { panic!("expected transcript"); };
+        let result = cx
+            .update(|cx| {
+                tool.run(
+                    ToolInput::ready(json!({
+                        "run_id": archived_id,
+                        "conversation": {"node_path": path, "visit_id": child_id},
+                    })),
+                    events,
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let ArchitectRunToolOutput::Success { data } = result else {
+            panic!("expected transcript");
+        };
         assert_eq!(data["run_id"], json!(archived_id));
         assert_eq!(data["visit_id"], json!(child_id));
     }

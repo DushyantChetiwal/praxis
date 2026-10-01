@@ -36,7 +36,9 @@ pub enum GraphEdit {
         node: ArchitectNode,
     },
     /// Incident edges are removed too, and listed in the routing consequences.
-    RemoveNode { path: NodePath },
+    RemoveNode {
+        path: NodePath,
+    },
     MoveNode {
         path: NodePath,
         position: NodePosition,
@@ -222,8 +224,12 @@ fn graph_edit_impact(graph: &ArchitectGraph, mut target: ArchitectGraph) -> Grap
     for parent in parents {
         let before = before_graphs.get(&parent).copied();
         let after = after_graphs.get(&parent).copied();
-        let before_edges = before.map(|graph| graph.edges.as_slice()).unwrap_or_default();
-        let after_edges = after.map(|graph| graph.edges.as_slice()).unwrap_or_default();
+        let before_edges = before
+            .map(|graph| graph.edges.as_slice())
+            .unwrap_or_default();
+        let after_edges = after
+            .map(|graph| graph.edges.as_slice())
+            .unwrap_or_default();
         let edge_ids: BTreeSet<_> = before_edges
             .iter()
             .chain(after_edges)
@@ -353,7 +359,10 @@ fn scoped_problem(parent: &NodePath, mut problem: GraphProblem) -> GraphProblem 
     problem
 }
 
-fn validate_addressability(graph: &ArchitectGraph, parent: &NodePath) -> Result<(), GraphEditError> {
+fn validate_addressability(
+    graph: &ArchitectGraph,
+    parent: &NodePath,
+) -> Result<(), GraphEditError> {
     let mut node_ids = BTreeSet::new();
     for node in &graph.nodes {
         let path = parent.child(node.id.clone());
@@ -429,7 +438,10 @@ fn check_endpoints(
     Ok(())
 }
 
-fn apply_operation(graph: &mut ArchitectGraph, operation: &GraphEdit) -> Result<(), GraphEditError> {
+fn apply_operation(
+    graph: &mut ArchitectGraph,
+    operation: &GraphEdit,
+) -> Result<(), GraphEditError> {
     match operation {
         GraphEdit::InsertNode { parent, node } => {
             let local = graph_at_mut(graph, parent)?;
@@ -672,14 +684,19 @@ mod tests {
             let mut before = nested_graph();
             let changed_path = path(&["left", "a"]);
             let consumer_path = path(&["left", "sibling"]);
-            before.node_at_mut(&changed_path).expect("changed node").pinned = was_pinned;
+            before
+                .node_at_mut(&changed_path)
+                .expect("changed node")
+                .pinned = was_pinned;
             before.node_at_mut(&consumer_path).expect("consumer").locked = false;
             let mut after = before.clone();
             let changed_node = after.node_at_mut(&changed_path).expect("changed node");
             changed_node.intent = "A different execution contract".into();
             changed_node.pinned = is_pinned;
             after.node_at_mut(&consumer_path).expect("consumer").locked = true;
-            let unaffected = after.node_at_mut(&path(&["right", "a"])).expect("unaffected");
+            let unaffected = after
+                .node_at_mut(&path(&["right", "a"]))
+                .expect("unaffected");
             unaffected.result = Some(StepResult {
                 summary: "New live result unrelated to this edit".into(),
                 attempt: 5,
@@ -699,11 +716,17 @@ mod tests {
             assert_eq!(preview.invalidated_steps, expected);
             assert_eq!(preview.affected_locks, expected);
             for invalidated in &preview.invalidated_steps {
-                let node = preview.graph.node_at(invalidated).expect("invalidated node");
+                let node = preview
+                    .graph
+                    .node_at(invalidated)
+                    .expect("invalidated node");
                 assert!(node.result.is_none());
                 assert!(!node.locked);
             }
-            assert_eq!(preview.graph.node(&"right".into()), after.node(&"right".into()));
+            assert_eq!(
+                preview.graph.node(&"right".into()),
+                after.node(&"right".into())
+            );
             assert_eq!(before, before_snapshot);
             assert_eq!(after, after_snapshot);
         }
@@ -758,13 +781,18 @@ mod tests {
             Err(GraphEditError::Problem(GraphProblem::DuplicateNode(_)))
         ));
         let mut duplicate_edge = before.clone();
-        duplicate_edge.edges.push(ArchitectEdge::new("ship-left", "right", "ship"));
+        duplicate_edge
+            .edges
+            .push(ArchitectEdge::new("ship-left", "right", "ship"));
         assert!(matches!(
             preview_graph_replacement(&before, &duplicate_edge),
             Err(GraphEditError::DuplicateEdge { .. })
         ));
         let mut invalid_position = before.clone();
-        invalid_position.node_mut(&"left".into()).expect("left").position = Some(Position {
+        invalid_position
+            .node_mut(&"left".into())
+            .expect("left")
+            .position = Some(Position {
             x: f32::INFINITY,
             y: 0.0,
         });
@@ -790,7 +818,12 @@ mod tests {
 
     #[test]
     fn replacement_reports_execution_blockers_without_applying_the_candidate() {
-        let before = local_graph();
+        let mut before = local_graph();
+        // Otherwise sibling is the sole root after closing the cycle, and the
+        // validator reports the disconnected cycle as unreachable, not endless.
+        before.edges.push(ArchitectEdge::new("entry", "sibling", "a"));
+        assert!(before.blocking_problems().is_empty());
+        let before_snapshot = before.clone();
         let mut after = before.clone();
         after.edges.push(ArchitectEdge::new("loop", "c", "a"));
         let after_snapshot = after.clone();
@@ -803,6 +836,7 @@ mod tests {
         );
         assert!(!preview.is_valid);
         assert!(!preview.ready_to_run);
+        assert_eq!(before, before_snapshot);
         assert_eq!(after, after_snapshot);
     }
 
@@ -850,9 +884,10 @@ mod tests {
         assert_eq!(preview.graph.edges, graph.edges);
         for removed_edge in ["ab", "bc"] {
             assert!(
-                preview.routing_changes.iter().any(|change| {
-                    change.contains(removed_edge) && change.contains("absent")
-                })
+                preview
+                    .routing_changes
+                    .iter()
+                    .any(|change| { change.contains(removed_edge) && change.contains("absent") })
             );
         }
         assert!(preview.is_valid);
@@ -1019,11 +1054,8 @@ mod tests {
     fn pinned_result_invalidation_includes_implicit_consumers() {
         let mut graph = local_graph();
         graph.node_mut(&"a".into()).expect("a").pinned = true;
-        let preview = preview_graph_edits(
-            &graph,
-            &[GraphEdit::RemoveNode { path: path(&["a"]) }],
-        )
-        .expect("remove pinned");
+        let preview = preview_graph_edits(&graph, &[GraphEdit::RemoveNode { path: path(&["a"]) }])
+            .expect("remove pinned");
         assert!(preview.invalidated_steps.contains(&path(&["sibling"])));
         assert!(
             preview
@@ -1312,7 +1344,8 @@ mod tests {
         ] {
             assert!(schema.contains(field), "missing {field}");
         }
-        let preview = preview_graph_edits(&ArchitectGraph::default(), &operations).expect("preview");
+        let preview =
+            preview_graph_edits(&ArchitectGraph::default(), &operations).expect("preview");
         let json = serde_json::to_value(&preview).expect("serialize preview");
         assert_eq!(
             serde_json::from_value::<GraphEditPreview>(json).expect("deserialize preview"),

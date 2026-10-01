@@ -107,20 +107,38 @@ fn validate_graph_budget(graph: &ArchitectGraph) -> anyhow::Result<()> {
     let mut nodes = 0;
     let mut edges = 0;
     while let Some((graph, depth)) = pending.pop() {
-        anyhow::ensure!(depth <= MAX_PLAN_DEPTH, "Checkpoint graph exceeds the nesting limit");
+        anyhow::ensure!(
+            depth <= MAX_PLAN_DEPTH,
+            "Checkpoint graph exceeds the nesting limit"
+        );
         nodes += graph.nodes.len();
         edges += graph.edges.len();
-        anyhow::ensure!(nodes <= MAX_CHECKPOINT_GRAPH_NODES, "Checkpoint graph exceeds the total node budget");
-        anyhow::ensure!(edges <= MAX_RUN_STEPS * MAX_RUN_STEPS, "Checkpoint graph exceeds the total edge budget");
+        anyhow::ensure!(
+            nodes <= MAX_CHECKPOINT_GRAPH_NODES,
+            "Checkpoint graph exceeds the total node budget"
+        );
+        anyhow::ensure!(
+            edges <= MAX_RUN_STEPS * MAX_RUN_STEPS,
+            "Checkpoint graph exceeds the total edge budget"
+        );
         let mut edge_ids = std::collections::HashSet::new();
         for edge in &graph.edges {
-            anyhow::ensure!(!edge.id.0.is_empty() && edge_ids.insert(&edge.id),
-                "Checkpoint graph contains an empty or duplicate edge ID");
+            anyhow::ensure!(
+                !edge.id.0.is_empty() && edge_ids.insert(&edge.id),
+                "Checkpoint graph contains an empty or duplicate edge ID"
+            );
         }
         for node in &graph.nodes {
-            anyhow::ensure!(!node.id.0.is_empty(), "Checkpoint graph contains an empty node ID");
-            anyhow::ensure!(node.result.as_ref().is_none_or(|result| result.attempt <= MAX_NODE_VISITS),
-                "Checkpoint result exceeds the attempt budget");
+            anyhow::ensure!(
+                !node.id.0.is_empty(),
+                "Checkpoint graph contains an empty node ID"
+            );
+            anyhow::ensure!(
+                node.result
+                    .as_ref()
+                    .is_none_or(|result| result.attempt <= MAX_NODE_VISITS),
+                "Checkpoint result exceeds the attempt budget"
+            );
             if let Some(nested) = node.subplan() {
                 pending.push((nested, depth + 1));
             }
@@ -133,20 +151,31 @@ fn validate_checkpoint_value(value: &serde_json::Value) -> anyhow::Result<()> {
     validate_checkpoint_value_with_budget(value, MAX_CHECKPOINT_VALUES)
 }
 
-fn validate_checkpoint_value_with_budget(value: &serde_json::Value, budget: usize) -> anyhow::Result<()> {
+fn validate_checkpoint_value_with_budget(
+    value: &serde_json::Value,
+    budget: usize,
+) -> anyhow::Result<()> {
     let mut pending = vec![(value, 0)];
     let mut values = 0;
     while let Some((value, depth)) = pending.pop() {
         values += 1;
-        anyhow::ensure!(values <= budget && depth <= 128,
-            "Checkpoint exceeds the serialized value-count or nesting budget");
+        anyhow::ensure!(
+            values <= budget && depth <= 128,
+            "Checkpoint exceeds the serialized value-count or nesting budget"
+        );
         match value {
             serde_json::Value::Array(items) => {
-                anyhow::ensure!(items.len() <= budget, "Checkpoint array exceeds the allocation budget");
+                anyhow::ensure!(
+                    items.len() <= budget,
+                    "Checkpoint array exceeds the allocation budget"
+                );
                 pending.extend(items.iter().map(|value| (value, depth + 1)));
             }
             serde_json::Value::Object(items) => {
-                anyhow::ensure!(items.len() <= budget, "Checkpoint object exceeds the allocation budget");
+                anyhow::ensure!(
+                    items.len() <= budget,
+                    "Checkpoint object exceeds the allocation budget"
+                );
                 pending.extend(items.values().map(|value| (value, depth + 1)));
             }
             _ => {}
@@ -192,76 +221,134 @@ impl RunState {
         }
         validate_checkpoint_value(&value)?;
         let checkpoint: Checkpoint = serde_json::from_value(value)?;
-        anyhow::ensure!(checkpoint.version == 1, "Unsupported Architect checkpoint version {}", checkpoint.version);
+        anyhow::ensure!(
+            checkpoint.version == 1,
+            "Unsupported Architect checkpoint version {}",
+            checkpoint.version
+        );
         let mut state = checkpoint.state;
-        anyhow::ensure!(!state.lanes.is_empty() && state.lanes.len() <= MAX_CHECKPOINT_LANES,
-            "The checkpoint has no root lane or exceeds the total lane budget");
+        anyhow::ensure!(
+            !state.lanes.is_empty() && state.lanes.len() <= MAX_CHECKPOINT_LANES,
+            "The checkpoint has no root lane or exceeds the total lane budget"
+        );
         validate_graph_budget(&state.graph)?;
         anyhow::ensure!(!state.graph.is_empty(), "The checkpoint graph is empty");
-        anyhow::ensure!(state.invalidated.len() <= 2 * MAX_CHECKPOINT_GRAPH_NODES
-            && state.invalidated.iter().all(|path| !path.is_empty() && path.depth() <= MAX_PLAN_DEPTH),
-            "Checkpoint invalidation paths exceed the graph budget");
-        anyhow::ensure!(state.steps <= MAX_RUN_STEPS, "The checkpoint exceeds the run step limit");
+        anyhow::ensure!(
+            state.invalidated.len() <= 2 * MAX_CHECKPOINT_GRAPH_NODES
+                && state
+                    .invalidated
+                    .iter()
+                    .all(|path| !path.is_empty() && path.depth() <= MAX_PLAN_DEPTH),
+            "Checkpoint invalidation paths exceed the graph budget"
+        );
+        anyhow::ensure!(
+            state.steps <= MAX_RUN_STEPS,
+            "The checkpoint exceeds the run step limit"
+        );
         let mut attempts = std::collections::HashSet::new();
         let mut total_attempts = 0usize;
         for (path, count) in &state.attempts {
-            anyhow::ensure!(!path.is_empty() && path.depth() <= MAX_PLAN_DEPTH
-                && *count > 0 && *count <= MAX_NODE_VISITS && attempts.insert(path),
-                "The checkpoint contains invalid attempt counters");
-            total_attempts = total_attempts.checked_add(*count)
+            anyhow::ensure!(
+                !path.is_empty()
+                    && path.depth() <= MAX_PLAN_DEPTH
+                    && *count > 0
+                    && *count <= MAX_NODE_VISITS
+                    && attempts.insert(path),
+                "The checkpoint contains invalid attempt counters"
+            );
+            total_attempts = total_attempts
+                .checked_add(*count)
                 .ok_or_else(|| anyhow::anyhow!("Checkpoint attempt counters overflow"))?;
-            anyhow::ensure!(total_attempts <= MAX_RUN_STEPS, "Checkpoint attempts exceed the whole-run step budget");
+            anyhow::ensure!(
+                total_attempts <= MAX_RUN_STEPS,
+                "Checkpoint attempts exceed the whole-run step budget"
+            );
         }
-        anyhow::ensure!(total_attempts == state.steps,
-            "Checkpoint attempt counters disagree with the total steps started");
+        anyhow::ensure!(
+            total_attempts == state.steps,
+            "Checkpoint attempt counters disagree with the total steps started"
+        );
         PlanRun::validate_structure(&state.graph).map_err(anyhow::Error::msg)?;
         let mut owned = std::collections::HashSet::new();
         let mut history_steps = 0usize;
         for (index, lane) in state.lanes.iter().enumerate() {
-            lane.run.validate_checkpoint(&state.graph).map_err(anyhow::Error::msg)?;
-            history_steps = history_steps.checked_add(lane.run.steps_taken())
+            lane.run
+                .validate_checkpoint(&state.graph)
+                .map_err(anyhow::Error::msg)?;
+            history_steps = history_steps
+                .checked_add(lane.run.steps_taken())
                 .ok_or_else(|| anyhow::anyhow!("Checkpoint lane counters overflow"))?;
-            anyhow::ensure!(history_steps <= (MAX_RUN_STEPS + state.lanes.len()) * MAX_PLAN_DEPTH,
-                "Checkpoint histories exceed the aggregate step and pending-lane budget");
-            anyhow::ensure!(lane.run.clone().decide(&state.graph) == lane.next,
-                "Lane {index} has an inconsistent next decision");
-            anyhow::ensure!(lane.children.is_empty() || matches!(lane.next, Decision::Fork { .. }),
-                "Only a fork can own child lanes");
+            anyhow::ensure!(
+                history_steps <= (MAX_RUN_STEPS + state.lanes.len()) * MAX_PLAN_DEPTH,
+                "Checkpoint histories exceed the aggregate step and pending-lane budget"
+            );
+            anyhow::ensure!(
+                lane.run.clone().decide(&state.graph) == lane.next,
+                "Lane {index} has an inconsistent next decision"
+            );
+            anyhow::ensure!(
+                lane.children.is_empty() || matches!(lane.next, Decision::Fork { .. }),
+                "Only a fork can own child lanes"
+            );
             if !lane.children.is_empty() {
-                anyhow::ensure!(lane.children.len() == lane.run.fork_lanes(&state.graph).len(),
-                    "Checkpoint fork is missing prerequisite lanes");
+                anyhow::ensure!(
+                    lane.children.len() == lane.run.fork_lanes(&state.graph).len(),
+                    "Checkpoint fork is missing prerequisite lanes"
+                );
             }
             for child in &lane.children {
-                anyhow::ensure!(*child > index && *child < state.lanes.len() && owned.insert(*child),
-                    "The checkpoint lane tree is cyclic or contains an invalid child");
+                anyhow::ensure!(
+                    *child > index && *child < state.lanes.len() && owned.insert(*child),
+                    "The checkpoint lane tree is cyclic or contains an invalid child"
+                );
             }
         }
         let mut admitted = std::collections::HashSet::new();
         for (index, lane) in state.lanes.iter().enumerate() {
-            anyhow::ensure!(index == 0 || owned.contains(&index) || matches!(lane.next, Decision::Done(_)),
-                "The checkpoint contains an unfinished orphan lane");
-            anyhow::ensure!(!lane.interrupted || matches!(lane.next, Decision::Run(_)),
-                "Only an executable step can have an interrupted attempt");
+            anyhow::ensure!(
+                index == 0 || owned.contains(&index) || matches!(lane.next, Decision::Done(_)),
+                "The checkpoint contains an unfinished orphan lane"
+            );
+            anyhow::ensure!(
+                !lane.interrupted || matches!(lane.next, Decision::Run(_)),
+                "Only an executable step can have an interrupted attempt"
+            );
             if let Decision::Run(path) = &lane.next {
-                anyhow::ensure!(admitted.insert(path), "Two lanes admit the same step before it completes");
+                anyhow::ensure!(
+                    admitted.insert(path),
+                    "Two lanes admit the same step before it completes"
+                );
             }
         }
         let mut in_flight = std::collections::HashSet::new();
         for index in checkpoint.in_flight {
-            anyhow::ensure!(in_flight.insert(index), "Checkpoint repeats an in-flight lane");
-            let lane = state.lanes.get_mut(index)
+            anyhow::ensure!(
+                in_flight.insert(index),
+                "Checkpoint repeats an in-flight lane"
+            );
+            let lane = state
+                .lanes
+                .get_mut(index)
                 .ok_or_else(|| anyhow::anyhow!("An in-flight checkpoint lane is missing"))?;
-            anyhow::ensure!(matches!(lane.next, Decision::Run(_) | Decision::Ask(_)),
-                "An in-flight lane is not on a turn");
+            anyhow::ensure!(
+                matches!(lane.next, Decision::Run(_) | Decision::Ask(_)),
+                "An in-flight lane is not on a turn"
+            );
             if matches!(lane.next, Decision::Run(_)) {
                 lane.interrupted = true;
             }
         }
         for archived in &state.archived_checkpoints {
-            let value = archived.get("checkpoint")
+            let value = archived
+                .get("checkpoint")
                 .ok_or_else(|| anyhow::anyhow!("Archived checkpoint is missing its saved state"))?;
-            anyhow::ensure!(value.pointer("/state/archived_checkpoints").and_then(serde_json::Value::as_array)
-                .is_some_and(Vec::is_empty), "Archived checkpoints must not recursively embed history");
+            anyhow::ensure!(
+                value
+                    .pointer("/state/archived_checkpoints")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(Vec::is_empty),
+                "Archived checkpoints must not recursively embed history"
+            );
             Self::from_checkpoint(value.clone())?;
         }
         // Loading is never permission to execute. The owning Thread exposes an
@@ -615,16 +702,29 @@ pub fn set_architect_step_models(
     cx: &mut App,
 ) -> anyhow::Result<()> {
     let owner = thread.read(cx);
-    let control = owner.architect_run().and_then(ArchitectRun::control).cloned();
+    let control = owner
+        .architect_run()
+        .and_then(ArchitectRun::control)
+        .cloned();
     let mut seen = std::collections::HashSet::new();
     for (path, model) in models {
-        anyhow::ensure!(seen.insert(path.clone()), "Step {path} appears more than once in the model batch.");
-        anyhow::ensure!(owner.architect_graph().and_then(|graph| graph.node_at(path)).is_some(),
-            "The plan has no step {path}.");
+        anyhow::ensure!(
+            seen.insert(path.clone()),
+            "Step {path} appears more than once in the model batch."
+        );
+        anyhow::ensure!(
+            owner
+                .architect_graph()
+                .and_then(|graph| graph.node_at(path))
+                .is_some(),
+            "The plan has no step {path}."
+        );
         ensure_architect_step_inactive(owner, path)?;
         if let Some(control) = &control {
-            anyhow::ensure!(control.borrow().graph.node_at(path).is_some(),
-                "Step {path} is not in the frozen checkpoint. Apply the graph update first.");
+            anyhow::ensure!(
+                control.borrow().graph.node_at(path).is_some(),
+                "Step {path} is not in the frozen checkpoint. Apply the graph update first."
+            );
         }
         if let Some(model) = model {
             resolve_step_model(model, cx)?;
@@ -640,7 +740,9 @@ pub fn set_architect_step_models(
     if let Some(control) = &control {
         apply(&mut control.borrow_mut().graph);
     }
-    thread.update(cx, |thread, cx| { thread.update_architect_graph(apply, cx); });
+    thread.update(cx, |thread, cx| {
+        thread.update_architect_graph(apply, cx);
+    });
     Ok(())
 }
 
@@ -671,20 +773,44 @@ fn topology(graph: &ArchitectGraph) -> serde_json::Value {
 }
 
 /// Canonical inspection of the frozen scheduler, not speculative draft routing.
+/// Terminal checkpoints are decoded for inspection only, never installed as control.
 pub fn architect_run_readiness(thread: &Thread) -> serde_json::Value {
-    let control = thread.architect_run().and_then(ArchitectRun::control);
-    let state = control.map(|control| control.borrow());
-    let graph = state.as_ref().map(|state| &state.graph).or_else(|| thread.architect_graph());
+    let run = thread.architect_run();
+    let control = run.and_then(ArchitectRun::control);
+    let live = control.map(|control| control.borrow());
+    let saved = if live.is_none() {
+        run.and_then(ArchitectRun::saved_checkpoint)
+            .map(|value| RunState::from_checkpoint(value.clone()))
+    } else {
+        None
+    };
+    let checkpoint_error = saved.as_ref().and_then(|result| result.as_ref().err())
+        .map(|error| error.to_string());
+    let state = live.as_deref().or_else(|| saved.as_ref().and_then(|result| result.as_ref().ok()));
+    let legacy_snapshot = run.filter(|_| state.is_none()).map(ArchitectRun::snapshot);
+    let completed_run = run.is_some_and(|run| run.outcome.as_ref().is_some_and(RunOutcome::is_success));
+    let read_only = run.is_some() && control.is_none();
+    let graph = state.map(|state| &state.graph)
+        .or_else(|| legacy_snapshot.as_ref().and_then(|snapshot| snapshot.graph.as_ref()))
+        .or_else(|| thread.architect_graph());
     let Some(graph) = graph else {
         return serde_json::json!({ "steps": [], "reason": "No plan exists" });
     };
     let mut steps: Vec<_> = graph_paths(graph).into_iter().map(|path| {
-        let completed = graph.node_at(&path).is_some_and(|node| node.result.is_some());
-        serde_json::json!({
-            "path": path,
-            "status": if completed { "completed" } else { "waiting" },
-            "reason": if completed { "A completed result is retained" } else { "Waiting for incoming prerequisites or enclosing plan" },
-        })
+        let completed_result = graph.node_at(&path).is_some_and(|node| node.result.is_some());
+        let completed_history = completed_run && run.is_some_and(|run| {
+            run.history().iter().any(|step| step.path.as_slice().starts_with(path.as_slice()))
+        });
+        let (status, reason) = if completed_result {
+            ("completed", "A completed result is retained")
+        } else if completed_history {
+            ("completed", "Completed visit history records this step or its nested work")
+        } else if run.is_some() && state.is_none() {
+            ("unknown", "Saved routing state is unavailable; history cannot distinguish skipped from unfinished work")
+        } else {
+            ("waiting", "Waiting for incoming prerequisites or enclosing plan")
+        };
+        serde_json::json!({ "path": path, "status": status, "reason": reason })
     }).collect();
     let mut apply = |path: &NodePath, status: &str, reason: &str| {
         if let Some(step) = steps.iter_mut().find(|step| step["path"] == serde_json::json!(path)) {
@@ -700,51 +826,100 @@ pub fn architect_run_readiness(thread: &Thread) -> serde_json::Value {
         }
         for (index, lane) in state.lanes.iter().enumerate() {
             match &lane.next {
-                Decision::Run(path) => apply(path,
-                    if state.in_flight.iter().any(|(active, _)| *active == index) { "running" } else { "ready" },
-                    if lane.interrupted { "Interrupted attempt; prerequisites remain satisfied" } else { "The scheduler has admitted this step" }),
-                Decision::Ask(_) => apply(&lane.run.current(), "waiting", "The step's branch verdict is unresolved"),
+                Decision::Run(path) => apply(
+                    path,
+                    if state.in_flight.iter().any(|(active, _)| *active == index) {
+                        "running"
+                    } else {
+                        "ready"
+                    },
+                    if lane.interrupted {
+                        "Interrupted attempt; prerequisites remain satisfied"
+                    } else {
+                        "The scheduler has admitted this step"
+                    },
+                ),
+                Decision::Ask(_) => apply(
+                    &lane.run.current(),
+                    "waiting",
+                    "The step's branch verdict is unresolved",
+                ),
                 _ => {}
             }
         }
-    } else if let Ok(mut run) = PlanRun::start(graph) {
-        for ready in run.readiness(graph) {
+    } else if run.is_none() && let Ok(mut fresh) = PlanRun::start(graph) {
+        for ready in fresh.readiness(graph) {
             apply(&ready.path, &ready.status, &ready.reason);
         }
-        if let Decision::Run(path) = run.decide(graph) {
+        if let Decision::Run(path) = fresh.decide(graph) {
             apply(&path, "ready", "The plan entry is ready");
         }
     }
-    let run_problems: Vec<_> = graph.blocking_problems().into_iter()
-        .map(|problem| problem.to_string()).collect();
+    let run_problems: Vec<_> = graph
+        .blocking_problems()
+        .into_iter()
+        .map(|problem| problem.to_string())
+        .collect();
     if !run_problems.is_empty() {
         for step in &mut steps {
             if step["status"] == "ready" {
                 step["status"] = "waiting".into();
-                step["reason"] = "Resolve the run problems and review the plan before resuming".into();
+                step["reason"] =
+                    "Resolve the run problems and review the plan before resuming".into();
             }
         }
     }
     if let Some(state) = &state {
-        let complete = state.lanes.first().is_some_and(|lane| matches!(lane.next, Decision::Done(RunOutcome::Completed)));
+        let complete = state
+            .lanes
+            .first()
+            .is_some_and(|lane| matches!(lane.next, Decision::Done(RunOutcome::Completed)));
         for step in &mut steps {
-            if state.rebase_error.is_some() && state.invalidated.iter().any(|path| step["path"] == serde_json::json!(path)) {
+            if state.rebase_error.is_some()
+                && state
+                    .invalidated
+                    .iter()
+                    .any(|path| step["path"] == serde_json::json!(path))
+            {
                 step["status"] = "invalidated".into();
-                step["reason"] = "The approved graph update invalidated this result; history is retained".into();
+                step["reason"] =
+                    "The approved graph update invalidated this result; history is retained".into();
             } else if state.rebase_error.is_some() && step["status"] != "completed" {
                 step["status"] = "waiting".into();
-                step["reason"] = "The graph update invalidated this checkpoint; review rebase_error".into();
+                step["reason"] =
+                    "The graph update invalidated this checkpoint; review rebase_error".into();
             } else if complete && step["status"] == "waiting" {
-                let visited = state.lanes.iter().any(|lane| lane.run.history().iter().any(|path| step["path"] == serde_json::json!(path)));
+                let visited = state.lanes.iter().any(|lane| {
+                    lane.run
+                        .history()
+                        .iter()
+                        .any(|path| step["path"] == serde_json::json!(path))
+                });
                 step["status"] = if visited { "completed" } else { "skipped" }.into();
-                step["reason"] = if visited { "The enclosing plan completed" } else { "The completed run did not select this route" }.into();
+                step["reason"] = if visited {
+                    "The enclosing plan completed"
+                } else {
+                    "The completed run did not select this route"
+                }
+                .into();
+            }
+        }
+    }
+    if read_only {
+        for step in &mut steps {
+            if step["status"] == "ready" || step["status"] == "running" {
+                step["status"] = "unknown".into();
+                step["reason"] = "This is a read-only saved run, not an executable pending visit".into();
             }
         }
     }
     serde_json::json!({
         "steps": steps,
-        "ready_to_run": !graph.is_empty() && run_problems.is_empty()
-            && state.as_ref().is_none_or(|state| state.rebase_error.is_none()),
+        "read_only": read_only,
+        "checkpoint_error": checkpoint_error,
+        "ready_to_run": !read_only && !graph.is_empty() && run_problems.is_empty()
+            && state.as_ref().is_none_or(|state| state.rebase_error.is_none()
+                && !state.lanes.first().is_some_and(|lane| matches!(lane.next, Decision::Done(_)))),
         "run_problems": run_problems,
         "paused": state.as_ref().is_some_and(|state| state.paused),
         "halted": state.as_ref().is_some_and(|state| state.halted),
@@ -764,28 +939,58 @@ pub fn resume_architect_run_at(
     cx: &mut App,
 ) -> anyhow::Result<()> {
     let owner = thread.read(cx);
-    let run = owner.architect_run().ok_or_else(|| anyhow::anyhow!("There is no checkpoint to resume."))?;
-    anyhow::ensure!(!run.is_running(), "Stop the run before selecting a resume step.");
-    let control = run.control().cloned().ok_or_else(|| anyhow::anyhow!("The run has no recoverable checkpoint."))?;
+    let run = owner
+        .architect_run()
+        .ok_or_else(|| anyhow::anyhow!("There is no checkpoint to resume."))?;
+    anyhow::ensure!(
+        !run.is_running(),
+        "Stop the run before selecting a resume step."
+    );
+    let control = run
+        .control()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("The run has no recoverable checkpoint."))?;
     {
         let mut state = control.borrow_mut();
-        anyhow::ensure!(state.rebase_error.is_none(), "{}", state.rebase_error.as_deref().unwrap_or_default());
-        anyhow::ensure!(run.outcome.as_ref().is_some_and(RunOutcome::is_resumable) || state.rebased,
-            "This run is not resumable.");
-        anyhow::ensure!(state.graph.node_at(&path).is_some(), "The checkpoint has no step {path}.");
+        anyhow::ensure!(
+            state.rebase_error.is_none(),
+            "{}",
+            state.rebase_error.as_deref().unwrap_or_default()
+        );
+        anyhow::ensure!(
+            run.outcome.as_ref().is_some_and(RunOutcome::is_resumable) || state.rebased,
+            "This run is not resumable."
+        );
+        anyhow::ensure!(
+            state.graph.node_at(&path).is_some(),
+            "The checkpoint has no step {path}."
+        );
         // A loop's pending visit may retain an earlier attempt's result. Only
         // scheduler admission, not the presence of that summary, proves readiness.
-        let live = owner.architect_graph().ok_or(ArchitectRunStartError::NotResumable)?;
+        let live = owner
+            .architect_graph()
+            .ok_or(ArchitectRunStartError::NotResumable)?;
         state.validate_review(live)?;
-        let candidate = state.lanes.iter().enumerate().find_map(|(index, lane)| {
-            let Decision::Run(current) = &lane.next else { return None };
-            if lane.interrupted && current != &path {
-                return None;
-            }
-            let mut run = lane.run.clone();
-            run.prioritize_ready(&path, &state.graph).ok()?;
-            Some((index, run))
-        }).ok_or_else(|| anyhow::anyhow!("Step {path} is skipped or still waiting for incoming prerequisites."))?;
+        let candidate = state
+            .lanes
+            .iter()
+            .enumerate()
+            .find_map(|(index, lane)| {
+                let Decision::Run(current) = &lane.next else {
+                    return None;
+                };
+                if lane.interrupted && current != &path {
+                    return None;
+                }
+                let mut run = lane.run.clone();
+                run.prioritize_ready(&path, &state.graph).ok()?;
+                Some((index, run))
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Step {path} is skipped or still waiting for incoming prerequisites."
+                )
+            })?;
         let (index, run) = candidate;
         state.lanes[index].run = run;
         state.lanes[index].next = Decision::Run(path);
@@ -796,7 +1001,11 @@ pub fn resume_architect_run_at(
 
 fn can_retain_lanes(state: &RunState, affected: &[NodePath]) -> bool {
     affected.iter().all(|path| {
-        if state.graph.node_at(path).is_some_and(|node| node.result.is_some()) {
+        if state
+            .graph
+            .node_at(path)
+            .is_some_and(|node| node.result.is_some())
+        {
             return false;
         }
         state.lanes.iter().all(|lane| {
@@ -875,10 +1084,13 @@ fn prepare_graph_update_with_budget(
     PlanRun::validate_structure(&impact.graph).map_err(anyhow::Error::msg)?;
     let mut graph = impact.graph;
     let new_paths = graph_paths(&graph);
-    let mut affected: std::collections::BTreeSet<_> = impact.invalidated_steps.into_iter().collect();
+    let mut affected: std::collections::BTreeSet<_> =
+        impact.invalidated_steps.into_iter().collect();
     for path in invalidated {
-        anyhow::ensure!(old.node_at(path).is_some() || graph.node_at(path).is_some(),
-            "Cannot invalidate missing step {path}.");
+        anyhow::ensure!(
+            old.node_at(path).is_some() || graph.node_at(path).is_some(),
+            "Cannot invalidate missing step {path}."
+        );
         affected.insert(path.clone());
     }
     let affected: Vec<_> = affected.into_iter().collect();
@@ -889,11 +1101,15 @@ fn prepare_graph_update_with_budget(
             node.locked = false;
         }
     }
-    let affected_locks = affected.iter().filter(|path| {
-        (old.node_at(path).is_some_and(|node| node.locked)
-            || proposed.node_at(path).is_some_and(|node| node.locked))
-            && graph.node_at(path).is_none_or(|node| !node.locked)
-    }).cloned().collect();
+    let affected_locks = affected
+        .iter()
+        .filter(|path| {
+            (old.node_at(path).is_some_and(|node| node.locked)
+                || proposed.node_at(path).is_some_and(|node| node.locked))
+                && graph.node_at(path).is_none_or(|node| !node.locked)
+        })
+        .cloned()
+        .collect();
     graph.clear_results();
     for path in &new_paths {
         if !affected.contains(path)
@@ -908,12 +1124,20 @@ fn prepare_graph_update_with_budget(
     if let Some(state) = state {
         if topology(old) == topology(&graph) && can_retain_lanes(state, &affected) {
             for lane in &state.lanes {
-                lane.run.validate_checkpoint(&graph).map_err(anyhow::Error::msg)?;
+                lane.run
+                    .validate_checkpoint(&graph)
+                    .map_err(anyhow::Error::msg)?;
             }
         } else {
-            let completed: Vec<_> = new_paths.iter().filter(|path| {
-                graph.node_at(path).is_some_and(|node| node.result.is_some())
-            }).cloned().collect();
+            let completed: Vec<_> = new_paths
+                .iter()
+                .filter(|path| {
+                    graph
+                        .node_at(path)
+                        .is_some_and(|node| node.result.is_some())
+                })
+                .cloned()
+                .collect();
             match PlanRun::rebase_remaining(&graph, &completed) {
                 Ok(rebased) => run = Some(rebased),
                 Err(error) => rebase_error = Some(error),
@@ -930,14 +1154,18 @@ fn prepare_graph_update_with_budget(
         checkpoint: None,
         checkpoint_error: None,
     };
-    if prepared.rebase_error.is_none() && let Some(state) = state {
+    if prepared.rebase_error.is_none()
+        && let Some(state) = state
+    {
         let prospective = stage_graph_update(state, &prepared);
         let checkpoint = prospective.checkpoint();
         match validate_checkpoint_value_with_budget(&checkpoint, checkpoint_budget) {
             Ok(()) => prepared.checkpoint = Some(prospective),
-            Err(error) => prepared.checkpoint_error = Some(format!(
-                "The proposed checkpoint, including preserved history, cannot be saved: {error}. The graph and checkpoint were not changed; no history was truncated."
-            )),
+            Err(error) => {
+                prepared.checkpoint_error = Some(format!(
+                    "The proposed checkpoint, including preserved history, cannot be saved: {error}. The graph and checkpoint were not changed; no history was truncated."
+                ))
+            }
         }
     }
     Ok(prepared)
@@ -969,28 +1197,58 @@ fn preview_architect_graph_update_with_budget(
 ) -> serde_json::Value {
     let control = thread.architect_run().and_then(ArchitectRun::control);
     let state = control.map(|control| control.borrow());
-    let old = state.as_ref().map(|state| &state.graph).or_else(|| thread.architect_graph());
-    let prepared = old.ok_or_else(|| anyhow::anyhow!("There is no plan to update."))
-        .and_then(|old| prepare_graph_update_with_budget(old, graph, invalidated, state.as_deref(), checkpoint_budget));
+    let old = state
+        .as_ref()
+        .map(|state| &state.graph)
+        .or_else(|| thread.architect_graph());
+    let prepared = old
+        .ok_or_else(|| anyhow::anyhow!("There is no plan to update."))
+        .and_then(|old| {
+            prepare_graph_update_with_budget(
+                old,
+                graph,
+                invalidated,
+                state.as_deref(),
+                checkpoint_budget,
+            )
+        });
     match prepared {
         Ok(prepared) => {
             let active = thread.architect_run().is_some_and(ArchitectRun::is_running)
-                || state.as_ref().is_some_and(|state| !state.in_flight.is_empty());
+                || state
+                    .as_ref()
+                    .is_some_and(|state| !state.in_flight.is_empty());
             let can_rebase = prepared.rebase_error.is_none();
             let checkpoint_fits = can_rebase && prepared.checkpoint_error.is_none();
-            let run_problems: Vec<_> = prepared.graph.blocking_problems().into_iter()
-                .map(|problem| problem.to_string()).collect();
+            let run_problems: Vec<_> = prepared
+                .graph
+                .blocking_problems()
+                .into_iter()
+                .map(|problem| problem.to_string())
+                .collect();
             let requires_review = graph_paths(&prepared.graph).iter().any(|path| {
-                prepared.graph.node_at(path).is_some_and(|node| !node.locked)
+                prepared
+                    .graph
+                    .node_at(path)
+                    .is_some_and(|node| !node.locked)
             });
             let reason = if active {
                 Some("Stop the run before applying a graph update.".to_string())
             } else {
-                prepared.rebase_error.clone().or_else(|| prepared.checkpoint_error.clone())
+                prepared
+                    .rebase_error
+                    .clone()
+                    .or_else(|| prepared.checkpoint_error.clone())
             };
-            let retained: Vec<_> = graph_paths(&prepared.graph).into_iter().filter(|path| {
-                prepared.graph.node_at(path).is_some_and(|node| node.result.is_some())
-            }).collect();
+            let retained: Vec<_> = graph_paths(&prepared.graph)
+                .into_iter()
+                .filter(|path| {
+                    prepared
+                        .graph
+                        .node_at(path)
+                        .is_some_and(|node| node.result.is_some())
+                })
+                .collect();
             serde_json::json!({
                 "can_rebase": can_rebase,
                 "can_apply": can_rebase && checkpoint_fits && !active,
@@ -1052,25 +1310,49 @@ fn apply_architect_graph_update_with_budget(
     cx: &mut App,
 ) -> anyhow::Result<()> {
     let owner = thread.read(cx);
-    anyhow::ensure!(!owner.architect_run().is_some_and(ArchitectRun::is_running),
-        "Stop the run before applying a graph update.");
-    let control = owner.architect_run().and_then(ArchitectRun::control).cloned();
+    anyhow::ensure!(
+        !owner.architect_run().is_some_and(ArchitectRun::is_running),
+        "Stop the run before applying a graph update."
+    );
+    let control = owner
+        .architect_run()
+        .and_then(ArchitectRun::control)
+        .cloned();
     let prepared = {
         let state = control.as_ref().map(|control| control.borrow());
-        anyhow::ensure!(state.as_ref().is_none_or(|state| state.in_flight.is_empty()),
-            "Wait for interrupted turns to stop before updating the graph.");
-        let old = state.as_ref().map(|state| &state.graph).or_else(|| owner.architect_graph())
+        anyhow::ensure!(
+            state
+                .as_ref()
+                .is_none_or(|state| state.in_flight.is_empty()),
+            "Wait for interrupted turns to stop before updating the graph."
+        );
+        let old = state
+            .as_ref()
+            .map(|state| &state.graph)
+            .or_else(|| owner.architect_graph())
             .ok_or_else(|| anyhow::anyhow!("There is no plan to update."))?;
-        prepare_graph_update_with_budget(old, &graph, invalidated, state.as_deref(), checkpoint_budget)?
+        prepare_graph_update_with_budget(
+            old,
+            &graph,
+            invalidated,
+            state.as_deref(),
+            checkpoint_budget,
+        )?
     };
     if let Some(error) = &prepared.rebase_error {
-        anyhow::bail!("Cannot safely rebase this checkpoint: {error}. The graph and completed history were not changed. Preview and approve a separate restart instead.");
+        anyhow::bail!(
+            "Cannot safely rebase this checkpoint: {error}. The graph and completed history were not changed. Preview and approve a separate restart instead."
+        );
     }
     if let Some(error) = &prepared.checkpoint_error {
         anyhow::bail!("{error}");
     }
     for path in graph_paths(&prepared.graph) {
-        if let Some(model) = prepared.graph.node_at(&path).and_then(|step| step.model.as_ref()) {
+        if let Some(model) = prepared
+            .graph
+            .node_at(&path)
+            .and_then(|step| step.model.as_ref())
+        {
             resolve_step_model(model, cx)?;
         }
     }
@@ -1168,7 +1450,10 @@ pub fn resume_architect_run(
     if !run.outcome.as_ref().is_some_and(RunOutcome::is_resumable) && !control.borrow().rebased {
         return Err(ArchitectRunStartError::NotResumable);
     }
-    let live = thread.read(cx).architect_graph().cloned()
+    let live = thread
+        .read(cx)
+        .architect_graph()
+        .cloned()
         .ok_or(ArchitectRunStartError::NotResumable)?;
     control.borrow_mut().prepare_resume(&live)?;
 
@@ -1318,8 +1603,12 @@ impl Driver {
                 let steps = state.steps;
                 return Err(RunOutcome::StepLimit { steps });
             }
-            let attempt = state.attempts.iter().find(|(path, _)| path == &node)
-                .map(|(_, count)| count + 1).unwrap_or(1);
+            let attempt = state
+                .attempts
+                .iter()
+                .find(|(path, _)| path == &node)
+                .map(|(_, count)| count + 1)
+                .unwrap_or(1);
             if attempt > MAX_NODE_VISITS {
                 return Err(RunOutcome::NodeLimit {
                     node: node.leaf().cloned().ok_or_else(|| RunOutcome::Failed {
@@ -1494,7 +1783,12 @@ impl Driver {
             current.next = next.clone();
             next
         };
-        self.finish_visit(visit, Some(summary.into()), ArchitectRunOutcome::Completed, cx)?;
+        self.finish_visit(
+            visit,
+            Some(summary.into()),
+            ArchitectRunOutcome::Completed,
+            cx,
+        )?;
         Ok(next)
     }
 
@@ -1509,7 +1803,12 @@ impl Driver {
         let saved_conversation = {
             let state = self.state.borrow();
             let lane = &state.lanes[lane];
-            if lane.last_step_thread.as_ref().and_then(WeakEntity::upgrade).is_none() {
+            if lane
+                .last_step_thread
+                .as_ref()
+                .and_then(WeakEntity::upgrade)
+                .is_none()
+            {
                 lane.last_step_session_id.clone()
             } else {
                 None
@@ -1522,15 +1821,14 @@ impl Driver {
             let task = cx.update(|cx| {
                 let (project, work_dirs) = {
                     let plan = self.plan_thread.read(cx);
-                    (plan.project().clone(), plan.work_dirs().cloned().unwrap_or_default())
+                    (
+                        plan.project().clone(),
+                        plan.work_dirs().cloned().unwrap_or_default(),
+                    )
                 };
-                connection.clone().load_session(
-                    session_id,
-                    project,
-                    work_dirs,
-                    None,
-                    cx,
-                )
+                connection
+                    .clone()
+                    .load_session(session_id, project, work_dirs, None, cx)
             });
             self.checkpoint(cx)?;
             let conversation = task.await.map_err(|error| RunOutcome::Failed {
@@ -1702,7 +2000,10 @@ impl Driver {
         thread: &Entity<AcpThread>,
         cx: &mut AsyncApp,
     ) -> Result<(), RunOutcome> {
-        self.state.borrow_mut().in_flight.push((lane, thread.downgrade()));
+        self.state
+            .borrow_mut()
+            .in_flight
+            .push((lane, thread.downgrade()));
         self.checkpoint(cx)
     }
 
@@ -1733,7 +2034,9 @@ impl Driver {
         if let Err(outcome) = self.finish_visit(
             visit,
             Some(message.clone().into()),
-            ArchitectRunOutcome::Failed { message: message.clone() },
+            ArchitectRunOutcome::Failed {
+                message: message.clone(),
+            },
             cx,
         ) {
             return outcome;
@@ -1869,8 +2172,8 @@ async fn send_and_wait(
 #[cfg(test)]
 mod checkpoint_tests {
     use super::*;
-    use architect::{ArchitectNode, EdgeCondition, NodeId};
     use acp_thread::AgentConnection as _;
+    use architect::{ArchitectNode, EdgeCondition, NodeId};
     use gpui::{AppContext as _, TestAppContext};
     use language_model::fake_provider::FakeLanguageModelProvider;
     use std::path::Path;
@@ -1879,7 +2182,12 @@ mod checkpoint_tests {
 
     async fn native_session(
         cx: &mut TestAppContext,
-    ) -> (Rc<NativeAgentConnection>, Entity<Thread>, Entity<AcpThread>, Arc<FakeLanguageModelProvider>) {
+    ) -> (
+        Rc<NativeAgentConnection>,
+        Entity<Thread>,
+        Entity<AcpThread>,
+        Arc<FakeLanguageModelProvider>,
+    ) {
         let fake = crate::tests::init_test(cx);
         let fs = fs::FakeFs::new(cx.executor());
         fs.insert_tree("/", serde_json::json!({ "a": {} })).await;
@@ -1887,21 +2195,39 @@ mod checkpoint_tests {
         let store = cx.new(|cx| crate::ThreadStore::new(cx));
         let agent = cx.update(|cx| crate::NativeAgent::new(store, crate::Templates::new(), fs, cx));
         let connection = Rc::new(NativeAgentConnection(agent));
-        let acp_thread = cx.update(|cx| connection.clone().new_session(
-            project,
-            PathList::new(&[Path::new("/a")]),
-            cx,
-        )).await.unwrap();
-        let thread = cx.update(|cx| connection.thread(acp_thread.read(cx).session_id(), cx).unwrap());
+        let acp_thread = cx
+            .update(|cx| {
+                connection
+                    .clone()
+                    .new_session(project, PathList::new(&[Path::new("/a")]), cx)
+            })
+            .await
+            .unwrap();
+        let thread = cx.update(|cx| {
+            connection
+                .thread(acp_thread.read(cx).session_id(), cx)
+                .unwrap()
+        });
         thread.update(cx, |thread, cx| thread.set_model(fake.model("fake"), cx));
         (connection, thread, acp_thread, fake)
     }
 
     fn finish_pending_step(fake: &FakeLanguageModelProvider) {
-        let pending: Vec<_> = fake.pending_completions().into_iter().filter(|request| {
-            request.messages.last().is_some_and(|message| message.string_contents().contains("## Step"))
-        }).collect();
-        assert_eq!(pending.len(), 1, "expected one admitted step, not a premature shared successor");
+        let pending: Vec<_> = fake
+            .pending_completions()
+            .into_iter()
+            .filter(|request| {
+                request
+                    .messages
+                    .last()
+                    .is_some_and(|message| message.string_contents().contains("## Step"))
+            })
+            .collect();
+        assert_eq!(
+            pending.len(),
+            1,
+            "expected one admitted step, not a premature shared successor"
+        );
         let model = fake.model("fake");
         fake.send_text(&model, &pending[0], "Step completed successfully.");
         fake.end_stream(&model, &pending[0]);
@@ -1909,10 +2235,72 @@ mod checkpoint_tests {
 
     fn assert_running(thread: &Entity<Thread>, expected: &str, cx: &TestAppContext) {
         thread.read_with(cx, |thread, _| {
-            let paths: Vec<_> = thread.architect_run().unwrap().running_steps().iter()
-                .map(|step| step.path.clone()).collect();
+            let paths: Vec<_> = thread
+                .architect_run()
+                .unwrap()
+                .running_steps()
+                .iter()
+                .map(|step| step.path.clone())
+                .collect();
             assert_eq!(paths, vec![path(expected)]);
         });
+    }
+
+    fn assert_finished_readiness(
+        thread: &Entity<Thread>,
+        expected: &[(&str, &str)],
+        cx: &TestAppContext,
+    ) -> serde_json::Value {
+        thread.read_with(cx, |thread, _| {
+            let run = thread.architect_run().unwrap();
+            assert_eq!(run.outcome, Some(RunOutcome::Completed));
+            assert!(run.control().is_none());
+            assert!(!run.can_resume());
+            let checkpoint = run.saved_checkpoint().cloned();
+            let sequence = thread.architect_event_sequence();
+            let readiness = architect_run_readiness(thread);
+            assert_eq!(readiness["ready_to_run"], false);
+            assert_eq!(readiness["read_only"], true);
+            let steps = readiness["steps"].as_array().unwrap();
+            for (node, status) in expected {
+                let step = steps.iter().find(|step| step["path"] == serde_json::json!([node])).unwrap();
+                assert_eq!(step["status"], *status, "incorrect terminal state for {node}");
+            }
+            assert!(steps.iter().all(|step| step["status"] != "ready" && step["status"] != "running"));
+            assert_eq!(run.saved_checkpoint(), checkpoint.as_ref());
+            assert!(run.control().is_none(), "inspection must not install resumable control");
+            assert_eq!(thread.architect_event_sequence(), sequence, "inspection must not emit execution events");
+            readiness
+        })
+    }
+
+    async fn reload_run_for_readiness(
+        connection: &Rc<NativeAgentConnection>,
+        thread: &Entity<Thread>,
+        acp_thread: &Entity<AcpThread>,
+        keep_checkpoint: bool,
+        cx: &mut TestAppContext,
+    ) -> (Entity<Thread>, Entity<AcpThread>) {
+        let mut saved = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
+        let snapshot = saved.persistent_architect.as_mut().unwrap().current.as_mut().unwrap();
+        assert!(matches!(snapshot.outcome, Some(ArchitectRunOutcome::Completed)));
+        assert!(snapshot.checkpoint.is_some(), "a terminal checkpoint must survive serialization");
+        if !keep_checkpoint {
+            snapshot.checkpoint = None;
+        }
+        let id = thread.read_with(cx, |thread, _| thread.id().clone());
+        let restored_id = acp::SessionId::new(format!("{id}-readiness-{keep_checkpoint}"));
+        let (project, work_dirs) = acp_thread.read_with(cx, |thread, _| (
+            thread.project().clone(), thread.work_dirs().cloned().unwrap_or_default(),
+        ));
+        let database = cx.update(|cx| crate::ThreadsDatabase::connect(cx)).await.unwrap();
+        database.save_thread(restored_id.clone(), saved, work_dirs.clone()).await.unwrap();
+        let restored_acp = cx.update(|cx| connection.clone().load_session(
+            restored_id.clone(), project, work_dirs, None, cx,
+        )).await.unwrap();
+        cx.run_until_parked();
+        let restored = cx.update(|cx| connection.thread(&restored_id, cx).unwrap());
+        (restored, restored_acp)
     }
 
     fn checkpoint_value_count(value: &serde_json::Value) -> usize {
@@ -1925,7 +2313,7 @@ mod checkpoint_tests {
 
     #[gpui::test(iterations = 3)]
     async fn native_pipeline_does_not_enter_a_join_with_only_closed_routes(cx: &mut TestAppContext) {
-        let (_connection, thread, acp_thread, fake) = native_session(cx).await;
+        let (connection, thread, acp_thread, fake) = native_session(cx).await;
         let mut graph = graph();
         for edge in &mut graph.edges {
             edge.max_repeats = Some(0);
@@ -1936,7 +2324,9 @@ mod checkpoint_tests {
         graph.connect("start", "a");
         graph.connect("start", "b");
         cx.update(|cx| {
-            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph.clone()), cx)
+            });
             start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
         });
         for expected in ["start", "a", "b"] {
@@ -1952,15 +2342,30 @@ mod checkpoint_tests {
             assert!(!run.history().iter().any(|step| step.path == path("join")));
             assert!(thread.architect_graph().unwrap().node_at(&path("join")).unwrap().result.is_none());
         });
+        let expected = [("start", "completed"), ("a", "completed"), ("b", "completed"), ("join", "skipped")];
+        let before = assert_finished_readiness(&thread, &expected, cx);
+        let (restored, restored_acp) = reload_run_for_readiness(&connection, &thread, &acp_thread, true, cx).await;
+        assert_eq!(assert_finished_readiness(&restored, &expected, cx), before);
+        cx.update(|cx| {
+            assert!(matches!(resume_architect_run(restored.clone(), restored_acp.clone(), cx),
+                Err(ArchitectRunStartError::NotResumable)));
+        });
+        let (legacy, _legacy_acp) = reload_run_for_readiness(&connection, &thread, &acp_thread, false, cx).await;
+        assert_finished_readiness(&legacy,
+            &[("start", "completed"), ("a", "completed"), ("b", "completed"), ("join", "unknown")], cx);
     }
 
     #[gpui::test]
-    async fn runtime_impact_includes_frozen_pinned_consumers_missing_from_draft_preview(cx: &mut TestAppContext) {
+    async fn runtime_impact_includes_frozen_pinned_consumers_missing_from_draft_preview(
+        cx: &mut TestAppContext,
+    ) {
         let (_connection, thread, acp_thread, fake) = native_session(cx).await;
         let mut graph = graph();
         graph.node_at_mut(&path("a")).unwrap().pinned = true;
         cx.update(|cx| {
-            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph.clone()), cx)
+            });
             start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
         });
         cx.run_until_parked();
@@ -1973,7 +2378,10 @@ mod checkpoint_tests {
         cx.run_until_parked();
         cx.update(|cx| stop_architect_run(&thread, None, cx));
         thread.update(cx, |thread, cx| {
-            thread.update_architect_graph(|graph| graph.node_at_mut(&path("a")).unwrap().pinned = false, cx);
+            thread.update_architect_graph(
+                |graph| graph.node_at_mut(&path("a")).unwrap().pinned = false,
+                cx,
+            );
         });
         let draft = thread.read_with(cx, |thread, _| thread.architect_graph().unwrap().clone());
         let mut proposed = draft.clone();
@@ -1981,21 +2389,54 @@ mod checkpoint_tests {
         let draft_preview = architect::preview_graph_replacement(&draft, &proposed).unwrap();
         assert!(!draft_preview.invalidated_steps.contains(&path("b")));
         let runtime = thread.read_with(cx, |thread, _| {
-            preview_architect_graph_update(thread, &draft_preview.graph, &draft_preview.invalidated_steps)
+            preview_architect_graph_update(
+                thread,
+                &draft_preview.graph,
+                &draft_preview.invalidated_steps,
+            )
         });
         assert_eq!(runtime["can_apply"], true);
-        assert!(runtime["invalidated_paths"].as_array().unwrap().contains(&serde_json::json!(["b"])));
-        assert!(!runtime["retained_results"].as_array().unwrap().contains(&serde_json::json!(["b"])));
-        cx.update(|cx| apply_architect_graph_update(&thread, draft_preview.graph, &draft_preview.invalidated_steps, cx).unwrap());
+        assert!(
+            runtime["invalidated_paths"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(["b"]))
+        );
+        assert!(
+            !runtime["retained_results"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(["b"]))
+        );
+        cx.update(|cx| {
+            apply_architect_graph_update(
+                &thread,
+                draft_preview.graph,
+                &draft_preview.invalidated_steps,
+                cx,
+            )
+            .unwrap()
+        });
         thread.read_with(cx, |thread, _| {
-            let consumer = thread.architect_graph().unwrap().node_at(&path("b")).unwrap();
+            let consumer = thread
+                .architect_graph()
+                .unwrap()
+                .node_at(&path("b"))
+                .unwrap();
             assert!(consumer.result.is_none());
             assert!(!consumer.locked);
             let run = thread.architect_run().unwrap();
-            assert_eq!(run.history().len(), 2, "invalidating results must not erase completed visit history");
+            assert_eq!(
+                run.history().len(),
+                2,
+                "invalidating results must not erase completed visit history"
+            );
             assert!(run.history().iter().all(|step| step.summary.is_some()));
             let state = run.control().unwrap().borrow();
-            assert_eq!(serde_json::json!(state.invalidated), runtime["invalidated_paths"]);
+            assert_eq!(
+                serde_json::json!(state.invalidated),
+                runtime["invalidated_paths"]
+            );
             assert_eq!(state.archived_checkpoints.len(), 1);
             RunState::from_checkpoint(state.checkpoint()).unwrap();
         });
@@ -2006,7 +2447,9 @@ mod checkpoint_tests {
         let (_connection, thread, acp_thread, fake) = native_session(cx).await;
         cx.update(|cx| {
             let graph = graph();
-            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph.clone()), cx)
+            });
             start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
         });
         cx.run_until_parked();
@@ -2017,12 +2460,25 @@ mod checkpoint_tests {
         let mut first = thread.read_with(cx, |thread, _| thread.architect_graph().unwrap().clone());
         first.add_node(ArchitectNode::new("first", "First addition"));
         cx.update(|cx| apply_architect_graph_update(&thread, first, &[], cx).unwrap());
-        let (before_graph, before_checkpoint, sequence) = thread.read_with(cx, |thread, _| (
-            thread.architect_graph().unwrap().clone(),
-            thread.architect_run().unwrap().snapshot().checkpoint.unwrap(),
-            thread.architect_event_sequence(),
-        ));
-        assert_eq!(before_checkpoint["state"]["archived_checkpoints"].as_array().unwrap().len(), 1);
+        let (before_graph, before_checkpoint, sequence) = thread.read_with(cx, |thread, _| {
+            (
+                thread.architect_graph().unwrap().clone(),
+                thread
+                    .architect_run()
+                    .unwrap()
+                    .snapshot()
+                    .checkpoint
+                    .unwrap(),
+                thread.architect_event_sequence(),
+            )
+        });
+        assert_eq!(
+            before_checkpoint["state"]["archived_checkpoints"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         let budget = checkpoint_value_count(&before_checkpoint);
         validate_checkpoint_value_with_budget(&before_checkpoint, budget).unwrap();
         RunState::from_checkpoint(before_checkpoint.clone()).unwrap();
@@ -2034,10 +2490,27 @@ mod checkpoint_tests {
         assert_eq!(preview["can_rebase"], true);
         assert_eq!(preview["can_apply"], false);
         assert_eq!(preview["checkpoint_fits"], false);
-        assert!(preview["checkpoint_error"].as_str().unwrap().contains("preserved history"));
-        assert!(preview["invalidated_paths"].as_array().unwrap().contains(&serde_json::json!(["second"])));
+        assert!(
+            preview["checkpoint_error"]
+                .as_str()
+                .unwrap()
+                .contains("preserved history")
+        );
+        assert!(
+            preview["invalidated_paths"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(["second"]))
+        );
         cx.update(|cx| {
-            let error = apply_architect_graph_update_with_budget(&thread, proposed.clone(), &[], budget, cx).unwrap_err();
+            let error = apply_architect_graph_update_with_budget(
+                &thread,
+                proposed.clone(),
+                &[],
+                budget,
+                cx,
+            )
+            .unwrap_err();
             assert!(error.to_string().contains("no history was truncated"));
         });
         let expected = thread.read_with(cx, |thread, _| {
@@ -2048,23 +2521,49 @@ mod checkpoint_tests {
             assert_eq!(run.history().len(), 1);
             assert!(run.history()[0].summary.is_some());
             let state = run.control().unwrap().borrow();
-            let prepared = prepare_graph_update(&state.graph, &proposed, &[], Some(&state)).unwrap();
+            let prepared =
+                prepare_graph_update(&state.graph, &proposed, &[], Some(&state)).unwrap();
             prepared.checkpoint.unwrap().checkpoint()
         });
         let sufficient_budget = checkpoint_value_count(&expected);
-        cx.update(|cx| apply_architect_graph_update_with_budget(&thread, proposed, &[], sufficient_budget, cx).unwrap());
+        cx.update(|cx| {
+            apply_architect_graph_update_with_budget(&thread, proposed, &[], sufficient_budget, cx)
+                .unwrap()
+        });
         thread.read_with(cx, |thread, _| {
-            let actual = thread.architect_run().unwrap().snapshot().checkpoint.unwrap();
-            assert_eq!(actual, expected, "commit must install the exact state that was preflighted");
-            assert_eq!(actual["state"]["archived_checkpoints"].as_array().unwrap().len(), 2);
+            let actual = thread
+                .architect_run()
+                .unwrap()
+                .snapshot()
+                .checkpoint
+                .unwrap();
+            assert_eq!(
+                actual, expected,
+                "commit must install the exact state that was preflighted"
+            );
+            assert_eq!(
+                actual["state"]["archived_checkpoints"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
             RunState::from_checkpoint(actual).unwrap();
-            assert!(thread.architect_graph().unwrap().node_at(&path("a")).unwrap().result.is_some());
+            assert!(
+                thread
+                    .architect_graph()
+                    .unwrap()
+                    .node_at(&path("a"))
+                    .unwrap()
+                    .result
+                    .is_some()
+            );
         });
     }
 
     #[gpui::test(iterations = 3)]
     async fn native_pipeline_checkpoints_the_other_root_before_waiting(cx: &mut TestAppContext) {
-        let (_connection, thread, acp_thread, fake) = native_session(cx).await;
+        let (connection, thread, acp_thread, fake) = native_session(cx).await;
         let snapshots = Rc::new(RefCell::new(Vec::new()));
         let _subscription = cx.update(|cx| cx.observe(&thread, {
             let snapshots = snapshots.clone();
@@ -2086,17 +2585,29 @@ mod checkpoint_tests {
         let sequence = thread.read_with(cx, |thread, _| thread.architect_event_sequence());
         finish_pending_step(&fake);
         cx.run_until_parked();
-        let saved = thread.read_with(cx, |thread, cx| {
-            assert!(thread.architect_event_sequence() > sequence);
-            assert!(thread.architect_run().unwrap().running_steps().is_empty());
-            thread.to_db(cx)
-        }).await;
+        let saved = thread
+            .read_with(cx, |thread, cx| {
+                assert!(thread.architect_event_sequence() > sequence);
+                assert!(thread.architect_run().unwrap().running_steps().is_empty());
+                thread.to_db(cx)
+            })
+            .await;
         let snapshot = saved.persistent_architect.unwrap().current.unwrap();
         let restored = RunState::from_checkpoint(snapshot.checkpoint.unwrap()).unwrap();
         assert_eq!(restored.lanes[0].next, Decision::Run(path("b")));
         assert!(restored.graph.node_at(&path("a")).unwrap().result.is_some());
-        assert!(restored.graph.node_at(&path("join")).unwrap().result.is_none());
-        assert!(matches!(snapshot.history[0].outcome, Some(ArchitectRunOutcome::Completed)));
+        assert!(
+            restored
+                .graph
+                .node_at(&path("join"))
+                .unwrap()
+                .result
+                .is_none()
+        );
+        assert!(matches!(
+            snapshot.history[0].outcome,
+            Some(ArchitectRunOutcome::Completed)
+        ));
         assert!(snapshots.borrow().iter().any(|checkpoint| {
             checkpoint["state"]["paused"] == true
                 && checkpoint["state"]["lanes"][0]["next"] == serde_json::json!({ "Run": ["b"] })
@@ -2115,10 +2626,22 @@ mod checkpoint_tests {
             assert_eq!(run.history().iter().map(|step| step.path.clone()).collect::<Vec<_>>(),
                 vec![path("a"), path("b"), path("join")]);
         });
+        let expected = [("a", "completed"), ("b", "completed"), ("join", "completed")];
+        let before = assert_finished_readiness(&thread, &expected, cx);
+        let (restored, restored_acp) = reload_run_for_readiness(&connection, &thread, &acp_thread, true, cx).await;
+        assert_eq!(assert_finished_readiness(&restored, &expected, cx), before);
+        cx.update(|cx| {
+            assert!(matches!(resume_architect_run(restored.clone(), restored_acp.clone(), cx),
+                Err(ArchitectRunStartError::NotResumable)));
+        });
+        let (legacy, _legacy_acp) = reload_run_for_readiness(&connection, &thread, &acp_thread, false, cx).await;
+        assert_finished_readiness(&legacy, &expected, cx);
     }
 
     #[gpui::test(iterations = 3)]
-    async fn native_pipeline_runs_partial_joins_only_after_all_prerequisites(cx: &mut TestAppContext) {
+    async fn native_pipeline_runs_partial_joins_only_after_all_prerequisites(
+        cx: &mut TestAppContext,
+    ) {
         let (_connection, thread, acp_thread, fake) = native_session(cx).await;
         let mut graph = ArchitectGraph::default();
         for id in ["a", "b", "e", "c", "f", "d"] {
@@ -2126,18 +2649,33 @@ mod checkpoint_tests {
             node.locked = true;
             graph.add_node(node);
         }
-        for (from, to) in [("a", "b"), ("a", "c"), ("a", "d"), ("b", "e"), ("c", "e"), ("e", "f"), ("d", "f")] {
+        for (from, to) in [
+            ("a", "b"),
+            ("a", "c"),
+            ("a", "d"),
+            ("b", "e"),
+            ("c", "e"),
+            ("e", "f"),
+            ("d", "f"),
+        ] {
             graph.connect(from, to);
         }
         cx.update(|cx| {
-            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph.clone()), cx)
+            });
             start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
         });
         for expected in ["a", "b", "c", "e", "d", "f"] {
             cx.run_until_parked();
             assert_running(&thread, expected, cx);
             thread.read_with(cx, |thread, _| {
-                let checkpoint = thread.architect_run().unwrap().snapshot().checkpoint.unwrap();
+                let checkpoint = thread
+                    .architect_run()
+                    .unwrap()
+                    .snapshot()
+                    .checkpoint
+                    .unwrap();
                 RunState::from_checkpoint(checkpoint).unwrap();
             });
             finish_pending_step(&fake);
@@ -2151,7 +2689,9 @@ mod checkpoint_tests {
     }
 
     #[gpui::test]
-    async fn native_pipeline_persists_failure_instead_of_completed_summary(cx: &mut TestAppContext) {
+    async fn native_pipeline_persists_failure_instead_of_completed_summary(
+        cx: &mut TestAppContext,
+    ) {
         let (_connection, thread, acp_thread, _fake) = native_session(cx).await;
         let mut graph = graph();
         graph.node_at_mut(&path("a")).unwrap().model = Some(architect::StepModel {
@@ -2159,13 +2699,18 @@ mod checkpoint_tests {
             model: "missing-model".into(),
         });
         cx.update(|cx| {
-            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph.clone()), cx)
+            });
             start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
         });
         cx.run_until_parked();
         let saved = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
         let snapshot = saved.persistent_architect.unwrap().current.unwrap();
-        assert!(matches!(snapshot.history[0].outcome, Some(ArchitectRunOutcome::Failed { .. })));
+        assert!(matches!(
+            snapshot.history[0].outcome,
+            Some(ArchitectRunOutcome::Failed { .. })
+        ));
         let state = RunState::from_checkpoint(snapshot.checkpoint.unwrap()).unwrap();
         assert!(state.halted);
         assert!(state.lanes[0].interrupted);
@@ -2173,11 +2718,15 @@ mod checkpoint_tests {
     }
 
     #[gpui::test(iterations = 3)]
-    async fn unlocked_core_insert_rebases_and_requires_review_before_resume(cx: &mut TestAppContext) {
+    async fn unlocked_core_insert_rebases_and_requires_review_before_resume(
+        cx: &mut TestAppContext,
+    ) {
         let (_connection, thread, acp_thread, fake) = native_session(cx).await;
         cx.update(|cx| {
             let graph = graph();
-            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph.clone()), cx)
+            });
             start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
         });
         cx.run_until_parked();
@@ -2189,10 +2738,14 @@ mod checkpoint_tests {
         let original = thread.read_with(cx, |thread, _| thread.architect_graph().unwrap().clone());
         let original_result = original.node_at(&path("a")).unwrap().result.clone();
         assert!(original_result.is_some());
-        let core = architect::preview_graph_edits(&original, &[architect::GraphEdit::InsertNode {
-            parent: NodePath::default(),
-            node: ArchitectNode::new("inserted", "Inserted step"),
-        }]).unwrap();
+        let core = architect::preview_graph_edits(
+            &original,
+            &[architect::GraphEdit::InsertNode {
+                parent: NodePath::default(),
+                node: ArchitectNode::new("inserted", "Inserted step"),
+            }],
+        )
+        .unwrap();
         assert!(core.is_valid);
         assert!(!core.ready_to_run);
         assert!(!core.graph.node_at(&path("inserted")).unwrap().locked);
@@ -2204,7 +2757,8 @@ mod checkpoint_tests {
         assert_eq!(preview["ready_to_run"], false);
         assert_eq!(preview["requires_review"], true);
         cx.update(|cx| {
-            apply_architect_graph_update(&thread, core.graph.clone(), &core.invalidated_steps, cx).unwrap();
+            apply_architect_graph_update(&thread, core.graph.clone(), &core.invalidated_steps, cx)
+                .unwrap();
         });
         let checkpoint = thread.read_with(cx, |thread, _| {
             let graph = thread.architect_graph().unwrap();
@@ -2215,23 +2769,42 @@ mod checkpoint_tests {
             run.snapshot().checkpoint.unwrap()
         });
         cx.update(|cx| {
-            assert!(matches!(resume_architect_run(thread.clone(), acp_thread.clone(), cx),
-                Err(ArchitectRunStartError::Refused(RunRefusal::NotReady(_)))));
+            assert!(matches!(
+                resume_architect_run(thread.clone(), acp_thread.clone(), cx),
+                Err(ArchitectRunStartError::Refused(RunRefusal::NotReady(_)))
+            ));
         });
         thread.read_with(cx, |thread, _| {
-            assert_eq!(thread.architect_run().unwrap().snapshot().checkpoint, Some(checkpoint.clone()));
+            assert_eq!(
+                thread.architect_run().unwrap().snapshot().checkpoint,
+                Some(checkpoint.clone())
+            );
             assert!(!thread.architect_run().unwrap().is_running());
         });
         let saved = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
-        let persisted = saved.persistent_architect.unwrap().current.unwrap().checkpoint.unwrap();
-        let mut restored = RunState::from_checkpoint(persisted).expect("unlocked is awaiting review, not corrupt");
+        let persisted = saved
+            .persistent_architect
+            .unwrap()
+            .current
+            .unwrap()
+            .checkpoint
+            .unwrap();
+        let mut restored =
+            RunState::from_checkpoint(persisted).expect("unlocked is awaiting review, not corrupt");
         let unlocked = restored.graph.clone();
         assert!(restored.halted);
-        assert!(matches!(restored.prepare_resume(&unlocked),
-            Err(ArchitectRunStartError::Refused(RunRefusal::NotReady(_)))));
+        assert!(matches!(
+            restored.prepare_resume(&unlocked),
+            Err(ArchitectRunStartError::Refused(RunRefusal::NotReady(_)))
+        ));
         cx.update(|cx| {
             thread.update(cx, |thread, cx| {
-                thread.update_architect_graph(|graph| { graph.lock_all(); }, cx);
+                thread.update_architect_graph(
+                    |graph| {
+                        graph.lock_all();
+                    },
+                    cx,
+                );
             });
             resume_architect_run(thread.clone(), acp_thread.clone(), cx).unwrap();
             let owner = thread.read(cx);
@@ -2248,8 +2821,22 @@ mod checkpoint_tests {
         thread.read_with(cx, |thread, _| {
             let run = thread.architect_run().unwrap();
             assert_eq!(run.outcome, Some(RunOutcome::Completed));
-            assert_eq!(run.history().iter().filter(|step| step.path == path("a")).count(), 1);
-            assert_eq!(thread.architect_graph().unwrap().node_at(&path("a")).unwrap().result, original_result);
+            assert_eq!(
+                run.history()
+                    .iter()
+                    .filter(|step| step.path == path("a"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                thread
+                    .architect_graph()
+                    .unwrap()
+                    .node_at(&path("a"))
+                    .unwrap()
+                    .result,
+                original_result
+            );
         });
     }
 
@@ -2262,50 +2849,91 @@ mod checkpoint_tests {
         container.subplan = Some(Box::new(self::graph()));
         graph.add_node(container);
         cx.update(|cx| {
-            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph.clone()), cx)
+            });
             start_architect_run(thread.clone(), acp_thread.clone(), graph.clone(), cx).unwrap();
             stop_architect_run(&thread, None, cx);
         });
-        let before = thread.read_with(cx, |thread, _| thread.architect_run().unwrap().snapshot().checkpoint.unwrap());
-        let core = architect::preview_graph_edits(&graph, &[architect::GraphEdit::MoveNode {
-            path: path("container").child("b".into()),
-            position: architect::NodePosition { x: 200.0, y: 100.0 },
-        }]).unwrap();
+        let before = thread.read_with(cx, |thread, _| {
+            thread
+                .architect_run()
+                .unwrap()
+                .snapshot()
+                .checkpoint
+                .unwrap()
+        });
+        let core = architect::preview_graph_edits(
+            &graph,
+            &[architect::GraphEdit::MoveNode {
+                path: path("container").child("b".into()),
+                position: architect::NodePosition { x: 200.0, y: 100.0 },
+            }],
+        )
+        .unwrap();
         assert!(core.invalidated_steps.is_empty());
-        let preview = thread.read_with(cx, |thread, _| preview_architect_graph_update(thread, &core.graph, &[]));
+        let preview = thread.read_with(cx, |thread, _| {
+            preview_architect_graph_update(thread, &core.graph, &[])
+        });
         assert_eq!(preview["can_rebase"], true);
         assert_eq!(preview["can_apply"], true);
         cx.update(|cx| apply_architect_graph_update(&thread, core.graph, &[], cx).unwrap());
         thread.read_with(cx, |thread, _| {
-            let after = thread.architect_run().unwrap().snapshot().checkpoint.unwrap();
+            let after = thread
+                .architect_run()
+                .unwrap()
+                .snapshot()
+                .checkpoint
+                .unwrap();
             assert_eq!(after["state"]["lanes"], before["state"]["lanes"]);
             RunState::from_checkpoint(after).unwrap();
         });
     }
 
     #[gpui::test]
-    async fn graph_preview_refuses_unsupported_rebase_without_mutating_history(cx: &mut TestAppContext) {
+    async fn graph_preview_refuses_unsupported_rebase_without_mutating_history(
+        cx: &mut TestAppContext,
+    ) {
         let (_connection, thread, acp_thread, _fake) = native_session(cx).await;
         let original = graph();
         cx.update(|cx| {
-            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(original.clone()), cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(original.clone()), cx)
+            });
             start_architect_run(thread.clone(), acp_thread.clone(), original.clone(), cx).unwrap();
             stop_architect_run(&thread, None, cx);
         });
-        let before = thread.read_with(cx, |thread, _| thread.architect_run().unwrap().snapshot().checkpoint.unwrap());
+        let before = thread.read_with(cx, |thread, _| {
+            thread
+                .architect_run()
+                .unwrap()
+                .snapshot()
+                .checkpoint
+                .unwrap()
+        });
         let sequence = thread.read_with(cx, |thread, _| thread.architect_event_sequence());
         let mut proposed = original.clone();
         proposed.node_at_mut(&path("a")).unwrap().subplan = Some(Box::new(graph()));
-        let preview = thread.read_with(cx, |thread, _| preview_architect_graph_update(thread, &proposed, &[]));
+        let preview = thread.read_with(cx, |thread, _| {
+            preview_architect_graph_update(thread, &proposed, &[])
+        });
         assert_eq!(preview["can_rebase"], false);
         assert_eq!(preview["can_apply"], false);
         assert_eq!(preview["lost_checkpoint"], true);
         assert_eq!(preview["history_preserved"], true);
-        assert!(preview["invalidated_paths"].as_array().unwrap().contains(&serde_json::json!(["a"])));
+        assert!(
+            preview["invalidated_paths"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(["a"]))
+        );
         cx.update(|cx| assert!(apply_architect_graph_update(&thread, proposed, &[], cx).is_err()));
         thread.read_with(cx, |thread, _| {
             assert_eq!(thread.architect_graph(), Some(&original));
-            assert_eq!(thread.architect_run().unwrap().snapshot().checkpoint, Some(before));
+            assert_eq!(
+                thread.architect_run().unwrap().snapshot().checkpoint,
+                Some(before)
+            );
             assert_eq!(thread.architect_event_sequence(), sequence);
         });
     }
@@ -2351,7 +2979,10 @@ mod checkpoint_tests {
         assert_eq!(restored.lanes[0].next, Decision::Run(path("b")));
         restored.prepare_resume(&state.graph).unwrap();
         assert_eq!(restored.lanes[0].run.attempt(&NodeId("b".into())), 2);
-        assert_eq!(restored.lanes[0].run.history(), &[path("a"), path("b"), path("b")]);
+        assert_eq!(
+            restored.lanes[0].run.history(),
+            &[path("a"), path("b"), path("b")]
+        );
         let next = restored.lanes[0].run.finish_step(&restored.graph);
         assert_eq!(next, Decision::Run(path("join")));
     }
@@ -2359,7 +2990,9 @@ mod checkpoint_tests {
     #[test]
     fn checkpoint_retains_the_question_conversation_without_serializing_entities() {
         let mut graph = graph();
-        graph.edges[0].condition = EdgeCondition::LlmEvaluated { question: "Continue?".into() };
+        graph.edges[0].condition = EdgeCondition::LlmEvaluated {
+            question: "Continue?".into(),
+        };
         let mut run = PlanRun::start(&graph).unwrap();
         let next = run.finish_step(&graph);
         assert!(matches!(next, Decision::Ask(_)));
@@ -2372,7 +3005,10 @@ mod checkpoint_tests {
         let mut restored = RunState::from_checkpoint(checkpoint).unwrap();
         assert_eq!(restored.lanes[0].next, next);
         assert!(!restored.lanes[0].interrupted);
-        assert_eq!(restored.lanes[0].last_step_session_id, state.lanes[0].last_step_session_id);
+        assert_eq!(
+            restored.lanes[0].last_step_session_id,
+            state.lanes[0].last_step_session_id
+        );
         assert!(restored.lanes[0].last_step_thread.is_none());
         restored.prepare_resume(&state.graph).unwrap();
         assert_eq!(restored.lanes[0].next, next);
@@ -2386,15 +3022,24 @@ mod checkpoint_tests {
         let mut checkpoint = state.checkpoint();
         checkpoint["state"]["steps"] = serde_json::json!(MAX_RUN_STEPS);
         checkpoint["state"]["attempts"] = serde_json::json!(
-            (0..9).map(|index| (vec![format!("step-{index}")], MAX_NODE_VISITS)).collect::<Vec<_>>()
+            (0..9)
+                .map(|index| (vec![format!("step-{index}")], MAX_NODE_VISITS))
+                .collect::<Vec<_>>()
         );
-        let error = RunState::from_checkpoint(checkpoint).err().unwrap().to_string();
+        let error = RunState::from_checkpoint(checkpoint)
+            .err()
+            .unwrap()
+            .to_string();
         assert!(error.contains("whole-run"), "{error}");
         let mut checkpoint = state.checkpoint();
         checkpoint["state"]["steps"] = serde_json::json!(1);
-        assert!(RunState::from_checkpoint(checkpoint).is_err(), "counters must agree exactly");
+        assert!(
+            RunState::from_checkpoint(checkpoint).is_err(),
+            "counters must agree exactly"
+        );
         let mut checkpoint = state.checkpoint();
-        checkpoint["state"]["lanes"][0]["run"]["stack"][0]["edge_uses"]["a->join"] = serde_json::json!(usize::MAX);
+        checkpoint["state"]["lanes"][0]["run"]["stack"][0]["edge_uses"]["a->join"] =
+            serde_json::json!(usize::MAX);
         assert!(RunState::from_checkpoint(checkpoint).is_err());
         let mut checkpoint = state.checkpoint();
         checkpoint["state"]["steps"] = serde_json::json!(-1);
@@ -2414,7 +3059,10 @@ mod checkpoint_tests {
             }
             state.graph.node_at_mut(&path(parent)).unwrap().subplan = Some(Box::new(nested));
         }
-        let error = RunState::from_checkpoint(state.checkpoint()).err().unwrap().to_string();
+        let error = RunState::from_checkpoint(state.checkpoint())
+            .err()
+            .unwrap()
+            .to_string();
         assert!(error.contains("total node budget"), "{error}");
     }
 
@@ -2432,10 +3080,22 @@ mod checkpoint_tests {
             nested = wrapper;
         }
         state.graph = nested;
-        assert!(RunState::from_checkpoint(state.checkpoint()).err().unwrap().to_string().contains("nesting limit"));
+        assert!(
+            RunState::from_checkpoint(state.checkpoint())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("nesting limit")
+        );
         state.graph = graph;
         state.graph.edges.push(state.graph.edges[0].clone());
-        assert!(RunState::from_checkpoint(state.checkpoint()).err().unwrap().to_string().contains("duplicate edge"));
+        assert!(
+            RunState::from_checkpoint(state.checkpoint())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("duplicate edge")
+        );
     }
 
     #[test]
@@ -2454,7 +3114,10 @@ mod checkpoint_tests {
         let prepared = prepare_graph_update(&before, &proposed, &[], None).unwrap();
         assert_eq!(prepared.changed_steps, core.changed_steps);
         assert_eq!(prepared.affected_locks, vec![path("b"), path("join")]);
-        assert!(!prepared.affected_locks.contains(&path("a")), "already-unlocked paths are not reopened locks");
+        assert!(
+            !prepared.affected_locks.contains(&path("a")),
+            "already-unlocked paths are not reopened locks"
+        );
         assert!(!prepared.affected_locks.contains(&path("untouched")));
         assert!(prepared.graph.node_at(&path("b")).is_none());
         assert!(!prepared.graph.node_at(&path("join")).unwrap().locked);
@@ -2474,9 +3137,17 @@ mod checkpoint_tests {
         let mut proposed = before.clone();
         proposed.node_at_mut(&changed).unwrap().title = "Revised nested step".into();
         let prepared = prepare_graph_update(&before, &proposed, &[], None).unwrap();
-        assert_eq!(prepared.affected_locks,
-            vec![parent.clone(), changed, parent.child("join".into())]);
-        assert!(prepared.graph.node_at(&parent.child("b".into())).unwrap().locked);
+        assert_eq!(
+            prepared.affected_locks,
+            vec![parent.clone(), changed, parent.child("join".into())]
+        );
+        assert!(
+            prepared
+                .graph
+                .node_at(&parent.child("b".into()))
+                .unwrap()
+                .locked
+        );
     }
 
     #[test]
@@ -2491,12 +3162,18 @@ mod checkpoint_tests {
         let mut root = graph.clone();
         for path in graph_paths(&root) {
             let node = root.node_at_mut(&path).unwrap();
-            node.result = Some(architect::StepResult { summary: "Authoritative result".into(), attempt: 2 });
+            node.result = Some(architect::StepResult {
+                summary: "Authoritative result".into(),
+                attempt: 2,
+            });
             node.position = Some(architect::Position { x: 200.0, y: 100.0 });
             node.locked = false;
         }
         let original_root = root.clone();
-        assert!(state.restore_is_compatible(&root), "compatibility does not require execution readiness");
+        assert!(
+            state.restore_is_compatible(&root),
+            "compatibility does not require execution readiness"
+        );
         assert_eq!(root, original_root);
         assert_eq!(state.checkpoint(), checkpoint);
         let changes: [fn(&mut ArchitectNode); 8] = [
@@ -2506,12 +3183,21 @@ mod checkpoint_tests {
             |node| node.rules = vec!["Different constraint".into()],
             |node| node.capture = "Different handoff".into(),
             |node| node.pinned = !node.pinned,
-            |node| node.model = Some(architect::StepModel { provider: "fake".into(), model: "different".into() }),
+            |node| {
+                node.model = Some(architect::StepModel {
+                    provider: "fake".into(),
+                    model: "different".into(),
+                })
+            },
             |node| node.chat = Some(acp::SessionId::new("different-conversation")),
         ];
         for change in changes {
             let mut changed = root.clone();
-            change(changed.node_at_mut(&path("container").child("b".into())).unwrap());
+            change(
+                changed
+                    .node_at_mut(&path("container").child("b".into()))
+                    .unwrap(),
+            );
             assert!(!state.restore_is_compatible(&changed));
         }
         let mut changed = root.clone();
@@ -2519,17 +3205,30 @@ mod checkpoint_tests {
         assert!(!state.restore_is_compatible(&changed));
         let mut changed = root.clone();
         changed.edges.reverse();
-        assert!(!state.restore_is_compatible(&changed), "edge order affects routing");
+        assert!(
+            !state.restore_is_compatible(&changed),
+            "edge order affects routing"
+        );
         let mut changed = root.clone();
         changed.nodes.reverse();
-        assert!(!state.restore_is_compatible(&changed), "node order affects scheduling");
+        assert!(
+            !state.restore_is_compatible(&changed),
+            "node order affects scheduling"
+        );
         let mut changed = root.clone();
         changed.edges[0].max_repeats = Some(0);
         assert!(!state.restore_is_compatible(&changed));
         let mut changed = root.clone();
-        let subplan = changed.node_at_mut(&path("container")).unwrap().subplan.take();
+        let subplan = changed
+            .node_at_mut(&path("container"))
+            .unwrap()
+            .subplan
+            .take();
         changed.node_at_mut(&path("b")).unwrap().subplan = subplan;
-        assert!(!state.restore_is_compatible(&changed), "identical leaf IDs under different parents are not the same steps");
+        assert!(
+            !state.restore_is_compatible(&changed),
+            "identical leaf IDs under different parents are not the same steps"
+        );
         assert_eq!(state.checkpoint(), checkpoint);
         assert_eq!(root, original_root);
     }
@@ -2539,7 +3238,10 @@ mod checkpoint_tests {
         let mut before = graph();
         before.node_at_mut(&path("a")).unwrap().pinned = true;
         for node in &mut before.nodes {
-            node.result = Some(architect::StepResult { summary: "Completed work".into(), attempt: 1 });
+            node.result = Some(architect::StepResult {
+                summary: "Completed work".into(),
+                attempt: 1,
+            });
         }
         let changes: [fn(&mut ArchitectNode); 8] = [
             |node| node.title = "New title".into(),
@@ -2548,7 +3250,12 @@ mod checkpoint_tests {
             |node| node.rules = vec!["New constraint".into()],
             |node| node.capture = "New handoff requirement".into(),
             |node| node.pinned = false,
-            |node| node.model = Some(architect::StepModel { provider: "fake".into(), model: "other".into() }),
+            |node| {
+                node.model = Some(architect::StepModel {
+                    provider: "fake".into(),
+                    model: "other".into(),
+                })
+            },
             |node| node.chat = Some(acp::SessionId::new("reviewed-conversation")),
         ];
         for change in changes {
@@ -2557,13 +3264,21 @@ mod checkpoint_tests {
             let core = architect::preview_graph_replacement(&before, &proposed).unwrap();
             let prepared = prepare_graph_update(&before, &proposed, &[], None).unwrap();
             assert_eq!(prepared.invalidated, core.invalidated_steps);
-            assert!(prepared.invalidated.contains(&path("b")), "pinned consumers are prerequisites even without an edge");
+            assert!(
+                prepared.invalidated.contains(&path("b")),
+                "pinned consumers are prerequisites even without an edge"
+            );
             for affected in &prepared.invalidated {
                 let node = prepared.graph.node_at(affected).unwrap();
                 assert!(node.result.is_none());
                 assert!(!node.locked);
             }
-            assert!(before.nodes.iter().all(|node| node.result.is_some() && node.locked));
+            assert!(
+                before
+                    .nodes
+                    .iter()
+                    .all(|node| node.result.is_some() && node.locked)
+            );
         }
     }
 
@@ -2574,10 +3289,15 @@ mod checkpoint_tests {
         proposed.node_at_mut(&path("a")).unwrap().title = "Changed title".into();
         let core = architect::preview_graph_replacement(&before, &proposed).unwrap();
         assert!(!core.invalidated_steps.contains(&path("b")));
-        let prepared = prepare_graph_update(&before, &proposed, &[path("b"), path("b")], None).unwrap();
-        let mut expected: std::collections::BTreeSet<_> = core.invalidated_steps.into_iter().collect();
+        let prepared =
+            prepare_graph_update(&before, &proposed, &[path("b"), path("b")], None).unwrap();
+        let mut expected: std::collections::BTreeSet<_> =
+            core.invalidated_steps.into_iter().collect();
         expected.insert(path("b"));
-        assert_eq!(prepared.invalidated, expected.into_iter().collect::<Vec<_>>());
+        assert_eq!(
+            prepared.invalidated,
+            expected.into_iter().collect::<Vec<_>>()
+        );
         assert!(!prepared.graph.node_at(&path("b")).unwrap().locked);
     }
 
@@ -2585,7 +3305,8 @@ mod checkpoint_tests {
     fn pending_nested_brief_edit_retains_completed_siblings_and_lane_positions() {
         let mut nested = graph();
         nested.node_at_mut(&path("a")).unwrap().result = Some(architect::StepResult {
-            summary: "Retained sibling".into(), attempt: 1,
+            summary: "Retained sibling".into(),
+            attempt: 1,
         });
         let mut original = ArchitectGraph::default();
         let mut container = ArchitectNode::new("container", "Container");
@@ -2608,12 +3329,23 @@ mod checkpoint_tests {
         step.intent = "The reviewed replacement brief".into();
         step.locked = false;
         proposed.node_at_mut(&join).unwrap().locked = false;
-        let prepared = prepare_graph_update(&original, &proposed,
-            &[parent, pending.clone(), join], Some(&state)).unwrap();
+        let prepared = prepare_graph_update(
+            &original,
+            &proposed,
+            &[parent, pending.clone(), join],
+            Some(&state),
+        )
+        .unwrap();
         assert!(prepared.rebase_error.is_none());
-        assert!(prepared.run.is_none(), "unchanged nested routing keeps the existing frames");
+        assert!(
+            prepared.run.is_none(),
+            "unchanged nested routing keeps the existing frames"
+        );
         assert!(!prepared.invalidated.contains(&completed));
-        assert_eq!(prepared.graph.node_at(&completed).unwrap().result, original.node_at(&completed).unwrap().result);
+        assert_eq!(
+            prepared.graph.node_at(&completed).unwrap().result,
+            original.node_at(&completed).unwrap().result
+        );
         state.graph = prepared.graph;
         let mut restored = RunState::from_checkpoint(state.checkpoint()).unwrap();
         assert_eq!(serde_json::to_value(&restored.lanes).unwrap(), before);
@@ -2636,7 +3368,10 @@ mod checkpoint_tests {
         let mut reviewed = graph;
         reviewed.lock_all();
         reviewed.node_at_mut(&path("b")).unwrap().intent = "An unapplied execution change".into();
-        assert!(matches!(state.prepare_resume(&reviewed), Err(ArchitectRunStartError::ReviewMismatch)));
+        assert!(matches!(
+            state.prepare_resume(&reviewed),
+            Err(ArchitectRunStartError::ReviewMismatch)
+        ));
         assert_eq!(state.checkpoint(), before);
     }
 
@@ -2656,7 +3391,8 @@ mod checkpoint_tests {
     fn prepared_rebase_retains_unrelated_results_and_does_not_mutate_the_checkpoint() {
         let mut graph = graph();
         graph.node_at_mut(&path("a")).unwrap().result = Some(architect::StepResult {
-            summary: "Retain A".into(), attempt: 1,
+            summary: "Retain A".into(),
+            attempt: 1,
         });
         let mut run = PlanRun::start(&graph).unwrap();
         assert_eq!(run.finish_step(&graph), Decision::Run(path("b")));
@@ -2671,9 +3407,16 @@ mod checkpoint_tests {
         proposed.connect("new", "join");
         let prepared = prepare_graph_update(&graph, &proposed, &[], Some(&state)).unwrap();
         assert!(prepared.rebase_error.is_none());
-        assert_eq!(prepared.invalidated,
-            architect::preview_graph_replacement(&graph, &proposed).unwrap().invalidated_steps);
-        assert_eq!(prepared.graph.node_at(&path("a")).unwrap().result, graph.node_at(&path("a")).unwrap().result);
+        assert_eq!(
+            prepared.invalidated,
+            architect::preview_graph_replacement(&graph, &proposed)
+                .unwrap()
+                .invalidated_steps
+        );
+        assert_eq!(
+            prepared.graph.node_at(&path("a")).unwrap().result,
+            graph.node_at(&path("a")).unwrap().result
+        );
         assert!(prepared.run.is_some());
         assert_eq!(state.checkpoint(), before);
     }

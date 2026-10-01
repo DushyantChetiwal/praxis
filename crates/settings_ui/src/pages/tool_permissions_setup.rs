@@ -1485,18 +1485,30 @@ mod tests {
             let store = SettingsStore::test(cx);
             cx.set_global(store);
             assert!(TOOLS.iter().any(|tool| tool.id == "edit_architect_plan"));
-            assert_eq!(evaluate_test_input("edit_architect_plan", "apply", cx), ToolPermissionDecision::Confirm);
+            assert_eq!(
+                evaluate_test_input("edit_architect_plan", "apply", cx),
+                ToolPermissionDecision::Confirm
+            );
             let mut settings = AgentSettings::get_global(cx).clone();
-            settings.tool_permissions.tools.insert("edit_architect_plan".into(), agent_settings::ToolRules {
-                default: Some(ToolPermissionMode::Allow),
-                always_allow: vec![],
-                always_deny: vec![agent_settings::CompiledRegex::new("^apply$", true).unwrap()],
-                always_confirm: vec![],
-                invalid_patterns: vec![],
-            });
+            settings.tool_permissions.tools.insert(
+                "edit_architect_plan".into(),
+                agent_settings::ToolRules {
+                    default: Some(ToolPermissionMode::Allow),
+                    always_allow: vec![],
+                    always_deny: vec![agent_settings::CompiledRegex::new("^apply$", true).unwrap()],
+                    always_confirm: vec![],
+                    invalid_patterns: vec![],
+                },
+            );
             AgentSettings::override_global(settings, cx);
-            assert!(matches!(evaluate_test_input("edit_architect_plan", "apply", cx), ToolPermissionDecision::Deny(_)));
-            assert_eq!(evaluate_test_input("control_architect_run", "resume_at", cx), ToolPermissionDecision::Confirm);
+            assert!(matches!(
+                evaluate_test_input("edit_architect_plan", "apply", cx),
+                ToolPermissionDecision::Deny(_)
+            ));
+            assert_eq!(
+                evaluate_test_input("control_architect_run", "resume_at", cx),
+                ToolPermissionDecision::Confirm
+            );
         });
     }
 

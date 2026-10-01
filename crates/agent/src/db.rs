@@ -965,17 +965,25 @@ mod tests {
     #[gpui::test]
     async fn test_architect_state_legacy_migration(cx: &mut TestAppContext) {
         let database = ThreadsDatabase::new(cx.executor()).expect("database");
-        let legacy = DbThread::from_json(br#"{
+        let legacy = DbThread::from_json(
+            br#"{
             "version": "0.3.0",
             "title": "Legacy Architect conversation",
             "messages": [],
             "updated_at": "2024-01-01T00:00:00Z"
-        }"#).expect("pre-checkpoint thread must still deserialize");
+        }"#,
+        )
+        .expect("pre-checkpoint thread must still deserialize");
         assert!(legacy.persistent_architect.is_none());
         let id = session_id("architect-legacy-state");
-        database.save_thread(id.clone(), legacy, PathList::default())
-            .await.expect("save migrated legacy thread");
-        let loaded = database.load_thread(id).await.expect("load")
+        database
+            .save_thread(id.clone(), legacy, PathList::default())
+            .await
+            .expect("save migrated legacy thread");
+        let loaded = database
+            .load_thread(id)
+            .await
+            .expect("load")
             .expect("legacy thread");
         assert!(loaded.persistent_architect.is_none());
         assert_eq!(loaded.session_mode, crate::SessionMode::Build);
