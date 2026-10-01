@@ -1,5 +1,4 @@
 use std::{
-    cell::RefCell,
     collections::BTreeSet,
     sync::Arc,
     time::{Duration, Instant},
@@ -9,6 +8,7 @@ use agent_client_protocol::schema::v1 as acp;
 use anyhow::{Context as _, Result, ensure};
 use architect::{ArchitectGraph, GraphEdit, GraphEditPreview, NodePath, preview_graph_edits};
 use gpui::{App, SharedString, Task, WeakEntity};
+use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -370,14 +370,14 @@ impl StoredPreview {
 
 pub struct EditArchitectPlanTool {
     thread: WeakEntity<Thread>,
-    previews: RefCell<Vec<StoredPreview>>,
+    previews: Mutex<Vec<StoredPreview>>,
 }
 
 impl EditArchitectPlanTool {
     pub fn new(thread: WeakEntity<Thread>) -> Self {
         Self {
             thread,
-            previews: RefCell::new(Vec::new()),
+            previews: Mutex::new(Vec::new()),
         }
     }
 
@@ -421,7 +421,7 @@ impl EditArchitectPlanTool {
         }))?;
         if let Some(token) = token {
             let now = Instant::now();
-            let mut previews = self.previews.borrow_mut();
+            let mut previews = self.previews.lock();
             previews.retain(|preview| preview.expires > now);
             if previews.len() >= MAX_PREVIEWS {
                 previews.remove(0);
@@ -505,7 +505,7 @@ impl AgentTool for EditArchitectPlanTool {
                 )?;
                 // Consume before awaiting approval: concurrent calls cannot reuse an approval.
                 let stored = {
-                    let mut previews = self.previews.borrow_mut();
+                    let mut previews = self.previews.lock();
                     let index = previews
                         .iter()
                         .position(|preview| preview.token == token)
@@ -581,6 +581,12 @@ mod tests {
             );
             agent_settings::AgentSettings::override_global(settings, cx);
         });
+    }
+
+    #[test]
+    fn edit_plan_tool_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<EditArchitectPlanTool>();
     }
 
     fn runtime_impact_fixture() -> Value {
@@ -739,7 +745,7 @@ mod tests {
             assert_eq!(thread.architect_graph(), Some(&graph))
         });
         assert!(
-            tool.previews.borrow().is_empty(),
+            tool.previews.lock().is_empty(),
             "denied token is consumed"
         );
     }
@@ -788,11 +794,11 @@ mod tests {
         for _ in 0..MAX_PREVIEWS {
             cx.update(|cx| tool.preview(&move_input(), cx)).unwrap();
         }
-        assert_eq!(tool.previews.borrow().len(), MAX_PREVIEWS);
+        assert_eq!(tool.previews.lock().len(), MAX_PREVIEWS);
         assert!(
             !tool
                 .previews
-                .borrow()
+                .lock()
                 .iter()
                 .any(|stored| json!(stored.token) == first["preview_token"])
         );
@@ -852,7 +858,7 @@ mod tests {
         assert_eq!(preview["requires_review"], true);
         assert_eq!(preview["ready_to_run"], false);
         {
-            let stored = tool.previews.borrow();
+            let stored = tool.previews.lock();
             let stored = stored.first().unwrap();
             assert!(
                 stored.preview.invalidated_steps.is_empty(),

@@ -129,17 +129,51 @@ impl From<GraphMutationError> for GraphEditError {
 /// This deliberately bypasses mutation-time lock refusals only on the clone.
 /// Execution-affecting edits reopen impacted steps for explicit review; they
 /// never approve or relock them. No runner or checkpoint history is mutated.
+///
+/// Before topology operations, automatic positions are materialized recursively
+/// from the source layout so surviving nodes do not shift with the new topology.
+/// Explicit moves and inserted positions win; new unpositioned nodes use the
+/// final layout. Materializing positions never invalidates execution. This policy
+/// is specific to targeted edits, not arbitrary replacements or draft merging.
 pub fn preview_graph_edits(
     graph: &ArchitectGraph,
     operations: &[GraphEdit],
 ) -> Result<GraphEditPreview, GraphEditError> {
     validate_addressability(graph, &NodePath::default())?;
+    let has_topology_operations = operations
+        .iter()
+        .any(|operation| !matches!(operation, GraphEdit::MoveNode { .. }));
     let mut target = graph.clone();
+    let positioned_source = has_topology_operations.then(|| {
+        materialize_positions(&mut target);
+        target.clone()
+    });
     for operation in operations {
         apply_operation(&mut target, operation)?;
         validate_addressability(&target, &NodePath::default())?;
     }
+    if positioned_source.as_ref() == Some(&target)
+        && !operations
+            .iter()
+            .any(|operation| matches!(operation, GraphEdit::MoveNode { .. }))
+    {
+        // A cancelled topology edit must not turn implicit positions into a
+        // persisted change. An explicit move still records its chosen position.
+        return Ok(graph_edit_impact(graph, graph.clone()));
+    }
+    if has_topology_operations {
+        materialize_positions(&mut target);
+    }
     Ok(graph_edit_impact(graph, target))
+}
+
+fn materialize_positions(graph: &mut ArchitectGraph) {
+    graph.place_unpositioned_nodes();
+    for node in &mut graph.nodes {
+        if let Some(subplan) = node.subplan.as_deref_mut() {
+            materialize_positions(subplan);
+        }
+    }
 }
 
 /// Previews replacing one graph snapshot with another without applying it.
@@ -150,7 +184,8 @@ pub fn preview_graph_edits(
 /// invalidate execution. Unaffected results and locks come from `after`; semantic
 /// changes clear results and reopen locks only in the returned clone. Dependency
 /// traversal uses both snapshots, including their pinned-summary consumers.
-/// Neither input nor external checkpoint history is modified.
+/// Neither input nor external checkpoint history is modified. Unlike targeted
+/// edits, replacements keep `after`'s positions verbatim, including `None`.
 pub fn preview_graph_replacement(
     before: &ArchitectGraph,
     after: &ArchitectGraph,
@@ -650,6 +685,220 @@ mod tests {
             nodes: vec![left, right, settled_node("ship")],
             edges: vec![ArchitectEdge::new("ship-left", "left", "ship")],
         }
+    }
+
+    fn automatic_graph() -> ArchitectGraph {
+        let mut graph = local_graph();
+        for node in &mut graph.nodes {
+            node.position = None;
+        }
+        graph
+    }
+
+    fn effective_position(graph: &ArchitectGraph, path: &NodePath) -> Position {
+        let local = graph
+            .graph_at(&path.parent().unwrap_or_default())
+            .expect("containing graph");
+        let node = graph.node_at(path).expect("positioned node");
+        node.position.unwrap_or_else(|| {
+            crate::layout_positions(local)
+                .get(&node.id)
+                .copied()
+                .expect("automatic position")
+        })
+    }
+
+    #[test]
+    fn inserting_a_node_preserves_effective_positions_and_existing_checkpoints() {
+        let before = automatic_graph();
+        let snapshot = before.clone();
+        let operations = [GraphEdit::InsertNode {
+            parent: NodePath::default(),
+            node: ArchitectNode::new("new", "New"),
+        }];
+        let mut unpreserved = before.clone();
+        apply_operation(&mut unpreserved, &operations[0]).expect("raw insertion");
+        assert_eq!(
+            effective_position(&before, &path(&["a"])),
+            Position { x: 0.0, y: -98.0 }
+        );
+        assert_eq!(
+            effective_position(&unpreserved, &path(&["a"])),
+            Position { x: 0.0, y: -196.0 }
+        );
+        let preview = preview_graph_edits(&before, &operations).expect("insertion preview");
+        for (id, expected_position) in [
+            ("a", Position { x: 0.0, y: -98.0 }),
+            ("b", Position { x: 392.0, y: 0.0 }),
+            ("c", Position { x: 784.0, y: 0.0 }),
+            ("sibling", Position { x: 0.0, y: 98.0 }),
+        ] {
+            let mut expected = before.node(&id.into()).expect("source node").clone();
+            expected.position = Some(expected_position);
+            assert_eq!(preview.graph.node(&id.into()), Some(&expected));
+            assert_eq!(effective_position(&preview.graph, &path(&[id])), expected_position);
+        }
+        assert_eq!(
+            preview.graph.node(&"new".into()).expect("inserted node").position,
+            Some(Position { x: 0.0, y: 196.0 })
+        );
+        assert_eq!(preview.invalidated_steps, vec![path(&["new"])]);
+        assert!(preview.affected_locks.is_empty());
+        assert_eq!(before, snapshot);
+
+        let replacement = preview_graph_replacement(&before, &unpreserved)
+            .expect("unrestricted replacement preview");
+        assert!(replacement.graph.nodes.iter().all(|node| node.position.is_none()));
+    }
+
+    #[test]
+    fn reconnecting_preserves_automatic_positions_without_invalidating_an_unrelated_node() {
+        let before = automatic_graph();
+        let snapshot = before.clone();
+        let operations = [GraphEdit::ReconnectEdge {
+            parent: NodePath::default(),
+            edge_id: "ab".into(),
+            from: "a".into(),
+            to: "c".into(),
+        }];
+        let mut unpreserved = before.clone();
+        apply_operation(&mut unpreserved, &operations[0]).expect("raw reconnect");
+        assert_eq!(
+            effective_position(&before, &path(&["sibling"])),
+            Position { x: 0.0, y: 98.0 }
+        );
+        assert_eq!(
+            effective_position(&unpreserved, &path(&["sibling"])),
+            Position { x: 0.0, y: 196.0 }
+        );
+        assert_eq!(
+            effective_position(&unpreserved, &path(&["c"])),
+            Position { x: 392.0, y: 0.0 }
+        );
+        let preview = preview_graph_edits(&before, &operations).expect("reconnect preview");
+        for id in ["a", "b", "c", "sibling"] {
+            assert_eq!(
+                preview.graph.node(&id.into()).expect("surviving node").position,
+                Some(effective_position(&before, &path(&[id])))
+            );
+        }
+        let mut expected_sibling = before.node(&"sibling".into()).expect("sibling").clone();
+        expected_sibling.position = Some(Position { x: 0.0, y: 98.0 });
+        assert_eq!(preview.graph.node(&"sibling".into()), Some(&expected_sibling));
+        let expected_impact = vec![path(&["a"]), path(&["b"]), path(&["c"])];
+        assert_eq!(preview.invalidated_steps, expected_impact);
+        assert_eq!(preview.affected_locks, expected_impact);
+        assert_eq!(before, snapshot);
+    }
+
+    #[test]
+    fn nested_layout_freezing_preserves_explicit_positions_and_moves_win() {
+        let mut before = automatic_graph();
+        let mut nested = automatic_graph();
+        nested.node_mut(&"a".into()).expect("nested a").subplan =
+            Some(Box::new(automatic_graph()));
+        before.node_mut(&"a".into()).expect("a").subplan = Some(Box::new(nested));
+        let explicit_path = path(&["a", "a", "b"]);
+        let explicit_position = Position { x: -600.0, y: 47.0 };
+        before.node_at_mut(&explicit_path).expect("explicit node").position =
+            Some(explicit_position);
+        let snapshot = before.clone();
+        let moved_path = path(&["a", "a", "a"]);
+        let moved_position = NodePosition { x: -42.0, y: 63.0 };
+        let inserted_position = Position { x: 1234.0, y: -56.0 };
+        let mut inserted = ArchitectNode::new("new", "New");
+        inserted.position = Some(inserted_position);
+        let operations = [
+            GraphEdit::MoveNode {
+                path: moved_path.clone(),
+                position: moved_position,
+            },
+            GraphEdit::InsertNode {
+                parent: path(&["a", "a"]),
+                node: inserted,
+            },
+            GraphEdit::InsertNode {
+                parent: path(&["a", "a"]),
+                node: ArchitectNode::new("automatic", "Automatic"),
+            },
+        ];
+        let preview = preview_graph_edits(&before, &operations).expect("nested preview");
+        for node_path in [
+            path(&["a"]),
+            path(&["b"]),
+            path(&["c"]),
+            path(&["sibling"]),
+            path(&["a", "a"]),
+            path(&["a", "b"]),
+            path(&["a", "c"]),
+            path(&["a", "sibling"]),
+            explicit_path,
+            path(&["a", "a", "c"]),
+            path(&["a", "a", "sibling"]),
+        ] {
+            assert_eq!(
+                preview.graph.node_at(&node_path).expect("surviving node").position,
+                Some(effective_position(&before, &node_path))
+            );
+        }
+        let mut expected_moved = before.node_at(&moved_path).expect("moved node").clone();
+        expected_moved.position = Some(moved_position.into());
+        assert_eq!(preview.graph.node_at(&moved_path), Some(&expected_moved));
+        assert!(!preview.invalidated_steps.contains(&moved_path));
+        assert!(!preview.affected_locks.contains(&moved_path));
+        assert_eq!(
+            preview.graph.node_at(&path(&["a", "a", "new"])).expect("inserted").position,
+            Some(inserted_position)
+        );
+        assert_eq!(
+            preview.graph.node_at(&path(&["a", "a", "automatic"]))
+                .expect("automatic insertion").position,
+            Some(Position { x: 0.0, y: 294.0 })
+        );
+        assert_eq!(before, snapshot);
+    }
+
+    #[test]
+    fn no_op_edits_do_not_materialize_automatic_positions() {
+        let before = automatic_graph();
+        for operations in [
+            vec![],
+            vec![GraphEdit::ReconnectEdge {
+                parent: NodePath::default(),
+                edge_id: "ab".into(),
+                from: "a".into(),
+                to: "b".into(),
+            }],
+            vec![
+                GraphEdit::InsertNode {
+                    parent: NodePath::default(),
+                    node: ArchitectNode::new("temporary", "Temporary"),
+                },
+                GraphEdit::RemoveNode { path: path(&["temporary"]) },
+            ],
+        ] {
+            let preview = preview_graph_edits(&before, &operations).expect("no-op preview");
+            assert_eq!(preview.graph, before);
+            assert!(preview.changed_steps.is_empty());
+            assert!(preview.invalidated_steps.is_empty());
+            assert!(preview.affected_locks.is_empty());
+            assert!(!preview.requires_approval);
+        }
+        let preview = preview_graph_edits(
+            &before,
+            &[GraphEdit::MoveNode {
+                path: path(&["a"]),
+                position: NodePosition { x: 0.0, y: -98.0 },
+            }],
+        )
+        .expect("explicit move to the automatic position");
+        let mut expected = before.clone();
+        expected.node_mut(&"a".into()).expect("a").position =
+            Some(Position { x: 0.0, y: -98.0 });
+        assert_eq!(preview.graph, expected);
+        assert!(preview.invalidated_steps.is_empty());
+        assert!(preview.affected_locks.is_empty());
+        assert!(preview.requires_approval);
     }
 
     #[test]

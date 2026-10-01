@@ -2188,7 +2188,6 @@ async fn send_and_wait(
 #[cfg(test)]
 mod checkpoint_tests {
     use super::*;
-    use acp_thread::AgentConnection as _;
     use architect::{ArchitectNode, EdgeCondition, NodeId};
     use gpui::{AppContext as _, TestAppContext};
     use language_model::fake_provider::FakeLanguageModelProvider;

@@ -1755,7 +1755,13 @@ impl NativeAgent {
                         .update(cx, |this, cx| {
                             let project_id = this.get_or_create_project_state(&project, cx);
                             this.pending_sessions.remove(&id);
-                            this.register_session(thread.clone(), project_id, cx)
+                            let acp_thread = this.register_session(thread.clone(), project_id, cx);
+                            // Restore-time notifications are drained before registration.
+                            // Persist recovery errors and events even when the thread stays idle.
+                            if thread.read(cx).has_persistent_architect_state() {
+                                this.save_thread(thread.clone(), cx);
+                            }
+                            acp_thread
                         })
                         .map_err(Arc::new)?;
                     let events = thread.update(cx, |thread, cx| thread.replay(cx));

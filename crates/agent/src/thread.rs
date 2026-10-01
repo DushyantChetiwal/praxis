@@ -2698,12 +2698,7 @@ impl Thread {
                         .clone()
                         .or_else(|| Some("Run interrupted. Resume explicitly to continue.".into())),
                 );
-                let thread = cx.weak_entity();
-                cx.defer(move |cx| {
-                    if let Some(thread) = thread.upgrade() {
-                        thread.update(cx, |_, cx| cx.notify());
-                    }
-                });
+
             }
         }
 
