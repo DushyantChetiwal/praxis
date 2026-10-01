@@ -856,26 +856,25 @@ fn request_thread(
         Ok(snapshot) => return Task::ready(Ok(snapshot)),
         Err(error) => error,
     };
-    let load = (|| {
-        let before = history_before_index(args)?.context("history needs before_index")?;
-        let session_id = acp::SessionId::new(required(args, "session_id")?.to_string());
-        let conversation = conversation_view(workspace, cx)?;
-        let owner = conversation
-            .read(cx)
-            .as_native_thread(cx)
-            .context("Open the root plan on the computer, then retry loading its step history")?;
-        let connection = conversation
-            .read(cx)
-            .as_native_connection(cx)
-            .context("Open the root plan on the computer, then retry loading its step history")?;
-        if !owns_step_session(owner.read(cx), &session_id) {
-            return Err(error);
-        }
-        Ok((
-            before,
-            load_owned_step_thread(owner, connection, session_id, cx),
-        ))
-    })();
+    let load =
+        (|| {
+            let before = history_before_index(args)?.context("history needs before_index")?;
+            let session_id = acp::SessionId::new(required(args, "session_id")?.to_string());
+            let conversation = conversation_view(workspace, cx)?;
+            let owner = conversation.read(cx).as_native_thread(cx).context(
+                "Open the root plan on the computer, then retry loading its step history",
+            )?;
+            let connection = conversation.read(cx).as_native_connection(cx).context(
+                "Open the root plan on the computer, then retry loading its step history",
+            )?;
+            if !owns_step_session(owner.read(cx), &session_id) {
+                return Err(error);
+            }
+            Ok((
+                before,
+                load_owned_step_thread(owner, connection, session_id, cx),
+            ))
+        })();
     let (before, load) = match load {
         Ok(load) => load,
         Err(error) => return Task::ready(Err(error)),
@@ -1120,9 +1119,8 @@ fn transcript_entry(index: usize, entry: &AgentThreadEntry, cx: &App) -> Option<
                     }
                 };
                 let text = block.to_markdown(cx);
-                (!text.trim().is_empty()).then(|| {
-                    json!({ "index": index, "role": role, "text": text.trim() })
-                })
+                (!text.trim().is_empty())
+                    .then(|| json!({ "index": index, "role": role, "text": text.trim() }))
             })
             .collect();
         if parts.is_empty() {
@@ -1770,11 +1768,11 @@ mod tests {
                 json!([])
             );
         });
-        let finished_id = steps[0].1.read_with(cx, |thread, _| thread.session_id().clone());
+        let finished_id = steps[0]
+            .1
+            .read_with(cx, |thread, _| thread.session_id().clone());
         let resolved = cx
-            .update(|cx| {
-                load_owned_step_thread(owner.clone(), connection.clone(), finished_id, cx)
-            })
+            .update(|cx| load_owned_step_thread(owner.clone(), connection.clone(), finished_id, cx))
             .await
             .expect("finished step remains owned and readable");
         assert_eq!(resolved, steps[0].1);
