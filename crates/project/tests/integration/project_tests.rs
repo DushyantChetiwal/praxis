@@ -98,6 +98,81 @@ use util::{
 };
 use worktree::WorktreeModelHandle as _;
 
+#[gpui::test]
+async fn test_remote_file_inventory_support_probe_times_out(cx: &mut TestAppContext) {
+    struct UnresponsiveClient {
+        handlers: Mutex<rpc::ProtoMessageHandlerSet>,
+    }
+
+    impl rpc::ProtoClient for UnresponsiveClient {
+        fn request(
+            &self,
+            _: rpc::proto::Envelope,
+            _: &'static str,
+        ) -> futures::future::BoxFuture<'static, Result<rpc::proto::Envelope>> {
+            future::pending().boxed()
+        }
+
+        fn send(&self, _: rpc::proto::Envelope, _: &'static str) -> Result<()> {
+            Ok(())
+        }
+
+        fn send_response(&self, _: rpc::proto::Envelope, _: &'static str) -> Result<()> {
+            Ok(())
+        }
+
+        fn message_handler_set(&self) -> &Mutex<rpc::ProtoMessageHandlerSet> {
+            &self.handlers
+        }
+
+        fn is_via_collab(&self) -> bool {
+            false
+        }
+
+        fn has_wsl_interop(&self) -> bool {
+            false
+        }
+    }
+
+    init_test(cx);
+    let tree = cx.update(|cx| {
+        Worktree::remote(
+            1,
+            clock::ReplicaId::new(1),
+            rpc::proto::WorktreeMetadata {
+                id: 1,
+                root_name: "project".into(),
+                visible: true,
+                abs_path: "/remote/project".into(),
+                root_repo_common_dir: None,
+                root_repo_is_linked_worktree: false,
+            },
+            rpc::AnyProtoClient::new(Arc::new(UnresponsiveClient {
+                handlers: Mutex::default(),
+            })),
+            PathStyle::Unix,
+            cx,
+        )
+    });
+    let negotiation = tree.update(cx, |tree, cx| tree.negotiate_file_inventory(cx));
+    cx.run_until_parked();
+    tree.read_with(cx, |tree, _| {
+        assert!(
+            tree.check_file_inventory_support()
+                .unwrap_err()
+                .to_string()
+                .contains("still loading")
+        );
+    });
+    cx.advance_clock(Duration::from_secs(31)).await;
+    negotiation.await;
+    tree.read_with(cx, |tree, _| {
+        let error = tree.check_file_inventory_support().unwrap_err().to_string();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(error.contains("Reconnect"), "{error}");
+    });
+}
+
 #[gpui::test(iterations = 3)]
 async fn test_remote_file_inventory_uses_host_files_and_refresh_barriers(
     cx: &mut TestAppContext,

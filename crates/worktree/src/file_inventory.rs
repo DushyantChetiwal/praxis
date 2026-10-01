@@ -1,6 +1,8 @@
 use super::*;
+use gpui::FutureExt as _;
 
 pub const MAX_FILE_INVENTORY_ENTRIES: usize = 100_000;
+const FILE_INVENTORY_SUPPORT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A fresh, bounded inventory from the filesystem that owns the worktree.
 /// Canonical paths are opaque host identities, not paths to open on the client.
@@ -56,15 +58,22 @@ impl Worktree {
             }),
         });
         cx.spawn(async move |this, cx| {
-            let support = match response.await {
-                Ok(response) if response.supports_file_inventory => Ok(()),
-                Ok(_) => Err(
+            let support = match response
+                .with_timeout(FILE_INVENTORY_SUPPORT_TIMEOUT, cx.background_executor())
+                .await
+            {
+                Ok(Ok(response)) if response.supports_file_inventory => Ok(()),
+                Ok(Ok(_)) => Err(
                     "The project host does not support creation tracking. Update Praxis on the host and reconnect before running the plan."
                         .to_string(),
                 ),
-                Err(error) => Err(format!(
+                Ok(Err(error)) => Err(format!(
                     "Cannot check project creation tracking: {error}. Reconnect to an updated Praxis host, then retry."
                 )),
+                Err(_) => Err(
+                    "Project file tracking support check timed out after 30 seconds. Reconnect to the host, then retry."
+                        .to_string(),
+                ),
             };
             this.update(cx, |this, cx| {
                 if let Self::Remote(remote) = this {
@@ -415,7 +424,7 @@ async fn local_file_inventory(
     worktree.read_with(cx, |tree, _| {
         tree.check_file_inventory_support()?;
         anyhow::ensure!(
-            tree.abs_path().as_path() == root,
+            tree.abs_path() == root.as_path(),
             "Project root changed while scanning. Restore it and retry."
         );
         Ok::<_, anyhow::Error>(())

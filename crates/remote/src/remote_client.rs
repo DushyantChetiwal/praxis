@@ -1444,6 +1444,79 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_channel_client_cancelled_requests_release_response_channels(
+        cx: &mut TestAppContext,
+    ) {
+        let (incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
+        let client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
+        let _drain_outgoing = cx
+            .executor()
+            .spawn(async move { while outgoing_rx.next().await.is_some() {} });
+
+        for polled in [false, true] {
+            let request_id = client.next_message_id.load(SeqCst);
+            let request = client.request_dynamic(
+                proto::Test { id: 0 }.into_envelope(0, None, None),
+                "Test",
+                true,
+            );
+            assert_eq!(client.response_channels.lock().len(), 1);
+            if polled {
+                let task = cx.executor().spawn(request);
+                cx.run_until_parked();
+                drop(task);
+            } else {
+                drop(request);
+            }
+            cx.run_until_parked();
+            assert!(client.response_channels.lock().is_empty());
+
+            let next_id = client.next_message_id.load(SeqCst);
+            let next = client.request_dynamic(
+                proto::Test { id: 1 }.into_envelope(0, None, None),
+                "Test",
+                true,
+            );
+            incoming_tx
+                .unbounded_send(
+                    proto::Test { id: 99 }.into_envelope(100 + request_id, Some(request_id), None),
+                )
+                .unwrap();
+            incoming_tx
+                .unbounded_send(
+                    proto::Test { id: 42 }.into_envelope(100 + next_id, Some(next_id), None),
+                )
+                .unwrap();
+            assert_eq!(
+                proto::Test::from_envelope(next.await.unwrap()).unwrap(),
+                proto::Test { id: 42 }
+            );
+            assert!(client.response_channels.lock().is_empty());
+        }
+    }
+
+    #[gpui::test]
+    async fn test_channel_client_failed_send_releases_response_channel(cx: &mut TestAppContext) {
+        let (_incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, outgoing_rx) = mpsc::unbounded::<Envelope>();
+        drop(outgoing_rx);
+        let client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
+        let error = client
+            .request_dynamic(
+                proto::Test { id: 0 }.into_envelope(0, None, None),
+                "Test",
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("failed to send"));
+        assert!(client.response_channels.lock().is_empty());
+    }
+
+    #[gpui::test]
     async fn test_channel_client_request_stream_terminates_on_error(cx: &mut TestAppContext) {
         let (incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
         let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
@@ -1977,9 +2050,16 @@ impl ChannelClient {
     ) -> impl 'static + Future<Output = Result<proto::Envelope>> {
         envelope.id = self.next_message_id.fetch_add(1, SeqCst);
         let (tx, rx) = oneshot::channel();
-        let mut response_channels_lock = self.response_channels.lock();
-        response_channels_lock.insert(MessageId(envelope.id), tx);
-        drop(response_channels_lock);
+        let request_id = MessageId(envelope.id);
+        self.response_channels.lock().insert(request_id, tx);
+        // Register cleanup before returning the future: callers may drop it
+        // without ever polling, including when a timeout wins the race.
+        let cleanup = util::defer({
+            let response_channels = self.response_channels.clone();
+            move || {
+                response_channels.lock().remove(&request_id);
+            }
+        });
 
         let result = if use_buffer {
             self.send_buffered(envelope)
@@ -1987,6 +2067,7 @@ impl ChannelClient {
             self.send_unbuffered(envelope)
         };
         async move {
+            let _cleanup = cleanup;
             if let Err(error) = &result {
                 log::error!("failed to send message: {error}");
                 anyhow::bail!("failed to send message: {error}");

@@ -296,6 +296,7 @@ jobs:
         run: |
           cargo test --locked -p remote --lib transport::tests::
           cargo test --locked -p remote --lib transport::wsl::tests::
+          cargo test --locked -p remote --lib remote_client::tests::test_channel_client_
 
       - name: Test MCP OAuth client registration
         run: "cargo test --locked -p context_server --lib oauth::"
