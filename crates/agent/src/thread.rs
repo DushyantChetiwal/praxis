@@ -2698,7 +2698,6 @@ impl Thread {
                         .clone()
                         .or_else(|| Some("Run interrupted. Resume explicitly to continue.".into())),
                 );
-
             }
         }
 

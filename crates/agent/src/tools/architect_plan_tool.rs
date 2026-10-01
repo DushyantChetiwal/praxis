@@ -744,10 +744,7 @@ mod tests {
         thread.read_with(cx, |thread, _| {
             assert_eq!(thread.architect_graph(), Some(&graph))
         });
-        assert!(
-            tool.previews.lock().is_empty(),
-            "denied token is consumed"
-        );
+        assert!(tool.previews.lock().is_empty(), "denied token is consumed");
     }
 
     #[gpui::test]

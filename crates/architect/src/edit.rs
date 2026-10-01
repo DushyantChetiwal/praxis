@@ -736,10 +736,17 @@ mod tests {
             let mut expected = before.node(&id.into()).expect("source node").clone();
             expected.position = Some(expected_position);
             assert_eq!(preview.graph.node(&id.into()), Some(&expected));
-            assert_eq!(effective_position(&preview.graph, &path(&[id])), expected_position);
+            assert_eq!(
+                effective_position(&preview.graph, &path(&[id])),
+                expected_position
+            );
         }
         assert_eq!(
-            preview.graph.node(&"new".into()).expect("inserted node").position,
+            preview
+                .graph
+                .node(&"new".into())
+                .expect("inserted node")
+                .position,
             Some(Position { x: 0.0, y: 196.0 })
         );
         assert_eq!(preview.invalidated_steps, vec![path(&["new"])]);
@@ -748,7 +755,13 @@ mod tests {
 
         let replacement = preview_graph_replacement(&before, &unpreserved)
             .expect("unrestricted replacement preview");
-        assert!(replacement.graph.nodes.iter().all(|node| node.position.is_none()));
+        assert!(
+            replacement
+                .graph
+                .nodes
+                .iter()
+                .all(|node| node.position.is_none())
+        );
     }
 
     #[test]
@@ -778,13 +791,20 @@ mod tests {
         let preview = preview_graph_edits(&before, &operations).expect("reconnect preview");
         for id in ["a", "b", "c", "sibling"] {
             assert_eq!(
-                preview.graph.node(&id.into()).expect("surviving node").position,
+                preview
+                    .graph
+                    .node(&id.into())
+                    .expect("surviving node")
+                    .position,
                 Some(effective_position(&before, &path(&[id])))
             );
         }
         let mut expected_sibling = before.node(&"sibling".into()).expect("sibling").clone();
         expected_sibling.position = Some(Position { x: 0.0, y: 98.0 });
-        assert_eq!(preview.graph.node(&"sibling".into()), Some(&expected_sibling));
+        assert_eq!(
+            preview.graph.node(&"sibling".into()),
+            Some(&expected_sibling)
+        );
         let expected_impact = vec![path(&["a"]), path(&["b"]), path(&["c"])];
         assert_eq!(preview.invalidated_steps, expected_impact);
         assert_eq!(preview.affected_locks, expected_impact);
@@ -795,17 +815,21 @@ mod tests {
     fn nested_layout_freezing_preserves_explicit_positions_and_moves_win() {
         let mut before = automatic_graph();
         let mut nested = automatic_graph();
-        nested.node_mut(&"a".into()).expect("nested a").subplan =
-            Some(Box::new(automatic_graph()));
+        nested.node_mut(&"a".into()).expect("nested a").subplan = Some(Box::new(automatic_graph()));
         before.node_mut(&"a".into()).expect("a").subplan = Some(Box::new(nested));
         let explicit_path = path(&["a", "a", "b"]);
         let explicit_position = Position { x: -600.0, y: 47.0 };
-        before.node_at_mut(&explicit_path).expect("explicit node").position =
-            Some(explicit_position);
+        before
+            .node_at_mut(&explicit_path)
+            .expect("explicit node")
+            .position = Some(explicit_position);
         let snapshot = before.clone();
         let moved_path = path(&["a", "a", "a"]);
         let moved_position = NodePosition { x: -42.0, y: 63.0 };
-        let inserted_position = Position { x: 1234.0, y: -56.0 };
+        let inserted_position = Position {
+            x: 1234.0,
+            y: -56.0,
+        };
         let mut inserted = ArchitectNode::new("new", "New");
         inserted.position = Some(inserted_position);
         let operations = [
@@ -837,7 +861,11 @@ mod tests {
             path(&["a", "a", "sibling"]),
         ] {
             assert_eq!(
-                preview.graph.node_at(&node_path).expect("surviving node").position,
+                preview
+                    .graph
+                    .node_at(&node_path)
+                    .expect("surviving node")
+                    .position,
                 Some(effective_position(&before, &node_path))
             );
         }
@@ -847,12 +875,19 @@ mod tests {
         assert!(!preview.invalidated_steps.contains(&moved_path));
         assert!(!preview.affected_locks.contains(&moved_path));
         assert_eq!(
-            preview.graph.node_at(&path(&["a", "a", "new"])).expect("inserted").position,
+            preview
+                .graph
+                .node_at(&path(&["a", "a", "new"]))
+                .expect("inserted")
+                .position,
             Some(inserted_position)
         );
         assert_eq!(
-            preview.graph.node_at(&path(&["a", "a", "automatic"]))
-                .expect("automatic insertion").position,
+            preview
+                .graph
+                .node_at(&path(&["a", "a", "automatic"]))
+                .expect("automatic insertion")
+                .position,
             Some(Position { x: 0.0, y: 294.0 })
         );
         assert_eq!(before, snapshot);
@@ -874,7 +909,9 @@ mod tests {
                     parent: NodePath::default(),
                     node: ArchitectNode::new("temporary", "Temporary"),
                 },
-                GraphEdit::RemoveNode { path: path(&["temporary"]) },
+                GraphEdit::RemoveNode {
+                    path: path(&["temporary"]),
+                },
             ],
         ] {
             let preview = preview_graph_edits(&before, &operations).expect("no-op preview");
@@ -893,8 +930,7 @@ mod tests {
         )
         .expect("explicit move to the automatic position");
         let mut expected = before.clone();
-        expected.node_mut(&"a".into()).expect("a").position =
-            Some(Position { x: 0.0, y: -98.0 });
+        expected.node_mut(&"a".into()).expect("a").position = Some(Position { x: 0.0, y: -98.0 });
         assert_eq!(preview.graph, expected);
         assert!(preview.invalidated_steps.is_empty());
         assert!(preview.affected_locks.is_empty());
