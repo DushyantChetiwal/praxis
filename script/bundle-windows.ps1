@@ -1,6 +1,9 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Combined')]
 Param(
-    [Parameter()][Alias('i')][switch]$Install,
+    [Parameter(ParameterSetName = 'Combined')]
+    [Parameter(ParameterSetName = 'DesktopOnly')][Alias('i')][switch]$Install,
+    [Parameter(ParameterSetName = 'DesktopOnly')][switch]$DesktopOnly,
+    [Parameter(ParameterSetName = 'RemoteServerOnly')][switch]$RemoteServerOnly,
     [Parameter()][Alias('h')][switch]$Help,
     [Parameter()][Alias('a')][string]$Architecture,
     [Parameter()][string]$Name
@@ -14,6 +17,20 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 $buildSuccess = $false
 $canCodeSign = $false
+$buildDesktop = -not $RemoteServerOnly
+$buildRemoteServer = -not $DesktopOnly
+
+if ($Help) {
+    Write-Output "Usage: bundle-windows.ps1 [-DesktopOnly | -RemoteServerOnly] [-Architecture x86_64|aarch64] [-Install]"
+    Write-Output "Build the Windows desktop installer and standalone remote server by default."
+    Write-Output "Options:"
+    Write-Output "  -DesktopOnly      Build only the desktop installer, including the staged Linux server for WSL."
+    Write-Output "  -RemoteServerOnly Build only the standalone Windows remote server ZIP."
+    Write-Output "  -Architecture, -a Which architecture to build (x86_64 or aarch64)."
+    Write-Output "  -Install, -i      Run the installer after building (not valid with -RemoteServerOnly)."
+    Write-Output "  -Help, -h         Show this help message."
+    exit 0
+}
 
 $OSArchitecture = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
     "X64" { "x86_64" }
@@ -27,8 +44,7 @@ $Architecture = if ($Architecture) {
     $OSArchitecture
 }
 
-# A lighter profile makes test installers far quicker to build. Published
-# installers keep the default.
+# Both bundle modes use the same release profile unless explicitly overridden.
 $CargoProfile = if ($env:PRAXIS_CARGO_PROFILE) { $env:PRAXIS_CARGO_PROFILE } else { "release" }
 $CargoOutDir = "./target/$Architecture-pc-windows-msvc/$CargoProfile"
 
@@ -70,21 +86,29 @@ Pop-Location
 
 $target = "$Architecture-pc-windows-msvc"
 
-if ($Help) {
-    Write-Output "Usage: test.ps1 [-Install] [-Help]"
-    Write-Output "Build the installer for Windows.\n"
-    Write-Output "Options:"
-    Write-Output "  -Architecture, -a Which architecture to build (x86_64 or aarch64)"
-    Write-Output "  -Install, -i      Run the installer after building."
-    Write-Output "  -Help, -h         Show this help message."
-    exit 0
-}
+function InitializeBundleEnvironment {
+    $workspace = $env:ZED_WORKSPACE
+    $version = $env:RELEASE_VERSION
+    if ([string]::IsNullOrWhiteSpace($workspace) -or [string]::IsNullOrWhiteSpace($version)) {
+        # The shared helper sets both values; retain any workflow-supplied override.
+        ParseZedWorkspace
+        if (-not [string]::IsNullOrWhiteSpace($workspace)) {
+            $env:ZED_WORKSPACE = $workspace
+        }
+        if (-not [string]::IsNullOrWhiteSpace($version)) {
+            $env:RELEASE_VERSION = $version
+        }
+    }
 
-Push-Location -Path crates/zed
-$channel = Get-Content "RELEASE_CHANNEL"
-$env:ZED_RELEASE_CHANNEL = $channel
-$env:RELEASE_CHANNEL = $channel
-Pop-Location
+    if ([string]::IsNullOrWhiteSpace($env:ZED_RELEASE_CHANNEL)) {
+        $env:ZED_RELEASE_CHANNEL = if (-not [string]::IsNullOrWhiteSpace($env:RELEASE_CHANNEL)) {
+            $env:RELEASE_CHANNEL
+        } else {
+            Get-Content "$env:ZED_WORKSPACE\crates\zed\RELEASE_CHANNEL"
+        }
+    }
+    $env:RELEASE_CHANNEL = $env:ZED_RELEASE_CHANNEL
+}
 
 function CheckEnvironmentVariables {
     if(-not $env:CI) {
@@ -120,6 +144,11 @@ function CheckEnvironmentVariables {
 }
 
 function PrepareForBundle {
+    rustup target add $target
+    if (-not $buildDesktop) {
+        return
+    }
+
     if (Test-Path "$innoDir") {
         Remove-Item -Path "$innoDir" -Recurse -Force
     }
@@ -129,8 +158,6 @@ function PrepareForBundle {
     New-Item -Path "$innoDir\appx" -ItemType Directory -Force
     New-Item -Path "$innoDir\bin" -ItemType Directory -Force
     New-Item -Path "$innoDir\tools" -ItemType Directory -Force
-
-    rustup target add $target
 }
 
 # Staged last rather than first, so a CI run can build the Linux remote server
@@ -209,7 +236,7 @@ function BuildRemoteServer {
 
     if ($canCodeSign) {
         Write-Output "Code signing remote_server.exe"
-        & "$innoDir\sign.ps1" $remoteServerSrc
+        & "$env:ZED_WORKSPACE\crates\zed\resources\windows\sign.ps1" $remoteServerSrc
     }
 
     $remoteServerDst = "$env:ZED_WORKSPACE\target\zed-remote-server-windows-$Architecture.zip"
@@ -219,16 +246,21 @@ function BuildRemoteServer {
     Write-Output "Remote server compressed successfully"
 }
 
-function ZipZedAndItsFriendsDebug {
-    $items = @(
-        ".\$CargoOutDir\zed.pdb",
-        ".\$CargoOutDir\cli.pdb",
-        ".\$CargoOutDir\auto_update_helper.pdb",
-        ".\$CargoOutDir\explorer_command_injector.pdb",
+function GetBundleDebugSymbols {
+    if ($buildDesktop) {
+        ".\$CargoOutDir\zed.pdb"
+        ".\$CargoOutDir\cli.pdb"
+        ".\$CargoOutDir\auto_update_helper.pdb"
+        ".\$CargoOutDir\explorer_command_injector.pdb"
+    }
+    if ($buildRemoteServer) {
         ".\$CargoOutDir\remote_server.pdb"
-    )
+    }
+}
 
-    Compress-Archive -Path $items -DestinationPath ".\$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip" -Force
+function ZipZedAndItsFriendsDebug {
+    $items = @(GetBundleDebugSymbols)
+    Compress-Archive -Path $items -DestinationPath $debugArchive -Force
 }
 
 
@@ -242,10 +274,12 @@ function UploadToSentry {
         Write-Output "missing SENTRY_AUTH_TOKEN. skipping sentry upload."
         return
     }
-    Write-Output "Uploading zed debug symbols to sentry..."
+    Write-Output "Uploading bundle debug symbols to sentry..."
+    # Do not scan the target directory: caches may contain binaries from another mode.
+    $items = @(GetBundleDebugSymbols)
     for ($i = 1; $i -le 3; $i++) {
         try {
-            sentry-cli debug-files upload --include-sources --wait -p zed -o zed-dev $CargoOutDir
+            sentry-cli debug-files upload --include-sources --wait -p zed -o zed-dev @items
             break
         }
         catch {
@@ -466,28 +500,43 @@ function BuildInstaller {
     }
 }
 
-ParseZedWorkspace
-$innoDir = "$env:ZED_WORKSPACE\inno\$Architecture"
-$debugArchive = "$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
-$debugStoreKey = "$env:ZED_RELEASE_CHANNEL/zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
+function InvokeBundlePipeline {
+    CheckEnvironmentVariables
+    PrepareForBundle
+    if ($buildDesktop) {
+        GenerateLicenses
+        BuildZedAndItsFriends
+    }
+    if ($buildRemoteServer) {
+        BuildRemoteServer
+    }
+    if ($buildDesktop) {
+        MakeAppx
+        SignZedAndItsFriends
+    }
+    ZipZedAndItsFriendsDebug
+    if ($buildDesktop) {
+        DownloadAMDGpuServices
+        DownloadConpty
+        CollectFiles
+        StageLinuxRemoteServer
+        BuildInstaller
+    } else {
+        $script:buildSuccess = $true
+    }
 
-CheckEnvironmentVariables
-PrepareForBundle
-GenerateLicenses
-BuildZedAndItsFriends
-BuildRemoteServer
-MakeAppx
-SignZedAndItsFriends
-ZipZedAndItsFriendsDebug
-DownloadAMDGpuServices
-DownloadConpty
-CollectFiles
-StageLinuxRemoteServer
-BuildInstaller
-
-if($env:CI) {
-    UploadToSentry
+    if ($env:CI) {
+        UploadToSentry
+    }
 }
+
+InitializeBundleEnvironment
+$channel = $env:ZED_RELEASE_CHANNEL
+$innoDir = "$env:ZED_WORKSPACE\inno\$Architecture"
+$debugName = if ($buildDesktop) { "zed" } else { "zed-remote-server" }
+$debugArchive = "$CargoOutDir\$debugName-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
+
+InvokeBundlePipeline
 
 if ($buildSuccess) {
     Write-Output "Build successful"
