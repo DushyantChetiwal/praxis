@@ -55,9 +55,8 @@ pub(crate) use modal::PraxisRemoteModal;
 use store::PhoneInfo;
 
 const TRANSCRIPT_BUDGET: usize = 36_000;
-/// What each transcript entry costs besides its text, once it is JSON.
-const ENTRY_OVERHEAD: usize = 64;
 const ENTRY_LIMIT: usize = 6_000;
+const HISTORY_PAGE_ENTRIES: usize = 100;
 const PERMISSION_DETAIL_LIMIT: usize = 4_000;
 const FILE_LIMIT: usize = 20_000;
 /// What a file's content may take once escaped as JSON, which leaves room
@@ -533,8 +532,13 @@ fn status_name(status: ThreadStatus) -> &'static str {
 }
 
 fn architect_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
-    let thread = panel.read(cx).active_native_agent_thread(cx)?;
-    let thread = thread.read(cx);
+    // Canvas focus and the selected step chat are not the owner of the run.
+    let conversation = panel.read(cx).active_conversation_view()?;
+    let owner = conversation.read(cx).as_native_thread(cx)?;
+    architect_thread_summary(owner.read(cx))
+}
+
+fn architect_thread_summary(thread: &agent::Thread) -> Option<Value> {
     let graph = thread.architect_graph()?;
     let run = thread.architect_run();
     let running = run.is_some_and(agent::ArchitectRun::is_running);
@@ -549,7 +553,7 @@ fn architect_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
         })
         .unwrap_or_default();
     Some(json!({
-        "steps": graph.nodes.len(),
+        "steps": graph.step_count_deeply(),
         "running": running,
         "paused": run.is_some_and(agent::ArchitectRun::is_paused),
         "can_resume": run.is_some_and(agent::ArchitectRun::can_resume),
@@ -802,51 +806,254 @@ fn open_thread(
     Ok(json!({ "opened": true }))
 }
 
-/// The most recent entries of a conversation that fit the budget, newest
-/// last, in the order the phone shows them.
+/// A bounded page of conversation entries, newest last. Without a cursor,
+/// follows the live root and its active step conversations.
 fn thread(workspace: &Entity<Workspace>, args: &Value, cx: &App) -> Result<Value> {
+    let before = history_before_index(args)?;
     let conversation_view = conversation_view(workspace, cx)?;
-    let view = match args.get("session_id").and_then(Value::as_str) {
-        Some(session_id) => conversation_view
-            .read(cx)
-            .thread_view(&acp::SessionId::new(session_id.to_string()))
-            .context("that conversation is not open in the Agent panel")?,
-        None => conversation_view
-            .read(cx)
+    let conversation = conversation_view.read(cx);
+    let owner = conversation.as_native_thread(cx);
+    let thread = match args.get("session_id").and_then(Value::as_str) {
+        Some(session_id) => {
+            let session_id = acp::SessionId::new(session_id.to_string());
+            conversation
+                .thread_view(&session_id)
+                .map(|view| view.read(cx).thread.clone())
+                .or_else(|| live_step_thread(owner.as_ref()?, &session_id, cx))
+                .context("that conversation is not open or running in this window")?
+        }
+        None => conversation
             .root_thread_view()
+            .map(|view| view.read(cx).thread.clone())
             .context("the conversation has not loaded yet")?,
     };
-    let thread = view.read(cx).thread.read(cx);
-    let total = thread.entries().len();
-    let mut budget = TRANSCRIPT_BUDGET;
-    let mut entries = Vec::new();
-    for (index, entry) in thread.entries().iter().enumerate().rev() {
-        let (role, text, status) = describe_entry(entry, cx);
-        let text = truncate(text.trim(), ENTRY_LIMIT);
-        if text.is_empty() {
-            continue;
+    if let Some(before) = before {
+        Ok(thread_page_snapshot(
+            thread.read(cx),
+            None,
+            TRANSCRIPT_BUDGET,
+            Some(before),
+            cx,
+        ))
+    } else {
+        Ok(watched_thread_snapshot(&thread, owner.as_ref(), cx))
+    }
+}
+
+fn history_before_index(args: &Value) -> Result<Option<usize>> {
+    args.get("before_index")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|index| usize::try_from(index).ok())
+                .context("before_index must be a non-negative integer")
+        })
+        .transpose()
+}
+
+fn live_step_thread(
+    owner: &Entity<agent::Thread>,
+    session_id: &acp::SessionId,
+    cx: &App,
+) -> Option<Entity<acp_thread::AcpThread>> {
+    let run = owner.read(cx).architect_run().filter(|run| run.is_running())?;
+    run.running_steps()
+        .iter()
+        .filter_map(|step| step.step_thread())
+        .chain(run.step_thread())
+        .find(|thread| thread.read(cx).session_id() == session_id)
+}
+
+fn watched_thread_snapshot(
+    thread: &Entity<acp_thread::AcpThread>,
+    owner: Option<&Entity<agent::Thread>>,
+    cx: &App,
+) -> Value {
+    let thread = thread.read(cx);
+    let mut steps = Vec::new();
+    if let Some(owner) = owner {
+        let owner = owner.read(cx);
+        // A pinned child chat must not acquire an unrelated root's live steps.
+        if owner.id() == thread.session_id()
+            && let Some(run) = owner.architect_run().filter(|run| run.is_running())
+        {
+            for step in run.running_steps() {
+                if let Some(step_thread) = step.step_thread()
+                    && step_thread.read(cx).session_id() != thread.session_id()
+                    && !steps.iter().any(|(_, existing)| existing == &step_thread)
+                {
+                    steps.push((step.title.to_string(), step_thread));
+                }
+            }
+            // A branch decision can still be streaming after its step has finished.
+            if let Some(step_thread) = run.step_thread()
+                && step_thread.read(cx).status() == ThreadStatus::Generating
+                && step_thread.read(cx).session_id() != thread.session_id()
+                && !steps.iter().any(|(_, existing)| existing == &step_thread)
+            {
+                steps.push((run.current_title.to_string(), step_thread));
+            }
         }
-        // Counted as JSON, since that is what has to fit in one comment.
-        let cost = json_len(&text) + ENTRY_OVERHEAD;
-        if cost > budget && !entries.is_empty() {
+    }
+    // Reserve the step_threads field and array separators, then share one budget.
+    let budget = TRANSCRIPT_BUDGET.saturating_sub(32 + steps.len()) / (steps.len() + 1);
+    let mut snapshot = thread_snapshot(thread, None, budget, cx);
+    let step_threads: Vec<Value> = steps
+        .into_iter()
+        .filter_map(|(title, thread)| {
+            let snapshot = thread_snapshot(thread.read(cx), Some(&title), budget, cx);
+            (snapshot.to_string().len() <= budget).then_some(snapshot)
+        })
+        .collect();
+    snapshot["step_threads"] = json!(step_threads);
+    snapshot
+}
+
+fn thread_snapshot(
+    thread: &acp_thread::AcpThread,
+    title: Option<&str>,
+    budget: usize,
+    cx: &App,
+) -> Value {
+    thread_page_snapshot(thread, title, budget, None, cx)
+}
+
+fn thread_page_snapshot(
+    thread: &acp_thread::AcpThread,
+    title: Option<&str>,
+    budget: usize,
+    before: Option<usize>,
+    cx: &App,
+) -> Value {
+    let end = before
+        .unwrap_or(thread.entries().len())
+        .min(thread.entries().len());
+    let mut snapshot = json!({
+        "session_id": thread.session_id().0.as_ref(),
+        "before_index": before,
+        "next_before": end,
+        "has_more": false,
+        "title": title.map(|title| truncate(title, 256))
+            .or_else(|| thread.title().map(|title| truncate(&title, 256))),
+        "status": status_name(thread.status()),
+        "total": thread.entries().len(),
+        "entries": [],
+    });
+    let budget = budget.saturating_sub(snapshot.to_string().len());
+    let (entries, next_before) = transcript_page(thread.entries(), end, budget, cx);
+    snapshot["entries"] = json!(entries);
+    snapshot["next_before"] = json!(next_before);
+    snapshot["has_more"] = json!(next_before > 0);
+    snapshot
+}
+
+#[cfg(test)]
+fn transcript_entries(source: &[AgentThreadEntry], budget: usize, cx: &App) -> Vec<Value> {
+    transcript_page(source, source.len(), budget, cx).0
+}
+
+fn transcript_page(
+    source: &[AgentThreadEntry],
+    before: usize,
+    mut budget: usize,
+    cx: &App,
+) -> (Vec<Value>, usize) {
+    let end = before.min(source.len());
+    let mut next_before = end;
+    let mut entries = Vec::new();
+    for (index, entry) in source
+        .iter()
+        .take(end)
+        .enumerate()
+        .rev()
+        .take(HISTORY_PAGE_ENTRIES)
+    {
+        let (role, text, status) = describe_entry(entry, cx);
+        let mut value = json!({ "index": index, "role": role, "text": "", "status": status });
+        let limit = budget.min(ENTRY_LIMIT);
+        if let AgentThreadEntry::AssistantMessage(message) = entry
+            && message.chunks.iter().any(|chunk| {
+                matches!(chunk, acp_thread::AssistantMessageChunk::Thought { .. })
+            })
+        {
+            let mut parts = Vec::new();
+            let mut has_content = false;
+            let mut remaining = limit.saturating_sub(value.to_string().len() + 16);
+            for (part_index, chunk) in message.chunks.iter().enumerate().rev() {
+                let (role, block) = match chunk {
+                    acp_thread::AssistantMessageChunk::Message { block, .. } => ("assistant", block),
+                    acp_thread::AssistantMessageChunk::Thought { block, .. } => ("reasoning", block),
+                };
+                let text = block.to_markdown(cx);
+                if text.trim().is_empty() {
+                    continue;
+                }
+                has_content = true;
+                let mut part = json!({ "index": part_index, "role": role, "text": "" });
+                // Assistant text also appears in the legacy fallback below.
+                let text_budget = remaining.saturating_sub(part.to_string().len() + 8) / 2;
+                let text = truncate_json_text(text.trim(), text_budget);
+                if text.is_empty() {
+                    break;
+                }
+                part["text"] = json!(text);
+                remaining = remaining.saturating_sub(part.to_string().len() + json_len(&text) + 8);
+                parts.push(part);
+            }
+            parts.reverse();
+            if parts.is_empty() {
+                if has_content {
+                    break;
+                }
+                next_before = index;
+                continue;
+            }
+            value["text"] = json!(
+                parts
+                    .iter()
+                    .filter(|part| part["role"] == "assistant")
+                    .filter_map(|part| part["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            );
+            value["parts"] = json!(parts);
+        } else {
+            if text.trim().is_empty() {
+                next_before = index;
+                continue;
+            }
+            let text =
+                truncate_json_text(text.trim(), limit.saturating_sub(value.to_string().len()));
+            if text.is_empty() {
+                break;
+            }
+            value["text"] = json!(text);
+        }
+        let cost = value.to_string().len() + 1;
+        if cost > budget {
             break;
         }
-        budget = budget.saturating_sub(cost);
-        entries.push(json!({
-            "index": index,
-            "role": role,
-            "text": text,
-            "status": status,
-        }));
+        budget -= cost;
+        entries.push(value);
+        next_before = index;
     }
     entries.reverse();
-    Ok(json!({
-        "session_id": thread.session_id().0.as_ref(),
-        "title": thread.title().map(|title| title.to_string()),
-        "status": status_name(thread.status()),
-        "total": total,
-        "entries": entries,
-    }))
+    (entries, next_before)
+}
+
+fn truncate_json_text(text: &str, budget: usize) -> String {
+    let mut limit = text.len().min(budget);
+    let mut text = truncate(text, limit);
+    while json_len(&text) > budget && limit > 0 {
+        limit /= 2;
+        text = truncate(&text, limit);
+    }
+    if json_len(&text) > budget || limit == 0 {
+        String::new()
+    } else {
+        text
+    }
 }
 
 fn describe_entry(
@@ -1108,6 +1315,296 @@ fn download_chunk(roots: &[(String, PathBuf)], path: &str, offset: u64) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assistant_entry(parts: &[(bool, &str)], cx: &mut App) -> AgentThreadEntry {
+        let registry = Arc::new(language::LanguageRegistry::new(
+            cx.background_executor().clone(),
+        ));
+        AgentThreadEntry::AssistantMessage(acp_thread::AssistantMessage {
+            chunks: parts
+                .iter()
+                .map(|(thinking, text)| {
+                    let block = acp_thread::MessageContent::new(
+                        (*text).into(),
+                        &registry,
+                        util::paths::PathStyle::local(),
+                        cx,
+                    );
+                    if *thinking {
+                        acp_thread::AssistantMessageChunk::Thought { id: None, block }
+                    } else {
+                        acp_thread::AssistantMessageChunk::Message { id: None, block }
+                    }
+                })
+                .collect(),
+            indented: false,
+            is_subagent_output: false,
+        })
+    }
+
+    #[test]
+    fn history_cursor_requires_a_non_negative_integer() {
+        assert_eq!(history_before_index(&json!({})).expect("no cursor"), None);
+        assert_eq!(
+            history_before_index(&json!({ "before_index": 0 })).expect("zero"),
+            Some(0)
+        );
+        assert_eq!(
+            history_before_index(&json!({ "before_index": 42 })).expect("cursor"),
+            Some(42)
+        );
+        for value in [json!(-1), json!(1.5), json!("42"), json!(true)] {
+            assert!(history_before_index(&json!({ "before_index": value })).is_err());
+        }
+    }
+
+    #[gpui::test]
+    fn history_pages_are_exclusive_bounded_and_keep_original_indices(cx: &mut App) {
+        let source: Vec<_> = (0..137)
+            .map(|index| assistant_entry(&[(index % 2 == 0, "Provider content")], cx))
+            .collect();
+        for budget in [512, TRANSCRIPT_BUDGET] {
+            let mut before = source.len() + 20;
+            let mut received = Vec::new();
+            while before > 0 {
+                let (page, next) = transcript_page(&source, before, budget - 2, cx);
+                assert!(next < before, "each nonterminal page makes progress");
+                assert!(page.len() <= HISTORY_PAGE_ENTRIES);
+                assert!(serde_json::to_string(&page).expect("page JSON").len() <= budget);
+                for entry in page {
+                    let index = entry["index"].as_u64().expect("entry index") as usize;
+                    assert!(index < before);
+                    assert!(index >= next);
+                    received.push(index);
+                }
+                before = next;
+            }
+            received.sort_unstable();
+            assert_eq!(received, (0..source.len()).collect::<Vec<_>>());
+        }
+        let (empty, next) = transcript_page(&source, 0, TRANSCRIPT_BUDGET, cx);
+        assert!(empty.is_empty());
+        assert_eq!(next, 0);
+        let (empty, next) = transcript_page(&source, 5, 0, cx);
+        assert!(empty.is_empty());
+        assert_eq!(next, 5, "a budget-rejected entry must not be skipped");
+    }
+
+    #[gpui::test]
+    fn history_cursor_advances_over_bounded_blank_pages(cx: &mut App) {
+        let source: Vec<_> = (0..205)
+            .map(|_| assistant_entry(&[(true, "  ")], cx))
+            .collect();
+        let mut before = source.len();
+        for expected in [105, 5, 0] {
+            let (page, next) = transcript_page(&source, before, TRANSCRIPT_BUDGET, cx);
+            assert!(page.is_empty());
+            assert_eq!(next, expected);
+            before = next;
+        }
+    }
+
+    #[gpui::test]
+    fn provider_thoughts_keep_their_type_order_and_legacy_entry_indices(cx: &mut App) {
+        let source = vec![
+            assistant_entry(&[(false, "An ordinary answer")], cx),
+            assistant_entry(
+                &[
+                    (true, "Provider thought"),
+                    (false, "Answer"),
+                    (true, "More thought"),
+                ],
+                cx,
+            ),
+            assistant_entry(&[(true, "Still thinking")], cx),
+            assistant_entry(&[(true, "  ")], cx),
+        ];
+        let entries = transcript_entries(&source, TRANSCRIPT_BUDGET, cx);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0]["index"], 0);
+        assert!(entries[0].get("parts").is_none(), "never invent reasoning");
+        assert_eq!(entries[1]["index"], 1);
+        assert_eq!(entries[1]["text"], "Answer");
+        assert_eq!(
+            entries[1]["parts"],
+            json!([
+                { "index": 0, "role": "reasoning", "text": "Provider thought" },
+                { "index": 1, "role": "assistant", "text": "Answer" },
+                { "index": 2, "role": "reasoning", "text": "More thought" },
+            ])
+        );
+        assert_eq!(entries[2]["index"], 2);
+        assert_eq!(entries[2]["text"], "");
+        assert_eq!(entries[2]["parts"][0]["text"], "Still thinking");
+    }
+
+    #[gpui::test]
+    fn reasoning_and_legacy_text_share_the_escaped_transcript_budget(cx: &mut App) {
+        let text = "\"\\\n\t🦀".repeat(4_000);
+        let source: Vec<_> = (0..20)
+            .map(|_| assistant_entry(&[(true, &text), (false, &text)], cx))
+            .collect();
+        for budget in [256, 1_024, TRANSCRIPT_BUDGET] {
+            let entries = transcript_entries(&source, budget - 2, cx);
+            assert!(!entries.is_empty());
+            assert!(
+                serde_json::to_string(&entries)
+                    .expect("entries serialize")
+                    .len()
+                    <= budget
+            );
+            assert!(entries.len() < source.len());
+            assert_eq!(entries.last().expect("newest entry")["index"], 19);
+        }
+    }
+
+    #[gpui::test]
+    async fn root_snapshot_includes_nested_totals_and_live_step_thinking(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use acp_thread::AgentConnection as _;
+        use architect::{ArchitectGraph, ArchitectNode, NodePath};
+        use std::rc::Rc;
+        use util::path_list::PathList;
+
+        crate::conversation_view::tests::init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+        let filesystem = project::FakeFs::new(cx.executor());
+        filesystem.insert_tree("/", json!({ "project": {} })).await;
+        let project = project::Project::test(filesystem.clone(), [Path::new("/project")], cx).await;
+        let connection = cx.update(|cx| {
+            let store = agent::ThreadStore::global(cx);
+            Rc::new(agent::NativeAgentConnection(agent::NativeAgent::new(
+                store,
+                agent::Templates::new(),
+                filesystem,
+                cx,
+            )))
+        });
+        let session = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project,
+                    PathList::new(&[Path::new("/project")]),
+                    cx,
+                )
+            })
+            .await
+            .expect("root session");
+        let session_id = session.read_with(cx, |thread, _| thread.session_id().clone());
+        let owner = cx
+            .update(|cx| connection.thread(&session_id, cx))
+            .expect("root owner");
+        let mut inner = ArchitectGraph::default();
+        inner.add_node(ArchitectNode::new("leaf", "Leaf"));
+        let mut child = ArchitectNode::new("child", "Child");
+        child.subplan = Some(Box::new(inner));
+        let mut nested = ArchitectGraph::default();
+        nested.add_node(child);
+        nested.add_node(ArchitectNode::new("sibling", "Sibling"));
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.subplan = Some(Box::new(nested));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(parent);
+        graph.add_node(ArchitectNode::new("other", "Other"));
+        let path = NodePath(vec!["parent".into(), "child".into(), "leaf".into()]);
+        owner.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(graph), cx);
+            thread.start_architect_run(path.clone(), "Leaf".into(), Task::ready(()), cx);
+        });
+        let mut steps = Vec::new();
+        for (index, (path, title)) in [(path, "Leaf"), (NodePath::root("other".into()), "Other")]
+            .into_iter()
+            .enumerate()
+        {
+            let step = cx
+                .update(|cx| {
+                    connection.create_architect_step_thread(
+                        &session_id,
+                        path.clone(),
+                        title.into(),
+                        cx,
+                    )
+                })
+                .expect("step session");
+            step.update(cx, |thread, cx| {
+                thread.push_assistant_content_block(format!("Thinking in {title}").into(), true, cx);
+            });
+            let visit = owner.update(cx, |thread, cx| {
+                let visit = thread.note_architect_run_position(path, title.into(), index + 1, 1, cx);
+                thread.set_architect_run_step_thread(visit, &step, cx);
+                visit
+            });
+            steps.push((visit, step));
+        }
+        cx.read(|cx| {
+            let summary = architect_thread_summary(owner.read(cx)).expect("plan summary");
+            assert_eq!(summary["steps"], 5, "all depths, not just the two root nodes");
+            assert_eq!(
+                summary["running_steps"]
+                    .as_array()
+                    .expect("running steps")
+                    .len(),
+                2
+            );
+            let snapshot = watched_thread_snapshot(&session, Some(&owner), cx);
+            assert_eq!(snapshot["session_id"], session_id.0.as_ref());
+            assert_eq!(
+                snapshot["step_threads"]
+                    .as_array()
+                    .expect("live threads")
+                    .len(),
+                2
+            );
+            let thinking = &snapshot["step_threads"][0]["entries"][0]["parts"][0];
+            assert_eq!(thinking["role"], "reasoning");
+            assert_eq!(thinking["text"], "Thinking in Leaf");
+            assert!(snapshot.to_string().len() <= TRANSCRIPT_BUDGET);
+            let pinned = watched_thread_snapshot(&steps[0].1, Some(&owner), cx);
+            assert_eq!(pinned["step_threads"], json!([]));
+            let step_session = steps[0].1.read(cx).session_id();
+            assert_eq!(
+                live_step_thread(&owner, step_session, cx),
+                Some(steps[0].1.clone())
+            );
+            assert!(live_step_thread(&owner, &acp::SessionId::new("unrelated"), cx).is_none());
+            let page = thread_page_snapshot(
+                steps[0].1.read(cx),
+                None,
+                TRANSCRIPT_BUDGET,
+                Some(1),
+                cx,
+            );
+            assert_eq!(page["before_index"], 1);
+            assert_eq!(page["next_before"], 0);
+            assert_eq!(page["has_more"], false);
+            assert_eq!(page["entries"][0]["parts"][0]["role"], "reasoning");
+            assert!(page.get("step_threads").is_none());
+            assert!(page.to_string().len() <= TRANSCRIPT_BUDGET);
+        });
+        steps[0].1.update(cx, |thread, cx| {
+            thread.push_assistant_content_block(" — more provider text".into(), true, cx);
+        });
+        cx.read(|cx| {
+            let snapshot = watched_thread_snapshot(&session, Some(&owner), cx);
+            assert_eq!(
+                snapshot["step_threads"][0]["entries"][0]["parts"][0]["text"],
+                "Thinking in Leaf — more provider text"
+            );
+        });
+        for (visit, _) in steps {
+            owner.update(cx, |thread, cx| thread.finish_architect_run_step(visit, None, cx));
+        }
+        cx.read(|cx| {
+            assert_eq!(
+                watched_thread_snapshot(&session, Some(&owner), cx)["step_threads"],
+                json!([])
+            );
+        });
+    }
 
     #[test]
     fn a_file_downloads_in_pieces_that_reassemble_exactly() {

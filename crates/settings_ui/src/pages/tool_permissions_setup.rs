@@ -21,6 +21,12 @@ const SETTINGS_DISCLAIMER: &str = "Note: custom tool permissions only apply to t
 /// Tools that support permission rules
 const TOOLS: &[ToolInfo] = &[
     ToolInfo {
+        id: "control_architect_run",
+        name: "Architect Run Control",
+        description: "Interrupt, pause, resume, change a step model, or revise a locked step brief in the main conversation",
+        regex_explanation: "Patterns match the action name only: interrupt, pause, resume, set_step_model, or revise_step. For example, ^revise_step$ matches changes to locked step briefs while preserving checkpoints, not topology edits. Rules apply to every step and model in this tool.",
+    },
+    ToolInfo {
         id: "terminal",
         name: "Terminal",
         description: "Commands executed in the terminal",
@@ -319,6 +325,7 @@ fn get_tool_render_fn(
         "pull_request" => render_pull_request_tool_config,
         "search_web" => render_web_search_tool_config,
         "skill" => render_skill_tool_config,
+        "control_architect_run" => render_architect_run_tool_config,
         _ => render_terminal_tool_config, // fallback
     }
 }
@@ -1398,10 +1405,60 @@ tool_config_page_fn!(render_fetch_tool_config, "fetch");
 tool_config_page_fn!(render_pull_request_tool_config, "pull_request");
 tool_config_page_fn!(render_web_search_tool_config, "search_web");
 tool_config_page_fn!(render_skill_tool_config, "skill");
+tool_config_page_fn!(render_architect_run_tool_config, "control_architect_run");
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn architect_run_permission_actions_use_settings_rules(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            assert!(TOOLS.iter().any(|tool| tool.id == "control_architect_run"));
+            assert!(!TOOLS.iter().any(|tool| tool.id == "inspect_architect_run"));
+            for action in ["interrupt", "pause", "resume", "set_step_model", "revise_step"] {
+                assert_eq!(
+                    evaluate_test_input("control_architect_run", action, cx),
+                    ToolPermissionDecision::Confirm
+                );
+            }
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.tools.insert(
+                "control_architect_run".into(),
+                agent_settings::ToolRules {
+                    default: Some(ToolPermissionMode::Allow),
+                    always_allow: vec![],
+                    always_deny: vec![agent_settings::CompiledRegex::new("^resume$", true).unwrap()],
+                    always_confirm: vec![
+                        agent_settings::CompiledRegex::new("^(set_step_model|revise_step)$", true).unwrap(),
+                    ],
+                    invalid_patterns: vec![],
+                },
+            );
+            AgentSettings::override_global(settings, cx);
+            assert!(matches!(
+                evaluate_test_input("control_architect_run", "resume", cx),
+                ToolPermissionDecision::Deny(_)
+            ));
+            assert_eq!(
+                evaluate_test_input("control_architect_run", "set_step_model", cx),
+                ToolPermissionDecision::Confirm
+            );
+            assert_eq!(
+                evaluate_test_input("control_architect_run", "revise_step", cx),
+                ToolPermissionDecision::Confirm
+            );
+            for action in ["interrupt", "pause"] {
+                assert_eq!(
+                    evaluate_test_input("control_architect_run", action, cx),
+                    ToolPermissionDecision::Allow
+                );
+            }
+        });
+    }
 
     #[test]
     fn test_all_tools_are_in_tool_info_or_excluded() {
@@ -1431,6 +1488,8 @@ mod tests {
             "go_to_definition",
             "grep",
             "list_agents_and_models",
+            // Reads only the owning plan's run and recorded step conversations.
+            "inspect_architect_run",
             "list_directory",
             "open",
             "read_file",

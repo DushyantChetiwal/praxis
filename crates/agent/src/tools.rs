@@ -1,4 +1,5 @@
 mod apply_code_action_tool;
+mod architect_run_tool;
 mod ask_question_tool;
 mod ask_user_tool;
 mod complete_step_tool;
@@ -80,6 +81,7 @@ where
 }
 
 pub use apply_code_action_tool::*;
+pub use architect_run_tool::*;
 pub use ask_question_tool::*;
 pub use ask_user_tool::*;
 pub use complete_step_tool::*;
@@ -220,6 +222,7 @@ tools! {
     AskQuestionTool,
     AskUserTool,
     CompleteStepTool,
+    ControlArchitectRunTool,
     CopyPathTool,
     CreateDirectoryTool,
     CreateThreadTool,
@@ -239,6 +242,7 @@ tools! {
     GitStatusTool,
     GoToDefinitionTool,
     GrepTool,
+    InspectArchitectRunTool,
     ListAgentsAndModelsTool,
     ListDirectoryTool,
     MovePathTool,
@@ -315,13 +319,15 @@ mod tests {
         // Stopping a task is part of terminal execution; status and waiting
         // only read a task this thread already started.
         assert!(!tool_allowed_in_restricted_mode(TerminalStopTool::NAME));
+        assert!(!tool_allowed_in_restricted_mode(ControlArchitectRunTool::NAME));
 
         // Every other built-in tool, and unknown (e.g. MCP) tools, are allowed.
         for name in ALL_TOOL_NAMES {
             let expected = *name != FetchTool::NAME
                 && *name != PullRequestTool::NAME
                 && *name != TerminalTool::NAME
-                && *name != TerminalStopTool::NAME;
+                && *name != TerminalStopTool::NAME
+                && *name != ControlArchitectRunTool::NAME;
             assert_eq!(
                 tool_allowed_in_restricted_mode(name),
                 expected,
@@ -333,6 +339,14 @@ mod tests {
 
     #[test]
     fn representative_tools_declare_their_plan_capabilities() {
+        assert_eq!(
+            InspectArchitectRunTool::capability(),
+            crate::ToolCapability::ReadOnly
+        );
+        assert_eq!(
+            ControlArchitectRunTool::capability(),
+            crate::ToolCapability::ArbitraryExecution
+        );
         assert_eq!(ReadFileTool::capability(), crate::ToolCapability::ReadOnly);
         assert_eq!(GitDiffTool::capability(), crate::ToolCapability::ReadOnly);
         for capability in [

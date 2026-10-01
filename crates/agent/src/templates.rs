@@ -108,6 +108,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn architect_coordinator_instructions_follow_tool_visibility() {
+        let project = prompt_store::ProjectContext::default();
+        let templates = Templates::new();
+        for name in ["system_prompt.hbs", "experimental_system_prompt.hbs"] {
+            for (tools, inspect, control) in [
+                (vec!["refine_step".into()], false, false),
+                (vec!["inspect_architect_run".into()], true, false),
+                (
+                    vec!["inspect_architect_run".into(), "control_architect_run".into()],
+                    true,
+                    true,
+                ),
+            ] {
+                let template = SystemPromptTemplate {
+                    project: &project,
+                    available_tools: tools,
+                    model_name: None,
+                    date: "2026-10-01".into(),
+                    user_agents_md: None,
+                    sandboxing: false,
+                    is_linux: false,
+                    is_windows: false,
+                    plan_mode: false,
+                    plan: None,
+                };
+                let rendered = templates.0.render(name, &template).unwrap();
+                assert_eq!(rendered.contains("## Architect Coordination"), inspect);
+                assert_eq!(
+                    rendered.contains("`control_architect_run` requires Build mode"),
+                    control
+                );
+                if control {
+                    assert!(rendered.contains("clears checkpoints"));
+                    assert!(rendered.contains("`revise_step`"));
+                    assert!(rendered.contains("Completed work cannot be revised"));
+                    assert!(rendered.contains("does not roll back their file changes"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_system_prompt_template() {
         let project = prompt_store::ProjectContext::default();
         let template = SystemPromptTemplate {

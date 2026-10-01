@@ -1,6 +1,6 @@
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
-use architect::{ArchitectGraph, EdgeCondition, GraphMutationError, NodeId, NodePath};
+use architect::{ArchitectGraph, EdgeCondition, GraphMutationError, NodeId, NodePath, StepModel};
 use gpui::{App, SharedString, Task, WeakEntity};
 use language_model::LanguageModelToolResultContent;
 use schemars::JsonSchema;
@@ -51,6 +51,15 @@ pub struct RefineStepToolInput {
     /// Leave out to keep what is already there.
     #[serde(default)]
     pub capture: Option<String>,
+    /// Execution model using exact available provider/model ids. Omit to keep
+    /// the current choice; send null to inherit the plan model. Applied before
+    /// locking. Live run changes belong in the main plan conversation.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_model_update",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub model: Option<Option<StepModel>>,
     /// When this step leads to each step that follows it. Leave out to keep the
     /// current routing.
     #[serde(default)]
@@ -58,6 +67,15 @@ pub struct RefineStepToolInput {
     /// Whether the user has declared this step settled.
     #[serde(default)]
     pub lock: bool,
+}
+
+// Serde normally collapses both a missing field and null to None. Refinement
+// needs null to clear an override without making omission erase saved choices.
+fn deserialize_model_update<'de, D>(deserializer: D) -> Result<Option<Option<StepModel>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<StepModel>::deserialize(deserializer).map(Some)
 }
 
 /// One outgoing connection from this step.
@@ -145,6 +163,7 @@ fn apply_refinement(
         goal,
         rules,
         capture,
+        model,
         routing,
         lock,
     } = input;
@@ -183,6 +202,9 @@ fn apply_refinement(
         }
         if let Some(capture) = capture {
             node.capture = capture;
+        }
+        if let Some(model) = model {
+            node.model = model;
         }
         node.title.clone()
     })?;
@@ -237,14 +259,29 @@ impl AgentTool for RefineStepTool {
             let outcome = self
                 .plan_thread
                 .update(cx, |thread, cx| {
-                    thread.update_architect_graph(
+                    if thread
+                        .architect_run()
+                        .is_some_and(|run| run.is_running() || run.can_resume())
+                    {
+                        return Err(RefineStepToolOutput::Error {
+                            error: "This plan has an active or resumable run. Ask for live step model changes in the main plan conversation.".into(),
+                        });
+                    }
+                    if let Some(Some(model)) = &input.model {
+                        super::draft_plan_tool::validate_step_model(model, cx).map_err(|error| {
+                            RefineStepToolOutput::Error {
+                                error: error.to_string(),
+                            }
+                        })?;
+                    }
+                    Ok(thread.update_architect_graph(
                         |graph| apply_refinement(graph, &node_path, input),
                         cx,
-                    )
+                    ))
                 })
                 .map_err(|error| RefineStepToolOutput::Error {
                     error: format!("The plan this step belongs to is gone: {error}"),
-                })?;
+                })??;
 
             let Some(outcome) = outcome else {
                 return Err(RefineStepToolOutput::Error {
@@ -322,6 +359,39 @@ mod tests {
     }
 
     #[test]
+    fn model_refinements_distinguish_omission_null_and_an_override() {
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(ArchitectNode::new("step", "Step"));
+        let path = NodePath::root("step".into());
+        let model = StepModel {
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+        };
+        for (input, expected) in [
+            (json!({"model": model}), Some(model.clone())),
+            (json!({"goal": "Refined"}), Some(model.clone())),
+            (json!({"model": null}), None),
+            (json!({"model": model, "lock": true}), Some(model.clone())),
+        ] {
+            let input: RefineStepToolInput = serde_json::from_value(input).expect("input should load");
+            let encoded = serde_json::to_value(&input).expect("input should serialize");
+            let restored: RefineStepToolInput =
+                serde_json::from_value(encoded).expect("input should replay");
+            assert_eq!(input.model, restored.model);
+            apply_refinement(&mut graph, &path, restored).expect("refinement should apply");
+            assert_eq!(
+                graph.node_at(&path).expect("step should exist").model,
+                expected
+            );
+        }
+        assert!(graph.node_at(&path).expect("step should exist").locked);
+        let before = graph.clone();
+        let clear = serde_json::from_value(json!({"model": null})).expect("input should load");
+        assert!(apply_refinement(&mut graph, &path, clear).is_err());
+        assert_eq!(graph, before, "locked models must not change");
+    }
+
+    #[test]
     fn rules_can_be_cleared_explicitly() {
         let input: RefineStepToolInput = serde_json::from_value(json!({ "rules": [] })).unwrap();
 
@@ -353,6 +423,7 @@ mod tests {
             &path,
             RefineStepToolInput {
                 goal: Some("Only this nested step".into()),
+                model: None,
                 rules: None,
                 capture: None,
                 routing: None,
@@ -390,6 +461,10 @@ mod tests {
             &path,
             RefineStepToolInput {
                 goal: Some("Changed".into()),
+                model: Some(Some(StepModel {
+                    provider: "test-provider".into(),
+                    model: "test-model".into(),
+                })),
                 rules: None,
                 capture: None,
                 routing: None,
@@ -404,6 +479,7 @@ mod tests {
         );
         let parent = graph.node_at(&path).unwrap();
         assert_eq!(parent.intent, "Original");
+        assert!(parent.model.is_none());
         assert!(!parent.locked);
     }
 }

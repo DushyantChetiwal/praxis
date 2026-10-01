@@ -114,6 +114,60 @@ The computer refuses a request when the comment or its `sent_at` is more than fi
 
 Plain-text sizes are capped so that every comment fits GitHub's 65,536-character limit: 46,000 bytes for an answer. Larger answers become an error.
 
+### Conversation snapshots and thinking
+
+`thread` answers and the snapshot's `thread` object have `session_id`, `title`, `status`, `total`, and `entries`. Each entry keeps its original thread `index`, `role`, `text`, and optional tool `status`. `total` counts source entries, not message parts.
+
+An assistant entry containing provider-supplied thoughts also has an optional ordered `parts` array. Each part has its source chunk `index`, `role` (`reasoning` or `assistant`), and `text`. Only ACP `Thought` chunks become `reasoning`; ordinary answers and tool output are never used to infer thoughts. Blank parts are omitted. For example:
+
+```json
+{
+  "index": 12,
+  "role": "assistant",
+  "text": "The answer",
+  "status": null,
+  "parts": [
+    { "index": 0, "role": "reasoning", "text": "Provider-supplied thinking" },
+    { "index": 1, "role": "assistant", "text": "The answer" }
+  ]
+}
+```
+
+Clients that understand `parts` render those instead of the fallback `text`. Android labels reasoning **Thinking** and collapses it until tapped. Older clients can ignore `parts` and continue displaying the answer. A thought-only entry has empty fallback text. Clients reading an older desktop's snapshot use the original entry fields when `parts` is absent.
+
+When watching a plan's owning root session, `thread.step_threads` contains bounded snapshots for its live step sessions, including parallel branches. Each has the same thread fields; its title names the step. This does not change the root session or its entry indices. A pinned child session does not include other branches. Steps disappear from this live section when they finish, except that the latest step remains visible while generating a branch decision. A client's display identity includes the session, entry index, and part index so streaming updates do not reset expansion or collide with other steps.
+
+The root and live step transcripts share the 36,000-byte budget, including JSON escaping, typed parts, and fallback text. Recent content is retained first; long content and older parts can be omitted. Part indices are not renumbered. The existing answer and encrypted snapshot size limits still apply. These fields are additive extensions to version 2; no pairing or protocol migration is needed.
+
+`status.windows[].architect.steps` counts every node in the owning root graph recursively, including subplan containers, matching the desktop's deep step count. It does not count only the current canvas level. `step_number` remains the run's visit number, including repeats; it is not a completed-step count or a percentage.
+
+### Paging older conversation entries
+
+Send `thread` with an optional, exclusive `before_index` cursor:
+
+```json
+{
+  "op": "thread",
+  "args": { "window": 1, "session_id": "root-session", "before_index": 120 }
+}
+```
+
+The response uses the same thread shape, plus:
+
+- `before_index`: the requested cursor, or `null` for a live snapshot.
+- `next_before`: the next exclusive cursor. Pass this value unchanged to retrieve the next older page.
+- `has_more`: whether `next_before` is greater than zero.
+
+`before_index` must be a non-negative integer. Zero returns an empty terminal page. A cursor beyond the current source length is clamped for reading, while the requested value is echoed. Every returned entry has its original index strictly below the requested cursor. `total` remains the whole source-entry count, not the page size.
+
+Each page scans at most 100 source entries and fits the 36,000-byte transcript budget, including metadata, JSON escaping, reasoning parts, and fallback text. Empty source entries advance the cursor even when no rows are returned. Long individual entries retain the existing truncation limit; paging retrieves older entries, not omitted portions of one entry. A paged response contains only the requested conversation, without `step_threads`. Live snapshots also expose the cursor fields and use the same source-entry cap.
+
+The target may be the coordinator/root conversation, an open child conversation, or a live Architect step session, even if that step has no open desktop chat view. This does not open arbitrary archived sessions. Once a step is no longer available, requests can fail; already loaded pages stay cached on Android until the device, window, or root session changes.
+
+Android merges entries by session and source index. Live snapshots replace matching entries even when the newer text is shorter. Historical replies only fill missing indices and cannot overwrite newer live content. Covered index ranges are retained, so missed live snapshots leave a fetchable gap rather than making intermediate messages unreachable. A source total that decreases invalidates that conversation's cached index space.
+
+The phone permits one history request at a time. Request identities reject stale successes and failures after navigation or reset. Upward scrolling at a conversation's history header fetches at most one page per user gesture, including its fling; **Load older messages** and **Retry loading older messages** are also available. An invalid or non-advancing cursor becomes a retryable error, never an automatic fetch loop. A response whose source length has fallen below the requested boundary is also rejected until a live snapshot resets the index space. Older desktops without paging metadata still display live conversations but require a desktop update for history paging.
+
 ### Downloading a file
 
 `download` sends one file of any kind, text or binary, in pieces small enough for one answer each. The phone asks for the pieces in order:

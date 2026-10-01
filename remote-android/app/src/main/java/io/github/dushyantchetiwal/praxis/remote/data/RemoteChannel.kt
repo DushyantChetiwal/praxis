@@ -154,7 +154,15 @@ data class WindowInfo(
 
 data class Status(val device: String?, val windows: List<WindowInfo>)
 
-data class Entry(val index: Int, val role: String, val text: String, val status: String?)
+data class EntryPart(val index: Int, val role: String, val text: String)
+
+data class Entry(
+    val index: Int,
+    val role: String,
+    val text: String,
+    val status: String?,
+    val parts: List<EntryPart> = emptyList(),
+)
 
 data class ThreadView(
     val sessionId: String?,
@@ -162,6 +170,10 @@ data class ThreadView(
     val status: String?,
     val total: Int,
     val entries: List<Entry>,
+    val stepThreads: List<ThreadView> = emptyList(),
+    val beforeIndex: Int? = null,
+    val nextBefore: Int? = null,
+    val hasMore: Boolean? = null,
 )
 
 data class Snapshot(
@@ -265,13 +277,19 @@ private fun parseThreadSummary(o: JSONObject): ThreadSummary = ThreadSummary(
     }.orEmpty(),
 )
 
-fun parseThreadView(o: JSONObject): ThreadView {
+fun parseThreadView(o: JSONObject): ThreadView = parseThreadView(o, includeSteps = true)
+
+private fun parseThreadView(o: JSONObject, includeSteps: Boolean): ThreadView {
     val entries = o.arr("entries")?.objects()?.map { e ->
         Entry(
             index = e.int("index") ?: 0,
             role = e.str("role") ?: "notice",
             text = e.str("text").orEmpty(),
             status = e.str("status"),
+            parts = e.arr("parts")?.objects()?.mapIndexedNotNull { index, part ->
+                val text = part.str("text")?.takeIf { it.isNotBlank() } ?: return@mapIndexedNotNull null
+                EntryPart(part.int("index") ?: index, part.str("role") ?: "notice", text)
+            }.orEmpty(),
         )
     }.orEmpty()
     return ThreadView(
@@ -280,6 +298,14 @@ fun parseThreadView(o: JSONObject): ThreadView {
         status = o.str("status"),
         total = o.int("total") ?: entries.size,
         entries = entries,
+        beforeIndex = o.int("before_index"),
+        nextBefore = o.int("next_before"),
+        hasMore = o.opt("has_more") as? Boolean,
+        stepThreads = if (includeSteps) {
+            o.arr("step_threads")?.objects()?.map { parseThreadView(it, includeSteps = false) }.orEmpty()
+        } else {
+            emptyList()
+        },
     )
 }
 

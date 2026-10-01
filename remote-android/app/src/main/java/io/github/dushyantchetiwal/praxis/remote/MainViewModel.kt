@@ -34,6 +34,8 @@ import io.github.dushyantchetiwal.praxis.remote.data.Snapshot
 import io.github.dushyantchetiwal.praxis.remote.data.Status
 import io.github.dushyantchetiwal.praxis.remote.data.Store
 import io.github.dushyantchetiwal.praxis.remote.data.ThreadItem
+import io.github.dushyantchetiwal.praxis.remote.data.TranscriptHistory
+import io.github.dushyantchetiwal.praxis.remote.data.parseThreadView
 import io.github.dushyantchetiwal.praxis.remote.data.TokenManager
 import io.github.dushyantchetiwal.praxis.remote.data.UpdateInfo
 import io.github.dushyantchetiwal.praxis.remote.data.findUpdate
@@ -130,6 +132,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var generation = 0
     private var pollJob: Job? = null
     private var downloadJob: Job? = null
+    private var historyJob: Job? = null
+    private var historySequence = 0L
     private val pollNow = Channel<Unit>(Channel.CONFLATED)
     private var pollFailures = 0
     /** The gist response last applied to the selected computer. */
@@ -562,6 +566,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun stopDevice() {
+        cancelHistoryRequest()
         pollJob?.cancel()
         pollJob = null
         downloadJob?.cancel()
@@ -583,10 +588,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         watcher.renewAt = 0L
     }
 
+    private fun cancelHistoryRequest() {
+        historyJob?.cancel()
+        historyJob = null
+    }
+
     private fun resetWindowView() {
+        cancelHistoryRequest()
         edit {
             copy(
-                thread = null,
+                history = TranscriptHistory(),
                 threadKnown = false,
                 threadError = null,
                 modeOverride = null,
@@ -709,11 +720,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun applySnapshot(snapshot: Snapshot) {
+        val previousTime = d.snapshot?.updatedAt
+        if (previousTime != null && snapshot.updatedAt != null && snapshot.updatedAt < previousTime) return
         val previousUpdatedAt = d.snapshot?.updatedAtRaw
         edit { copy(snapshot = snapshot) }
         snapshot.status?.let { applyStatus(it, snapshot.watch?.window) }
         if (d.watchMatchesView(snapshot.watch)) {
-            edit { copy(thread = snapshot.thread, threadError = snapshot.threadError, threadKnown = true) }
+            val incoming = snapshot.thread
+            val history = when {
+                incoming != null -> d.history.live(incoming)
+                snapshot.threadError != null -> d.history
+                else -> TranscriptHistory()
+            }
+            if (d.history.request != null && history.request == null) cancelHistoryRequest()
+            edit { copy(history = history, threadError = snapshot.threadError, threadKnown = true) }
         }
         pruneOutbox()
         val override = d.modeOverride
@@ -915,7 +935,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val ok = act("new_thread", windowArgs(), str(R.string.label_could_not_start_thread))
             edit { copy(startingThread = false) }
             if (!ok) return@launch
-            edit { copy(watchSession = null, thread = null, threadKnown = false, threads = ThreadsState(), tab = Tab.Chat) }
+            cancelHistoryRequest()
+            edit { copy(watchSession = null, history = TranscriptHistory(), threadKnown = false, threads = ThreadsState(), tab = Tab.Chat) }
             ensureWatch()
             message(str(R.string.toast_new_thread))
         }
@@ -977,6 +998,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** One bounded history request at a time, including across visible step chats. */
+    fun loadOlder(session: String, retry: Boolean = false): Long? {
+        if (d.device == null || historyJob?.isActive == true || !d.history.canLoad(session, retry)) return null
+        val history = d.history.begin(session, ++historySequence, retry)
+        val request = history.request ?: return null
+        val key = viewKey()
+        val gen = generation
+        val args = windowArgs {
+            put("session_id", session)
+            put("before_index", request.before)
+        }
+        edit { copy(history = history) }
+        historyJob = viewModelScope.launch {
+            try {
+                val result = praxis("thread", args)
+                if (gen != generation || key != viewKey()) return@launch
+                edit {
+                    copy(history = if (result == null) {
+                        this.history.failed(request)
+                    } else {
+                        this.history.complete(request, parseThreadView(result))
+                    })
+                }
+            } catch (error: ApiException) {
+                if (gen != generation || key != viewKey()) return@launch
+                edit { copy(history = this.history.failed(request, error.message)) }
+            }
+        }
+        return request.id
+    }
+
     fun loadThreads() {
         if (d.device == null) return
         val key = viewKey()
@@ -1004,11 +1056,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val ok = act("open_thread", windowArgs { put("session_id", thread.sessionId) }, str(R.string.label_could_not_open_thread))
             edit { copy(threads = threads.copy(opening = null)) }
             if (!ok) return@launch
+            cancelHistoryRequest()
             edit {
                 copy(
                     threads = threads.copy(items = threads.items?.map { it.copy(active = it.sessionId == thread.sessionId) }),
                     watchSession = thread.sessionId,
-                    thread = null,
+                    history = TranscriptHistory(),
                     threadKnown = false,
                 )
             }

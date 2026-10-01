@@ -1598,6 +1598,19 @@ pub enum ThreadModel {
     Unset,
 }
 
+impl Clone for ThreadModel {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Ready(model) => Self::Ready(model.clone()),
+            Self::Unresolved(selection) => Self::Unresolved(SelectedModel {
+                provider: selection.provider.clone(),
+                model: selection.model.clone(),
+            }),
+            Self::Unset => Self::Unset,
+        }
+    }
+}
+
 impl ThreadModel {
     fn as_model(&self) -> Option<&LanguageModel> {
         match self {
@@ -1761,6 +1774,30 @@ impl Thread {
             thread.inherits_parent_model_settings = false;
             thread.apply_model_selection(&model_selection, cx);
         }
+        thread
+    }
+
+    pub(crate) fn new_architect_run_step(
+        parent_thread: &Entity<Thread>,
+        title: SharedString,
+        model: Option<LanguageModel>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut thread = Self::new_subagent(parent_thread, None, cx);
+        // Execution inherits the coordinator's selection, including an unresolved
+        // selection, never the unrelated subagent default. Pin it for this visit.
+        thread.inherit_parent_settings(parent_thread, cx);
+        thread.inherits_parent_model_settings = false;
+        thread.model = parent_thread.read(cx).model.clone();
+        if let Some(model) = model {
+            thread.set_model(model, cx);
+        } else {
+            thread.prompt_capabilities_tx
+                .send(Self::prompt_capabilities(thread.model.as_model()))
+                .log_err();
+        }
+        thread.set_title(title, cx);
+        thread.set_session_mode(SessionMode::Build, cx);
         thread
     }
 
@@ -2610,6 +2647,11 @@ impl Thread {
 
     pub fn finish_architect_run(&mut self, outcome: architect::RunOutcome, cx: &mut Context<Self>) {
         if let Some(run) = self.architect_run.as_mut() {
+            if let Some(control) = &run.control
+                && let Some(graph) = &mut self.architect_graph
+            {
+                control.borrow().restore_interrupted_results(graph);
+            }
             run.current = None;
             // Only a run that was cut short can be picked up again.
             if !outcome.is_resumable() {
@@ -2642,6 +2684,11 @@ impl Thread {
     pub fn stop_architect_run(&mut self, cx: &mut Context<Self>) {
         if let Some(run) = self.architect_run.as_mut() {
             if run.outcome.is_none() {
+                if let Some(control) = &run.control
+                    && let Some(graph) = &mut self.architect_graph
+                {
+                    control.borrow().restore_interrupted_results(graph);
+                }
                 run.current = None;
                 run.outcome = Some(architect::RunOutcome::Cancelled);
                 run.close_running_steps();

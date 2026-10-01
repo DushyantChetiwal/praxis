@@ -49,6 +49,12 @@ pub fn compile_spec(graph: &ArchitectGraph) -> Result<String, Vec<GraphProblem>>
 
         write!(spec, "\n## Step {number}: {}\n", node.title).ok();
 
+        if let Some(model) = &node.model {
+            spec.push_str(&format!("\nModel: {}/{}\n", model.provider, model.model));
+        } else {
+            spec.push_str("\nModel: inherit plan\n");
+        }
+
         if !node.responsibility.trim().is_empty() {
             spec.push_str("\nResponsibility: ");
             spec.push_str(node.responsibility.trim());
@@ -63,6 +69,15 @@ pub fn compile_spec(graph: &ArchitectGraph) -> Result<String, Vec<GraphProblem>>
             spec.push_str("\nRules:\n");
             for rule in &node.rules {
                 writeln!(spec, "- {rule}").ok();
+            }
+        }
+
+        if let Some(subplan) = node.subplan() {
+            spec.push_str("\nNested plan:\n\n");
+            for line in compile_spec(subplan)?.lines() {
+                spec.push_str("> ");
+                spec.push_str(line);
+                spec.push('\n');
             }
         }
 
@@ -169,6 +184,28 @@ mod tests {
 
         assert!(plan_at < edit_at, "plan should come before edit:\n{spec}");
         assert!(edit_at < test_at, "edit should come before test:\n{spec}");
+    }
+
+    #[test]
+    fn spec_includes_explicit_and_inherited_models_in_nested_plans() {
+        let mut graph = locked_graph();
+        let mut nested = ArchitectGraph::default();
+        let mut child = ArchitectNode::new("child", "Nested work");
+        child.model = Some(crate::StepModel {
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+        });
+        child.locked = true;
+        nested.add_node(child);
+        graph
+            .node_mut(&"edit".into())
+            .expect("edit step should exist")
+            .subplan = Some(Box::new(nested));
+
+        let spec = compile_spec(&graph).expect("locked plan should compile");
+        assert!(spec.contains("Model: inherit plan"));
+        assert!(spec.contains("Model: test-provider/test-model"));
+        assert!(spec.contains("Nested work"));
     }
 
     #[test]

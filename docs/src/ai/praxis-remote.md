@@ -20,12 +20,14 @@ Praxis must be running on the computer for the phone to pair or to reach it. The
 
 ## What you can do
 
-- **Chat:** read the active conversation as it happens, send messages (queued if the agent is busy), stop a turn, and start a new thread.
+- **Chat:** read the active conversation as it happens, send messages (queued if the agent is busy), stop a turn, and start a new thread. Tap **Thinking** to expand thinking supplied by the model provider. It only appears when the provider sends it; Praxis does not generate a substitute.
 - **Approvals:** every tool call waiting for permission appears as a card with the same choices Praxis offers, including requests from a plan step's own thread.
 - **Modes:** switch the conversation between Plan, Build and Architect.
-- **Architect:** see the plan's progress, and start or stop a run.
+- **Architect:** see the whole plan's step count, including nested plans, and start or stop a run. Live step conversations appear below the root conversation, including their provider-supplied thinking. Parallel steps have separate sections. The current step number counts visits, including repeats, rather than completed steps.
 - **Threads:** open an earlier conversation from the same project.
 - **Files:** browse and read the project's files, and download any of them, one at a time, with the download button next to a file or in the file viewer. On Android 10 and later downloads go to **Downloads/Praxis**; on older versions the phone asks where to save. Files up to 5 MB can be downloaded, and a large one takes a few minutes because it travels through GitHub in 32 KB pieces. Files covered by the project's `private_files` setting are never sent. There is no editing.
+
+Scroll upward in Chat to load older messages, or tap **Load older messages** at the top of the root or an active step conversation. Loaded history stays in place as live updates arrive. If loading fails, tap **Retry loading older messages**. While you read older messages, new output does not pull you back down; tap **Jump to latest** to follow it again. History is kept for the current device, window, and root conversation, and resets when you switch away. Both your computer and phone need a version that supports history paging.
 
 If several Praxis windows are open, pick one at the top of the app.
 

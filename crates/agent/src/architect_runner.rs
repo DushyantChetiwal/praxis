@@ -10,6 +10,7 @@ use futures::FutureExt as _;
 use futures::channel::oneshot;
 use futures::future::{LocalBoxFuture, join_all};
 use gpui::{App, AsyncApp, Context, Entity, SharedString, WeakEntity};
+use language_model::{LanguageModel, LanguageModelProviderId, LanguageModelRegistry};
 
 use crate::{ArchitectRun, ArchitectStepVisitId, NativeAgentConnection, SessionMode, Thread};
 
@@ -138,6 +139,18 @@ impl RunState {
             .collect()
     }
 
+    pub(crate) fn restore_interrupted_results(&self, graph: &mut ArchitectGraph) {
+        for lane in &self.lanes {
+            if lane.interrupted
+                && let Decision::Run(path) = &lane.next
+                && let Some(step) = graph.node_at_mut(path)
+            {
+                // A tool report is provisional until its turn finishes successfully.
+                step.result = self.graph.node_at(path).and_then(|step| step.result.clone());
+            }
+        }
+    }
+
     /// Hands over every turn in flight, for stopping them.
     pub(crate) fn take_in_flight(&mut self) -> Vec<Entity<AcpThread>> {
         self.in_flight
@@ -250,6 +263,169 @@ fn start_run(
     Ok(())
 }
 
+/// Revises an execution brief after explicit coordinator approval, without changing
+/// topology, results, or the run checkpoint. `goal` replaces `ArchitectNode::intent`;
+/// omitted fields are preserved and supplied empty values clear those fields.
+///
+/// This is an authorized execution change, not a drafting edit: existing locks on
+/// the step and its ancestors stay intact. Callers must obtain approval before
+/// invoking it. Active steps (including branch decisions) require stopping first;
+/// completed steps and containers with completed descendants cannot be revised.
+pub fn update_architect_step(
+    thread: &Entity<Thread>,
+    path: &NodePath,
+    goal: Option<String>,
+    rules: Option<Vec<String>>,
+    capture: Option<String>,
+    cx: &mut App,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        goal.is_some() || rules.is_some() || capture.is_some(),
+        "Provide a goal, rules, or capture requirement to revise."
+    );
+    let owner = thread.read(cx);
+    let step = owner
+        .architect_graph()
+        .and_then(|graph| graph.node_at(path))
+        .ok_or_else(|| anyhow::anyhow!("The plan has no step {path}."))?;
+    ensure_architect_step_inactive(owner, path)?;
+    anyhow::ensure!(
+        !has_completed_architect_work(step),
+        "Step {path} already has completed work. Its execution brief cannot be rewritten."
+    );
+    let control = owner.architect_run().and_then(ArchitectRun::control).cloned();
+    let apply = |step: &mut architect::ArchitectNode| {
+        if let Some(goal) = &goal {
+            step.intent = goal.clone();
+        }
+        if let Some(rules) = &rules {
+            step.rules = rules.clone();
+        }
+        if let Some(capture) = &capture {
+            step.capture = capture.clone();
+        }
+    };
+    if let Some(control) = &control {
+        let mut state = control.borrow_mut();
+        let step = state.graph.node_at_mut(path).ok_or_else(|| {
+            anyhow::anyhow!("Step {path} is not in the run checkpoint. Start a new run to change its topology.")
+        })?;
+        anyhow::ensure!(
+            !has_completed_architect_work(step),
+            "Step {path} already has completed work in the checkpoint. Its execution brief cannot be rewritten."
+        );
+        apply(step);
+    }
+    thread.update(cx, |thread, cx| {
+        thread.update_architect_graph(
+            |graph| {
+                if let Some(step) = graph.node_at_mut(path) {
+                    apply(step);
+                }
+            },
+            cx,
+        );
+    });
+    Ok(())
+}
+
+fn has_completed_architect_work(step: &architect::ArchitectNode) -> bool {
+    step.result.is_some()
+        || step.subplan().is_some_and(|graph| {
+            graph.nodes.iter().any(has_completed_architect_work)
+        })
+}
+
+fn ensure_architect_step_inactive(thread: &Thread, path: &NodePath) -> anyhow::Result<()> {
+    if let Some(run) = thread.architect_run().filter(|run| run.is_running()) {
+        let active = run
+            .running_steps()
+            .iter()
+            .any(|step| step.path.as_slice().starts_with(path.as_slice()))
+            || run.control().is_some_and(|control| {
+                control.borrow().lanes.iter().any(|lane| {
+                    matches!(lane.next, Decision::Ask(_))
+                        && lane.run.current().as_slice().starts_with(path.as_slice())
+                })
+            });
+        anyhow::ensure!(
+            !active,
+            "Stop the run before revising active step {path} or its enclosing brief."
+        );
+    }
+    Ok(())
+}
+
+/// Changes the model for subsequent visits to a step without changing run topology.
+/// Stop the run before changing a step whose execution or branch decision is active.
+/// Completed visits and their conversations retain the model they actually used;
+/// changing a completed step's selection only affects later visits or runs.
+pub fn set_architect_step_model(
+    thread: &Entity<Thread>,
+    path: &NodePath,
+    model: Option<architect::StepModel>,
+    cx: &mut App,
+) -> anyhow::Result<()> {
+    let owner = thread.read(cx);
+    anyhow::ensure!(
+        owner
+            .architect_graph()
+            .and_then(|graph| graph.node_at(path))
+            .is_some(),
+        "The plan has no step {path}."
+    );
+    let run = owner.architect_run();
+    let control = run.and_then(ArchitectRun::control).cloned();
+    ensure_architect_step_inactive(owner, path)?;
+    if let Some(model) = &model {
+        resolve_step_model(model, cx)?;
+    }
+    if let Some(control) = &control {
+        let mut state = control.borrow_mut();
+        let step = state.graph.node_at_mut(path).ok_or_else(|| {
+            anyhow::anyhow!("Step {path} is not in the run checkpoint. Start a new run to change its topology.")
+        })?;
+        step.model = model.clone();
+    }
+    thread.update(cx, |thread, cx| {
+        thread.update_architect_graph(
+            |graph| {
+                if let Some(step) = graph.node_at_mut(path) {
+                    step.model = model;
+                }
+            },
+            cx,
+        );
+    });
+    Ok(())
+}
+
+pub(crate) fn resolve_step_model(
+    selection: &architect::StepModel,
+    cx: &App,
+) -> anyhow::Result<LanguageModel> {
+    let provider_id = LanguageModelProviderId::from(selection.provider.clone());
+    let provider = LanguageModelRegistry::read_global(cx)
+        .provider(&provider_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Model provider \"{}\" is unavailable. Configure it or choose another step model.",
+                selection.provider
+            )
+        })?;
+    provider
+        .provided_models(cx)
+        .into_iter()
+        .find(|model| model.id().0.as_ref() == selection.model.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Model \"{}/{}\" is unavailable. Configure it or choose another step model.",
+                selection.provider,
+                selection.model
+            )
+        })
+}
+
 /// Pauses a run: no lane starts another step or question, and the turns
 /// already under way are left to finish. The run then waits, keeping its
 /// place in every branch, until it is resumed.
@@ -318,8 +494,9 @@ pub fn resume_architect_run(
     Ok(())
 }
 
-/// Cancels both the in-flight conversation turns and the task owned by the
-/// thread. Either entity may already be gone while a window is closing.
+/// Stops execution while preserving its checkpoint. Passing `None` never cancels
+/// the owning conversation, so its coordinator can interrupt a run from a tool.
+/// Pass the owning ACP thread only to also cancel legacy shared-thread execution.
 pub fn stop_architect_run(
     thread: &Entity<Thread>,
     acp_thread: Option<&Entity<AcpThread>>,
@@ -331,7 +508,12 @@ pub fn stop_architect_run(
     let run = thread.read(cx).architect_run();
     let control = run.and_then(ArchitectRun::control);
     let working: Vec<Entity<AcpThread>> = match control {
-        Some(control) => control.borrow_mut().take_in_flight(),
+        Some(control) => {
+            let mut state = control.borrow_mut();
+            state.halted = true;
+            state.waiters.clear();
+            state.take_in_flight()
+        }
         None if run.is_some_and(ArchitectRun::is_running) => {
             let step_thread = run.and_then(ArchitectRun::step_thread);
             step_thread
@@ -341,12 +523,16 @@ pub fn stop_architect_run(
         }
         None => Vec::new(),
     };
+    let owner_session_id = thread.read(cx).id().clone();
+    thread.update(cx, |thread, cx| thread.stop_architect_run(cx));
     for working_thread in working {
+        if acp_thread.is_none() && working_thread.read(cx).session_id() == &owner_session_id {
+            continue;
+        }
         working_thread
             .update(cx, |thread, cx| thread.cancel(cx))
             .detach();
     }
-    thread.update(cx, |thread, cx| thread.stop_architect_run(cx));
 }
 
 /// What every lane of a run shares.
@@ -394,16 +580,6 @@ impl Driver {
     async fn run_to_end(self, cx: &mut AsyncApp) {
         let outcome = drive_lane(self.clone(), 0, cx.clone()).await;
 
-        if !outcome.is_success() && outcome != RunOutcome::Cancelled {
-            let report = outcome.describe(&self.state.borrow().graph);
-            self.begin_turn(0, &self.plan_thread);
-            let sent = send_and_wait(&self.plan_thread, report, cx).await;
-            self.end_turn(0);
-            if let Err(error) = sent {
-                log::error!("Architect: could not report how the run ended: {error}");
-            }
-        }
-
         if let Err(error) = self.thread.update(cx, |thread, cx| {
             thread.finish_architect_run(outcome, cx);
         }) {
@@ -443,7 +619,7 @@ impl Driver {
         cx: &mut AsyncApp,
     ) -> Result<Decision, RunOutcome> {
         let concurrent = self.step_threads.is_some();
-        let (step_number, attempt, title, mut prompt, alongside, note) = {
+        let (step_number, attempt, title, mut prompt, model, note) = {
             let mut guard = self.state.borrow_mut();
             let state = &mut *guard;
             if state.steps >= MAX_RUN_STEPS {
@@ -464,7 +640,8 @@ impl Driver {
                 Vec::new()
             };
             let note = architect::parallel_steps_prompt(&state.graph, &alongside);
-            (step_number, attempt, title, prompt, alongside, note)
+            let model = state.graph.node_at(&node).and_then(|step| step.model.clone());
+            (step_number, attempt, title, prompt, model, note)
         };
 
         let visit = self.update_thread(cx, |thread, cx| {
@@ -481,7 +658,13 @@ impl Driver {
             Some((connection, plan_session_id)) => {
                 let label = SharedString::from(format!("Step {step_number}: {title}"));
                 let created = cx.update(|cx| {
-                    connection.create_architect_run_step_thread(plan_session_id, label, visit, cx)
+                    connection.create_architect_run_step_thread(
+                        plan_session_id,
+                        label,
+                        visit,
+                        model.as_ref(),
+                        cx,
+                    )
                 });
                 match created {
                     Ok(step_thread) => {
@@ -493,21 +676,19 @@ impl Driver {
                         );
                         step_thread
                     }
-                    Err(error) if alongside.is_empty() => {
-                        log::warn!(
-                            "Architect: running {node} in the plan's conversation, since a thread \
-                             of its own could not be made: {error:#}"
-                        );
-                        self.plan_thread.clone()
-                    }
                     Err(error) => {
-                        // The plan's conversation can only take one step at a
-                        // time, and others are running alongside this one.
                         let message =
                             format!("No thread could be made for step \"{node}\": {error:#}");
                         return Err(self.fail_step(visit, message, cx));
                     }
                 }
+            }
+            None if model.is_some() => {
+                return Err(self.fail_step(
+                    visit,
+                    "Per-step models require the Praxis Agent. Choose it and resume the run.".into(),
+                    cx,
+                ));
             }
             None => self.plan_thread.clone(),
         };
@@ -530,13 +711,17 @@ impl Driver {
         let halted = self.end_turn(lane);
         let reported_on_visit =
             self.update_thread(cx, |thread, _cx| thread.clear_architect_step_visit(visit))?;
-        if let Err(error) = sent {
-            if halted {
-                self.finish_visit(visit, None, cx)?;
-                return Err(RunOutcome::Cancelled);
-            }
-            let message = format!("Step \"{node}\" could not run: {error}");
-            return Err(self.fail_step(visit, message, cx));
+        if halted || matches!(sent, Err(RunOutcome::Cancelled)) {
+            self.finish_visit(visit, None, cx)?;
+            return Err(RunOutcome::Cancelled);
+        }
+        if let Err(outcome) = sent {
+            return Err(match outcome {
+                RunOutcome::Failed { message } => {
+                    self.fail_step(visit, format!("Step \"{node}\" could not run: {message}"), cx)
+                }
+                outcome => outcome,
+            });
         }
 
         // Only a report made on this visit counts. The step may still carry
@@ -598,26 +783,52 @@ impl Driver {
         branch: Branch,
         cx: &mut AsyncApp,
     ) -> Result<Decision, RunOutcome> {
-        let (prompt, asked) = {
+        let (prompt, asked, model) = {
             let state = self.state.borrow();
             let last_step_thread = state.lanes[lane].last_step_thread.as_ref();
             let asked = match last_step_thread.and_then(WeakEntity::upgrade) {
                 Some(thread) => thread,
+                None if self.step_threads.is_some() => {
+                    return Err(RunOutcome::Failed {
+                        message: "The step conversation is no longer available to decide its branch. Run that step again.".into(),
+                    });
+                }
                 None => self.plan_thread.clone(),
             };
-            (architect::branch_prompt(&state.graph, &branch), asked)
+            let model = state
+                .graph
+                .node_at(&state.lanes[lane].run.current())
+                .and_then(|step| step.model.clone());
+            (architect::branch_prompt(&state.graph, &branch), asked, model)
         };
+        if let Some((connection, _)) = &self.step_threads {
+            cx.update(|cx| -> anyhow::Result<()> {
+                let model = match &model {
+                    Some(model) => resolve_step_model(model, cx)?,
+                    None => self
+                        .thread
+                        .read_with(cx, |thread, _| thread.model().cloned())?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Select a model for the plan before resuming.")
+                        })?,
+                };
+                let step_thread = connection
+                    .thread(asked.read(cx).session_id(), cx)
+                    .ok_or_else(|| anyhow::anyhow!("The step conversation is no longer open."))?;
+                step_thread.update(cx, |thread, cx| thread.set_model(model, cx));
+                Ok(())
+            })
+            .map_err(|error| RunOutcome::Failed {
+                message: format!("The branch model could not be selected: {error:#}"),
+            })?;
+        }
 
         self.begin_turn(lane, &asked);
         let sent = send_and_wait(&asked, prompt, cx).await;
         if self.end_turn(lane) {
             return Err(RunOutcome::Cancelled);
         }
-        if let Err(error) = sent {
-            let message = format!("A branch could not be decided: {error}");
-            log::error!("Architect: {message}");
-            return Err(RunOutcome::Failed { message });
-        }
+        sent?;
 
         let reply = closing_message(&asked, cx);
         let taken = architect::parse_verdict(&reply).unwrap_or_else(|| {
@@ -684,6 +895,7 @@ impl Driver {
         let turns = {
             let mut state = self.state.borrow_mut();
             state.halted = true;
+            state.waiters.clear();
             state.take_in_flight()
         };
         for turn in turns {
@@ -784,7 +996,7 @@ fn drive_lane(
 ) -> LocalBoxFuture<'static, RunOutcome> {
     async move {
         let outcome = driver.drive(lane, &mut cx).await;
-        if !outcome.is_success() && outcome != RunOutcome::Cancelled {
+        if !outcome.is_success() {
             driver.halt(&mut cx);
         }
         outcome
@@ -840,15 +1052,26 @@ async fn send_and_wait(
     thread: &Entity<AcpThread>,
     prompt: String,
     cx: &mut AsyncApp,
-) -> anyhow::Result<()> {
+) -> Result<(), RunOutcome> {
     let send = thread.update(cx, |thread, cx| {
         thread.send(
             vec![acp::ContentBlock::Text(acp::TextContent::new(prompt))],
             cx,
         )
     });
-    send.await?;
-    Ok(())
+    match send.await {
+        Ok(Some(response)) => match response.stop_reason {
+            acp::StopReason::EndTurn => Ok(()),
+            acp::StopReason::Cancelled => Err(RunOutcome::Cancelled),
+            reason => Err(RunOutcome::Failed {
+                message: format!("The step ended without completing ({reason:?}). Check its conversation and resume the run."),
+            }),
+        },
+        Ok(None) => Err(RunOutcome::Cancelled),
+        Err(error) => Err(RunOutcome::Failed {
+            message: format!("{error:#}. Check the model's configuration and resume the run."),
+        }),
+    }
 }
 
 fn last_assistant_text(thread: &AcpThread, cx: &App) -> String {

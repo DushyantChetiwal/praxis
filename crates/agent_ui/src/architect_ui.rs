@@ -328,6 +328,7 @@ pub struct ArchitectPane {
     next_undo_group: Option<UndoGroup>,
 
     _thread_subscription: Subscription,
+    _model_registry_subscription: Subscription,
     _search_subscription: Subscription,
     /// Watches for another item becoming active while Architect View owns the
     /// workspace, so that opening a file switches to Editor View with it.
@@ -358,6 +359,10 @@ impl ArchitectPane {
             cx.emit(workspace::item::ItemEvent::UpdateTab);
             cx.notify();
         });
+        let model_registry_subscription = cx.subscribe(
+            &language_model::LanguageModelRegistry::global(cx),
+            |_, _, _, cx| cx.notify(),
+        );
         let search_editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
             editor.set_placeholder_text("Search steps", window, cx);
@@ -418,6 +423,7 @@ impl ArchitectPane {
             undo_group: None,
             next_undo_group: None,
             _thread_subscription: subscription,
+            _model_registry_subscription: model_registry_subscription,
             _search_subscription: search_subscription,
             _workspace_subscription: workspace_subscription,
             plan_conversation_subscription: None,
@@ -3974,6 +3980,150 @@ mod tests {
                 Some(Selection::Node(b.clone())),
                 "with nothing to reach from, Shift-click selects the step alone"
             );
+        });
+    }
+
+    #[gpui::test]
+    async fn step_model_inspector_edits_use_registry_ids_and_recheck_guards(cx: &mut TestAppContext) {
+        fn step_model(
+            pane: &ArchitectPane,
+            path: &NodePath,
+            cx: &Context<ArchitectPane>,
+        ) -> Option<architect::StepModel> {
+            pane.root_graph(cx)
+                .and_then(|graph| graph.node_at(path))
+                .and_then(|node| node.model.clone())
+        }
+
+        let plan = test_plan(cx).await;
+        let project = plan.project.clone();
+        let thread = plan.thread;
+        let mut nested = ArchitectGraph::default();
+        nested.add_node(ArchitectNode::new("step", "Nested step"));
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.subplan = Some(Box::new(nested));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(parent);
+        graph.add_node(ArchitectNode::new("step", "Root step"));
+        thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
+        let path = NodePath::from(vec!["parent".into(), "step".into()]);
+        let model = cx.update(|cx| {
+            inspector::available_step_models(cx)
+                .into_iter()
+                .next()
+                .expect("the registry should offer the fake provider's model")
+                .0
+        });
+        assert_eq!(model.provider, "fake");
+        assert_eq!(model.model, "fake");
+
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.update_in(cx, |_workspace, window, cx| {
+            let workspace = cx.weak_entity();
+            cx.new(|cx| {
+                ArchitectPane::new(
+                    thread.clone(),
+                    workspace,
+                    None,
+                    Vec::new(),
+                    None,
+                    px(226.0),
+                    px(348.0),
+                    window,
+                    cx,
+                )
+            })
+        });
+        pane.update_in(cx, |pane, window, cx| {
+            pane.drill_into("parent".into(), window, cx);
+            pane.set_selection(Some(Selection::Node("step".into())), window, cx);
+            assert!(pane.set_step_model(path.clone(), Some(model.clone()), cx));
+            assert_eq!(step_model(pane, &path, cx), Some(model.clone()));
+            assert!(step_model(pane, &NodePath::root("step".into()), cx).is_none());
+            pane.step_history(HistoryDirection::Undo, window, cx);
+            assert!(step_model(pane, &path, cx).is_none());
+            pane.step_history(HistoryDirection::Redo, window, cx);
+            assert_eq!(step_model(pane, &path, cx), Some(model.clone()));
+
+            // A menu opened inside the parent must retain its full path even
+            // if navigation changes before its deferred callback is delivered.
+            pane.drill_out(window, cx);
+            assert!(pane.set_step_model(path.clone(), None, cx));
+            assert!(pane.set_step_model(path.clone(), Some(model.clone()), cx));
+            pane.set_selection(Some(Selection::Node("parent".into())), window, cx);
+            pane.duplicate_selection(window, cx);
+            let copy = pane
+                .root_graph(cx)
+                .and_then(|graph| graph.nodes.last())
+                .expect("a copy should be added");
+            assert_eq!(
+                copy.subplan()
+                    .and_then(|graph| graph.node(&"step".into()))
+                    .and_then(|node| node.model.as_ref()),
+                Some(&model)
+            );
+        });
+        cx.run_until_parked();
+
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(
+                |graph| {
+                    graph
+                        .lock_deeply_at(&NodePath::root("parent".into()))
+                        .expect("the parent should lock");
+                    graph.node_at_mut(&path).expect("child should exist").locked = false;
+                },
+                cx,
+            );
+        });
+        pane.update_in(cx, |pane, _, cx| {
+            assert!(!pane.set_step_model(path.clone(), None, cx));
+        });
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(
+                |graph| {
+                    graph.unlock_all();
+                    graph.set_locked_at(&path, true).expect("the step should lock");
+                },
+                cx,
+            );
+        });
+        pane.update_in(cx, |pane, _, cx| {
+            assert!(!pane.set_step_model(path.clone(), None, cx));
+        });
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(|graph| graph.unlock_all(), cx);
+        });
+        pane.update_in(cx, |pane, _, cx| {
+            pane.run_starting.set(true);
+            assert!(!pane.set_step_model(path.clone(), None, cx));
+            pane.run_starting.set(false);
+        });
+        thread.update(cx, |thread, cx| {
+            thread.start_architect_run(path.clone(), "Nested step".into(), Task::ready(()), cx);
+        });
+        pane.update_in(cx, |pane, _, cx| {
+            assert!(!pane.set_step_model(path.clone(), None, cx));
+            assert_eq!(step_model(pane, &path, cx), Some(model.clone()));
+        });
+        thread.update(cx, |thread, cx| {
+            thread.finish_architect_run(architect::RunOutcome::Completed, cx);
+        });
+        cx.update(|_, cx| {
+            language_model::LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                registry.unregister_provider(
+                    language_model::LanguageModelProviderId(model.provider.clone().into()),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        pane.update_in(cx, |pane, _, cx| {
+            assert!(inspector::available_step_models(cx).is_empty());
+            assert!(!pane.set_step_model(path.clone(), Some(model.clone()), cx));
+            assert!(pane.set_step_model(path.clone(), None, cx));
+            assert!(step_model(pane, &path, cx).is_none());
         });
     }
 

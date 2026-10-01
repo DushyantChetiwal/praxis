@@ -5,6 +5,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -66,6 +67,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -90,6 +93,15 @@ import io.github.dushyantchetiwal.praxis.remote.R
 import io.github.dushyantchetiwal.praxis.remote.Tab
 import io.github.dushyantchetiwal.praxis.remote.data.Architect
 import io.github.dushyantchetiwal.praxis.remote.data.Entry
+import io.github.dushyantchetiwal.praxis.remote.data.HistoryScrollAnchor
+import io.github.dushyantchetiwal.praxis.remote.data.HistoryScrollGate
+import io.github.dushyantchetiwal.praxis.remote.data.TranscriptHistory
+import io.github.dushyantchetiwal.praxis.remote.data.followLatestAfterScroll
+import io.github.dushyantchetiwal.praxis.remote.data.historyItemKey
+import io.github.dushyantchetiwal.praxis.remote.data.stepItemKey
+import io.github.dushyantchetiwal.praxis.remote.data.transcriptEntryKey
+import io.github.dushyantchetiwal.praxis.remote.data.transcriptItemKeys
+import kotlinx.coroutines.flow.first
 import io.github.dushyantchetiwal.praxis.remote.data.ModeInfo
 import io.github.dushyantchetiwal.praxis.remote.data.Permission
 import io.github.dushyantchetiwal.praxis.remote.ui.theme.OnlineGreen
@@ -321,13 +333,38 @@ private fun PermissionCard(permission: Permission, busy: Boolean, vm: MainViewMo
 
 @Composable
 private fun Transcript(ui: DeviceUi, vm: MainViewModel) {
+    key(ui.device?.channel, ui.windowId, ui.thread?.sessionId) {
+        TranscriptContent(ui, vm)
+    }
+}
+
+@Composable
+private fun TranscriptContent(ui: DeviceUi, vm: MainViewModel) {
     val thread = ui.thread
     val entries = thread?.entries.orEmpty()
     val session = thread?.sessionId
     val listState = rememberLazyListState()
-    val expanded = remember(session) { mutableStateMapOf<Int, Boolean>() }
+    val expanded = remember(session) { mutableStateMapOf<String, Boolean>() }
+    val stepThreads = thread?.stepThreads.orEmpty()
     var stick by remember { mutableStateOf(true) }
-    val hidden = (thread?.total ?: 0) - entries.size
+    var anchor by remember { mutableStateOf<HistoryScrollAnchor?>(null) }
+    val dragging by listState.interactionSource.collectIsDraggedAsState()
+    val gate = remember { HistoryScrollGate() }
+    val history by rememberUpdatedState(ui.history)
+    val itemKeys by rememberUpdatedState(transcriptItemKeys(thread))
+
+    fun visibleAnchor(requestId: Long): HistoryScrollAnchor? =
+        listState.layoutInfo.visibleItemsInfo.firstOrNull { (it.key as? String)?.startsWith("entry:") == true }
+            ?.let { HistoryScrollAnchor(requestId, it.key as String, it.offset) }
+
+    val loadHistory: (String, Boolean) -> Unit = { target, retry ->
+        val requestId = vm.loadOlder(target, retry)
+        if (requestId != null) {
+            stick = false
+            anchor = visibleAnchor(requestId)
+        }
+    }
+    val latestLoadHistory by rememberUpdatedState(loadHistory)
 
     val atBottom by remember {
         derivedStateOf {
@@ -338,19 +375,39 @@ private fun Transcript(ui: DeviceUi, vm: MainViewModel) {
         }
     }
     LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress to atBottom }.collect { (scrolling, bottom) ->
-            if (scrolling || bottom) stick = bottom
+        snapshotFlow {
+            (dragging to listState.isScrollInProgress) to (listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset)
+        }.collect { (interaction, position) ->
+            val (dragging, scrolling) = interaction
+            val (index, offset) = position
+            val visibleKeys = listState.layoutInfo.visibleItemsInfo.map { it.key }.toSet()
+            val candidate = history.records.keys.firstOrNull {
+                history.canLoad(it) && historyItemKey(it) in visibleKeys
+            }
+            val fetch = gate.update(dragging, index, offset, candidate != null, scrolling)
+            stick = followLatestAfterScroll(
+                stick, gate.userScrolling, gate.movingUp, atBottom, history.request != null || anchor != null,
+            )
+            if (gate.userScrolling) anchor?.let { anchor = visibleAnchor(it.requestId) ?: it }
+            if (fetch && candidate != null) latestLoadHistory(candidate, false)
         }
     }
-    LaunchedEffect(session) { stick = true }
+    LaunchedEffect(ui.history.request?.id, anchor) {
+        val pending = anchor ?: return@LaunchedEffect
+        if (ui.history.request?.id == pending.requestId) return@LaunchedEffect
+        snapshotFlow { listState.isScrollInProgress }.first { !it }
+        pending.indexIn(itemKeys)?.let { listState.scrollToItem(it, -pending.offset) }
+        if (anchor == pending) anchor = null
+    }
 
     val hasItems by remember { derivedStateOf { listState.layoutInfo.totalItemsCount > 0 } }
-    LaunchedEffect(session, entries, ui.outbox.size, ui.threadKnown) {
+    LaunchedEffect(session, entries, stepThreads, ui.outbox.size, ui.threadKnown) {
         if (stick) scrollToEnd(listState)
     }
     LaunchedEffect(ui.outbox.size) {
         // Sending always brings the new message into view.
         if (ui.outbox.isNotEmpty()) {
+            anchor = null
             stick = true
             scrollToEnd(listState)
         }
@@ -365,19 +422,28 @@ private fun Transcript(ui: DeviceUi, vm: MainViewModel) {
         if (thread == null && ui.outbox.isEmpty()) {
             item(key = "empty") { TranscriptEmpty(ui, vm) }
         }
-        if (thread != null && hidden > 0) {
-            item(key = "earlier") {
-                Text(
-                    pluralStringResource(R.plurals.chat_earlier, hidden, hidden),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+        if (thread != null) {
+            item(key = historyItemKey(session)) {
+                HistoryHeader(ui.history, session, loadHistory)
             }
         }
-        items(entries, key = { "e-${session}-${it.index}" }) { entry ->
-            EntryView(entry, expanded[entry.index] == true) { expanded[entry.index] = !(expanded[entry.index] ?: false) }
+        items(entries, key = { transcriptEntryKey(session, it.index) }) { entry ->
+            TranscriptEntry(entry, transcriptEntryKey(session, entry.index), expanded)
+        }
+        stepThreads.forEach { step ->
+            item(key = stepItemKey(step.sessionId)) {
+                Text(
+                    stringResource(R.string.chat_active_step, step.title ?: stringResource(R.string.chat_untitled)),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            item(key = historyItemKey(step.sessionId)) {
+                HistoryHeader(ui.history, step.sessionId, loadHistory)
+            }
+            items(step.entries, key = { transcriptEntryKey(step.sessionId, it.index) }) { entry ->
+                TranscriptEntry(entry, transcriptEntryKey(step.sessionId, entry.index), expanded)
+            }
         }
         items(ui.outbox, key = { "o-${it.id}" }) { item -> OutboxBubble(item) }
     }
@@ -389,12 +455,46 @@ private fun Transcript(ui: DeviceUi, vm: MainViewModel) {
         modifier = Modifier.fillMaxSize(),
     ) {
         Box(Modifier.fillMaxSize().padding(12.dp), contentAlignment = Alignment.BottomEnd) {
-            SmallFloatingActionButton(onClick = { stick = true }) {
+            SmallFloatingActionButton(onClick = { anchor = null; stick = true }) {
                 Icon(Icons.Filled.KeyboardArrowDown, contentDescription = stringResource(R.string.chat_jump_to_bottom))
             }
         }
     }
     LaunchedEffect(stick) { if (stick) scrollToEnd(listState) }
+}
+
+@Composable
+private fun HistoryHeader(history: TranscriptHistory, session: String?, onLoad: (String, Boolean) -> Unit) {
+    val record = history.records[session] ?: return
+    val loading = history.request?.session == session
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        when {
+            loading -> LoadingRow(stringResource(R.string.history_loading))
+            record.failure != null -> {
+                Text(
+                    record.failure.message ?: stringResource(R.string.history_no_progress),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                TextButton(onClick = { if (session != null) onLoad(session, true) }, enabled = history.request == null) {
+                    Text(stringResource(R.string.history_retry))
+                }
+            }
+            (record.nextBefore ?: 0) > 0 -> TextButton(
+                onClick = { if (session != null) onLoad(session, false) },
+                enabled = history.request == null,
+            ) { Text(stringResource(R.string.history_load)) }
+            else -> Text(
+                stringResource(if (record.nextBefore == null && record.view.total > record.view.entries.size) {
+                    R.string.history_upgrade
+                } else {
+                    R.string.history_start
+                }),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
 }
 
 private suspend fun scrollToEnd(state: LazyListState) {
@@ -430,11 +530,29 @@ private fun TranscriptEmpty(ui: DeviceUi, vm: MainViewModel) {
 }
 
 @Composable
+private fun TranscriptEntry(entry: Entry, entryKey: String, expanded: MutableMap<String, Boolean>) {
+    if (entry.parts.isEmpty()) {
+        EntryView(entry, expanded[entryKey] == true) { expanded[entryKey] = expanded[entryKey] != true }
+    } else {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            entry.parts.forEach { part ->
+                val partKey = "$entryKey:part:${part.index}"
+                EntryView(
+                    Entry(entry.index, part.role, part.text, entry.status),
+                    expanded[partKey] == true,
+                ) { expanded[partKey] = expanded[partKey] != true }
+            }
+        }
+    }
+}
+
+@Composable
 private fun EntryView(entry: Entry, expanded: Boolean, onToggle: () -> Unit) {
     when (entry.role) {
         "user" -> UserBubble(entry.text)
         "assistant" -> SelectionContainer { Markdown(entry.text, Modifier.fillMaxWidth().padding(horizontal = 4.dp)) }
         "tool" -> ToolRow(entry, expanded, onToggle)
+        "reasoning" -> ThinkingRow(entry.text, expanded, onToggle)
         else -> Text(
             entry.text,
             style = MaterialTheme.typography.bodySmall,
@@ -443,6 +561,30 @@ private fun EntryView(entry: Entry, expanded: Boolean, onToggle: () -> Unit) {
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         )
+    }
+}
+
+@Composable
+private fun ThinkingRow(text: String, expanded: Boolean, onToggle: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column {
+            TextButton(onClick = onToggle, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.chat_thinking), modifier = Modifier.weight(1f), textAlign = TextAlign.Start)
+                Icon(
+                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = stringResource(if (expanded) R.string.action_collapse else R.string.action_expand),
+                )
+            }
+            if (expanded) {
+                SelectionContainer {
+                    Markdown(text, Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp), style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
     }
 }
 

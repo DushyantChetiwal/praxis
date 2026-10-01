@@ -10,6 +10,7 @@ import io.github.dushyantchetiwal.praxis.remote.data.Snapshot
 import io.github.dushyantchetiwal.praxis.remote.data.Status
 import io.github.dushyantchetiwal.praxis.remote.data.ThreadItem
 import io.github.dushyantchetiwal.praxis.remote.data.ThreadView
+import io.github.dushyantchetiwal.praxis.remote.data.TranscriptHistory
 import io.github.dushyantchetiwal.praxis.remote.data.UpdateInfo
 import io.github.dushyantchetiwal.praxis.remote.data.WatchInfo
 import io.github.dushyantchetiwal.praxis.remote.data.WindowInfo
@@ -134,7 +135,7 @@ data class DeviceUi(
     val windowId: Long? = null,
     /** A thread pinned with open_thread; null follows the window's active thread. */
     val watchSession: String? = null,
-    val thread: ThreadView? = null,
+    val history: TranscriptHistory = TranscriptHistory(),
     /** Whether [thread] reflects a snapshot for the current view. */
     val threadKnown: Boolean = false,
     val threadError: String? = null,
@@ -151,6 +152,8 @@ data class DeviceUi(
     val stopping: Boolean = false,
     val startingThread: Boolean = false,
 ) {
+    val thread: ThreadView? get() = history.thread
+
     fun currentWindow(): WindowInfo? = status?.windows?.find { it.id == windowId }
 
     fun isGenerating(): Boolean =

@@ -115,16 +115,21 @@
     <string name="chat_waiting">Waiting for Praxis…</string>
     <string name="chat_loading_thread">Loading thread…</string>
     <string name="chat_jump_to_bottom">Jump to latest</string>
+    <string name="history_loading">Loading older messages…</string>
+    <string name="history_load">Load older messages</string>
+    <string name="history_retry">Retry loading older messages</string>
+    <string name="history_no_progress">Praxis returned no earlier page. Retry, or update Praxis on your computer.</string>
+    <string name="history_upgrade">Update Praxis on your computer to load older messages.</string>
+    <string name="history_start">Start of conversation</string>
     <string name="status_working">Working…</string>
     <string name="status_idle">Idle</string>
     <plurals name="status_queued">
         <item quantity="one">%d queued</item>
         <item quantity="other">%d queued</item>
     </plurals>
-    <plurals name="chat_earlier">
-        <item quantity="one">%d earlier entry not shown</item>
-        <item quantity="other">%d earlier entries not shown</item>
-    </plurals>
+
+    <string name="chat_thinking">Thinking</string>
+    <string name="chat_active_step">Active step · %1$s</string>
     <string name="architect_title">Architect plan</string>
     <string name="architect_step">Step %1$s of %2$d</string>
     <plurals name="architect_planned">

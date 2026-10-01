@@ -31,7 +31,7 @@ use project::{
 use serde::{Deserialize, Serialize};
 use serde_json::to_string_pretty;
 use settings::{Settings, SettingsStore};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Formatter, Write};
@@ -441,18 +441,68 @@ pub struct ElicitationStore {
     question_timeouts: HashMap<ElicitationEntryId, QuestionTimeout>,
 }
 
+#[derive(Default)]
+pub struct QuestionWindowActivity {
+    windows: RefCell<Vec<std::rc::Weak<Cell<Option<Instant>>>>>,
+}
+
+impl QuestionWindowActivity {
+    fn track_window(&self, active: bool, now: Instant) -> Rc<Cell<Option<Instant>>> {
+        let activity = Rc::new(Cell::new((!active).then_some(now)));
+        let mut windows = self.windows.borrow_mut();
+        windows.retain(|window| window.strong_count() > 0);
+        windows.push(Rc::downgrade(&activity));
+        activity
+    }
+
+    /// Observe OS window focus, not individual controls: reading or selecting in
+    /// an active window must never spend the inactivity budget. The callback only
+    /// updates a cell, so it cannot re-enter a thread or its observing panel.
+    pub fn observe_window<T: 'static>(
+        &self,
+        window: &mut gpui::Window,
+        cx: &mut Context<T>,
+    ) -> Subscription {
+        let activity =
+            self.track_window(window.is_window_active(), cx.background_executor().now());
+        cx.observe_window_activation(window, move |_, window, cx| {
+            activity.set((!window.is_window_active()).then(|| cx.background_executor().now()));
+        })
+    }
+
+    fn remaining(&self, created_at: Instant, now: Instant) -> Option<Duration> {
+        let mut inactive_since = None;
+        for window in self.windows.borrow().iter() {
+            // Unknown/closed windows do not authorize unattended answers, and
+            // any active presentation of the question protects it.
+            let window = window.upgrade()?;
+            let since = window.get()?;
+            inactive_since =
+                Some(inactive_since.map_or(since, |previous: Instant| previous.max(since)));
+        }
+        inactive_since.map(|since| {
+            (since.max(created_at) + Duration::from_secs(10)).saturating_duration_since(now)
+        })
+    }
+}
+
 struct QuestionTimeout {
     interacted: Rc<Cell<bool>>,
+    activity: Rc<QuestionWindowActivity>,
+    created_at: Instant,
     message: String,
     recommendation: String,
 }
 
 impl QuestionTimeout {
-    fn message(&self, seconds: u64) -> String {
+    fn message(&self, now: Instant) -> String {
         let status = if self.interacted.get() {
             "Auto-answer paused; waiting for your answer.".to_string()
+        } else if let Some(remaining) = self.activity.remaining(self.created_at, now) {
+            let seconds = remaining.as_secs_f64().ceil() as u64;
+            format!("Using the recommendation in {seconds}s while the question window is inactive.")
         } else {
-            format!("Using the recommendation in {seconds}s unless you interact.")
+            "Auto-answer paused while Praxis is active; countdown starts after you leave the question window.".to_string()
         };
         format!(
             "{}\n\nRecommendation: {}\n\n{status}",
@@ -4148,13 +4198,16 @@ impl AcpThread {
         acp::Error,
     > {
         let executor = cx.background_executor().clone();
-        let deadline = executor.now() + Duration::from_secs(10);
+        let created_at = executor.now();
+        let activity = Rc::new(QuestionWindowActivity::default());
         let state = QuestionTimeout {
             interacted: Rc::new(Cell::new(false)),
+            activity: activity.clone(),
+            created_at,
             message: request.message.clone(),
             recommendation: recommendation_label,
         };
-        request.message = state.message(10);
+        request.message = state.message(created_at);
         let (id, response) = self.request_elicitation_with_id(request, cx)?;
         let interacted = state.interacted.clone();
         self.elicitations
@@ -4186,24 +4239,34 @@ impl AcpThread {
                 .detach();
         });
         let task_id = id.clone();
+        let is_canceled = Rc::new(is_canceled);
         let task = cx.spawn(async move |this, cx| {
             let _cleanup = cleanup;
             let mut response = response.fuse();
             loop {
                 if interacted.get() {
-                    return (response.await, false);
+                    return (response.await, timed_out.get());
                 }
-                let remaining = deadline.saturating_duration_since(executor.now());
-                let tick = executor.timer(remaining.min(Duration::from_secs(1))).fuse();
+                let remaining = activity.remaining(created_at, executor.now());
+                let delay = remaining
+                    .filter(|remaining| !remaining.is_zero())
+                    .unwrap_or(Duration::from_secs(1))
+                    .min(Duration::from_secs(1));
+                let tick = executor.timer(delay).fuse();
                 futures::pin_mut!(tick);
                 futures::select_biased! {
                     response = response => return (response, timed_out.get()),
                     _ = tick => {}
                 }
-                let remaining = deadline.saturating_duration_since(executor.now());
-                if remaining.is_zero() {
+                if activity
+                    .remaining(created_at, executor.now())
+                    .is_some_and(|remaining| remaining.is_zero())
+                {
                     let id = task_id.clone();
                     let timeout_result = timed_out.clone();
+                    let this = this.clone();
+                    let is_canceled = is_canceled.clone();
+                    let recommendation = recommendation.clone();
                     // Let already queued input/cancellation effects win at the deadline.
                     cx.update(|cx| {
                         cx.defer(move |cx| {
@@ -4216,8 +4279,19 @@ impl AcpThread {
                                         return;
                                     }
                                     let eligible = thread
-                                        .question_interaction_flag(&id)
-                                        .is_some_and(|flag| !flag.get())
+                                        .elicitations
+                                        .question_timeouts
+                                        .get(&id)
+                                        .is_some_and(|state| {
+                                            !state.interacted.get()
+                                                && state
+                                                    .activity
+                                                    .remaining(
+                                                        state.created_at,
+                                                        cx.background_executor().now(),
+                                                    )
+                                                    .is_some_and(|remaining| remaining.is_zero())
+                                        })
                                         && thread.elicitation(&id).is_some_and(|(_, entry)| {
                                             matches!(
                                                 entry.status,
@@ -4232,14 +4306,10 @@ impl AcpThread {
                             }
                         })
                     });
-                    return (response.await, timed_out.get());
+                    continue;
                 }
                 if let Err(error) = this.update(cx, |thread, cx| {
-                    thread.refresh_question_countdown(
-                        &task_id,
-                        remaining.as_secs_f64().ceil() as u64,
-                        cx,
-                    );
+                    thread.refresh_question_countdown(&task_id, cx);
                 }) {
                     log::debug!("Question thread disappeared: {error}");
                     return (
@@ -4250,6 +4320,16 @@ impl AcpThread {
             }
         });
         Ok((id, task))
+    }
+
+    pub fn question_window_activity(
+        &self,
+        id: &ElicitationEntryId,
+    ) -> Option<Rc<QuestionWindowActivity>> {
+        self.elicitations
+            .question_timeouts
+            .get(id)
+            .map(|state| state.activity.clone())
     }
 
     /// Set this flag synchronously on input, before deferring any entity updates.
@@ -4264,20 +4344,15 @@ impl AcpThread {
     pub fn mark_question_interaction(&mut self, id: &ElicitationEntryId, cx: &mut Context<Self>) {
         if let Some(flag) = self.question_interaction_flag(id) {
             flag.set(true);
-            self.refresh_question_countdown(id, 0, cx);
+            self.refresh_question_countdown(id, cx);
         }
     }
 
-    fn refresh_question_countdown(
-        &mut self,
-        id: &ElicitationEntryId,
-        seconds: u64,
-        cx: &mut Context<Self>,
-    ) {
+    fn refresh_question_countdown(&mut self, id: &ElicitationEntryId, cx: &mut Context<Self>) {
         let Some(state) = self.elicitations.question_timeouts.get(id) else {
             return;
         };
-        let message = state.message(seconds);
+        let message = state.message(cx.background_executor().now());
         let Some(ix) = self.elicitation_entry_ix(id) else {
             return;
         };
@@ -9970,9 +10045,10 @@ mod tests {
     ) -> (
         ElicitationEntryId,
         Task<(acp::CreateElicitationResponse, bool)>,
+        Rc<Cell<Option<Instant>>>,
     ) {
         thread.update(cx, |thread, cx| {
-            thread
+            let (id, task) = thread
                 .request_question_with_timeout(
                     acp::CreateElicitationRequest::new(
                         acp::ElicitationFormMode::new(
@@ -9986,7 +10062,13 @@ mod tests {
                     || false,
                     cx,
                 )
+                .unwrap();
+            let activity = thread
+                .question_window_activity(&id)
                 .unwrap()
+                .track_window(false, cx.background_executor().now());
+            thread.refresh_question_countdown(&id, cx);
+            (id, task, activity)
         })
     }
 
@@ -9999,11 +10081,157 @@ mod tests {
         ))
     }
 
+    struct QuestionActivityView {
+        _subscription: Subscription,
+    }
+
+    impl gpui::Render for QuestionActivityView {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+            gpui::Empty
+        }
+    }
+
     #[gpui::test]
-    async fn test_question_timeout_without_ui(cx: &mut TestAppContext) {
+    async fn test_question_timeout_active_window_and_toggling(cx: &mut TestAppContext) {
         init_test(cx);
         let thread = new_test_thread(cx).await;
-        let (id, task) = request_timed_question(&thread, cx);
+        let (id, task, activity) = request_timed_question(&thread, cx);
+        drop(activity);
+        let activity =
+            thread.read_with(cx, |thread, _| thread.question_window_activity(&id).unwrap());
+        let (_, cx) = cx.add_window_view(|window, cx| QuestionActivityView {
+            _subscription: activity.observe_window(window, cx),
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        for _ in 0..3 {
+            cx.executor().advance_clock(Duration::from_secs(60));
+            cx.run_until_parked();
+            thread.read_with(cx, |thread, _| {
+                let entry = thread.elicitation(&id).unwrap().1;
+                assert!(matches!(entry.status, ElicitationStatus::Pending { .. }));
+                assert!(entry.request.message.contains("paused while Praxis is active"));
+            });
+            cx.deactivate_window();
+            cx.executor().advance_clock(Duration::from_secs(9));
+            cx.run_until_parked();
+            thread.read_with(cx, |thread, _| {
+                assert!(matches!(
+                    thread.elicitation(&id).unwrap().1.status,
+                    ElicitationStatus::Pending { .. }
+                ));
+            });
+            cx.update(|window, _| window.activate_window());
+            cx.run_until_parked();
+        }
+        cx.deactivate_window();
+        cx.executor().advance_clock(Duration::from_secs(9));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert!(matches!(
+                thread.elicitation(&id).unwrap().1.status,
+                ElicitationStatus::Pending { .. }
+            ));
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let (response, timed_out) = task
+            .now_or_never()
+            .expect("ten continuously inactive seconds must resolve the question");
+        assert!(timed_out);
+        assert_eq!(response.action, question_test_answer("postgres").action);
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_reactivation_at_deadline(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (id, task, activity) = request_timed_question(&thread, cx);
+        drop(activity);
+        let activity =
+            thread.read_with(cx, |thread, _| thread.question_window_activity(&id).unwrap());
+        let (_, cx) = cx.add_window_view(|window, cx| QuestionActivityView {
+            _subscription: activity.observe_window(window, cx),
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.deactivate_window();
+        cx.executor().advance_clock(Duration::from_secs(9));
+        cx.dispatcher
+            .scheduler()
+            .clock()
+            .advance(Duration::from_secs(1));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert!(matches!(
+                thread.elicitation(&id).unwrap().1.status,
+                ElicitationStatus::Pending { .. }
+            ));
+        });
+        thread.update(cx, |thread, cx| thread.cancel_elicitation(&id, cx));
+        assert!(!task.await.1);
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_without_ui_waits(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (id, task, activity) = request_timed_question(&thread, cx);
+        drop(activity);
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert!(matches!(
+                thread.elicitation(&id).unwrap().1.status,
+                ElicitationStatus::Pending { .. }
+            ));
+        });
+        thread.update(cx, |thread, cx| thread.cancel_elicitation(&id, cx));
+        assert!(!task.await.1);
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_any_active_window_protects_question(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (id, task, _inactive_window) = request_timed_question(&thread, cx);
+        let activity = thread.read_with(cx, |thread, cx| {
+            thread
+                .question_window_activity(&id)
+                .unwrap()
+                .track_window(true, cx.background_executor().now())
+        });
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert!(matches!(
+                thread.elicitation(&id).unwrap().1.status,
+                ElicitationStatus::Pending { .. }
+            ));
+        });
+        // Closing the active presentation must not charge its active time to
+        // another inactive presentation of the same question.
+        drop(activity);
+        cx.executor().advance_clock(Duration::from_secs(60));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert!(matches!(
+                thread.elicitation(&id).unwrap().1.status,
+                ElicitationStatus::Pending { .. }
+            ));
+        });
+        thread.update(cx, |thread, cx| thread.cancel_elicitation(&id, cx));
+        assert!(!task.await.1);
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_inactive_window(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (id, task, _activity) = request_timed_question(&thread, cx);
         let updates = Rc::new(Cell::new(0));
         let update_count = updates.clone();
         let _subscription = cx.update(|cx| {
@@ -10050,7 +10278,7 @@ mod tests {
     async fn test_question_timeout_starts_at_creation(cx: &mut TestAppContext) {
         init_test(cx);
         let thread = new_test_thread(cx).await;
-        let (id, task) = request_timed_question(&thread, cx);
+        let (id, task, _activity) = request_timed_question(&thread, cx);
         // Unlike advance_clock, advancing the raw clock does not run tasks.
         // The timer's first poll is therefore nine seconds after creation.
         cx.dispatcher
@@ -10098,6 +10326,12 @@ mod tests {
                 )
                 .unwrap()
         });
+        let _activity = thread.read_with(cx, |thread, cx| {
+            thread
+                .question_window_activity(&id)
+                .unwrap()
+                .track_window(false, cx.background_executor().now())
+        });
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_millis(9999));
         canceled.set(true);
@@ -10123,7 +10357,7 @@ mod tests {
             acp::CreateElicitationResponse::new(acp::ElicitationAction::Decline),
             acp::CreateElicitationResponse::new(acp::ElicitationAction::Cancel),
         ] {
-            let (id, task) = request_timed_question(&thread, cx);
+            let (id, task, _activity) = request_timed_question(&thread, cx);
             cx.run_until_parked();
             // advance_clock runs expired timers, so respond before the deadline.
             cx.executor().advance_clock(Duration::from_millis(9999));
@@ -10152,7 +10386,7 @@ mod tests {
             )),
             None, // Editing pauses rather than resolves the question.
         ] {
-            let (id, task) = request_timed_question(&thread, cx);
+            let (id, task, _activity) = request_timed_question(&thread, cx);
             cx.run_until_parked();
             cx.executor().advance_clock(Duration::from_secs(9));
             // Reach the deadline without polling the expired timer. Queue input
@@ -10213,7 +10447,7 @@ mod tests {
     async fn test_question_timeout_committed_result_ignores_late_input(cx: &mut TestAppContext) {
         init_test(cx);
         let thread = new_test_thread(cx).await;
-        let (id, task) = request_timed_question(&thread, cx);
+        let (id, task, _activity) = request_timed_question(&thread, cx);
         // This runs the timeout through resolution, not merely to readiness.
         cx.executor().advance_clock(Duration::from_secs(10));
         cx.run_until_parked();
@@ -10243,7 +10477,7 @@ mod tests {
     async fn test_question_timeout_interaction_permanently_pauses(cx: &mut TestAppContext) {
         init_test(cx);
         let thread = new_test_thread(cx).await;
-        let (id, task) = request_timed_question(&thread, cx);
+        let (id, task, _activity) = request_timed_question(&thread, cx);
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_millis(9999));
         thread.update(cx, |thread, cx| thread.mark_question_interaction(&id, cx));
@@ -10272,7 +10506,7 @@ mod tests {
     async fn test_question_timeout_cancel_before_deadline(cx: &mut TestAppContext) {
         init_test(cx);
         let thread = new_test_thread(cx).await;
-        let (id, task) = request_timed_question(&thread, cx);
+        let (id, task, _activity) = request_timed_question(&thread, cx);
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_millis(9999));
         thread.update(cx, |thread, cx| thread.cancel_elicitation(&id, cx));
@@ -10286,7 +10520,7 @@ mod tests {
     async fn assert_question_timeout_drop_cleans_up(cx: &mut TestAppContext, poll_first: bool) {
         init_test(cx);
         let thread = new_test_thread(cx).await;
-        let (id, task) = request_timed_question(&thread, cx);
+        let (id, task, _activity) = request_timed_question(&thread, cx);
         if poll_first {
             cx.run_until_parked();
         }
@@ -10325,7 +10559,7 @@ mod tests {
         init_test(cx);
         let thread = new_test_thread(cx).await;
         let weak = thread.downgrade();
-        let (_, task) = request_timed_question(&thread, cx);
+        let (_, task, _activity) = request_timed_question(&thread, cx);
         cx.run_until_parked();
         cx.update(|_| drop(thread));
         cx.run_until_parked();
