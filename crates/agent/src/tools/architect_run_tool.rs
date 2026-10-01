@@ -568,7 +568,7 @@ fn event_page(thread: &Thread, after: u64, limit: usize, run_id: Option<Uuid>) -
         let next = events
             .iter()
             .take(count)
-            .last()
+            .next_back()
             .map_or(after, |event| event.sequence);
         let page = json!({
             "events": entries, "next_sequence": next, "event_sequence": thread.architect_event_sequence(),
