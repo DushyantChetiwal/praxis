@@ -213,7 +213,10 @@ fn place_inserted_nodes(
                         y.is_finite()
                             && !occupied.iter().any(|other| {
                                 layout_cells_overlap(
-                                    Position { x: position.x, y: *y },
+                                    Position {
+                                        x: position.x,
+                                        y: *y,
+                                    },
                                     *other,
                                 )
                             })
@@ -911,7 +914,10 @@ mod tests {
                 .node(&"container".into())
                 .expect("container")
                 .position,
-            before.node(&"container".into()).expect("container").position
+            before
+                .node(&"container".into())
+                .expect("container")
+                .position
         );
         assert_eq!(before, snapshot);
     }
