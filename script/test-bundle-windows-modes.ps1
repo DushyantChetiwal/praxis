@@ -1,5 +1,16 @@
 # Run in Windows CI with: pwsh -NoProfile -File script/test-bundle-windows-modes.ps1
 $ErrorActionPreference = 'Stop'
+$testPhase = 'Load bundle definitions and mode binding'
+
+trap {
+    [Console]::Error.WriteLine("Windows bundle mode tests failed during: $testPhase")
+    [Console]::Error.WriteLine("Error ID: {0}", $_.FullyQualifiedErrorId)
+    [Console]::Error.WriteLine($_.Exception.ToString())
+    [Console]::Error.WriteLine($_.InvocationInfo.PositionMessage)
+    [Console]::Error.WriteLine("Script stack trace:")
+    [Console]::Error.WriteLine($_.ScriptStackTrace)
+    throw
+}
 
 $bundlePath = Join-Path $PSScriptRoot 'bundle-windows.ps1'
 $tokens = $null
@@ -10,8 +21,10 @@ if ($parseErrors.Count -ne 0) {
 }
 
 # Load definitions without running Visual Studio, Cargo, installers, or downloads.
+$bundleFunctionBodies = @{}
 foreach ($definition in $bundle.EndBlock.Statements | Where-Object { $_ -is [System.Management.Automation.Language.FunctionDefinitionAst] }) {
     . ([scriptblock]::Create($definition.Extent.Text))
+    $bundleFunctionBodies[$definition.Name] = (Get-Item "Function:$($definition.Name)").ScriptBlock.ToString()
 }
 $modeAssignments = $bundle.EndBlock.Statements | Where-Object {
     $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and
@@ -46,6 +59,7 @@ try {
         @{ Arguments = @{ DesktopOnly = $true }; Desktop = $true; Remote = $false },
         @{ Arguments = @{ RemoteServerOnly = $true }; Desktop = $false; Remote = $true }
     )) {
+        $testPhase = "Pipeline: desktop=$($case.Desktop), remote=$($case.Remote)"
         & {
             $arguments = $case.Arguments
             $mode = & $bindMode @arguments
@@ -62,7 +76,8 @@ try {
                 'CollectFiles', 'StageLinuxRemoteServer', 'BuildInstaller', 'UploadToSentry'
             )
             foreach ($step in $pipelineSteps) {
-                Set-Item "Function:$step" ([scriptblock]::Create("`$steps.Add('$step')"))
+                # Unqualified Set-Item replaces the existing script-scope function and leaks this mock.
+                Set-Item "Function:local:$step" ([scriptblock]::Create("`$steps.Add('$step')"))
             }
             InvokeBundlePipeline
             $expected = @('CheckEnvironmentVariables', 'PrepareForBundle')
@@ -79,6 +94,13 @@ try {
             AssertEqual $steps $expected 'Mode pipeline and ordering'
         }
 
+        $testPhase = 'Verify pipeline mock isolation'
+        foreach ($functionName in $bundleFunctionBodies.Keys) {
+            $actualBody = (Get-Item "Function:$functionName").ScriptBlock.ToString()
+            AssertEqual $actualBody $bundleFunctionBodies[$functionName] "Pipeline mocks must not replace $functionName outside their test scope"
+        }
+
+        $testPhase = "Symbols and Sentry: desktop=$($case.Desktop), remote=$($case.Remote)"
         & {
             $buildDesktop = $case.Desktop
             $buildRemoteServer = $case.Remote
@@ -104,6 +126,7 @@ try {
         }
     }
 
+    $testPhase = 'Reject incompatible switches'
     foreach ($arguments in @(
         @{ DesktopOnly = $true; RemoteServerOnly = $true },
         @{ RemoteServerOnly = $true; Install = $true }
@@ -114,6 +137,7 @@ try {
         AssertEqual $rejected $true 'Incompatible switches are rejected before setup'
     }
 
+    $testPhase = 'Remote-only preparation'
     & {
         $buildDesktop = $false
         $target = 'x86_64-pc-windows-msvc'
@@ -127,6 +151,7 @@ try {
     }
 
     foreach ($signed in @($false, $true)) {
+        $testPhase = "Remote build and packaging: signed=$signed"
         & {
             $canCodeSign = $signed
             $Architecture = 'x86_64'
@@ -165,6 +190,7 @@ try {
         }
     }
 
+    $testPhase = 'Workspace, version, and channel defaults'
     & {
         function ParseZedWorkspace {
             $env:ZED_WORKSPACE = 'metadata-workspace'
