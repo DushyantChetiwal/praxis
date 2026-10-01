@@ -2729,7 +2729,10 @@ mod tests {
             graph.add_node(ArchitectNode::new(blank, "Invalid step"));
             graph.lock_all();
             assert!(
-                graph.problems().iter().any(|problem| matches!(problem, GraphProblem::InvalidNodeId(_)))
+                graph
+                    .problems()
+                    .iter()
+                    .any(|problem| matches!(problem, GraphProblem::InvalidNodeId(_)))
             );
             assert!(PlanRun::start(&graph).is_err());
 
@@ -2739,7 +2742,10 @@ mod tests {
             nested.edges.push(ArchitectEdge::new(blank, "a", "b"));
             nested.lock_all();
             assert!(
-                nested.problems().iter().any(|problem| matches!(problem, GraphProblem::InvalidEdgeId(_)))
+                nested
+                    .problems()
+                    .iter()
+                    .any(|problem| matches!(problem, GraphProblem::InvalidEdgeId(_)))
             );
             graph.nodes.clear();
             let mut parent = ArchitectNode::new("parent", "Parent");
@@ -2755,7 +2761,9 @@ mod tests {
         graph.edges.push(ArchitectEdge::new("same", "a", "b"));
         graph.lock_all();
         assert!(
-            graph.problems().contains(&GraphProblem::DuplicateEdge("same".into()))
+            graph
+                .problems()
+                .contains(&GraphProblem::DuplicateEdge("same".into()))
         );
         assert!(PlanRun::start(&graph).is_err());
         assert!(PlanRun::validate_structure(&graph).is_err());
@@ -2766,10 +2774,13 @@ mod tests {
         let proposal: ProposedGraph = serde_json::from_value(serde_json::json!({"nodes": [
             {"id":"same", "title":"First", "file_surface":[]},
             {"id":"same", "title":"Second", "file_surface":[]}
-        ]})).unwrap();
+        ]}))
+        .unwrap();
         let graph = proposal.into_graph();
         assert!(
-            graph.problems().contains(&GraphProblem::DuplicateNode("same".into()))
+            graph
+                .problems()
+                .contains(&GraphProblem::DuplicateNode("same".into()))
         );
         assert!(graph.node(&"same-2".into()).is_none());
         let node_schema = serde_json::to_value(schemars::schema_for!(NodeId)).unwrap();

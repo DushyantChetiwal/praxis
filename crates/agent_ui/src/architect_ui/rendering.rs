@@ -1453,7 +1453,10 @@ impl ArchitectPane {
         let completed = if succeeded {
             total
         } else {
-            run.history().iter().filter(|step| !step.is_running()).count()
+            run.history()
+                .iter()
+                .filter(|step| !step.is_running())
+                .count()
         };
         let progress = (completed as f32 / total as f32).clamp(0.0, 1.0);
         let elapsed = run
@@ -3486,9 +3489,20 @@ mod tests {
         thread.update(cx, |thread, cx| {
             thread.set_architect_graph(Some(graph), cx);
             let parent = NodePath::root("parent".into());
-            thread.start_architect_run(parent.child("first".into()), "First".into(), Task::ready(()), cx);
+            thread.start_architect_run(
+                parent.child("first".into()),
+                "First".into(),
+                Task::ready(()),
+                cx,
+            );
             for (number, id) in ["first", "second"].into_iter().enumerate() {
-                let visit = thread.note_architect_run_position(parent.child(id.into()), id.into(), number + 1, 1, cx);
+                let visit = thread.note_architect_run_position(
+                    parent.child(id.into()),
+                    id.into(),
+                    number + 1,
+                    1,
+                    cx,
+                );
                 thread.finish_architect_run_step(visit, Some("Done".into()), cx);
             }
             thread.finish_architect_run(RunOutcome::Completed, cx);

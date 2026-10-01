@@ -310,4 +310,3 @@ async fn test_remote_file_inventory_disconnect_is_not_an_empty_snapshot(
         )
     );
 }
-

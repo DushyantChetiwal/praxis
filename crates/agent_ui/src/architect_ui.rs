@@ -1961,9 +1961,7 @@ impl ArchitectPane {
             GraphProblem::DanglingEdge { edge, .. }
             | GraphProblem::InvalidEdgeId(edge)
             | GraphProblem::DuplicateEdge(edge)
-            | GraphProblem::EmptyCondition(edge) => {
-                Selection::Edge(edge.clone())
-            }
+            | GraphProblem::EmptyCondition(edge) => Selection::Edge(edge.clone()),
         }
     }
 

@@ -348,8 +348,15 @@ pub(super) fn plan_validation_problems(graph: &architect::ArchitectGraph) -> Vec
 fn validate_proposed_ids(nodes: &[ProposedNode]) -> Result<()> {
     let mut ids = std::collections::HashSet::new();
     for node in nodes {
-        anyhow::ensure!(!node.id.0.trim().is_empty(), "Every step needs a non-blank stable id.");
-        anyhow::ensure!(ids.insert(&node.id), "Step id {:?} is duplicated. Use a unique id for each step in the same graph; IDs are never silently renamed.", node.id.0);
+        anyhow::ensure!(
+            !node.id.0.trim().is_empty(),
+            "Every step needs a non-blank stable id."
+        );
+        anyhow::ensure!(
+            ids.insert(&node.id),
+            "Step id {:?} is duplicated. Use a unique id for each step in the same graph; IDs are never silently renamed.",
+            node.id.0
+        );
         if let Some(subplan) = &node.steps {
             validate_proposed_ids(&subplan.nodes)
                 .with_context(|| format!("Inside step {:?}", node.id.0))?;
@@ -555,9 +562,12 @@ mod tests {
         ] {
             let (events, _receiver) = ToolCallEventStream::test();
             let input = ToolInput::ready(json!({"nodes": nodes}));
-            let error = cx.update(|cx| {
-                Arc::new(DraftPlanTool::new(thread.downgrade())).run(input, events, cx)
-            }).await.expect_err("invalid IDs must not rewrite the plan");
+            let error = cx
+                .update(|cx| {
+                    Arc::new(DraftPlanTool::new(thread.downgrade())).run(input, events, cx)
+                })
+                .await
+                .expect_err("invalid IDs must not rewrite the plan");
             assert!(matches!(error, DraftPlanToolOutput::Error { .. }));
             thread.read_with(cx, |thread, _| {
                 assert_eq!(thread.architect_graph(), Some(&before));
@@ -576,7 +586,8 @@ mod tests {
             {"id":"right", "title":"Right", "file_surface":[], "steps":{"nodes":[
                 {"id":"step", "title":"Step", "file_surface":[]}
             ]}}
-        ]})).unwrap();
+        ]}))
+        .unwrap();
         validate_proposed_ids(&proposal.nodes).expect("IDs are local to each graph");
     }
 
