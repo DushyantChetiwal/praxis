@@ -47,6 +47,16 @@ pub(crate) struct ElicitationFormState {
 }
 
 impl ElicitationFormState {
+    pub(crate) fn observe_question_window<T: 'static>(
+        &mut self,
+        activity: &acp_thread::QuestionWindowActivity,
+        window: &mut Window,
+        cx: &mut Context<T>,
+    ) {
+        self.edit_subscriptions
+            .push(activity.observe_window(window, cx));
+    }
+
     pub(crate) fn new(schema: &acp::ElicitationSchema, window: &mut Window, cx: &mut App) -> Self {
         let required = schema.required.as_deref().unwrap_or_default();
         let mut fields = HashMap::default();
@@ -548,6 +558,89 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(editor.read_with(cx, |editor, cx| editor.text(cx)), before);
+    }
+
+    #[gpui::test]
+    fn question_freeform_and_selections_survive_window_activation(cx: &mut TestAppContext) {
+        init_keyboard_test(cx);
+        for allow_multiple in [false, true] {
+            let schema = agent::AskQuestionTool::elicitation_schema(&agent::AskQuestionToolInput {
+                question: "Which database?".into(),
+                options: vec![
+                    agent::AskQuestionOption {
+                        value: "postgres".into(),
+                        label: "PostgreSQL".into(),
+                        description: None,
+                    },
+                    agent::AskQuestionOption {
+                        value: "sqlite".into(),
+                        label: "SQLite".into(),
+                        description: None,
+                    },
+                ],
+                allow_multiple,
+                recommendation: None,
+            });
+            let activity = acp_thread::QuestionWindowActivity::default();
+            let interacted = Rc::new(std::cell::Cell::new(false));
+            let flag = interacted.clone();
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                let mut view = TestElicitationView::new(schema.clone(), window, cx);
+                view.form_state
+                    .observe_question_window(&activity, window, cx);
+                view.form_state
+                    .observe_text_edits(Rc::new(move |_| flag.set(true)), cx);
+                view
+            });
+            let editor = view.read_with(cx, |view, cx| {
+                // No option should be silently selected when the user only
+                // wants to write text.
+                assert!(view.form_state.collect(&schema, cx).unwrap().is_empty());
+                view.editor("freeform_answer")
+            });
+            cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+            cx.simulate_input("Use a local database instead");
+            cx.run_until_parked();
+            assert!(interacted.get());
+            view.read_with(cx, |view, cx| {
+                let content = view.form_state.collect(&schema, cx).unwrap();
+                assert_eq!(content.len(), 1);
+                assert_eq!(
+                    content.get("freeform_answer"),
+                    Some(&"Use a local database instead".into())
+                );
+            });
+            view.update(cx, |view, cx| {
+                if allow_multiple {
+                    view.form_state
+                        .set_multi_select("answer", "sqlite".into(), true);
+                } else {
+                    view.form_state.set_single_select("answer", "sqlite".into());
+                }
+                cx.notify();
+            });
+            let before =
+                view.read_with(cx, |view, cx| view.form_state.collect(&schema, cx).unwrap());
+            for _ in 0..3 {
+                cx.deactivate_window();
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_secs(60));
+                cx.update(|window, _| window.activate_window());
+                view.update(cx, |view, cx| {
+                    view.elicitation.request.message =
+                        "Auto-answer paused; waiting for your answer.".into();
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                view.read_with(cx, |view, cx| {
+                    assert_eq!(
+                        view.editor("freeform_answer").entity_id(),
+                        editor.entity_id()
+                    );
+                    assert_eq!(view.form_state.collect(&schema, cx).unwrap(), before);
+                });
+            }
+        }
     }
 
     #[gpui::test]

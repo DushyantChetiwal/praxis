@@ -328,6 +328,7 @@ pub struct ArchitectPane {
     next_undo_group: Option<UndoGroup>,
 
     _thread_subscription: Subscription,
+    _model_registry_subscription: Subscription,
     _search_subscription: Subscription,
     /// Watches for another item becoming active while Architect View owns the
     /// workspace, so that opening a file switches to Editor View with it.
@@ -354,10 +355,14 @@ impl ArchitectPane {
         let subscription = cx.observe(&thread, |this, _, cx| {
             // The agent or a run may have removed selected steps.
             this.prune_bulk_selection(cx);
-            this.refresh_inspector_if_lock_changed(cx);
+            this.refresh_inspector_if_source_changed(cx);
             cx.emit(workspace::item::ItemEvent::UpdateTab);
             cx.notify();
         });
+        let model_registry_subscription = cx.subscribe(
+            &language_model::LanguageModelRegistry::global(cx),
+            |_, _, _, cx| cx.notify(),
+        );
         let search_editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
             editor.set_placeholder_text("Search steps", window, cx);
@@ -418,6 +423,7 @@ impl ArchitectPane {
             undo_group: None,
             next_undo_group: None,
             _thread_subscription: subscription,
+            _model_registry_subscription: model_registry_subscription,
             _search_subscription: search_subscription,
             _workspace_subscription: workspace_subscription,
             plan_conversation_subscription: None,
@@ -605,7 +611,7 @@ impl ArchitectPane {
         self.thread = thread.clone();
         self._thread_subscription = cx.observe(&thread, |this, _, cx| {
             this.prune_bulk_selection(cx);
-            this.refresh_inspector_if_lock_changed(cx);
+            this.refresh_inspector_if_source_changed(cx);
             cx.emit(workspace::item::ItemEvent::UpdateTab);
             cx.notify();
         });
@@ -3974,6 +3980,359 @@ mod tests {
                 Some(Selection::Node(b.clone())),
                 "with nothing to reach from, Shift-click selects the step alone"
             );
+        });
+    }
+
+    #[gpui::test]
+    async fn step_model_inspector_edits_use_registry_ids_and_recheck_guards(
+        cx: &mut TestAppContext,
+    ) {
+        fn step_model(
+            pane: &ArchitectPane,
+            path: &NodePath,
+            cx: &Context<ArchitectPane>,
+        ) -> Option<architect::StepModel> {
+            pane.root_graph(cx)
+                .and_then(|graph| graph.node_at(path))
+                .and_then(|node| node.model.clone())
+        }
+
+        let plan = test_plan(cx).await;
+        let project = plan.project.clone();
+        let thread = plan.thread;
+        let mut nested = ArchitectGraph::default();
+        nested.add_node(ArchitectNode::new("step", "Nested step"));
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.subplan = Some(Box::new(nested));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(parent);
+        graph.add_node(ArchitectNode::new("step", "Root step"));
+        thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
+        let path = NodePath::from(vec!["parent".into(), "step".into()]);
+        let model = cx.update(|cx| {
+            inspector::available_step_models(cx)
+                .into_iter()
+                .next()
+                .expect("the registry should offer the fake provider's model")
+                .0
+        });
+        assert_eq!(model.provider, "fake");
+        assert_eq!(model.model, "fake");
+
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.update_in(cx, |_workspace, window, cx| {
+            let workspace = cx.weak_entity();
+            cx.new(|cx| {
+                ArchitectPane::new(
+                    thread.clone(),
+                    workspace,
+                    None,
+                    Vec::new(),
+                    None,
+                    px(226.0),
+                    px(348.0),
+                    window,
+                    cx,
+                )
+            })
+        });
+        pane.update_in(cx, |pane, window, cx| {
+            pane.drill_into("parent".into(), window, cx);
+            pane.set_selection(Some(Selection::Node("step".into())), window, cx);
+            assert!(pane.set_step_model(path.clone(), Some(model.clone()), cx));
+            assert_eq!(step_model(pane, &path, cx), Some(model.clone()));
+            assert!(step_model(pane, &NodePath::root("step".into()), cx).is_none());
+            pane.step_history(HistoryDirection::Undo, window, cx);
+            assert!(step_model(pane, &path, cx).is_none());
+            pane.step_history(HistoryDirection::Redo, window, cx);
+            assert_eq!(step_model(pane, &path, cx), Some(model.clone()));
+
+            // A menu opened inside the parent must retain its full path even
+            // if navigation changes before its deferred callback is delivered.
+            pane.drill_out(window, cx);
+            assert!(pane.set_step_model(path.clone(), None, cx));
+            assert!(pane.set_step_model(path.clone(), Some(model.clone()), cx));
+            pane.set_selection(Some(Selection::Node("parent".into())), window, cx);
+            pane.duplicate_selection(window, cx);
+            let copy = pane
+                .root_graph(cx)
+                .and_then(|graph| graph.nodes.last())
+                .expect("a copy should be added");
+            assert_eq!(
+                copy.subplan()
+                    .and_then(|graph| graph.node(&"step".into()))
+                    .and_then(|node| node.model.as_ref()),
+                Some(&model)
+            );
+        });
+        cx.run_until_parked();
+
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(
+                |graph| {
+                    graph
+                        .lock_deeply_at(&NodePath::root("parent".into()))
+                        .expect("the parent should lock");
+                    graph.node_at_mut(&path).expect("child should exist").locked = false;
+                },
+                cx,
+            );
+        });
+        pane.update_in(cx, |pane, _, cx| {
+            assert!(!pane.set_step_model(path.clone(), None, cx));
+        });
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(
+                |graph| {
+                    graph.unlock_all();
+                    graph
+                        .set_locked_at(&path, true)
+                        .expect("the step should lock");
+                },
+                cx,
+            );
+        });
+        pane.update_in(cx, |pane, _, cx| {
+            assert!(!pane.set_step_model(path.clone(), None, cx));
+        });
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(|graph| graph.unlock_all(), cx);
+        });
+        pane.update_in(cx, |pane, _, cx| {
+            pane.run_starting.set(true);
+            assert!(!pane.set_step_model(path.clone(), None, cx));
+            pane.run_starting.set(false);
+        });
+        thread.update(cx, |thread, cx| {
+            thread.start_architect_run(path.clone(), "Nested step".into(), Task::ready(()), cx);
+        });
+        pane.update_in(cx, |pane, _, cx| {
+            assert!(!pane.set_step_model(path.clone(), None, cx));
+            assert_eq!(step_model(pane, &path, cx), Some(model.clone()));
+        });
+        thread.update(cx, |thread, cx| {
+            thread.finish_architect_run(architect::RunOutcome::Completed, cx);
+        });
+        cx.update(|_, cx| {
+            language_model::LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                registry.unregister_provider(
+                    language_model::LanguageModelProviderId(model.provider.clone().into()),
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+        pane.update_in(cx, |pane, _, cx| {
+            assert!(inspector::available_step_models(cx).is_empty());
+            assert!(!pane.set_step_model(path.clone(), Some(model.clone()), cx));
+            assert!(pane.set_step_model(path.clone(), None, cx));
+            assert!(step_model(pane, &path, cx).is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn inspector_tracks_revised_briefs_without_resetting_local_edits(
+        cx: &mut TestAppContext,
+    ) {
+        let plan = test_plan(cx).await;
+        let project = plan.project.clone();
+        let thread = plan.thread;
+        let path = NodePath::root("step".into());
+        let mut node = ArchitectNode::new("step", "Original title");
+        node.responsibility = "Original responsibility".into();
+        node.intent = "Original goal".into();
+        node.capture = "Original capture".into();
+        node.rules = vec!["Original rule".into()];
+        node.locked = true;
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(node);
+        thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
+
+        // A focus regression needs the inspector in the rendered tree, not an
+        // unattached entity whose focus the workspace restores on the next draw.
+        let direct_architect = Rc::new(RefCell::new(None));
+        let direct_architect_for_root = direct_architect.clone();
+        let (test_root, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::test_new(project.clone(), window, cx));
+            ArchitectIntegrationRoot {
+                workspace,
+                architect: direct_architect_for_root,
+            }
+        });
+        let workspace = test_root.read_with(cx, |root, _| root.workspace.clone());
+        let pane = workspace.update_in(cx, |_workspace, window, cx| {
+            let workspace = cx.weak_entity();
+            cx.new(|cx| {
+                ArchitectPane::new(
+                    thread.clone(),
+                    workspace,
+                    None,
+                    Vec::new(),
+                    None,
+                    px(226.0),
+                    px(348.0),
+                    window,
+                    cx,
+                )
+            })
+        });
+        *direct_architect.borrow_mut() = Some(pane.clone());
+        test_root.update(cx, |_, cx| cx.notify());
+        cx.simulate_resize(size(px(1500.0), px(900.0)));
+        let editors = pane.update_in(cx, |pane, window, cx| {
+            pane.set_selection(Some(Selection::Node("step".into())), window, cx);
+            pane.inspector
+                .as_ref()
+                .expect("step should be selected")
+                .editors()
+        });
+        cx.run_until_parked();
+        let [title, responsibility, goal, capture, new_rule] = editors.clone();
+
+        cx.update(|_, cx| {
+            agent::update_architect_step(
+                &thread,
+                &path,
+                Some("Revised goal".into()),
+                Some(vec!["Revised rule".into()]),
+                Some("Revised capture".into()),
+                cx,
+            )
+            .expect("the coordinator should be able to revise a locked pending step");
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            goal.read_with(cx, |editor, cx| editor.text(cx)),
+            "Revised goal"
+        );
+        assert_eq!(
+            capture.read_with(cx, |editor, cx| editor.text(cx)),
+            "Revised capture"
+        );
+        pane.update_in(cx, |pane, _, cx| {
+            let node = pane
+                .root_graph(cx)
+                .and_then(|graph| graph.node_at(&path))
+                .expect("the revised step should exist");
+            assert!(node.locked);
+            assert_eq!(node.rules, vec!["Revised rule"]);
+            assert!(
+                pane.undo_stack.is_empty(),
+                "synchronizing must not write back to the plan"
+            );
+            assert_eq!(
+                pane.inspector
+                    .as_ref()
+                    .expect("inspector should remain open")
+                    .editors(),
+                editors
+            );
+        });
+        for editor in &editors {
+            assert!(editor.read_with(cx, |editor, cx| editor.read_only(cx)));
+        }
+
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(
+                |graph| {
+                    let node = graph.node_at_mut(&path).expect("step should exist");
+                    node.title = "Revised title".into();
+                    node.responsibility = "Revised responsibility".into();
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            title.read_with(cx, |editor, cx| editor.text(cx)),
+            "Revised title"
+        );
+        assert_eq!(
+            responsibility.read_with(cx, |editor, cx| editor.text(cx)),
+            "Revised responsibility"
+        );
+
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(|graph| graph.unlock_all(), cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        pane.update_in(cx, |_, window, cx| {
+            new_rule.update(cx, |editor, cx| {
+                editor.set_text("Unsubmitted rule", window, cx);
+            });
+            capture.update(cx, |editor, cx| {
+                editor.focus_handle(cx).focus(window, cx);
+                editor.change_selections(Default::default(), window, cx, |selections| {
+                    selections.select_ranges([text::Point::new(0, 2)..text::Point::new(0, 5)]);
+                });
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+            assert!(
+                capture.focus_handle(cx).is_focused(window),
+                "the mounted capture editor must retain focus before testing a revision"
+            );
+        });
+        pane.update_in(cx, |pane, window, cx| {
+            goal.update(cx, |editor, cx| editor.set_text("Local typing", window, cx));
+            agent::update_architect_step(
+                &thread,
+                &path,
+                Some("Competing external goal".into()),
+                Some(vec!["Latest rule".into()]),
+                None,
+                cx,
+            )
+            .expect("an unlocked pending step should be revisable");
+            // Flush the source while the local BufferEdited notification is
+            // still queued, to exercise the in-flight typing guard directly.
+            pane.refresh_inspector(window, cx);
+            assert_eq!(goal.read(cx).text(cx), "Local typing");
+            pane.set_selection(Some(Selection::Node("step".into())), window, cx);
+            pane.set_selection(Some(Selection::Node("step".into())), window, cx);
+        });
+        cx.run_until_parked();
+        thread.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        cx.run_until_parked();
+        pane.update_in(cx, |pane, window, cx| {
+            assert_eq!(
+                pane.inspector
+                    .as_ref()
+                    .expect("inspector should remain open")
+                    .editors(),
+                editors
+            );
+            assert_eq!(goal.read(cx).text(cx), "Local typing");
+            assert_eq!(new_rule.read(cx).text(cx), "Unsubmitted rule");
+            assert!(
+                capture.focus_handle(cx).is_focused(window),
+                "revising another field and reselecting the step must preserve capture focus"
+            );
+            capture.update(cx, |editor, cx| {
+                let snapshot = editor.snapshot(window, cx);
+                let selection = editor.selections.newest::<text::Point>(&snapshot);
+                assert_eq!(selection.start, text::Point::new(0, 2));
+                assert_eq!(selection.end, text::Point::new(0, 5));
+            });
+            let node = pane
+                .root_graph(cx)
+                .and_then(|graph| graph.node_at(&path))
+                .expect("step should exist");
+            assert_eq!(node.intent, "Local typing");
+            assert_eq!(node.rules, vec!["Latest rule"]);
         });
     }
 

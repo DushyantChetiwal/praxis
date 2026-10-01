@@ -474,12 +474,14 @@ impl ArchitectPane {
             count => format!("Select the first of {count} things that need attention").into(),
         };
         let latest_run = self.thread.read(cx).architect_run();
-        let run_status: Option<SharedString> = latest_run.and_then(|run| match &run.outcome {
-            Some(outcome) => root.map(|root| outcome.summary(root).into()),
-            // Loops can take a run past the number of steps, so no total is
-            // shown for the step number to exceed.
-            None => super::run::running_summary(run),
-        });
+        let run_status: Option<SharedString> = latest_run
+            .filter(|run| !run.result_dismissed())
+            .and_then(|run| match &run.outcome {
+                Some(outcome) => root.map(|root| outcome.summary(root).into()),
+                // Loops can take a run past the number of steps, so no total is
+                // shown for the step number to exceed.
+                None => super::run::running_summary(run),
+            });
 
         // One line, in the order the plan is read: where you are, what it is,
         // then what is being done to it.
@@ -1394,7 +1396,9 @@ impl ArchitectPane {
 
     fn render_run_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let thread = self.thread.read(cx);
-        let run = thread.architect_run()?;
+        let run = thread
+            .architect_run()
+            .filter(|run| !run.result_dismissed())?;
         let total = self
             .root_graph(cx)
             .map(ArchitectGraph::step_count_deeply)
@@ -1548,7 +1552,9 @@ impl ArchitectPane {
                         IconButton::new("architect-dismiss-run", IconName::Close)
                             .tab_index(0isize)
                             .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text("Dismiss this run's result"))
+                            .tooltip(Tooltip::text(
+                                "Hide this result; keep run history and recovery",
+                            ))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.thread.update(cx, |thread, cx| {
                                     thread.dismiss_architect_run(cx);
@@ -3234,6 +3240,114 @@ impl Item for ArchitectPane {
 mod tests {
     use super::super::geometry::NODE_HEIGHT;
     use super::*;
+
+    #[gpui::test]
+    async fn dismissed_failure_hides_banner_but_keeps_resume_available(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::{path::Path, rc::Rc};
+
+        use acp_thread::AgentConnection as _;
+        use project::{FakeFs, Project};
+        use util::path_list::PathList;
+        use workspace::Workspace;
+
+        crate::conversation_view::tests::init_test(cx);
+        let fake = cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx)
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/", serde_json::json!({ "a": {} })).await;
+        let project = Project::test(fs.clone(), [Path::new("/a")], cx).await;
+        let thread_store = cx.update(|cx| agent::ThreadStore::global(cx));
+        let native_agent =
+            cx.update(|cx| agent::NativeAgent::new(thread_store, agent::Templates::new(), fs, cx));
+        let connection = Rc::new(agent::NativeAgentConnection(native_agent));
+        let session = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new("/a")]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        let session_id = session.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| connection.thread(&session_id, cx)).unwrap();
+        let mut graph = ArchitectGraph::default();
+        let mut step = ArchitectNode::new("build", "Build");
+        step.locked = true;
+        graph.add_node(step);
+        let model = fake.model("fake");
+        thread.update(cx, |thread, cx| {
+            thread.set_model(model.clone(), cx);
+            thread.set_architect_graph(Some(graph.clone()), cx);
+        });
+        cx.update(|cx| agent::start_architect_run(thread.clone(), session.clone(), graph, cx))
+            .unwrap();
+        cx.run_until_parked();
+        let request = fake
+            .pending_completions_for(&model)
+            .pop()
+            .expect("the step should request a completion before authentication fails");
+        // forbid_requests returns a generic, retryable error rather than an auth rejection.
+        fake.send_error(
+            &model,
+            &request,
+            language_model::LanguageModelCompletionError::from_http_status(
+                model.provider_name.clone(),
+                http_client::StatusCode::UNAUTHORIZED,
+                "Invalid API key".into(),
+                None,
+            ),
+        );
+        fake.end_stream(&model, &request);
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert!(matches!(
+                &thread.architect_run().unwrap().outcome,
+                Some(RunOutcome::Failed { message }) if message.contains("Invalid API key")
+            ));
+        });
+
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.update_in(cx, |_workspace, window, cx| {
+            let workspace = cx.weak_entity();
+            cx.new(|cx| {
+                ArchitectPane::new(
+                    thread.clone(),
+                    workspace,
+                    None,
+                    Vec::new(),
+                    None,
+                    px(226.0),
+                    px(348.0),
+                    window,
+                    cx,
+                )
+            })
+        });
+        pane.update(cx, |pane, cx| {
+            assert!(pane.render_run_bar(cx).is_some());
+            assert!(pane.can_resume(cx));
+        });
+        thread.update(cx, |thread, cx| thread.dismiss_architect_run(cx));
+        pane.update(cx, |pane, cx| {
+            assert!(pane.render_run_bar(cx).is_none());
+            assert!(pane.can_resume(cx), "the header must still offer Resume");
+            assert!(!pane.is_running(cx));
+        });
+        cx.update(|_, cx| agent::resume_architect_run(thread.clone(), session, cx))
+            .unwrap();
+        pane.update(cx, |pane, cx| {
+            assert!(pane.render_run_bar(cx).is_some());
+            assert!(pane.is_running(cx));
+        });
+        cx.update(|_, cx| agent::stop_architect_run(&thread, None, cx));
+    }
 
     #[test]
     fn primary_actions_have_one_rendering_owner() {

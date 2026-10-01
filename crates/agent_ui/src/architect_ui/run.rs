@@ -123,6 +123,7 @@ impl ArchitectPane {
             .is_some_and(agent::ArchitectRun::is_paused)
     }
 
+    // Recovery remains available even when the result banner has been dismissed.
     pub(super) fn can_resume(&self, cx: &App) -> bool {
         !self.run_starting.get()
             && self
@@ -143,8 +144,7 @@ impl ArchitectPane {
 
     /// Stops a run between steps, and stops the turn it is waiting on.
     pub(super) fn stop_run(&mut self, cx: &mut Context<Self>) {
-        let acp_thread = self.plan_acp_thread(cx);
-        agent::stop_architect_run(&self.thread, acp_thread.as_ref(), cx);
+        agent::stop_architect_run(&self.thread, None, cx);
         self.record_activity(None, "Requested that the plan run stop", cx);
         self.run_starting.set(false);
         cx.notify();

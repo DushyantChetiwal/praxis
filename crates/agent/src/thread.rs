@@ -328,6 +328,8 @@ pub struct ArchitectRun {
     /// Which step of the run this is, counting repeats.
     pub step_number: usize,
     pub outcome: Option<architect::RunOutcome>,
+    // Dismissing presentation must not discard the checkpoint or inspection history.
+    result_dismissed: bool,
     /// A remote workflow associated with this run, when the execution provider
     /// exposes one. The UI keeps this optional so local runs do not grow a dead
     /// workflow action.
@@ -356,6 +358,10 @@ impl ArchitectRun {
 
     pub fn history(&self) -> &[RunStep] {
         &self.history
+    }
+
+    pub fn result_dismissed(&self) -> bool {
+        self.result_dismissed
     }
 
     pub fn remote_workflow_url(&self) -> Option<&str> {
@@ -1598,6 +1604,19 @@ pub enum ThreadModel {
     Unset,
 }
 
+impl Clone for ThreadModel {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Ready(model) => Self::Ready(model.clone()),
+            Self::Unresolved(selection) => Self::Unresolved(SelectedModel {
+                provider: selection.provider.clone(),
+                model: selection.model.clone(),
+            }),
+            Self::Unset => Self::Unset,
+        }
+    }
+}
+
 impl ThreadModel {
     fn as_model(&self) -> Option<&LanguageModel> {
         match self {
@@ -1761,6 +1780,31 @@ impl Thread {
             thread.inherits_parent_model_settings = false;
             thread.apply_model_selection(&model_selection, cx);
         }
+        thread
+    }
+
+    pub(crate) fn new_architect_run_step(
+        parent_thread: &Entity<Thread>,
+        title: SharedString,
+        model: Option<LanguageModel>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut thread = Self::new_subagent(parent_thread, None, cx);
+        // Execution inherits the coordinator's selection, including an unresolved
+        // selection, never the unrelated subagent default. Pin it for this visit.
+        thread.inherit_parent_settings(parent_thread, cx);
+        thread.inherits_parent_model_settings = false;
+        thread.model = parent_thread.read(cx).model.clone();
+        if let Some(model) = model {
+            thread.set_model(model, cx);
+        } else {
+            thread
+                .prompt_capabilities_tx
+                .send(Self::prompt_capabilities(thread.model.as_model()))
+                .log_err();
+        }
+        thread.set_title(title, cx);
+        thread.set_session_mode(SessionMode::Build, cx);
         thread
     }
 
@@ -2469,6 +2513,7 @@ impl Thread {
             current_title,
             step_number: 1,
             outcome: None,
+            result_dismissed: false,
             remote_workflow_url: None,
             history: Vec::new(),
             running: Vec::new(),
@@ -2485,6 +2530,7 @@ impl Thread {
     pub(crate) fn reopen_architect_run(&mut self, task: Task<()>, cx: &mut Context<Self>) {
         if let Some(run) = self.architect_run.as_mut() {
             run.outcome = None;
+            run.result_dismissed = false;
             run._task = task;
             cx.notify();
         }
@@ -2610,12 +2656,18 @@ impl Thread {
 
     pub fn finish_architect_run(&mut self, outcome: architect::RunOutcome, cx: &mut Context<Self>) {
         if let Some(run) = self.architect_run.as_mut() {
+            if let Some(control) = &run.control
+                && let Some(graph) = &mut self.architect_graph
+            {
+                control.borrow().restore_interrupted_results(graph);
+            }
             run.current = None;
             // Only a run that was cut short can be picked up again.
             if !outcome.is_resumable() {
                 run.control = None;
             }
             run.outcome = Some(outcome);
+            run.result_dismissed = false;
             // A run cancelled mid-step leaves that step open, and a step that
             // never ends reads as one still running.
             run.close_running_steps();
@@ -2624,15 +2676,13 @@ impl Thread {
         cx.notify();
     }
 
-    /// Forgets a finished run once the user has read its outcome. A run still
-    /// in progress is kept, since dropping it would cancel it unannounced.
+    /// Hides the finished run's result without discarding its history or checkpoint.
     pub fn dismiss_architect_run(&mut self, cx: &mut Context<Self>) {
-        if self
-            .architect_run
-            .as_ref()
-            .is_some_and(|run| run.outcome.is_some())
+        if let Some(run) = self.architect_run.as_mut()
+            && run.outcome.is_some()
+            && !run.result_dismissed
         {
-            self.architect_run = None;
+            run.result_dismissed = true;
             cx.notify();
         }
     }
@@ -2642,8 +2692,14 @@ impl Thread {
     pub fn stop_architect_run(&mut self, cx: &mut Context<Self>) {
         if let Some(run) = self.architect_run.as_mut() {
             if run.outcome.is_none() {
+                if let Some(control) = &run.control
+                    && let Some(graph) = &mut self.architect_graph
+                {
+                    control.borrow().restore_interrupted_results(graph);
+                }
                 run.current = None;
                 run.outcome = Some(architect::RunOutcome::Cancelled);
+                run.result_dismissed = false;
                 run.close_running_steps();
             }
             run._task = Task::ready(());

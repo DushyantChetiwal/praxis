@@ -1,9 +1,14 @@
 use acp_thread::AcpThread;
 use agent_client_protocol::schema::v1 as acp;
-use architect::{ArchitectEdge, ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, NodeId};
+use architect::{
+    ArchitectEdge, ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, NodeId, NodePath,
+    StepModel,
+};
 use editor::{Editor, EditorEvent};
 use gpui::{App, Context, Entity, Focusable, SharedString, Subscription, Window, div, px};
-use ui::{TintColor, Tooltip, prelude::*};
+use language_model::LanguageModelRegistry;
+use ui::{ContextMenu, ContextMenuEntry, PopoverMenu, TintColor, Tooltip, prelude::*};
+use util::ResultExt;
 
 use crate::AgentPanel;
 
@@ -34,9 +39,8 @@ pub(super) struct EdgeInspector {
 
 pub(super) struct NodeInspector {
     node: NodeId,
-    /// Whether the step was locked when the editors were built, which is what
-    /// decided whether they are read-only.
     locked: bool,
+    source_text: [String; 4],
     pub(super) title: Entity<Editor>,
     responsibility: Entity<Editor>,
     goal: Entity<Editor>,
@@ -45,7 +49,200 @@ pub(super) struct NodeInspector {
     _subscriptions: Vec<Subscription>,
 }
 
+impl NodeInspector {
+    fn source_text(node: &ArchitectNode) -> [String; 4] {
+        [
+            node.title.clone(),
+            node.responsibility.clone(),
+            node.intent.clone(),
+            node.capture.clone(),
+        ]
+    }
+
+    fn source_changed(&self, node: &ArchitectNode) -> bool {
+        self.locked != node.locked || self.source_text != Self::source_text(node)
+    }
+
+    #[cfg(test)]
+    pub(super) fn editors(&self) -> [Entity<Editor>; 5] {
+        [
+            self.title.clone(),
+            self.responsibility.clone(),
+            self.goal.clone(),
+            self.capture.clone(),
+            self.new_rule.clone(),
+        ]
+    }
+}
+
+pub(super) fn available_step_models(cx: &App) -> Vec<(StepModel, SharedString)> {
+    let mut models: Vec<(StepModel, SharedString)> = Vec::new();
+    for provider in LanguageModelRegistry::read_global(cx).visible_providers() {
+        if !provider.is_authenticated(cx) {
+            continue;
+        }
+        for model in provider.provided_models(cx) {
+            models.push((
+                StepModel {
+                    provider: model.provider_id().0.to_string(),
+                    model: model.id().0.to_string(),
+                },
+                format!("{} · {}", provider.name().0, model.name().0).into(),
+            ));
+        }
+    }
+    models.sort_by(|left, right| left.1.cmp(&right.1));
+    models
+}
+
 impl ArchitectPane {
+    fn step_model_edit_refusal(&self, path: &NodePath, cx: &Context<Self>) -> Option<&'static str> {
+        if self.is_running(cx) || self.can_resume(cx) {
+            return Some(
+                "Use the plan conversation to change models for an active or resumable run.",
+            );
+        }
+        let Some(graph) = self.root_graph(cx) else {
+            return Some("This plan is no longer available.");
+        };
+        if path.is_empty() || graph.node_at(path).is_none() {
+            return Some("This step is no longer available.");
+        }
+        let mut ancestor = NodePath::default();
+        for id in path.iter() {
+            ancestor = ancestor.child(id.clone());
+            if graph.node_at(&ancestor).is_some_and(|node| node.locked) {
+                return Some(
+                    "Unlock this step and its containing steps before changing its model.",
+                );
+            }
+        }
+        None
+    }
+
+    pub(super) fn set_step_model(
+        &mut self,
+        path: NodePath,
+        model: Option<StepModel>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(reason) = self.step_model_edit_refusal(&path, cx) {
+            self.report(reason.to_string(), cx);
+            return false;
+        }
+        if let Some(model) = &model
+            && !available_step_models(cx)
+                .iter()
+                .any(|(available, _)| available == model)
+        {
+            self.report(
+                "This model is no longer available. Choose another model or inherit the plan model."
+                    .to_string(),
+                cx,
+            );
+            return false;
+        }
+        let activity_path = path.clone();
+        let message = match &model {
+            Some(model) => format!("Set execution model to {}/{}", model.provider, model.model),
+            None => "Restored the plan's execution model".to_string(),
+        };
+        if self.edit_checked(
+            move |graph| graph.mutate_node_at(&path, |node| node.model = model),
+            cx,
+        ) {
+            self.record_activity(Some(activity_path), message, cx);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn render_step_model(&self, node: &ArchitectNode, cx: &mut Context<Self>) -> AnyElement {
+        let path = self.focus.child(node.id.clone());
+        let refusal = self.step_model_edit_refusal(&path, cx);
+        let models = available_step_models(cx);
+        let selected = node.model.clone();
+        let label = match &selected {
+            None => SharedString::from("Inherit plan model"),
+            Some(selected) => models
+                .iter()
+                .find(|(model, _)| model == selected)
+                .map(|(_, label)| label.clone())
+                .unwrap_or_else(|| {
+                    format!("Unavailable: {}/{}", selected.provider, selected.model).into()
+                }),
+        };
+        let pane = cx.weak_entity();
+        v_flex()
+            .gap_1()
+            .child(
+                Label::new("EXECUTION MODEL")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                PopoverMenu::new("architect-step-model-menu")
+                    .trigger_with_tooltip(
+                        Button::new("architect-step-model", label)
+                            .tab_index(0isize)
+                            .label_size(LabelSize::Small)
+                            .end_icon(Icon::new(IconName::ChevronDown))
+                            .disabled(refusal.is_some()),
+                        Tooltip::text(
+                            refusal.unwrap_or("Choose the model that executes this step"),
+                        ),
+                    )
+                    .menu(move |window, cx| {
+                        let pane = pane.clone();
+                        let path = path.clone();
+                        let selected = selected.clone();
+                        Some(ContextMenu::build(window, cx, move |mut menu, _, cx| {
+                            let choices =
+                                std::iter::once((None, SharedString::from("Inherit plan model")))
+                                    .chain(
+                                        available_step_models(cx)
+                                            .into_iter()
+                                            .map(|(model, label)| (Some(model), label)),
+                                    );
+                            for (model, label) in choices {
+                                let pane = pane.clone();
+                                let path = path.clone();
+                                let entry = ContextMenuEntry::new(label)
+                                    .toggleable(IconPosition::End, model == selected);
+                                menu.push_item(entry.handler(move |window, cx| {
+                                    let pane = pane.clone();
+                                    let path = path.clone();
+                                    let model = model.clone();
+                                    window.defer(cx, move |_, cx| {
+                                        pane.update(cx, |pane, cx| {
+                                            pane.set_step_model(path, model, cx);
+                                        })
+                                        .log_err();
+                                    });
+                                }));
+                            }
+                            menu
+                        }))
+                    }),
+            )
+            .when_some(refusal, |this, reason| {
+                this.child(
+                    Label::new(reason)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+            })
+            .when(models.is_empty() && refusal.is_none(), |this| {
+                this.child(
+                    Label::new("Configure a model provider to choose a step override.")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+            })
+            .into_any()
+    }
+
     pub(super) fn set_selection(
         &mut self,
         selection: Option<Selection>,
@@ -252,6 +449,7 @@ impl ArchitectPane {
         let new_rule = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
             editor.set_placeholder_text("Add a rule and press enter", window, cx);
+            editor.set_read_only(node.locked);
             editor
         });
 
@@ -306,6 +504,7 @@ impl ArchitectPane {
         ];
 
         NodeInspector {
+            source_text: NodeInspector::source_text(&node),
             node: node.id,
             locked: node.locked,
             title,
@@ -634,22 +833,20 @@ impl ArchitectPane {
         self.refresh_inspector(window, cx);
     }
 
-    /// Rebuilds the inspector when its step was locked or unlocked without
-    /// going through the canvas, as the agent does from the chat, so its
-    /// fields go read-only or editable again with the step.
-    pub(super) fn refresh_inspector_if_lock_changed(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh_inspector_if_source_changed(&mut self, cx: &mut Context<Self>) {
         let Some(inspector) = self.inspector.as_ref() else {
             return;
         };
-        let lock_changed = self
+        let source_changed = self
             .graph(cx)
             .and_then(|graph| graph.node(&inspector.node))
-            .is_some_and(|node| node.locked != inspector.locked);
-        if !lock_changed {
+            .is_some_and(|node| inspector.source_changed(node));
+        if !source_changed {
             return;
         }
-        // Rebuilding the editors needs the window, which an observer is not
-        // given, so it waits until this update has finished.
+        // Updating editor buffers needs the window and must wait until the
+        // notifying entity has finished updating. Read the latest source then,
+        // rather than replaying a stale snapshot over a newer edit or selection.
         let pane = cx.weak_entity();
         let window_handle = self.window_handle;
         cx.defer(move |cx| {
@@ -665,8 +862,7 @@ impl ArchitectPane {
         });
     }
 
-    /// Rebuilds the inspector so its fields match the step again, which is what
-    /// makes them go read-only the moment a step is locked.
+    /// Synchronizes external changes without replacing editors or their focus.
     pub(super) fn refresh_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self
             .inspector
@@ -679,7 +875,46 @@ impl ArchitectPane {
             self.inspector = None;
             return;
         };
-        self.inspector = Some(self.build_inspector(node, window, cx));
+        let Some(inspector) = self.inspector.as_mut() else {
+            return;
+        };
+        let source_text = NodeInspector::source_text(&node);
+        let lock_changed = inspector.locked != node.locked;
+        for ((editor, previous), next) in [
+            &inspector.title,
+            &inspector.responsibility,
+            &inspector.goal,
+            &inspector.capture,
+        ]
+        .into_iter()
+        .zip(&inspector.source_text)
+        .zip(&source_text)
+        {
+            if !lock_changed && previous == next {
+                continue;
+            }
+            editor.update(cx, |editor, cx| {
+                let text = editor.text(cx);
+                // A local BufferEdited event may still be queued. Do not erase
+                // uncommitted typing; an already-written local edit also needs
+                // no set_text, which would reset its selection/undo state.
+                if text != *next && (node.locked || editor.read_only(cx) || text == *previous) {
+                    editor.set_text(next.clone(), window, cx);
+                }
+                editor.set_read_only(node.locked);
+                if lock_changed {
+                    cx.notify();
+                }
+            });
+        }
+        if lock_changed {
+            inspector.new_rule.update(cx, |editor, cx| {
+                editor.set_read_only(node.locked);
+                cx.notify();
+            });
+        }
+        inspector.source_text = source_text;
+        inspector.locked = node.locked;
         cx.notify();
     }
 
@@ -1852,6 +2087,7 @@ impl ArchitectPane {
                         .overflow_y_scroll()
                         .p_3()
                         .gap_3()
+                        .child(self.render_step_model(&node, cx))
                         // The name is already the panel's heading, so the field
                         // is only worth its space while it can still be changed.
                         .when(!locked, |this| {

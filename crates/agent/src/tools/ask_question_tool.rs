@@ -10,6 +10,7 @@ use std::{collections::HashSet, sync::Arc};
 use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 
 const ANSWER_FIELD: &str = "answer";
+const FREEFORM_ANSWER_FIELD: &str = "freeform_answer";
 
 /// Ask the user one question whose answer is needed before continuing.
 ///
@@ -20,9 +21,10 @@ const ANSWER_FIELD: &str = "answer";
 ///
 /// Leave `options` empty for a free-text answer. Provide options for a
 /// single-select question, or set `allow_multiple` to let the user select more
-/// than one. Keep the options concise and use their descriptions to explain
-/// meaningful tradeoffs. Always supply a recommendation when it is safe to
-/// proceed automatically after 10 seconds without user interaction. Otherwise
+/// than one. A freeform answer is always available, including with options.
+/// Keep the options concise and use their descriptions to explain meaningful
+/// tradeoffs. Always supply a recommendation when it is safe to proceed
+/// automatically after 10 seconds with all Praxis windows inactive. Otherwise
 /// omit it and wait for a manual answer. Do not use this tool to request secrets.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -37,9 +39,11 @@ pub struct AskQuestionToolInput {
     pub allow_multiple: bool,
     /// Always supply a recommendation when it is safe to proceed without user input.
     /// Use a string for free text/single select, or a nonempty array of unique option
-    /// values for multi select. After 10 seconds without interaction this answer is
-    /// used automatically. Omit only when no safe recommendation exists; then wait
-    /// for a manual answer. Never use this to authorize tools or exit plan mode.
+    /// values for multi select. After 10 seconds with all Praxis windows inactive
+    /// and no edits or selections, this answer is used automatically. Active time
+    /// never counts toward the timeout. Omit only when no safe recommendation
+    /// exists; then wait for a manual answer. Never use this to authorize tools
+    /// or exit plan mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommendation: Option<AskQuestionAnswer>,
 }
@@ -182,28 +186,41 @@ impl AskQuestionTool {
             .collect()
     }
 
-    fn elicitation_schema(input: &AskQuestionToolInput) -> acp::ElicitationSchema {
+    pub fn elicitation_schema(input: &AskQuestionToolInput) -> acp::ElicitationSchema {
         if input.options.is_empty() {
             acp::ElicitationSchema::new().property(
                 ANSWER_FIELD,
                 acp::StringPropertySchema::new().title("Your answer"),
                 true,
             )
-        } else if input.allow_multiple {
-            acp::ElicitationSchema::new().property(
-                ANSWER_FIELD,
-                acp::MultiSelectPropertySchema::titled(Self::elicitation_options(input))
-                    .title("Choose one or more")
-                    .min_items(1),
-                true,
-            )
         } else {
-            acp::ElicitationSchema::new().property(
-                ANSWER_FIELD,
+            // MCP/ACP forms only support flat properties, not an object-level
+            // oneOf. Both fields are optional on the wire; the service requires
+            // an answer and gives explicit freeform text precedence over choices.
+            let schema = if input.allow_multiple {
+                acp::ElicitationSchema::new().property(
+                    ANSWER_FIELD,
+                    acp::MultiSelectPropertySchema::titled(Self::elicitation_options(input))
+                        .title("Choose one or more"),
+                    false,
+                )
+            } else {
+                acp::ElicitationSchema::new().property(
+                    ANSWER_FIELD,
+                    acp::StringPropertySchema::new()
+                        .title("Choose one")
+                        .one_of(Self::elicitation_options(input)),
+                    false,
+                )
+            };
+            schema.property(
+                FREEFORM_ANSWER_FIELD,
                 acp::StringPropertySchema::new()
-                    .title("Choose one")
-                    .one_of(Self::elicitation_options(input)),
-                true,
+                    .title("Or write your own answer")
+                    .description(
+                        "If provided, this answer is used instead of the selected options.",
+                    ),
+                false,
             )
         }
     }
@@ -219,6 +236,24 @@ impl AskQuestionTool {
                         error: "The submitted response did not contain an answer.".into(),
                     };
                 };
+                if !input.options.is_empty()
+                    && let Some(freeform) = content.remove(FREEFORM_ANSWER_FIELD)
+                {
+                    match freeform {
+                        acp::ElicitationContentValue::String(answer) => {
+                            if !answer.trim().is_empty() {
+                                return AskQuestionToolOutput::Answered {
+                                    answer: AskQuestionAnswer::Text(answer),
+                                };
+                            }
+                        }
+                        _ => {
+                            return AskQuestionToolOutput::Error {
+                                error: "The freeform answer must be text.".into(),
+                            };
+                        }
+                    }
+                }
                 let Some(answer) = content.remove(ANSWER_FIELD) else {
                     return AskQuestionToolOutput::Error {
                         error: "The submitted response did not contain an answer.".into(),
@@ -317,7 +352,7 @@ impl AskQuestionTool {
             AskQuestionToolOutput::TimedOut { answer } => (
                 "Question timed out; used model recommendation",
                 format!(
-                    "**Question:** {}\n\nNo user interaction within 10 seconds. Used the model recommendation (not a user answer): {}",
+                    "**Question:** {}\n\nPraxis was inactive for 10 seconds with no edits or selections. Used the model recommendation (not a user answer): {}",
                     input.question,
                     Self::recommendation_label(input, answer)
                 ),
@@ -496,6 +531,104 @@ mod tests {
             "the answer field must be required: {:?}",
             schema.required
         );
+    }
+
+    fn assert_options_allow_freeform(schema: &acp::ElicitationSchema) {
+        assert!(schema.required.as_deref().unwrap_or_default().is_empty());
+        let Some(acp::ElicitationPropertySchema::String(freeform)) =
+            schema.properties.get(FREEFORM_ANSWER_FIELD)
+        else {
+            panic!("questions with options must also expose freeform text")
+        };
+        assert!(freeform.enum_values.is_none());
+        assert!(freeform.one_of.is_none());
+    }
+
+    #[gpui::test]
+    fn question_always_offers_freeform(_cx: &mut gpui::TestAppContext) {
+        for input in [
+            input(Vec::new(), false),
+            input(vec![option("postgres", "PostgreSQL")], false),
+            input(vec![option("postgres", "PostgreSQL")], true),
+        ] {
+            let schema = AskQuestionTool::elicitation_schema(&input);
+            let schema = serde_json::from_value::<acp::ElicitationSchema>(
+                serde_json::to_value(schema).unwrap(),
+            )
+            .unwrap();
+            if input.options.is_empty() {
+                assert_answer_is_required(&schema);
+            } else {
+                assert_options_allow_freeform(&schema);
+            }
+            let field = if input.options.is_empty() {
+                ANSWER_FIELD
+            } else {
+                FREEFORM_ANSWER_FIELD
+            };
+            let response = acp::CreateElicitationResponse::new(acp::ElicitationAction::Accept(
+                acp::ElicitationAcceptAction::new().content(BTreeMap::from([(
+                    field.into(),
+                    acp::ElicitationContentValue::from("Use an embedded database instead"),
+                )])),
+            ));
+            assert_eq!(
+                AskQuestionTool::response_output(&input, response),
+                AskQuestionToolOutput::Answered {
+                    answer: AskQuestionAnswer::Text("Use an embedded database instead".into()),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn freeform_answers_override_selections_without_weakening_option_validation() {
+        for allow_multiple in [false, true] {
+            let input = input(vec![option("postgres", "PostgreSQL")], allow_multiple);
+            let selected = if allow_multiple {
+                acp::ElicitationContentValue::StringArray(vec!["postgres".into()])
+            } else {
+                acp::ElicitationContentValue::from("postgres")
+            };
+            for freeform in ["An alternative", "  "] {
+                let response = acp::CreateElicitationResponse::new(acp::ElicitationAction::Accept(
+                    acp::ElicitationAcceptAction::new().content(BTreeMap::from([
+                        (ANSWER_FIELD.into(), selected.clone()),
+                        (FREEFORM_ANSWER_FIELD.into(), freeform.into()),
+                    ])),
+                ));
+                let expected = if freeform.trim().is_empty() {
+                    if allow_multiple {
+                        AskQuestionAnswer::Multiple(vec!["postgres".into()])
+                    } else {
+                        AskQuestionAnswer::Text("postgres".into())
+                    }
+                } else {
+                    AskQuestionAnswer::Text(freeform.into())
+                };
+                assert_eq!(
+                    AskQuestionTool::response_output(&input, response),
+                    AskQuestionToolOutput::Answered { answer: expected }
+                );
+            }
+            for content in [
+                BTreeMap::new(),
+                BTreeMap::from([(FREEFORM_ANSWER_FIELD.into(), "  ".into())]),
+                BTreeMap::from([(
+                    FREEFORM_ANSWER_FIELD.into(),
+                    acp::ElicitationContentValue::StringArray(vec!["text".into()]),
+                )]),
+                BTreeMap::from([(ANSWER_FIELD.into(), "unknown".into())]),
+            ] {
+                let response = acp::CreateElicitationResponse::new(acp::ElicitationAction::Accept(
+                    acp::ElicitationAcceptAction::new().content(content),
+                ));
+                assert!(matches!(
+                    AskQuestionTool::response_output(&input, response),
+                    AskQuestionToolOutput::Error { .. }
+                ));
+            }
+        }
     }
 
     #[test]
@@ -691,7 +824,7 @@ mod tests {
         ))
         .unwrap();
         let schema = AskQuestionTool::elicitation_schema(&input);
-        assert_answer_is_required(&schema);
+        assert_options_allow_freeform(&schema);
 
         let Some(acp::ElicitationPropertySchema::String(answer)) =
             schema.properties.get(ANSWER_FIELD)
@@ -706,21 +839,21 @@ mod tests {
     }
 
     #[test]
-    fn multiple_options_create_a_required_multi_select() {
+    fn multiple_options_create_a_multi_select_with_freeform() {
         let input = AskQuestionTool::validate_input(input(
             vec![option("api", "API"), option("worker", "Worker")],
             true,
         ))
         .unwrap();
         let schema = AskQuestionTool::elicitation_schema(&input);
-        assert_answer_is_required(&schema);
+        assert_options_allow_freeform(&schema);
 
         let Some(acp::ElicitationPropertySchema::Array(answer)) =
             schema.properties.get(ANSWER_FIELD)
         else {
             panic!("multi-select must use an array property")
         };
-        assert_eq!(answer.min_items, Some(1));
+        assert_eq!(answer.min_items, None);
         let acp::MultiSelectItems::Titled(items) = &answer.items else {
             panic!("multi-select options must preserve their labels")
         };

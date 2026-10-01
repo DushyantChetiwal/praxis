@@ -79,6 +79,12 @@ That conversation appears **beside the step, on the canvas**. The Agent Panel st
 
 The step's thread starts knowing what the main conversation knows, then diverges, so settling one step does not crowd out the context the next step will be settled in. It can read the project and rewrite its own step through the `refine_step` tool, but cannot change the project or any other step.
 
+## Per-step models
+
+In a step's **Details** inspector, choose **Execution model** before locking it. **Inherit plan model** uses the main conversation's model; an override stores both the provider and model ID. The main agent can include the same selection in `draft_plan`, and a step's refinement chat can change it before locking. Existing plans without overrides continue to inherit the plan model.
+
+An unavailable model fails that step with an actionable error rather than silently choosing a different provider. Correct its model or provider configuration, then resume. Explicit step models require the native Praxis Agent.
+
 ## Locking
 
 A step you are satisfied with should be **locked**. Locking makes it read-only and is your signal that deliberation on it is over. The agent will not lock or unlock a step on its own initiative.
@@ -114,7 +120,7 @@ Agents other than Zed's own run every step in the plan's conversation, so there 
 
 **Pause** starts no new steps and lets the steps already running finish, then waits. **Resume** carries on from exactly where the run paused.
 
-A run that was stopped or that failed can also be resumed. The steps it was on run again, each counted as another attempt, and everything earlier steps reported is kept. **Run** always starts again from the beginning with a clean slate. Runs are kept in memory only, so a run cannot be resumed after Zed restarts.
+A run that was stopped or that failed can also be resumed, including after an API-key or provider error. Fix the configuration and choose **Resume**: interrupted steps run again as new attempts, while completed branches and their summaries are kept. Failures stay in run status and the affected step conversation; they do not send a new prompt into the main conversation. **Run** always starts again from the beginning with a clean slate. Checkpoints are kept in memory only, so a run cannot be resumed after Praxis restarts.
 
 To start part way through, choose **Run From Here** on a step's right-click menu, or the play button in its inspector. The run starts at that step, even inside a nested plan, and the steps before it are not run again: what they last reported is what the later steps are told.
 
@@ -126,11 +132,18 @@ To start part way through, choose **Run From Here** on a step's right-click menu
 - after any single step has been entered 25 times, or
 - if plans turn out to nest more than 5 deep.
 
-When that happens the agent is told which step kept repeating and asked to explain what would have to change for it to finish, rather than being left to carry on.
+When a limit is reached, the run status records why execution stopped. The main conversation can inspect that outcome without being interrupted by an automatically submitted prompt.
 
 ### Editing a plan mid-run
 
-A run carries out the plan as it was when you pressed **Run**. Editing the canvas or a step's chat while a run is in flight does not change the run already in progress, so that it is always possible to say afterwards what was actually carried out. Stop the run and start it again to pick up your changes. **Resume** also picks them up, as long as the plan still has every step the run was on.
+The main conversation has two coordinator tools:
+
+- `inspect_architect_run` reads status, paginated visit history, and the conversation for a specific step visit, addressed by its full nested path and visit ID. It can inspect both active and finished visits without changing execution.
+- `control_architect_run` can pause, interrupt, resume, change a step's model, or revise its goal, rules, and capture requirements. These execution changes require **Build** mode and the configured tool permission approval. Step agents cannot control sibling steps.
+
+Pending step briefs and models can be changed during execution. Active work must be interrupted first, then revised and resumed. Approved brief revisions preserve locks and checkpoints; completed briefs cannot be rewritten. Model changes affect subsequent visits, never past conversations. Approval is rejected if the plan changes while permission is pending.
+
+These tools let you ask the main conversation to monitor and steer the run while it is executing; they do not start an independent, continuously polling coordinator. Structural changes still require redrafting, which clears the checkpoint and requires a new run. Ordinary canvas edits are not a substitute for the coordinator's checkpoint-preserving revision operation.
 
 ## Related settings
 

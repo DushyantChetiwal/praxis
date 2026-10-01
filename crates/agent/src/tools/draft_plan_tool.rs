@@ -1,8 +1,8 @@
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
-use architect::{ProposedEdge, ProposedGraph, ProposedNode};
+use architect::{ProposedEdge, ProposedGraph, ProposedNode, StepModel};
 use gpui::{App, SharedString, Task, WeakEntity};
-use language_model::LanguageModelToolResultContent;
+use language_model::{LanguageModelRegistry, LanguageModelToolResultContent};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -52,6 +52,13 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 /// - A condition on a connection out of a step can only be judged from that
 ///   step's summary, so make sure the `capture` covers whatever the condition
 ///   asks about.
+///
+/// ### Execution model: `model`
+/// A step may override the plan model with `{"provider": "...", "model": "..."}`.
+/// Use exact ids from the available models, never display labels or invented ids.
+/// Omit `model` to inherit the plan model on new steps and preserve the existing
+/// choice on redrafted steps. Change a model before locking the step. During a
+/// run, use the main conversation's live model-change tool instead of redrafting.
 ///
 /// ### Steps that contain plans: `steps`
 /// A step may carry a nested plan in `steps`, for work that is one step at this
@@ -144,6 +151,33 @@ impl DraftPlanTool {
     }
 }
 
+pub(super) fn validate_step_model(model: &StepModel, cx: &App) -> Result<()> {
+    anyhow::ensure!(
+        LanguageModelRegistry::read_global(cx)
+            .available_models(cx)
+            .any(|available| {
+                available.provider_id().0.as_ref() == model.provider.as_str()
+                    && available.id().0.as_ref() == model.model.as_str()
+            }),
+        "The step model {}/{} is unavailable. Choose an available model in the step inspector or inherit the plan model.",
+        model.provider,
+        model.model,
+    );
+    Ok(())
+}
+
+fn validate_proposed_models(nodes: &[ProposedNode], cx: &App) -> Result<()> {
+    for node in nodes {
+        if let Some(model) = &node.model {
+            validate_step_model(model, cx)?;
+        }
+        if let Some(subplan) = &node.steps {
+            validate_proposed_models(&subplan.nodes, cx)?;
+        }
+    }
+    Ok(())
+}
+
 impl AgentTool for DraftPlanTool {
     type Input = DraftPlanToolInput;
     type Output = DraftPlanToolOutput;
@@ -191,6 +225,23 @@ impl AgentTool for DraftPlanTool {
                     error: "A plan needs at least one step.".into(),
                 });
             }
+
+            self.thread
+                .read_with(cx, |thread, cx| {
+                    anyhow::ensure!(
+                        !thread
+                            .architect_run()
+                            .is_some_and(|run| run.is_running() || run.can_resume()),
+                        "This plan has an active or resumable run. Use the main conversation's live model-change tool instead of redrafting it."
+                    );
+                    validate_proposed_models(&input.nodes, cx)
+                })
+                .map_err(|error| DraftPlanToolOutput::Error {
+                    error: format!("The thread this plan belongs to is gone: {error}"),
+                })?
+                .map_err(|error| DraftPlanToolOutput::Error {
+                    error: error.to_string(),
+                })?;
 
             let draft = ProposedGraph {
                 nodes: input.nodes,
@@ -281,6 +332,83 @@ impl AgentTool for DraftPlanTool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn draft_schema_and_nested_input_include_execution_models() {
+        let schema = serde_json::to_value(schemars::schema_for!(DraftPlanToolInput))
+            .expect("schema should serialize");
+        let schema = schema.to_string();
+        assert!(schema.contains("StepModel"));
+        assert!(schema.contains("provider"));
+
+        let input: DraftPlanToolInput = serde_json::from_value(json!({
+            "nodes": [{
+                "id": "parent", "title": "Parent",
+                "model": {"provider": "test-provider", "model": "parent-model"},
+                "steps": {"nodes": [{
+                    "id": "child", "title": "Child",
+                    "model": {"provider": "test-provider", "model": "child-model"}
+                }]}
+            }, {"id": "inherited", "title": "Inherited"}]
+        }))
+        .expect("model-bearing drafts should deserialize");
+        let graph = ProposedGraph {
+            nodes: input.nodes,
+            edges: input.edges,
+        }
+        .into_graph();
+        let parent = graph.node(&"parent".into()).expect("parent should exist");
+        assert_eq!(
+            parent
+                .model
+                .as_ref()
+                .expect("parent model should exist")
+                .model,
+            "parent-model"
+        );
+        let child = parent
+            .subplan()
+            .expect("nested plan should exist")
+            .node(&"child".into())
+            .expect("child should exist");
+        assert_eq!(
+            child
+                .model
+                .as_ref()
+                .expect("child model should exist")
+                .model,
+            "child-model"
+        );
+        assert!(
+            graph
+                .node(&"inherited".into())
+                .expect("step should exist")
+                .model
+                .is_none()
+        );
+    }
+
+    #[gpui::test]
+    fn model_validation_uses_registry_ids_not_display_names(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let provider = LanguageModelRegistry::test(cx);
+            let model = provider.model("execution-model");
+            let selected = StepModel {
+                provider: model.provider_id().0.to_string(),
+                model: model.id().0.to_string(),
+            };
+            assert!(validate_step_model(&selected, cx).is_ok());
+            let display_names = StepModel {
+                provider: "Fake".into(),
+                model: "Missing Model".into(),
+            };
+            assert!(validate_step_model(&display_names, cx).is_err());
+            LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                registry.unregister_provider(model.provider_id(), cx);
+            });
+            assert!(validate_step_model(&selected, cx).is_err());
+        });
+    }
 
     #[test]
     fn saved_output_without_optional_lists_replays() {

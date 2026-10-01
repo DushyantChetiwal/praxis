@@ -2676,6 +2676,9 @@ impl ThreadView {
             && !self.elicitation_form_states.contains_key(&id)
         {
             let mut form = ElicitationFormState::new(&schema, window, cx);
+            if let Some(activity) = self.thread.read(cx).question_window_activity(&id) {
+                form.observe_question_window(&activity, window, cx);
+            }
             if let Some(on_interaction) = self.question_interaction_callback(&id, cx) {
                 form.observe_text_edits(on_interaction, cx);
             }

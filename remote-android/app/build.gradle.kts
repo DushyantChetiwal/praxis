@@ -91,4 +91,5 @@ dependencies {
     implementation(libs.androidx.security.crypto)
 
     testImplementation(libs.junit)
+    testImplementation(libs.org.json)
 }

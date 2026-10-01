@@ -106,11 +106,21 @@ pub struct StepResult {
     pub attempt: usize,
 }
 
+/// Registry identifiers for the model that executes a step, not display names.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct StepModel {
+    pub provider: String,
+    pub model: String,
+}
+
 /// A single step in the plan.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArchitectNode {
     pub id: NodeId,
     pub title: String,
+    /// Overrides the plan's execution model. Omitted steps inherit the plan model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<StepModel>,
     /// The area of work this step owns.
     #[serde(default)]
     pub responsibility: String,
@@ -153,6 +163,7 @@ impl ArchitectNode {
         Self {
             id: id.into(),
             title: title.into(),
+            model: None,
             responsibility: String::new(),
             intent: String::new(),
             rules: Vec::new(),
@@ -574,6 +585,10 @@ impl ArchitectGraph {
                 None => true,
                 Some(drafted) => {
                     drafted.title != settled.title
+                        || drafted
+                            .model
+                            .as_ref()
+                            .is_some_and(|model| Some(model) != settled.model.as_ref())
                         || drafted.responsibility.trim() != settled.responsibility.trim()
                         || drafted.intent.trim() != settled.intent.trim()
                         || drafted.rules != settled.rules
@@ -603,14 +618,24 @@ impl ArchitectGraph {
             node.position = existing.position;
             node.chat = existing.chat.clone();
             node.result = existing.result.clone();
-            if node.subplan.is_none() {
-                node.subplan = existing.subplan.clone();
+            let mut kept_detail = false;
+            match (node.subplan.as_deref_mut(), existing.subplan.as_deref()) {
+                (Some(drafted), Some(existing)) => {
+                    let merged = existing.merge_draft(drafted.clone())?;
+                    kept_detail = !merged.preserved.is_empty();
+                    *drafted = merged.graph;
+                }
+                (None, _) => node.subplan = existing.subplan.clone(),
+                _ => {}
             }
 
             // Detail a draft leaves blank is detail it did not mean to remove.
             // A redraw that only changes the shape of the plan should not empty
             // out the steps it keeps.
-            let mut kept_detail = false;
+            if node.model.is_none() && existing.model.is_some() {
+                node.model = existing.model.clone();
+                kept_detail = true;
+            }
             if node.responsibility.trim().is_empty() && !existing.responsibility.trim().is_empty() {
                 node.responsibility = existing.responsibility.clone();
                 kept_detail = true;
@@ -665,6 +690,14 @@ impl ArchitectGraph {
                     ""
                 }
             );
+            if let Some(model) = &node.model {
+                out.push_str(&format!(
+                    "{pad}  model: {}/{}\n",
+                    model.provider, model.model
+                ));
+            } else {
+                out.push_str(&format!("{pad}  model: inherit plan\n"));
+            }
             if !node.responsibility.trim().is_empty() {
                 out.push_str(&format!(
                     "{pad}  responsibility: {}\n",
@@ -1554,6 +1587,11 @@ pub struct ProposedNode {
     pub id: NodeId,
     /// A short human-readable name for the step.
     pub title: String,
+    /// Execution model using exact provider and model ids from the available
+    /// models. Omit to inherit the plan model for a new step, or to preserve an
+    /// existing step's override when redrafting. Never invent model ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<StepModel>,
     /// The area of work this step owns, such as `Authentication` or `Tests`.
     #[serde(default)]
     pub responsibility: String,
@@ -1605,6 +1643,7 @@ impl ProposedGraph {
             graph.add_node(ArchitectNode {
                 id: node.id,
                 title: node.title,
+                model: node.model,
                 responsibility: node.responsibility,
                 intent: node.intent,
                 rules: node.rules,
@@ -1754,6 +1793,107 @@ mod tests {
                 .into_iter()
                 .map(NodeId::from)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn step_models_are_optional_and_survive_nested_json_round_trips() {
+        let legacy: ArchitectNode = serde_json::from_value(serde_json::json!({
+            "id": "legacy", "title": "Saved before step models"
+        }))
+        .expect("legacy steps should load");
+        assert!(legacy.model.is_none());
+        let serialized = serde_json::to_value(&legacy).expect("step should serialize");
+        assert!(serialized.get("model").is_none());
+
+        let graph = draft(serde_json::json!({
+            "nodes": [{
+                "id": "parent", "title": "Parent",
+                "steps": {"nodes": [{
+                    "id": "child", "title": "Child",
+                    "model": {"provider": "test-provider", "model": "test-model"}
+                }]}
+            }]
+        }));
+        let path = NodePath::from(vec!["parent".into(), "child".into()]);
+        let model = graph
+            .node_at(&path)
+            .expect("child should exist")
+            .model
+            .as_ref()
+            .expect("proposal should retain the model");
+        assert_eq!(model.provider, "test-provider");
+        assert_eq!(model.model, "test-model");
+        let saved = serde_json::to_string(&graph).expect("plan should serialize");
+        let restored: ArchitectGraph = serde_json::from_str(&saved).expect("plan should load");
+        assert_eq!(restored, graph);
+        assert!(
+            restored
+                .outline()
+                .contains("model: test-provider/test-model")
+        );
+        assert!(restored.outline().contains("model: inherit plan"));
+    }
+
+    #[test]
+    fn redrafting_preserves_omitted_models_and_protects_locked_models_deeply() {
+        let proposal = serde_json::json!({
+            "nodes": [{
+                "id": "parent", "title": "Parent",
+                "steps": {"nodes": [{"id": "child", "title": "Child"}]}
+            }]
+        });
+        let mut graph = draft(proposal.clone());
+        let path = NodePath::from(vec!["parent".into(), "child".into()]);
+        let model = StepModel {
+            provider: "test-provider".into(),
+            model: "test-model".into(),
+        };
+        graph
+            .mutate_node_at(&path, |node| node.model = Some(model.clone()))
+            .expect("child should be editable");
+        for locked in [false, true] {
+            graph
+                .set_locked_at(&path, locked)
+                .expect("lock should change");
+            let merged = graph
+                .merge_draft(draft(proposal.clone()))
+                .expect("omission should preserve");
+            assert_eq!(
+                merged
+                    .graph
+                    .node_at(&path)
+                    .expect("child should exist")
+                    .model,
+                Some(model.clone())
+            );
+        }
+        let mut replacement = draft(proposal);
+        replacement
+            .mutate_node_at(&path, |node| {
+                node.model = Some(StepModel {
+                    provider: "test-provider".into(),
+                    model: "other-model".into(),
+                });
+            })
+            .expect("draft should be editable");
+        assert!(graph.merge_draft(replacement.clone()).is_err());
+        graph
+            .set_locked_at(&path, false)
+            .expect("child should unlock");
+        let merged = graph
+            .merge_draft(replacement)
+            .expect("unlocked override can change");
+        assert_eq!(
+            merged
+                .graph
+                .node_at(&path)
+                .expect("child should exist")
+                .model
+                .as_ref()
+                .expect("override should exist")
+                .model,
+            "other-model"
         );
     }
 
