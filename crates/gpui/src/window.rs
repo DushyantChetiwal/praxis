@@ -1898,7 +1898,10 @@ impl Window {
             move |active| {
                 handle
                     .update(&mut cx, |_, window, cx| {
-                        window.active.set(active);
+                        let was_active = window.active.replace(active);
+                        if active && !was_active {
+                            cx.record_window_activation();
+                        }
                         window.modifiers = window.platform_window.modifiers();
                         window.capslock = window.platform_window.capslock();
                         window
@@ -5408,6 +5411,9 @@ impl Window {
         // Platforms may resend cursor positions during redraws or while a file drag is stationary.
         let input_activity = match &event {
             PlatformInput::MouseMove(event) => event.position != self.mouse_position,
+            PlatformInput::ModifiersChanged(event) => {
+                event.modifiers != self.modifiers || event.capslock != self.capslock
+            }
             PlatformInput::FileDrop(FileDropEvent::Pending { position }) => {
                 *position != self.mouse_position
             }
@@ -7688,6 +7694,108 @@ mod tests {
         TouchId, TouchPhase, Underline, UnderlineStyle, Window, WindowAppearance, WindowOptions,
         canvas, div, hsla, point, px, size,
     };
+
+    #[gpui::test]
+    fn test_window_activation_is_app_wide_and_precedes_observers(cx: &mut TestAppContext) {
+        assert_eq!(cx.read(|cx| cx.last_window_activation()), None);
+        let first_window = cx.add_window(|_, _| EmptyView);
+        let second_window = cx.add_window(|_, _| EmptyView);
+        let first_platform_window = cx.test_window(first_window.into());
+        let second_platform_window = cx.test_window(second_window.into());
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = second_window
+            .update(cx, {
+                let observed = observed.clone();
+                move |_, window, cx| {
+                    cx.observe_window_activation(window, move |_, window, cx| {
+                        observed
+                            .borrow_mut()
+                            .push((window.is_window_active(), cx.last_window_activation()));
+                        assert_eq!(cx.last_input_activity(), None);
+                    })
+                }
+            })
+            .expect("window exists");
+
+        assert_eq!(cx.read(|cx| cx.last_window_activation()), None);
+        first_platform_window.simulate_active_status_change(true);
+        let first_activation = Some(cx.executor().now());
+        assert_eq!(cx.read(|cx| cx.last_window_activation()), first_activation);
+
+        cx.executor().advance_clock(Duration::from_secs(65));
+        first_platform_window.simulate_active_status_change(false);
+        assert_eq!(cx.read(|cx| cx.last_window_activation()), first_activation);
+        second_platform_window.simulate_active_status_change(true);
+        let second_activation = Some(cx.executor().now());
+        assert_ne!(first_activation, second_activation);
+        assert_eq!(cx.read(|cx| cx.last_window_activation()), second_activation);
+        assert_eq!(*observed.borrow(), vec![(true, second_activation)]);
+        first_window
+            .update(cx, |_, _, cx| {
+                assert_eq!(cx.last_window_activation(), second_activation);
+            })
+            .expect("window exists");
+
+        cx.executor().advance_clock(Duration::from_secs(5));
+        second_platform_window.simulate_active_status_change(true);
+        assert_eq!(cx.read(|cx| cx.last_window_activation()), second_activation);
+        second_platform_window.simulate_active_status_change(false);
+        second_platform_window.simulate_active_status_change(false);
+        assert_eq!(cx.read(|cx| cx.last_window_activation()), second_activation);
+        assert_eq!(
+            *observed.borrow(),
+            vec![
+                (true, second_activation),
+                (true, second_activation),
+                (false, second_activation),
+                (false, second_activation),
+            ]
+        );
+
+        cx.executor().advance_clock(Duration::from_secs(1));
+        second_platform_window.simulate_active_status_change(true);
+        let reactivation = Some(cx.executor().now());
+        assert_eq!(cx.read(|cx| cx.last_window_activation()), reactivation);
+        assert_eq!(observed.borrow().last(), Some(&(true, reactivation)));
+        assert_eq!(cx.read(|cx| cx.last_input_activity()), None);
+    }
+
+    #[gpui::test]
+    fn test_only_changed_modifiers_and_capslock_record_input_activity(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let mut platform_window = cx.test_window(window.into());
+        platform_window.simulate_active_status_change(true);
+        let activation = cx.read(|cx| cx.last_window_activation());
+        assert_eq!(activation, Some(cx.executor().now()));
+        let mut last_activity = None;
+
+        for (shift, capslock, changed) in [
+            (false, false, false),
+            (true, false, true),
+            (true, false, false),
+            (true, true, true),
+            (true, true, false),
+            (false, true, true),
+            (false, false, true),
+            (false, false, false),
+        ] {
+            cx.executor().advance_clock(Duration::from_secs(1));
+            platform_window.simulate_input(PlatformInput::ModifiersChanged(
+                crate::ModifiersChangedEvent {
+                    modifiers: crate::Modifiers {
+                        shift,
+                        ..Default::default()
+                    },
+                    capslock: crate::Capslock { on: capslock },
+                },
+            ));
+            if changed {
+                last_activity = Some(cx.executor().now());
+            }
+            assert_eq!(cx.read(|cx| cx.last_input_activity()), last_activity);
+            assert_eq!(cx.read(|cx| cx.last_window_activation()), activation);
+        }
+    }
 
     #[gpui::test]
     fn test_input_activity_is_app_wide_and_precedes_handlers(cx: &mut TestAppContext) {

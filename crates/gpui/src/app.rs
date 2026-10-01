@@ -828,6 +828,7 @@ pub struct App {
     /// Origin of the shared clock that phase-locks synced repeating animations.
     pub(crate) synced_animation_epoch: Instant,
     last_input_activity: Option<Instant>,
+    last_window_activation: Option<Instant>,
     /// Whether the app was created by [`Application::new_inaccessible`]. No
     /// accesskit APIs will be called when this flag is set.
     pub(crate) accessibility_force_disabled: bool,
@@ -933,6 +934,7 @@ impl App {
                 reduce_motion: false,
                 synced_animation_epoch,
                 last_input_activity: None,
+                last_window_activation: None,
                 accessibility_force_disabled: false,
 
                 #[cfg(any(test, feature = "test-support", debug_assertions))]
@@ -2022,14 +2024,27 @@ impl App {
     /// Returns when input was last delivered to any window, using the background executor's clock.
     ///
     /// Returns `None` until input is received. Synthetic input dispatch can count as activity,
-    /// but stationary mouse moves, rendering, and programmatic entity updates do not.
-    /// Window activation is not tracked; idle-timeout owners should handle it separately.
+    /// but stationary mouse moves, unchanged modifier notifications, rendering, and programmatic
+    /// entity updates do not. Window activation is tracked separately by [`Self::last_window_activation`].
     pub fn last_input_activity(&self) -> Option<Instant> {
         self.last_input_activity
     }
 
     pub(crate) fn record_input_activity(&mut self) {
         self.last_input_activity = Some(self.background_executor().now());
+    }
+
+    /// Returns when any window last transitioned from inactive to active, using the background
+    /// executor's clock. Returns `None` until such a transition is received from the platform.
+    ///
+    /// This is recorded before activation observers run, independently of input activity.
+    /// Repeated active notifications and deactivation do not change the timestamp.
+    pub fn last_window_activation(&self) -> Option<Instant> {
+        self.last_window_activation
+    }
+
+    pub(crate) fn record_window_activation(&mut self) {
+        self.last_window_activation = Some(self.background_executor().now());
     }
 
     /// Obtains a reference to the executor, which can be used to spawn futures.

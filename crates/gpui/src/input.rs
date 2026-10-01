@@ -292,8 +292,8 @@ mod tests {
     use super::*;
     use crate::{
         AnyWindowHandle, AppContext as _, FocusHandle, InteractiveElement as _, IntoElement,
-        ParentElement as _, PlatformWindow as _, Render, Styled as _, TestAppContext, TextInputAction,
-        TextInputStateChange, canvas, div,
+        ParentElement as _, PlatformWindow as _, Render, Styled as _, TestAppContext,
+        TextInputAction, TextInputStateChange, canvas, div,
     };
 
     #[gpui::test]
@@ -409,41 +409,46 @@ mod tests {
             .test_window(window.into())
             .take_input_handler()
             .expect("focused view has an input handler");
-        assert_eq!(input_handler.selected_text_range(false), None);
+        assert!(input_handler.selected_text_range(false).is_none());
         assert_eq!(input_handler.marked_text_range(), None);
         assert_eq!(input_handler.text_for_range(0..0, &mut None), None);
         assert_eq!(input_handler.bounds_for_range(0..0), None);
         assert_eq!(cx.read(|cx| cx.last_input_activity()), None);
 
-        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
         input_handler.replace_and_mark_text_in_range(None, "composition", Some(0..0));
         assert_eq!(
             cx.read(|cx| cx.last_input_activity()),
             Some(cx.executor().now())
         );
 
-        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
         input_handler.replace_text_in_range(None, "committed text");
         assert_eq!(
             cx.read(|cx| cx.last_input_activity()),
             Some(cx.executor().now())
         );
 
-        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
         input_handler.paste(ClipboardItem::new_string("pasted text".into()));
         assert_eq!(
             cx.read(|cx| cx.last_input_activity()),
             Some(cx.executor().now())
         );
 
-        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
         input_handler.set_selected_text_range(0..0);
         let last_activity = Some(cx.executor().now());
         assert_eq!(cx.read(|cx| cx.last_input_activity()), last_activity);
 
-        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
         input_handler.unmark_text();
-        assert_eq!(input_handler.selected_text_range(false), None);
+        assert!(input_handler.selected_text_range(false).is_none());
         assert_eq!(input_handler.bounds_for_range(0..0), None);
         window
             .update(cx, |view, window, cx| {

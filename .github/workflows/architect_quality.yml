@@ -181,6 +181,7 @@ jobs:
       - name: Test GPUI input activity
         run: |
           cargo test --locked -p gpui --lib input_activity
+          cargo test --locked -p gpui --lib test_window_activation_is_app_wide_and_precedes_observers
           cargo test --locked -p gpui --lib direct_text_input_records_activity
 
       - name: Test question recommendations and countdowns

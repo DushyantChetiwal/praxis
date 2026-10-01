@@ -528,8 +528,13 @@ impl QuestionWindowActivity {
         }
         let last_input = cx.last_input_activity().unwrap_or(created_at);
         let (baseline, timeout) = if active {
+            // Other windows have no question observer, and a brief app blur can
+            // happen entirely between timer ticks. GPUI records every activation.
             (
-                self.foreground_idle_since.get().unwrap_or(created_at),
+                self.foreground_idle_since
+                    .get()
+                    .unwrap_or(created_at)
+                    .max(cx.last_window_activation().unwrap_or(created_at)),
                 QUESTION_IDLE_GRACE + QUESTION_COUNTDOWN,
             )
         } else {
@@ -556,7 +561,8 @@ impl QuestionTimeout {
             "Auto-answer paused; waiting for your answer.".to_string()
         } else if let Some(remaining) = self.activity.remaining(self.created_at, cx) {
             if remaining > QUESTION_COUNTDOWN {
-                "Auto-answer waits for 60s without input in Praxis, then a 10s countdown.".to_string()
+                "Auto-answer waits for 60s without input in Praxis, then a 10s countdown."
+                    .to_string()
             } else {
                 let seconds = remaining.as_secs_f64().ceil() as u64;
                 format!("Using the recommendation in {seconds}s. Interact with Praxis to pause.")
@@ -4369,7 +4375,7 @@ impl AcpThread {
         recommendation: acp::CreateElicitationResponse,
         cx: &mut Context<Self>,
     ) -> bool {
-        // Read current app input here, not just when the timer queued this submission.
+        // Read current input and activation here, not just when the timer queued submission.
         let eligible = self
             .elicitations
             .question_timeouts
@@ -10186,7 +10192,12 @@ mod tests {
         thread.read_with(cx, |thread, _| {
             let entry = thread.elicitation(&id).unwrap().1;
             assert!(matches!(entry.status, ElicitationStatus::Pending { .. }));
-            assert!(entry.request.message.contains("waits for 60s without input"));
+            assert!(
+                entry
+                    .request
+                    .message
+                    .contains("waits for 60s without input")
+            );
         });
         for remaining in (1..=10).rev() {
             cx.executor().advance_clock(Duration::from_secs(1));
@@ -10280,7 +10291,12 @@ mod tests {
         cx.executor().advance_clock(Duration::from_secs(1));
         thread.read_with(cx, |thread, _| {
             let entry = thread.elicitation(&id).unwrap().1;
-            assert!(entry.request.message.contains("waits for 60s without input"));
+            assert!(
+                entry
+                    .request
+                    .message
+                    .contains("waits for 60s without input")
+            );
             assert!(!thread.question_interaction_flag(&id).unwrap().get());
         });
         // Repeated ordinary input postpones auto-answer, but does not disable it.
@@ -10298,11 +10314,101 @@ mod tests {
         });
         cx.executor().advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
-        assert!(
-            task.now_or_never()
-                .expect("idle after input must expire")
-                .1
-        );
+        assert!(task.now_or_never().expect("idle after input must expire").1);
+    }
+
+    async fn assert_question_timeout_other_window_activation_restarts_idle(
+        cx: &mut TestAppContext,
+        external_app_blink: bool,
+    ) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let (id, task, activity) = request_timed_question(&thread, cx);
+        drop(activity);
+        let activity = thread.read_with(cx, |thread, _| {
+            thread.question_window_activity(&id).unwrap()
+        });
+        let question_window = cx.add_window(|window, cx| QuestionActivityView {
+            _subscription: activity.observe_window(window, cx),
+        });
+        let cx = cx.add_empty_window();
+        question_window
+            .update(cx, |_, window, _| window.activate_window())
+            .unwrap();
+        cx.run_until_parked();
+        if external_app_blink {
+            cx.update(|window, _| window.activate_window());
+            cx.run_until_parked();
+        }
+        cx.executor().advance_clock(Duration::from_secs(65));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            let entry = thread.elicitation(&id).unwrap().1;
+            assert!(matches!(entry.status, ElicitationStatus::Pending { .. }));
+            assert!(entry.request.message.contains("in 5s."));
+        });
+        if external_app_blink {
+            // B has no question observer. Leave and return before the next tick,
+            // so neither the question's observer nor polling can see this blur.
+            cx.deactivate_window();
+            cx.dispatcher
+                .scheduler()
+                .clock()
+                .advance(Duration::from_millis(100));
+        }
+        cx.update(|window, cx| {
+            assert!(cx.last_input_activity().is_none());
+            window.activate_window();
+        });
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, cx| {
+            assert!(cx.last_input_activity().is_none());
+            assert_eq!(
+                cx.last_window_activation(),
+                Some(cx.background_executor().now())
+            );
+            let state = thread.elicitations.question_timeouts.get(&id).unwrap();
+            assert_eq!(
+                activity.remaining(state.created_at, cx),
+                Some(QUESTION_IDLE_GRACE + QUESTION_COUNTDOWN)
+            );
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        thread.read_with(cx, |thread, _| {
+            assert!(
+                thread
+                    .elicitation(&id)
+                    .unwrap()
+                    .1
+                    .request
+                    .message
+                    .contains("waits for 60s without input")
+            );
+        });
+        cx.executor().advance_clock(Duration::from_secs(68));
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            let entry = thread.elicitation(&id).unwrap().1;
+            assert!(matches!(entry.status, ElicitationStatus::Pending { .. }));
+            assert!(entry.request.message.contains("Using the recommendation in"));
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        let (response, timed_out) = task
+            .now_or_never()
+            .expect("70 idle seconds after the other window activates must resolve the question");
+        assert!(timed_out);
+        assert_eq!(response.action, question_test_answer("postgres").action);
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_other_window_activation_restarts_idle(cx: &mut TestAppContext) {
+        assert_question_timeout_other_window_activation_restarts_idle(cx, false).await;
+    }
+
+    #[gpui::test]
+    async fn test_question_timeout_other_window_blink_restarts_idle(cx: &mut TestAppContext) {
+        assert_question_timeout_other_window_activation_restarts_idle(cx, true).await;
     }
 
     #[gpui::test]
@@ -10320,7 +10426,10 @@ mod tests {
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_secs(69));
-        cx.dispatcher.scheduler().clock().advance(Duration::from_secs(1));
+        cx.dispatcher
+            .scheduler()
+            .clock()
+            .advance(Duration::from_secs(1));
         cx.update(|window, cx| {
             window.dispatch_event(
                 gpui::PlatformInput::KeyUp(gpui::KeyUpEvent {
@@ -10364,7 +10473,10 @@ mod tests {
         cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_secs(69));
-        cx.dispatcher.scheduler().clock().advance(Duration::from_secs(1));
+        cx.dispatcher
+            .scheduler()
+            .clock()
+            .advance(Duration::from_secs(1));
         let submission_checked = Rc::new(Cell::new(false));
         cx.update(|window, cx| {
             let created_at = thread
@@ -10426,11 +10538,7 @@ mod tests {
         });
         cx.executor().advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
-        assert!(
-            task.now_or_never()
-                .expect("focus must restart idle time")
-                .1
-        );
+        assert!(task.now_or_never().expect("focus must restart idle time").1);
     }
 
     #[gpui::test]
