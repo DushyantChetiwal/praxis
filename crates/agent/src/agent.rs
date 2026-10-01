@@ -2284,8 +2284,7 @@ impl NativeAgentConnection {
         let model = model
             .map(|model| crate::architect_runner::resolve_step_model(model, cx))
             .transpose()?;
-        let thread =
-            cx.new(|cx| Thread::new_architect_run_step(&parent_thread, title, model, cx));
+        let thread = cx.new(|cx| Thread::new_architect_run_step(&parent_thread, title, model, cx));
         thread.update(cx, |thread, _cx| {
             let complete_step = CompleteStepTool::for_visit(parent_thread.downgrade(), visit);
             thread.add_tool(complete_step);
@@ -8453,7 +8452,11 @@ mod internal_tests {
             let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
             let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
             thread.update(cx, |thread, cx| thread.set_model(fake.model("fake"), cx));
-            for mode in [SessionMode::Plan, SessionMode::Architect, SessionMode::Build] {
+            for mode in [
+                SessionMode::Plan,
+                SessionMode::Architect,
+                SessionMode::Build,
+            ] {
                 thread.update(cx, |thread, cx| thread.set_session_mode(mode, cx));
                 thread.read_with(cx, |thread, cx| {
                     let tools = thread.enabled_tools(cx);
@@ -8475,7 +8478,9 @@ mod internal_tests {
                     assert_eq!(tools.contains_key(ControlArchitectRunTool::NAME), control);
                 });
             }
-            thread.update(cx, |thread, cx| thread.set_session_mode(SessionMode::Build, cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_session_mode(SessionMode::Build, cx)
+            });
             let project_id = agent.read_with(cx, |agent, _| {
                 agent.sessions.get(&session_id).unwrap().project_id
             });
@@ -8554,7 +8559,8 @@ mod internal_tests {
                 let model = thread.model().unwrap();
                 json!({"provider": model.provider_id().0, "model": model.id().0})
             });
-            let change = json!({"action": "set_step_model", "node_path": ["step"], "model": selection});
+            let change =
+                json!({"action": "set_step_model", "node_path": ["step"], "model": selection});
             permission(ToolPermissionMode::Deny, cx);
             for input in [
                 json!({"action": "interrupt"}),
@@ -8566,7 +8572,11 @@ mod internal_tests {
             }
             thread.read_with(cx, |thread, _| {
                 assert!(thread.architect_run().is_none());
-                let node = thread.architect_graph().unwrap().node(&"step".into()).unwrap();
+                let node = thread
+                    .architect_graph()
+                    .unwrap()
+                    .node(&"step".into())
+                    .unwrap();
                 assert!(node.model.is_none());
             });
             permission(ToolPermissionMode::Allow, cx);
@@ -8610,7 +8620,11 @@ mod internal_tests {
             .await
             .unwrap();
             thread.read_with(cx, |thread, _| {
-                let node = thread.architect_graph().unwrap().node(&"step".into()).unwrap();
+                let node = thread
+                    .architect_graph()
+                    .unwrap()
+                    .node(&"step".into())
+                    .unwrap();
                 assert!(node.model.is_none());
             });
         }
@@ -8652,7 +8666,8 @@ mod internal_tests {
             permission(ToolPermissionMode::Confirm, cx);
             let (events, mut receiver) = ToolCallEventStream::test();
             let task = cx.update(|cx| {
-                tool.clone().run(ToolInput::ready(revision.clone()), events, cx)
+                tool.clone()
+                    .run(ToolInput::ready(revision.clone()), events, cx)
             });
             let authorization = receiver.expect_authorization().await;
             assert!(
@@ -8676,7 +8691,11 @@ mod internal_tests {
                 let run = thread.architect_run().unwrap();
                 assert!(Rc::ptr_eq(run.control().unwrap(), &checkpoint));
                 assert!(run.can_resume());
-                let node = thread.architect_graph().unwrap().node(&"step".into()).unwrap();
+                let node = thread
+                    .architect_graph()
+                    .unwrap()
+                    .node(&"step".into())
+                    .unwrap();
                 assert!(node.locked);
                 assert_eq!(node.intent, "Use the revised execution brief");
                 assert!(node.rules.is_empty());
@@ -8853,10 +8872,14 @@ mod internal_tests {
             cx.run_until_parked();
             let briefs = pending_step_briefs(&fake);
             assert!(
-                briefs.iter().any(|(_, brief)| brief.contains("Newer authorized goal"))
+                briefs
+                    .iter()
+                    .any(|(_, brief)| brief.contains("Newer authorized goal"))
             );
             assert!(
-                briefs.iter().all(|(_, brief)| !brief.contains("Stale approved goal"))
+                briefs
+                    .iter()
+                    .all(|(_, brief)| !brief.contains("Stale approved goal"))
             );
             cx.update(|cx| stop_architect_run(&thread, None, cx));
         }
@@ -8934,7 +8957,11 @@ mod internal_tests {
             ));
             permission(ToolPermissionMode::Deny, cx);
             for action in ["interrupt", "pause"] {
-                assert!(call(tool.clone(), json!({"action": action}), cx).await.is_err());
+                assert!(
+                    call(tool.clone(), json!({"action": action}), cx)
+                        .await
+                        .is_err()
+                );
             }
             thread.read_with(cx, |thread, _| {
                 let run = thread.architect_run().unwrap();
@@ -8947,7 +8974,11 @@ mod internal_tests {
                 .unwrap();
             assert_eq!(paused["state"]["paused"], true);
             permission(ToolPermissionMode::Deny, cx);
-            assert!(call(tool.clone(), json!({"action": "resume"}), cx).await.is_err());
+            assert!(
+                call(tool.clone(), json!({"action": "resume"}), cx)
+                    .await
+                    .is_err()
+            );
             thread.read_with(cx, |thread, _| {
                 assert!(thread.architect_run().unwrap().is_paused());
             });
@@ -9005,11 +9036,15 @@ mod internal_tests {
                     history.last().unwrap().session_id
                 );
             });
-            call(tool, json!({"action": "interrupt"}), cx).await.unwrap();
+            call(tool, json!({"action": "interrupt"}), cx)
+                .await
+                .unwrap();
         }
 
         #[gpui::test]
-        async fn conversation_selection_requires_full_path_and_exact_visit(cx: &mut TestAppContext) {
+        async fn conversation_selection_requires_full_path_and_exact_visit(
+            cx: &mut TestAppContext,
+        ) {
             init_test(cx);
             let (connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
             let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
@@ -9023,7 +9058,13 @@ mod internal_tests {
             let paths = [first_path.clone(), first_path.clone(), second_path.clone()];
             for (index, path) in paths.iter().cloned().enumerate() {
                 let visit = thread.update(cx, |thread, cx| {
-                    thread.note_architect_run_position(path, "Step".into(), index + 1, index + 1, cx)
+                    thread.note_architect_run_position(
+                        path,
+                        "Step".into(),
+                        index + 1,
+                        index + 1,
+                        cx,
+                    )
                 });
                 let conversation = cx.update(|cx| {
                     connection
@@ -10113,8 +10154,14 @@ mod internal_tests {
         fake.end_stream(&model, &start[0].0);
         cx.run_until_parked();
         let branches = pending_step_briefs(&fake);
-        let left = branches.iter().find(|(_, brief)| brief.contains(": Left")).unwrap();
-        let right = branches.iter().find(|(_, brief)| brief.contains(": Right")).unwrap();
+        let left = branches
+            .iter()
+            .find(|(_, brief)| brief.contains(": Left"))
+            .unwrap();
+        let right = branches
+            .iter()
+            .find(|(_, brief)| brief.contains(": Right"))
+            .unwrap();
         fake.send_text(&model, &left.0, "Preserve the completed left lane.");
         fake.end_stream(&model, &left.0);
         cx.run_until_parked();
@@ -10167,7 +10214,13 @@ mod internal_tests {
                 .collect();
             assert_eq!(
                 steps,
-                [("Start", 1), ("Left", 1), ("Right", 1), ("Right", 2), ("Join", 1)]
+                [
+                    ("Start", 1),
+                    ("Left", 1),
+                    ("Right", 1),
+                    ("Right", 2),
+                    ("Join", 1)
+                ]
             );
         });
         acp_thread.read_with(cx, |thread, _| assert!(thread.entries().is_empty()));
@@ -10211,15 +10264,20 @@ mod internal_tests {
             .unwrap();
         cx.run_until_parked();
         cx.update(|cx| {
-            assert!(crate::update_architect_step(&thread, &edit_path, None, None, None, cx).is_err());
-            assert!(crate::update_architect_step(
-                &thread,
-                &architect::NodePath::root("missing".into()),
-                Some("Missing goal".into()),
-                None,
-                None,
-                cx,
-            ).is_err());
+            assert!(
+                crate::update_architect_step(&thread, &edit_path, None, None, None, cx).is_err()
+            );
+            assert!(
+                crate::update_architect_step(
+                    &thread,
+                    &architect::NodePath::root("missing".into()),
+                    Some("Missing goal".into()),
+                    None,
+                    None,
+                    cx,
+                )
+                .is_err()
+            );
             crate::update_architect_step(
                 &thread,
                 &edit_path,
@@ -10227,7 +10285,8 @@ mod internal_tests {
                 Some(vec!["Keep the public interface".into()]),
                 Some("Report the changed files".into()),
                 cx,
-            ).unwrap();
+            )
+            .unwrap();
         });
         let start = pending_step_briefs(&fake);
         fake.send_text(&model, &start[0].0, "Completed prerequisite work.");
@@ -10240,20 +10299,39 @@ mod internal_tests {
         assert!(pending[0].1.contains("Report the changed files"));
         assert!(!pending[0].1.contains("Original edit goal"));
         let original_step_session = thread.read_with(cx, |thread, _| {
-            thread.architect_run().unwrap().history()[0].session_id.clone().unwrap()
+            thread.architect_run().unwrap().history()[0]
+                .session_id
+                .clone()
+                .unwrap()
         });
-        let original_step_thread = cx.update(|cx| connection.thread(&original_step_session, cx)).unwrap();
+        let original_step_thread = cx
+            .update(|cx| connection.thread(&original_step_session, cx))
+            .unwrap();
         let before_rejections = thread.read_with(cx, |thread, _| thread.architect_graph().cloned());
         cx.update(|cx| {
             for path in [&edit_path, &group_path] {
                 let error = crate::update_architect_step(
-                    &thread, path, Some("Unauthorized active revision".into()), None, None, cx,
-                ).unwrap_err();
+                    &thread,
+                    path,
+                    Some("Unauthorized active revision".into()),
+                    None,
+                    None,
+                    cx,
+                )
+                .unwrap_err();
                 assert!(error.to_string().contains("Stop the run"));
             }
-            assert!(crate::update_architect_step(
-                &thread, &start_path, Some("Rewrite completed work".into()), None, None, cx,
-            ).is_err());
+            assert!(
+                crate::update_architect_step(
+                    &thread,
+                    &start_path,
+                    Some("Rewrite completed work".into()),
+                    None,
+                    None,
+                    cx,
+                )
+                .is_err()
+            );
         });
         thread.read_with(cx, |thread, _| {
             assert_eq!(thread.architect_graph(), before_rejections.as_ref());
@@ -10262,9 +10340,13 @@ mod internal_tests {
             crate::set_architect_step_model(
                 &thread,
                 &start_path,
-                Some(architect::StepModel { provider: "fake".into(), model: "alternate".into() }),
+                Some(architect::StepModel {
+                    provider: "fake".into(),
+                    model: "alternate".into(),
+                }),
                 cx,
-            ).unwrap();
+            )
+            .unwrap();
             crate::stop_architect_run(&thread, None, cx);
         });
         cx.run_until_parked();
@@ -10272,8 +10354,14 @@ mod internal_tests {
         original_step_thread.read_with(cx, |thread, _| assert_eq!(thread.model(), Some(&model)));
         cx.update(|cx| {
             crate::update_architect_step(
-                &thread, &edit_path, Some("Revised retry goal".into()), None, None, cx,
-            ).unwrap();
+                &thread,
+                &edit_path,
+                Some("Revised retry goal".into()),
+                None,
+                None,
+                cx,
+            )
+            .unwrap();
         });
         thread.read_with(cx, |thread, _| {
             let run = thread.architect_run().unwrap();
@@ -10288,11 +10376,18 @@ mod internal_tests {
             assert_eq!(edit.rules, ["Keep the public interface"]);
             assert_eq!(edit.capture, "Report the changed files");
             assert_eq!(
-                graph.node_at(&start_path).unwrap().result.as_ref().unwrap().summary,
+                graph
+                    .node_at(&start_path)
+                    .unwrap()
+                    .result
+                    .as_ref()
+                    .unwrap()
+                    .summary,
                 "Completed prerequisite work."
             );
         });
-        cx.update(|cx| crate::resume_architect_run(thread.clone(), acp_thread.clone(), cx)).unwrap();
+        cx.update(|cx| crate::resume_architect_run(thread.clone(), acp_thread.clone(), cx))
+            .unwrap();
         cx.run_until_parked();
         let retried = pending_step_briefs(&fake);
         assert_eq!(retried.len(), 1);
@@ -10307,9 +10402,17 @@ mod internal_tests {
         assert_eq!(verify.len(), 1);
         cx.update(|cx| {
             for path in [&edit_path, &group_path] {
-                assert!(crate::update_architect_step(
-                    &thread, path, Some("Rewrite completed brief".into()), None, None, cx,
-                ).is_err());
+                assert!(
+                    crate::update_architect_step(
+                        &thread,
+                        path,
+                        Some("Rewrite completed brief".into()),
+                        None,
+                        None,
+                        cx,
+                    )
+                    .is_err()
+                );
             }
         });
         fake.send_text(&model, &verify[0].0, "Verified.");
@@ -10318,12 +10421,23 @@ mod internal_tests {
         thread.read_with(cx, |thread, _| {
             let run = thread.architect_run().unwrap();
             assert_eq!(run.outcome, Some(architect::RunOutcome::Completed));
-            let visits: Vec<_> = run.history().iter()
-                .map(|step| (step.path.clone(), step.attempt)).collect();
-            assert_eq!(visits, vec![
-                (start_path.clone(), 1), (edit_path.clone(), 1), (edit_path.clone(), 2),
-                (architect::NodePath(vec!["group".into(), "verify".into()]), 1),
-            ]);
+            let visits: Vec<_> = run
+                .history()
+                .iter()
+                .map(|step| (step.path.clone(), step.attempt))
+                .collect();
+            assert_eq!(
+                visits,
+                vec![
+                    (start_path.clone(), 1),
+                    (edit_path.clone(), 1),
+                    (edit_path.clone(), 2),
+                    (
+                        architect::NodePath(vec!["group".into(), "verify".into()]),
+                        1
+                    ),
+                ]
+            );
         });
         cx.update(|cx| {
             for path in [&start_path, &edit_path, &group_path] {
@@ -10378,8 +10492,13 @@ mod internal_tests {
         cx.run_until_parked();
         cx.update(|cx| {
             assert!(
-                crate::set_architect_step_model(&thread, &path("start"), Some(selection.clone()), cx)
-                    .is_err()
+                crate::set_architect_step_model(
+                    &thread,
+                    &path("start"),
+                    Some(selection.clone()),
+                    cx
+                )
+                .is_err()
             );
             crate::set_architect_step_model(&thread, &path("left"), Some(selection.clone()), cx)
                 .unwrap();
@@ -10397,7 +10516,8 @@ mod internal_tests {
                 },
             ] {
                 assert!(
-                    crate::set_architect_step_model(&thread, &path("left"), Some(invalid), cx).is_err()
+                    crate::set_architect_step_model(&thread, &path("left"), Some(invalid), cx)
+                        .is_err()
                 );
             }
             assert!(crate::set_architect_step_model(&thread, &path("missing"), None, cx).is_err());
@@ -10421,12 +10541,18 @@ mod internal_tests {
         cx.run_until_parked();
         let joined = pending_step_briefs(&fake);
         assert_eq!(joined.len(), 1);
-        assert!(fake.pending_completions_for(&default_model).contains(&joined[0].0));
+        assert!(
+            fake.pending_completions_for(&default_model)
+                .contains(&joined[0].0)
+        );
         fake.send_text(&default_model, &joined[0].0, "Joined.");
         fake.end_stream(&default_model, &joined[0].0);
         cx.run_until_parked();
         thread.read_with(cx, |thread, _| {
-            assert_eq!(thread.architect_run().unwrap().outcome, Some(architect::RunOutcome::Completed));
+            assert_eq!(
+                thread.architect_run().unwrap().outcome,
+                Some(architect::RunOutcome::Completed)
+            );
             assert_eq!(
                 thread
                     .architect_graph()
@@ -10468,7 +10594,8 @@ mod internal_tests {
             thread.set_model(default_model, cx);
             thread.set_architect_graph(Some(graph.clone()), cx);
         });
-        cx.update(|cx| crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx)).unwrap();
+        cx.update(|cx| crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx))
+            .unwrap();
         cx.run_until_parked();
         assert!(
             fake.pending_completions().is_empty(),
@@ -10476,7 +10603,10 @@ mod internal_tests {
         );
         thread.read_with(cx, |thread, _| {
             let run = thread.architect_run().unwrap();
-            assert!(matches!(run.outcome, Some(architect::RunOutcome::Failed { .. })));
+            assert!(matches!(
+                run.outcome,
+                Some(architect::RunOutcome::Failed { .. })
+            ));
             assert!(run.can_resume());
         });
         acp_thread.read_with(cx, |thread, _| assert!(thread.entries().is_empty()));
@@ -10489,13 +10619,17 @@ mod internal_tests {
                     model: "alternate".into(),
                 }),
                 cx,
-            ).unwrap();
+            )
+            .unwrap();
             crate::resume_architect_run(thread.clone(), acp_thread.clone(), cx).unwrap();
         });
         cx.run_until_parked();
         let resumed = pending_step_briefs(&fake);
         assert_eq!(resumed.len(), 1);
-        assert!(fake.pending_completions_for(&alternate_model).contains(&resumed[0].0));
+        assert!(
+            fake.pending_completions_for(&alternate_model)
+                .contains(&resumed[0].0)
+        );
         fake.send_text(&alternate_model, &resumed[0].0, "Recovered.");
         fake.end_stream(&alternate_model, &resumed[0].0);
         cx.run_until_parked();
@@ -10534,7 +10668,8 @@ mod internal_tests {
             thread.set_model(model.clone(), cx);
             thread.set_architect_graph(Some(graph.clone()), cx);
         });
-        cx.update(|cx| crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx)).unwrap();
+        cx.update(|cx| crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx))
+            .unwrap();
         cx.run_until_parked();
         let step = pending_step_briefs(&fake);
         fake.send_text(&model, &step[0].0, "Built.");
@@ -10549,7 +10684,8 @@ mod internal_tests {
         };
         cx.update(|cx| {
             assert!(
-                crate::set_architect_step_model(&thread, &path, Some(selection.clone()), cx).is_err()
+                crate::set_architect_step_model(&thread, &path, Some(selection.clone()), cx)
+                    .is_err()
             );
             let error = crate::update_architect_step(
                 &thread,
@@ -10558,22 +10694,28 @@ mod internal_tests {
                 None,
                 None,
                 cx,
-            ).unwrap_err();
+            )
+            .unwrap_err();
             assert!(error.to_string().contains("Stop the run"));
         });
         fake.send_error(&model, &question, anyhow!("Invalid API key"));
         fake.end_stream(&model, &question);
         cx.run_until_parked();
-        thread.read_with(cx, |thread, _| assert!(thread.architect_run().unwrap().can_resume()));
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.architect_run().unwrap().can_resume())
+        });
         cx.update(|cx| {
-            assert!(crate::update_architect_step(
-                &thread,
-                &path,
-                Some("Rewrite the completed step after its branch failed".into()),
-                None,
-                None,
-                cx,
-            ).is_err());
+            assert!(
+                crate::update_architect_step(
+                    &thread,
+                    &path,
+                    Some("Rewrite the completed step after its branch failed".into()),
+                    None,
+                    None,
+                    cx,
+                )
+                .is_err()
+            );
             crate::set_architect_step_model(&thread, &path, Some(selection), cx).unwrap();
             crate::resume_architect_run(thread.clone(), acp_thread.clone(), cx).unwrap();
         });
@@ -10594,7 +10736,10 @@ mod internal_tests {
         fake.end_stream(&model, &ship[0].0);
         cx.run_until_parked();
         thread.read_with(cx, |thread, _| {
-            assert_eq!(thread.architect_run().unwrap().outcome, Some(architect::RunOutcome::Completed));
+            assert_eq!(
+                thread.architect_run().unwrap().outcome,
+                Some(architect::RunOutcome::Completed)
+            );
         });
         acp_thread.read_with(cx, |thread, _| assert!(thread.entries().is_empty()));
     }
@@ -10619,15 +10764,22 @@ mod internal_tests {
             thread.set_model(model.clone(), cx);
             thread.set_architect_graph(Some(graph.clone()), cx);
         });
-        cx.update(|cx| crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx)).unwrap();
+        cx.update(|cx| crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx))
+            .unwrap();
         cx.run_until_parked();
         let start = pending_step_briefs(&fake);
         fake.send_text(&model, &start[0].0, "Started.");
         fake.end_stream(&model, &start[0].0);
         cx.run_until_parked();
         let branches = pending_step_briefs(&fake);
-        let left = branches.iter().find(|(_, brief)| brief.contains(": Left")).unwrap();
-        let right = branches.iter().find(|(_, brief)| brief.contains(": Right")).unwrap();
+        let left = branches
+            .iter()
+            .find(|(_, brief)| brief.contains(": Left"))
+            .unwrap();
+        let right = branches
+            .iter()
+            .find(|(_, brief)| brief.contains(": Right"))
+            .unwrap();
         cx.update(|cx| crate::pause_architect_run(&thread, cx));
         fake.send_text(&model, &left.0, "Left finished.");
         fake.end_stream(&model, &left.0);
@@ -10637,10 +10789,14 @@ mod internal_tests {
         cx.run_until_parked();
         thread.read_with(cx, |thread, _| {
             let run = thread.architect_run().unwrap();
-            assert!(matches!(run.outcome, Some(architect::RunOutcome::Failed { .. })));
+            assert!(matches!(
+                run.outcome,
+                Some(architect::RunOutcome::Failed { .. })
+            ));
             assert!(run.can_resume());
         });
-        cx.update(|cx| crate::resume_architect_run(thread.clone(), acp_thread.clone(), cx)).unwrap();
+        cx.update(|cx| crate::resume_architect_run(thread.clone(), acp_thread.clone(), cx))
+            .unwrap();
         cx.run_until_parked();
         let resumed = pending_step_briefs(&fake);
         assert_eq!(resumed.len(), 2);
@@ -10670,7 +10826,8 @@ mod internal_tests {
             thread.set_model(model.clone(), cx);
             thread.set_architect_graph(Some(graph.clone()), cx);
         });
-        cx.update(|cx| crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx)).unwrap();
+        cx.update(|cx| crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx))
+            .unwrap();
         cx.run_until_parked();
         let pending = pending_step_briefs(&fake);
         fake.send_text(&model, &pending[0].0, "Incomplete work.");
@@ -10692,7 +10849,8 @@ mod internal_tests {
             assert!(thread.architect_graph().unwrap().nodes[0].result.is_none());
         });
         acp_thread.read_with(cx, |thread, _| assert!(thread.entries().is_empty()));
-        cx.update(|cx| crate::resume_architect_run(thread.clone(), acp_thread.clone(), cx)).unwrap();
+        cx.update(|cx| crate::resume_architect_run(thread.clone(), acp_thread.clone(), cx))
+            .unwrap();
         cx.run_until_parked();
         let resumed = pending_step_briefs(&fake);
         assert_eq!(resumed.len(), 1);
@@ -10700,7 +10858,10 @@ mod internal_tests {
         fake.end_stream(&model, &resumed[0].0);
         cx.run_until_parked();
         thread.read_with(cx, |thread, _| {
-            assert_eq!(thread.architect_run().unwrap().outcome, Some(architect::RunOutcome::Completed));
+            assert_eq!(
+                thread.architect_run().unwrap().outcome,
+                Some(architect::RunOutcome::Completed)
+            );
         });
     }
 
@@ -10718,7 +10879,8 @@ mod internal_tests {
             thread.set_model(model.clone(), cx);
             thread.set_architect_graph(Some(graph.clone()), cx);
         });
-        cx.update(|cx| crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx)).unwrap();
+        cx.update(|cx| crate::start_architect_run(thread.clone(), acp_thread.clone(), graph, cx))
+            .unwrap();
         cx.run_until_parked();
         let step = pending_step_briefs(&fake);
         let coordinator_turn =
@@ -10733,7 +10895,9 @@ mod internal_tests {
         cx.run_until_parked();
         assert!(fake.is_stream_closed(&model, &step[0].0));
         assert!(!fake.is_stream_closed(&model, &coordinator_request));
-        thread.read_with(cx, |thread, _| assert!(thread.architect_run().unwrap().can_resume()));
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.architect_run().unwrap().can_resume())
+        });
         fake.end_stream(&model, &step[0].0);
         fake.send_text(
             &model,

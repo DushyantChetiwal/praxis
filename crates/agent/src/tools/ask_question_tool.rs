@@ -217,7 +217,9 @@ impl AskQuestionTool {
                 FREEFORM_ANSWER_FIELD,
                 acp::StringPropertySchema::new()
                     .title("Or write your own answer")
-                    .description("If provided, this answer is used instead of the selected options."),
+                    .description(
+                        "If provided, this answer is used instead of the selected options.",
+                    ),
                 false,
             )
         }

@@ -319,7 +319,9 @@ mod tests {
         // Stopping a task is part of terminal execution; status and waiting
         // only read a task this thread already started.
         assert!(!tool_allowed_in_restricted_mode(TerminalStopTool::NAME));
-        assert!(!tool_allowed_in_restricted_mode(ControlArchitectRunTool::NAME));
+        assert!(!tool_allowed_in_restricted_mode(
+            ControlArchitectRunTool::NAME
+        ));
 
         // Every other built-in tool, and unknown (e.g. MCP) tools, are allowed.
         for name in ALL_TOOL_NAMES {

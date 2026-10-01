@@ -116,7 +116,10 @@ mod tests {
                 (vec!["refine_step".into()], false, false),
                 (vec!["inspect_architect_run".into()], true, false),
                 (
-                    vec!["inspect_architect_run".into(), "control_architect_run".into()],
+                    vec![
+                        "inspect_architect_run".into(),
+                        "control_architect_run".into(),
+                    ],
                     true,
                     true,
                 ),

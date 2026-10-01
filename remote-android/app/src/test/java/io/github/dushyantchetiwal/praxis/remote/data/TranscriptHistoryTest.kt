@@ -149,6 +149,25 @@ class TranscriptHistoryTest {
     }
 
     @Test
+    fun budgetEmptyStepSnapshotPreservesHistoryAndLeavesNewEntriesFetchable() {
+        val incoming = view().copy(stepThreads = listOf(view("step")))
+        var history = TranscriptHistory().live(incoming).begin("step", 1)
+        history = history.complete(history.request!!, page(history.request!!))
+
+        val bounded = view("step", start = 25, total = 25)
+        history = history.live(incoming.copy(stepThreads = listOf(bounded)))
+        assertEquals((0 until 20).toList(), history.thread!!.stepThreads.single().entries.map { it.index })
+        assertEquals(25, history.records.getValue("step").nextBefore)
+        assertTrue(history.canLoad("step"))
+
+        history = history.begin("step", 2)
+        history = history.complete(history.request!!, page(history.request!!, start = 18, total = 25))
+        assertEquals((0 until 25).toList(), history.thread!!.stepThreads.single().entries.map { it.index })
+        assertEquals(0, history.records.getValue("step").nextBefore)
+        assertEquals(10, history.thread!!.entries.size)
+    }
+
+    @Test
     fun stepHistoryIsIndependentCachedAndNotResurrectedByLateReplies() {
         val incoming = view().copy(stepThreads = listOf(view("step"), view("parallel")))
         var history = TranscriptHistory().live(incoming).begin("step", 1)

@@ -8,6 +8,20 @@ import org.junit.Test
 
 class TranscriptTest {
     @Test
+    fun executionVisitsCanExceedTheRootPlanStepCount() {
+        val status = parseStatus(JSONObject("""{
+            "windows":[{"window":1,"architect":{
+                "steps":5,"running":true,"step_number":9,"current_step":"Retrying leaf"
+            }}]
+        }"""))
+        val architect = status.windows.single().architect!!
+        assertEquals(5, architect.steps)
+        assertEquals(9, architect.stepNumber)
+        assertTrue(architect.stepNumber > architect.steps)
+        assertTrue(architect.running)
+    }
+
+    @Test
     fun legacySnapshotsKeepTheirEntriesWithoutInventingThinking() {
         val thread = parseThreadView(JSONObject("""{
             "session_id":"root", "total":7,

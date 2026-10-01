@@ -1,7 +1,8 @@
 use acp_thread::AcpThread;
 use agent_client_protocol::schema::v1 as acp;
 use architect::{
-    ArchitectEdge, ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, NodeId, NodePath, StepModel,
+    ArchitectEdge, ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, NodeId, NodePath,
+    StepModel,
 };
 use editor::{Editor, EditorEvent};
 use gpui::{App, Context, Entity, Focusable, SharedString, Subscription, Window, div, px};
@@ -86,7 +87,9 @@ impl ArchitectPane {
         for id in path.iter() {
             ancestor = ancestor.child(id.clone());
             if graph.node_at(&ancestor).is_some_and(|node| node.locked) {
-                return Some("Unlock this step and its containing steps before changing its model.");
+                return Some(
+                    "Unlock this step and its containing steps before changing its model.",
+                );
             }
         }
         None
@@ -161,22 +164,22 @@ impl ArchitectPane {
                             .label_size(LabelSize::Small)
                             .icon(IconName::ChevronDown)
                             .disabled(refusal.is_some()),
-                        Tooltip::text(refusal.unwrap_or("Choose the model that executes this step")),
+                        Tooltip::text(
+                            refusal.unwrap_or("Choose the model that executes this step"),
+                        ),
                     )
                     .menu(move |window, cx| {
                         let pane = pane.clone();
                         let path = path.clone();
                         let selected = selected.clone();
                         Some(ContextMenu::build(window, cx, move |mut menu, _, cx| {
-                            let choices = std::iter::once((
-                                None,
-                                SharedString::from("Inherit plan model"),
-                            ))
-                            .chain(
-                                available_step_models(cx)
-                                    .into_iter()
-                                    .map(|(model, label)| (Some(model), label)),
-                            );
+                            let choices =
+                                std::iter::once((None, SharedString::from("Inherit plan model")))
+                                    .chain(
+                                        available_step_models(cx)
+                                            .into_iter()
+                                            .map(|(model, label)| (Some(model), label)),
+                                    );
                             for (model, label) in choices {
                                 let pane = pane.clone();
                                 let path = path.clone();

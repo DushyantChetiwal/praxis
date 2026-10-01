@@ -146,7 +146,10 @@ impl RunState {
                 && let Some(step) = graph.node_at_mut(path)
             {
                 // A tool report is provisional until its turn finishes successfully.
-                step.result = self.graph.node_at(path).and_then(|step| step.result.clone());
+                step.result = self
+                    .graph
+                    .node_at(path)
+                    .and_then(|step| step.result.clone());
             }
         }
     }
@@ -293,7 +296,10 @@ pub fn update_architect_step(
         !has_completed_architect_work(step),
         "Step {path} already has completed work. Its execution brief cannot be rewritten."
     );
-    let control = owner.architect_run().and_then(ArchitectRun::control).cloned();
+    let control = owner
+        .architect_run()
+        .and_then(ArchitectRun::control)
+        .cloned();
     let apply = |step: &mut architect::ArchitectNode| {
         if let Some(goal) = &goal {
             step.intent = goal.clone();
@@ -308,7 +314,9 @@ pub fn update_architect_step(
     if let Some(control) = &control {
         let mut state = control.borrow_mut();
         let step = state.graph.node_at_mut(path).ok_or_else(|| {
-            anyhow::anyhow!("Step {path} is not in the run checkpoint. Start a new run to change its topology.")
+            anyhow::anyhow!(
+                "Step {path} is not in the run checkpoint. Start a new run to change its topology."
+            )
         })?;
         anyhow::ensure!(
             !has_completed_architect_work(step),
@@ -331,9 +339,9 @@ pub fn update_architect_step(
 
 fn has_completed_architect_work(step: &architect::ArchitectNode) -> bool {
     step.result.is_some()
-        || step.subplan().is_some_and(|graph| {
-            graph.nodes.iter().any(has_completed_architect_work)
-        })
+        || step
+            .subplan()
+            .is_some_and(|graph| graph.nodes.iter().any(has_completed_architect_work))
 }
 
 fn ensure_architect_step_inactive(thread: &Thread, path: &NodePath) -> anyhow::Result<()> {
@@ -383,7 +391,9 @@ pub fn set_architect_step_model(
     if let Some(control) = &control {
         let mut state = control.borrow_mut();
         let step = state.graph.node_at_mut(path).ok_or_else(|| {
-            anyhow::anyhow!("Step {path} is not in the run checkpoint. Start a new run to change its topology.")
+            anyhow::anyhow!(
+                "Step {path} is not in the run checkpoint. Start a new run to change its topology."
+            )
         })?;
         step.model = model.clone();
     }
@@ -640,7 +650,10 @@ impl Driver {
                 Vec::new()
             };
             let note = architect::parallel_steps_prompt(&state.graph, &alongside);
-            let model = state.graph.node_at(&node).and_then(|step| step.model.clone());
+            let model = state
+                .graph
+                .node_at(&node)
+                .and_then(|step| step.model.clone());
             (step_number, attempt, title, prompt, model, note)
         };
 
@@ -686,7 +699,8 @@ impl Driver {
             None if model.is_some() => {
                 return Err(self.fail_step(
                     visit,
-                    "Per-step models require the Praxis Agent. Choose it and resume the run.".into(),
+                    "Per-step models require the Praxis Agent. Choose it and resume the run."
+                        .into(),
                     cx,
                 ));
             }
@@ -717,9 +731,11 @@ impl Driver {
         }
         if let Err(outcome) = sent {
             return Err(match outcome {
-                RunOutcome::Failed { message } => {
-                    self.fail_step(visit, format!("Step \"{node}\" could not run: {message}"), cx)
-                }
+                RunOutcome::Failed { message } => self.fail_step(
+                    visit,
+                    format!("Step \"{node}\" could not run: {message}"),
+                    cx,
+                ),
                 outcome => outcome,
             });
         }
@@ -799,7 +815,11 @@ impl Driver {
                 .graph
                 .node_at(&state.lanes[lane].run.current())
                 .and_then(|step| step.model.clone());
-            (architect::branch_prompt(&state.graph, &branch), asked, model)
+            (
+                architect::branch_prompt(&state.graph, &branch),
+                asked,
+                model,
+            )
         };
         if let Some((connection, _)) = &self.step_threads {
             cx.update(|cx| -> anyhow::Result<()> {
@@ -1064,7 +1084,9 @@ async fn send_and_wait(
             acp::StopReason::EndTurn => Ok(()),
             acp::StopReason::Cancelled => Err(RunOutcome::Cancelled),
             reason => Err(RunOutcome::Failed {
-                message: format!("The step ended without completing ({reason:?}). Check its conversation and resume the run."),
+                message: format!(
+                    "The step ended without completing ({reason:?}). Check its conversation and resume the run."
+                ),
             }),
         },
         Ok(None) => Err(RunOutcome::Cancelled),

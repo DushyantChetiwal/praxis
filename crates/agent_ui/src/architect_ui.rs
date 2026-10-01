@@ -3984,7 +3984,9 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn step_model_inspector_edits_use_registry_ids_and_recheck_guards(cx: &mut TestAppContext) {
+    async fn step_model_inspector_edits_use_registry_ids_and_recheck_guards(
+        cx: &mut TestAppContext,
+    ) {
         fn step_model(
             pane: &ArchitectPane,
             path: &NodePath,
@@ -4084,7 +4086,9 @@ mod tests {
             thread.update_architect_graph(
                 |graph| {
                     graph.unlock_all();
-                    graph.set_locked_at(&path, true).expect("the step should lock");
+                    graph
+                        .set_locked_at(&path, true)
+                        .expect("the step should lock");
                 },
                 cx,
             );

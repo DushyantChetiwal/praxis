@@ -155,7 +155,10 @@ impl ControlArchitectRunToolInput {
             "model is only accepted for set_step_model, not brief revisions."
         );
         if self.action == ArchitectRunAction::ReviseStep {
-            ensure!(has_revision, "revise_step requires goal, rules, or capture.");
+            ensure!(
+                has_revision,
+                "revise_step requires goal, rules, or capture."
+            );
         } else {
             ensure!(
                 !has_revision,
@@ -281,10 +284,13 @@ impl ControlArchitectRunTool {
 }
 
 fn main_thread(thread: &WeakEntity<Thread>, cx: &App) -> Result<Entity<Thread>> {
-    let thread = thread.upgrade().context("The plan conversation is closed.")?;
+    let thread = thread
+        .upgrade()
+        .context("The plan conversation is closed.")?;
     ensure!(
         thread.read(cx).parent_thread_id().is_none()
-            && thread.read(cx).profile().as_str() != agent_settings::builtin_profiles::ARCHITECT_STEP,
+            && thread.read(cx).profile().as_str()
+                != agent_settings::builtin_profiles::ARCHITECT_STEP,
         "Architect coordinator tools are only available in the main conversation."
     );
     Ok(thread)

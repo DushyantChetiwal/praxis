@@ -359,7 +359,11 @@ mod tests {
         .into_graph();
         let parent = graph.node(&"parent".into()).expect("parent should exist");
         assert_eq!(
-            parent.model.as_ref().expect("parent model should exist").model,
+            parent
+                .model
+                .as_ref()
+                .expect("parent model should exist")
+                .model,
             "parent-model"
         );
         let child = parent
@@ -368,7 +372,11 @@ mod tests {
             .node(&"child".into())
             .expect("child should exist");
         assert_eq!(
-            child.model.as_ref().expect("child model should exist").model,
+            child
+                .model
+                .as_ref()
+                .expect("child model should exist")
+                .model,
             "child-model"
         );
         assert!(

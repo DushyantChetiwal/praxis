@@ -463,8 +463,7 @@ impl QuestionWindowActivity {
         window: &mut gpui::Window,
         cx: &mut Context<T>,
     ) -> Subscription {
-        let activity =
-            self.track_window(window.is_window_active(), cx.background_executor().now());
+        let activity = self.track_window(window.is_window_active(), cx.background_executor().now());
         cx.observe_window_activation(window, move |_, window, cx| {
             activity.set((!window.is_window_active()).then(|| cx.background_executor().now()));
         })
@@ -10086,7 +10085,11 @@ mod tests {
     }
 
     impl gpui::Render for QuestionActivityView {
-        fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut Context<Self>,
+        ) -> impl gpui::IntoElement {
             gpui::Empty
         }
     }
@@ -10097,8 +10100,9 @@ mod tests {
         let thread = new_test_thread(cx).await;
         let (id, task, activity) = request_timed_question(&thread, cx);
         drop(activity);
-        let activity =
-            thread.read_with(cx, |thread, _| thread.question_window_activity(&id).unwrap());
+        let activity = thread.read_with(cx, |thread, _| {
+            thread.question_window_activity(&id).unwrap()
+        });
         let (_, cx) = cx.add_window_view(|window, cx| QuestionActivityView {
             _subscription: activity.observe_window(window, cx),
         });
@@ -10110,7 +10114,12 @@ mod tests {
             thread.read_with(cx, |thread, _| {
                 let entry = thread.elicitation(&id).unwrap().1;
                 assert!(matches!(entry.status, ElicitationStatus::Pending { .. }));
-                assert!(entry.request.message.contains("paused while Praxis is active"));
+                assert!(
+                    entry
+                        .request
+                        .message
+                        .contains("paused while Praxis is active")
+                );
             });
             cx.deactivate_window();
             cx.executor().advance_clock(Duration::from_secs(9));
@@ -10148,8 +10157,9 @@ mod tests {
         let thread = new_test_thread(cx).await;
         let (id, task, activity) = request_timed_question(&thread, cx);
         drop(activity);
-        let activity =
-            thread.read_with(cx, |thread, _| thread.question_window_activity(&id).unwrap());
+        let activity = thread.read_with(cx, |thread, _| {
+            thread.question_window_activity(&id).unwrap()
+        });
         let (_, cx) = cx.add_window_view(|window, cx| QuestionActivityView {
             _subscription: activity.observe_window(window, cx),
         });

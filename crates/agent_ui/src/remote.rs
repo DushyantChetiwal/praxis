@@ -857,7 +857,10 @@ fn live_step_thread(
     session_id: &acp::SessionId,
     cx: &App,
 ) -> Option<Entity<acp_thread::AcpThread>> {
-    let run = owner.read(cx).architect_run().filter(|run| run.is_running())?;
+    let run = owner
+        .read(cx)
+        .architect_run()
+        .filter(|run| run.is_running())?;
     run.running_steps()
         .iter()
         .filter_map(|step| step.step_thread())
@@ -973,17 +976,22 @@ fn transcript_page(
         let mut value = json!({ "index": index, "role": role, "text": "", "status": status });
         let limit = budget.min(ENTRY_LIMIT);
         if let AgentThreadEntry::AssistantMessage(message) = entry
-            && message.chunks.iter().any(|chunk| {
-                matches!(chunk, acp_thread::AssistantMessageChunk::Thought { .. })
-            })
+            && message
+                .chunks
+                .iter()
+                .any(|chunk| matches!(chunk, acp_thread::AssistantMessageChunk::Thought { .. }))
         {
             let mut parts = Vec::new();
             let mut has_content = false;
             let mut remaining = limit.saturating_sub(value.to_string().len() + 16);
             for (part_index, chunk) in message.chunks.iter().enumerate().rev() {
                 let (role, block) = match chunk {
-                    acp_thread::AssistantMessageChunk::Message { block, .. } => ("assistant", block),
-                    acp_thread::AssistantMessageChunk::Thought { block, .. } => ("reasoning", block),
+                    acp_thread::AssistantMessageChunk::Message { block, .. } => {
+                        ("assistant", block)
+                    }
+                    acp_thread::AssistantMessageChunk::Thought { block, .. } => {
+                        ("reasoning", block)
+                    }
                 };
                 let text = block.to_markdown(cx);
                 if text.trim().is_empty() {
@@ -1486,11 +1494,9 @@ mod tests {
         });
         let session = cx
             .update(|cx| {
-                connection.clone().new_session(
-                    project,
-                    PathList::new(&[Path::new("/project")]),
-                    cx,
-                )
+                connection
+                    .clone()
+                    .new_session(project, PathList::new(&[Path::new("/project")]), cx)
             })
             .await
             .expect("root session");
@@ -1531,10 +1537,15 @@ mod tests {
                 })
                 .expect("step session");
             step.update(cx, |thread, cx| {
-                thread.push_assistant_content_block(format!("Thinking in {title}").into(), true, cx);
+                thread.push_assistant_content_block(
+                    format!("Thinking in {title}").into(),
+                    true,
+                    cx,
+                );
             });
             let visit = owner.update(cx, |thread, cx| {
-                let visit = thread.note_architect_run_position(path, title.into(), index + 1, 1, cx);
+                let visit =
+                    thread.note_architect_run_position(path, title.into(), index + 1, 1, cx);
                 thread.set_architect_run_step_thread(visit, &step, cx);
                 visit
             });
@@ -1542,7 +1553,10 @@ mod tests {
         }
         cx.read(|cx| {
             let summary = architect_thread_summary(owner.read(cx)).expect("plan summary");
-            assert_eq!(summary["steps"], 5, "all depths, not just the two root nodes");
+            assert_eq!(
+                summary["steps"], 5,
+                "all depths, not just the two root nodes"
+            );
             assert_eq!(
                 summary["running_steps"]
                     .as_array()
@@ -1571,13 +1585,8 @@ mod tests {
                 Some(steps[0].1.clone())
             );
             assert!(live_step_thread(&owner, &acp::SessionId::new("unrelated"), cx).is_none());
-            let page = thread_page_snapshot(
-                steps[0].1.read(cx),
-                None,
-                TRANSCRIPT_BUDGET,
-                Some(1),
-                cx,
-            );
+            let page =
+                thread_page_snapshot(steps[0].1.read(cx), None, TRANSCRIPT_BUDGET, Some(1), cx);
             assert_eq!(page["before_index"], 1);
             assert_eq!(page["next_before"], 0);
             assert_eq!(page["has_more"], false);
@@ -1596,7 +1605,9 @@ mod tests {
             );
         });
         for (visit, _) in steps {
-            owner.update(cx, |thread, cx| thread.finish_architect_run_step(visit, None, cx));
+            owner.update(cx, |thread, cx| {
+                thread.finish_architect_run_step(visit, None, cx)
+            });
         }
         cx.read(|cx| {
             assert_eq!(

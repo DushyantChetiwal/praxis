@@ -1419,7 +1419,13 @@ mod tests {
             cx.set_global(store);
             assert!(TOOLS.iter().any(|tool| tool.id == "control_architect_run"));
             assert!(!TOOLS.iter().any(|tool| tool.id == "inspect_architect_run"));
-            for action in ["interrupt", "pause", "resume", "set_step_model", "revise_step"] {
+            for action in [
+                "interrupt",
+                "pause",
+                "resume",
+                "set_step_model",
+                "revise_step",
+            ] {
                 assert_eq!(
                     evaluate_test_input("control_architect_run", action, cx),
                     ToolPermissionDecision::Confirm
@@ -1431,9 +1437,12 @@ mod tests {
                 agent_settings::ToolRules {
                     default: Some(ToolPermissionMode::Allow),
                     always_allow: vec![],
-                    always_deny: vec![agent_settings::CompiledRegex::new("^resume$", true).unwrap()],
+                    always_deny: vec![
+                        agent_settings::CompiledRegex::new("^resume$", true).unwrap(),
+                    ],
                     always_confirm: vec![
-                        agent_settings::CompiledRegex::new("^(set_step_model|revise_step)$", true).unwrap(),
+                        agent_settings::CompiledRegex::new("^(set_step_model|revise_step)$", true)
+                            .unwrap(),
                     ],
                     invalid_patterns: vec![],
                 },

@@ -619,10 +619,12 @@ mod tests {
                 }
                 cx.notify();
             });
-            let before = view.read_with(cx, |view, cx| view.form_state.collect(&schema, cx).unwrap());
+            let before =
+                view.read_with(cx, |view, cx| view.form_state.collect(&schema, cx).unwrap());
             for _ in 0..3 {
                 cx.deactivate_window();
-                cx.executor().advance_clock(std::time::Duration::from_secs(60));
+                cx.executor()
+                    .advance_clock(std::time::Duration::from_secs(60));
                 cx.update(|window, _| window.activate_window());
                 view.update(cx, |view, cx| {
                     view.elicitation.request.message =
@@ -631,7 +633,10 @@ mod tests {
                 });
                 cx.run_until_parked();
                 view.read_with(cx, |view, cx| {
-                    assert_eq!(view.editor("freeform_answer").entity_id(), editor.entity_id());
+                    assert_eq!(
+                        view.editor("freeform_answer").entity_id(),
+                        editor.entity_id()
+                    );
                     assert_eq!(view.form_state.collect(&schema, cx).unwrap(), before);
                 });
             }

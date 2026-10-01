@@ -373,7 +373,8 @@ mod tests {
             (json!({"model": null}), None),
             (json!({"model": model, "lock": true}), Some(model.clone())),
         ] {
-            let input: RefineStepToolInput = serde_json::from_value(input).expect("input should load");
+            let input: RefineStepToolInput =
+                serde_json::from_value(input).expect("input should load");
             let encoded = serde_json::to_value(&input).expect("input should serialize");
             let restored: RefineStepToolInput =
                 serde_json::from_value(encoded).expect("input should replay");

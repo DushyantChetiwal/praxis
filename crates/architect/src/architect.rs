@@ -1827,7 +1827,11 @@ mod tests {
         let saved = serde_json::to_string(&graph).expect("plan should serialize");
         let restored: ArchitectGraph = serde_json::from_str(&saved).expect("plan should load");
         assert_eq!(restored, graph);
-        assert!(restored.outline().contains("model: test-provider/test-model"));
+        assert!(
+            restored
+                .outline()
+                .contains("model: test-provider/test-model")
+        );
         assert!(restored.outline().contains("model: inherit plan"));
     }
 
@@ -1849,12 +1853,18 @@ mod tests {
             .mutate_node_at(&path, |node| node.model = Some(model.clone()))
             .expect("child should be editable");
         for locked in [false, true] {
-            graph.set_locked_at(&path, locked).expect("lock should change");
+            graph
+                .set_locked_at(&path, locked)
+                .expect("lock should change");
             let merged = graph
                 .merge_draft(draft(proposal.clone()))
                 .expect("omission should preserve");
             assert_eq!(
-                merged.graph.node_at(&path).expect("child should exist").model,
+                merged
+                    .graph
+                    .node_at(&path)
+                    .expect("child should exist")
+                    .model,
                 Some(model.clone())
             );
         }
@@ -1868,7 +1878,9 @@ mod tests {
             })
             .expect("draft should be editable");
         assert!(graph.merge_draft(replacement.clone()).is_err());
-        graph.set_locked_at(&path, false).expect("child should unlock");
+        graph
+            .set_locked_at(&path, false)
+            .expect("child should unlock");
         let merged = graph
             .merge_draft(replacement)
             .expect("unlocked override can change");

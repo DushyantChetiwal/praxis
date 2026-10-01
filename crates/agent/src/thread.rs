@@ -1792,7 +1792,8 @@ impl Thread {
         if let Some(model) = model {
             thread.set_model(model, cx);
         } else {
-            thread.prompt_capabilities_tx
+            thread
+                .prompt_capabilities_tx
                 .send(Self::prompt_capabilities(thread.model.as_model()))
                 .log_err();
         }
