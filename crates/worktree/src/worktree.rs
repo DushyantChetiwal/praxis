@@ -180,6 +180,7 @@ pub struct RemoteWorktree {
     visible: bool,
     disconnected: bool,
     file_inventory_support: Option<Result<(), String>>,
+    file_inventory_probe: Option<futures::future::Shared<Task<()>>>,
     received_initial_update: bool,
 }
 
@@ -669,6 +670,7 @@ impl Worktree {
                 visible: worktree.visible,
                 disconnected: false,
                 file_inventory_support: None,
+                file_inventory_probe: None,
                 received_initial_update: false,
             };
 

@@ -12,7 +12,7 @@ use architect::{
 };
 use futures::channel::oneshot;
 use futures::future::{LocalBoxFuture, join_all};
-use futures::{FutureExt as _, StreamExt as _};
+use futures::FutureExt as _;
 use gpui::{App, AsyncApp, Context, Entity, SharedString, WeakEntity};
 use language_model::{LanguageModel, LanguageModelProviderId, LanguageModelRegistry};
 use serde::{Deserialize, Serialize};
@@ -556,6 +556,10 @@ const MAX_OBSERVED_FILES: usize = project::MAX_FILE_INVENTORY_ENTRIES;
 struct FileSnapshot {
     roots: BTreeMap<String, PathBuf>,
     files: BTreeMap<String, String>,
+    // Conflict comparisons remain conservative, but discovery must distinguish
+    // files whose names differ only by case on a case-sensitive host.
+    #[serde(default)]
+    case_preserving: bool,
     // None is an older checkpoint whose discovery scope was not recorded. Its
     // first scan establishes a baseline rather than inventing creation events.
     #[serde(default)]
@@ -569,8 +573,10 @@ impl FileSnapshot {
             "The file snapshot has no roots or exceeds the file budget"
         );
         for (identity, file) in &self.files {
+            let normalized = ArchitectGraph::normalize_file_surface_path(file)
+                .map_err(anyhow::Error::msg)?;
             anyhow::ensure!(
-                ArchitectGraph::normalize_file_surface_path(file).as_ref() == Ok(identity),
+                identity == if self.case_preserving { file } else { &normalized },
                 "Invalid file snapshot identity for {file}"
             );
         }
@@ -602,18 +608,20 @@ impl FileSnapshot {
         // evidence of creation. This also covers ignore/exclusion policy edits.
         let skipped: std::collections::BTreeSet<_> =
             skipped_paths.iter().map(String::as_str).collect();
-        Ok(self
-            .files
-            .iter()
-            .filter(|(identity, _)| {
-                !previous.files.contains_key(*identity)
-                    && !std::iter::successors(Some(identity.as_str()), |path| {
-                        path.rsplit_once('/').map(|(parent, _)| parent)
-                    })
-                    .any(|path| skipped.contains(path))
-            })
-            .map(|(_, file)| file.clone())
-            .collect())
+        let mut created = Vec::new();
+        for file in self.files.values() {
+            let normalized = ArchitectGraph::normalize_file_surface_path(file)
+                .map_err(anyhow::Error::msg)?;
+            let previous_identity = if previous.case_preserving { file } else { &normalized };
+            if !previous.files.contains_key(previous_identity)
+                && !std::iter::successors(Some(normalized.as_str()), |path| {
+                    path.rsplit_once('/').map(|(parent, _)| parent)
+                }).any(|path| skipped.contains(path))
+            {
+                created.push(file.clone());
+            }
+        }
+        Ok(created)
     }
 }
 
@@ -676,11 +684,44 @@ fn participating_worktrees(
 
 fn preflight_creation_tracking(
     thread: &Entity<Thread>,
+    graph: &ArchitectGraph,
     cx: &App,
 ) -> Result<(), ArchitectRunStartError> {
-    participating_worktrees(thread.read(cx).project(), cx)
-        .map(|_| ())
-        .map_err(|error| ArchitectRunStartError::CreationTrackingUnavailable(error.to_string()))
+    let worktrees = participating_worktrees(thread.read(cx).project(), cx)
+        .map_err(|error| ArchitectRunStartError::CreationTrackingUnavailable(error.to_string()))?;
+    for path in graph_paths(graph) {
+        for file in graph
+            .node_at(&path)
+            .and_then(|node| node.file_surface.as_ref())
+            .into_iter()
+            .flatten()
+        {
+            let Some((root, relative)) = file.split_once('/') else {
+                continue;
+            };
+            let Some((_, worktree)) = worktrees
+                .iter()
+                .find(|(name, _)| name.to_lowercase() == root.to_lowercase())
+            else {
+                return Err(ArchitectRunStartError::CreationTrackingUnavailable(format!(
+                    "Step {path} declares {file:?}, which does not belong to an open project root. Update its file surface using the current project's relative paths before running."
+                )));
+            };
+            let Ok(relative) = util::rel_path::RelPath::from_unix_str(relative) else {
+                continue;
+            };
+            if worktree
+                .read(cx)
+                .entry_for_path(relative)
+                .is_some_and(|entry| entry.is_dir())
+            {
+                return Err(ArchitectRunStartError::CreationTrackingUnavailable(format!(
+                    "Step {path} declares directory {file:?}. List the existing files individually before running."
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn project_file_snapshot(
@@ -699,6 +740,7 @@ async fn project_file_snapshot(
     let mut snapshot = FileSnapshot {
         roots,
         files: BTreeMap::new(),
+        case_preserving: true,
         skipped_paths: None,
     };
     let mut skipped_paths = Vec::new();
@@ -750,9 +792,8 @@ async fn project_file_snapshot(
         );
         for relative in inventory.files {
             let file = format!("{name}/{relative}");
-            let identity =
-                ArchitectGraph::normalize_file_surface_path(&file).map_err(anyhow::Error::msg)?;
-            snapshot.files.insert(identity, file);
+            ArchitectGraph::normalize_file_surface_path(&file).map_err(anyhow::Error::msg)?;
+            snapshot.files.insert(file.clone(), file);
         }
         for relative in inventory.skipped_paths {
             skipped_paths.push(
@@ -864,7 +905,7 @@ fn start_run(
         return Err(ArchitectRunStartError::AlreadyRunning);
     }
 
-    preflight_creation_tracking(&thread, cx)?;
+    preflight_creation_tracking(&thread, &graph, cx)?;
     let plan_run = match &from {
         Some(from) => PlanRun::start_at(&graph, from)?,
         None => PlanRun::start(&graph)?,
@@ -1276,8 +1317,11 @@ pub fn resume_architect_run_at(
     path: NodePath,
     cx: &mut App,
 ) -> anyhow::Result<()> {
-    preflight_creation_tracking(&thread, cx)?;
     let owner = thread.read(cx);
+    let graph = owner
+        .architect_graph()
+        .ok_or(ArchitectRunStartError::NotResumable)?;
+    preflight_creation_tracking(&thread, graph, cx)?;
     let run = owner
         .architect_run()
         .ok_or_else(|| anyhow::anyhow!("There is no checkpoint to resume."))?;
@@ -1782,7 +1826,11 @@ pub fn resume_architect_run(
     acp_thread: Entity<AcpThread>,
     cx: &mut App,
 ) -> Result<(), ArchitectRunStartError> {
-    preflight_creation_tracking(&thread, cx)?;
+    let graph = thread
+        .read(cx)
+        .architect_graph()
+        .ok_or(ArchitectRunStartError::NotResumable)?;
+    preflight_creation_tracking(&thread, graph, cx)?;
     let run = thread
         .read(cx)
         .architect_run()
@@ -3120,6 +3168,35 @@ mod checkpoint_tests {
     }
 
     #[gpui::test]
+    async fn surface_root_and_directory_preflight_preserves_existing_work(cx: &mut TestAppContext) {
+        let fake = crate::tests::init_test(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/a", serde_json::json!({"src": {"main.rs": ""}}))
+            .await;
+        let project = project::Project::test(fs, [Path::new("/a")], cx).await;
+        let (_connection, thread, acp_thread, fake) =
+            native_project_session(project, fake, cx).await;
+        for (file, problem) in [
+            ("a/src", "directory"),
+            ("removed/src/main.rs", "open project root"),
+        ] {
+            let mut graph = linear_graph(&["source", "after"]);
+            let node = graph.node_at_mut(&path("source")).unwrap();
+            node.file_surface = Some(vec![file.into()]);
+            node.result = Some(architect::StepResult {
+                summary: "Retained work".into(),
+                attempt: 1,
+            });
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph), cx);
+                thread.set_session_mode(SessionMode::Architect, cx);
+            });
+            assert_preflight_preserves_execution(&thread, &acp_thread, problem, cx).await;
+            assert!(fake.pending_completions().is_empty());
+        }
+    }
+
+    #[gpui::test]
     async fn reconnecting_remote_is_refused_before_start_mutates_results(
         cx: &mut TestAppContext,
         host_cx: &mut TestAppContext,
@@ -3254,6 +3331,62 @@ mod checkpoint_tests {
         assert_preflight_preserves_execution(&thread, &acp_thread, "scanning is disabled", cx)
             .await;
         assert!(thread.read_with(cx, |thread, _| thread.architect_run().is_none()));
+    }
+
+    #[test]
+    fn inventory_case_identity_survives_checkpoints_without_inventing_legacy_creations() {
+        let legacy: FileSnapshot = serde_json::from_value(serde_json::json!({
+            "roots": {"a": "/a"},
+            "files": {"a/readme.md": "a/README.md"},
+            "skipped_paths": []
+        })).unwrap();
+        legacy.validate().unwrap();
+        assert!(!legacy.case_preserving);
+        let mut current = legacy.clone();
+        current.case_preserving = true;
+        current.files = BTreeMap::from([
+            ("a/README.md".into(), "a/README.md".into()),
+            ("a/readme.md".into(), "a/readme.md".into()),
+        ]);
+        current.validate().unwrap();
+        assert!(current.created_since(&legacy).unwrap().is_empty());
+        let restored: FileSnapshot = serde_json::from_value(serde_json::to_value(&current).unwrap()).unwrap();
+        assert!(restored.case_preserving);
+        current.files.insert("a/Readme.md".into(), "a/Readme.md".into());
+        assert_eq!(current.created_since(&restored).unwrap(), vec!["a/Readme.md"]);
+        current.skipped_paths = Some(vec!["a/ignored".into()]);
+        let baseline = current.clone();
+        current.files.insert("a/Ignored/New.rs".into(), "a/Ignored/New.rs".into());
+        assert!(current.created_since(&baseline).unwrap().is_empty());
+    }
+
+    #[gpui::test(iterations = 3)]
+    async fn newly_created_case_variant_is_propagated_to_successors(cx: &mut TestAppContext) {
+        let (_connection, thread, acp_thread, fake) = native_session(cx).await;
+        let fs = project_fs(&thread, cx);
+        fs.insert_tree("/a", serde_json::json!({"README.md": "existing"})).await;
+        fs.pause_events();
+        let mut graph = linear_graph(&["source", "after"]);
+        graph.node_at_mut(&path("after")).unwrap().file_surface = Some(vec!["a/README.md".into()]);
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            start_architect_run(thread.clone(), acp_thread, graph, cx).unwrap();
+        });
+        cx.run_until_parked();
+        assert_running(&thread, "source", cx);
+        fs.insert_tree("/a", serde_json::json!({"readme.md": "new"})).await;
+        finish_pending_step(&fake);
+        cx.run_until_parked();
+        assert_running(&thread, "after", cx);
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(
+                thread.architect_graph().unwrap().node_at(&path("after")).unwrap().file_surface,
+                Some(vec!["a/README.md".into(), "a/readme.md".into()])
+            );
+        });
+        finish_pending_step(&fake);
+        cx.run_until_parked();
+        fs.unpause_events_and_flush();
     }
 
     #[gpui::test(iterations = 3)]

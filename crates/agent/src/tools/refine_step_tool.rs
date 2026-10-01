@@ -82,7 +82,8 @@ pub struct RefineStepToolInput {
     /// No directories, globs, absolute paths, or '..'. Omit to preserve;
     /// [] explicitly anticipates no existing files;
     /// null is rejected. This replaces, not appends, and imposes no write allowlist.
-    /// Invalid or overlapping declarations are saved with actionable problems.
+    /// Ambiguous roots and known directories are rejected without changing the plan.
+    /// Other invalid or overlapping declarations are saved with actionable problems.
     #[serde(
         default,
         deserialize_with = "deserialize_file_surface_update",

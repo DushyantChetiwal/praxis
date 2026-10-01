@@ -81,8 +81,9 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 /// Newly exposed conflicts stop further dispatch while retaining completed
 /// results. Inspect, correct surfaces or serialize work, review/relock, then
 /// resume. This scheduling guard is not filesystem write enforcement.
-/// Invalid or overlapping declarations are retained on the canvas with actionable
-/// problems, but the plan cannot run until corrected. Use targeted
+/// Ambiguous root selection and known directory entries are rejected before saving.
+/// Other invalid or overlapping declarations are retained on the canvas with
+/// actionable problems, but the plan cannot run until corrected. Use targeted
 /// `edit_architect_plan` set_file_surface or connection edits to repair it.
 ///
 /// ### What each step hands on: `capture`
@@ -239,20 +240,30 @@ pub(crate) fn resolve_file_surface(
                 .join("/");
             let qualified: Vec<_> = roots
                 .iter()
-                .filter_map(|(name, _)| {
+                .filter_map(|(name, snapshot)| {
                     let (prefix, suffix) = relative.split_once('/')?;
                     if name.to_lowercase() == prefix.to_lowercase() {
-                        Some(format!("{name}/{suffix}"))
+                        Some((name, snapshot, suffix))
                     } else {
                         None
                     }
                 })
                 .collect();
             anyhow::ensure!(qualified.len() <= 1, "Project root names are ambiguous. Give the roots distinct names before declaring file_surface.");
-            if let Some(path) = qualified.into_iter().next() {
-                return Ok(path);
+            if let Some((name, snapshot, relative)) = qualified.into_iter().next() {
+                let path = util::rel_path::RelPath::from_unix_str(relative)?;
+                anyhow::ensure!(
+                    snapshot.entry_for_path(path).is_none_or(|entry| !entry.is_dir()),
+                    "file_surface entry {file:?} is a directory. List the existing files individually, not the containing folder."
+                );
+                return Ok(format!("{name}/{relative}"));
             }
-            if let [(name, _)] = roots.as_slice() {
+            if let [(name, snapshot)] = roots.as_slice() {
+                let path = util::rel_path::RelPath::from_unix_str(&relative)?;
+                anyhow::ensure!(
+                    snapshot.entry_for_path(path).is_none_or(|entry| !entry.is_dir()),
+                    "file_surface entry {file:?} is a directory. List the existing files individually, not the containing folder."
+                );
                 return Ok(format!("{name}/{relative}"));
             }
             let path = util::rel_path::RelPath::from_unix_str(&relative)?;
@@ -560,6 +571,9 @@ mod tests {
                 .expect_err("ambiguous roots");
             assert!(error.to_string().contains("Use root/path"));
             assert!(resolve_file_surface(&["missing.rs".into()], &project, cx).is_err());
+            let error = resolve_file_surface(&["backend/src".into()], &project, cx)
+                .expect_err("directories cannot stand in for files");
+            assert!(error.to_string().contains("is a directory"));
         });
     }
 
@@ -590,6 +604,11 @@ mod tests {
                     .expect("remote-relative path"),
                 vec!["remote/src/main.rs"]
             );
+            for directory in ["src", "remote/src"] {
+                let error = resolve_file_surface(&[directory.into()], &project, cx)
+                    .expect_err("remote directory is not a file surface");
+                assert!(error.to_string().contains("is a directory"));
+            }
         });
     }
 

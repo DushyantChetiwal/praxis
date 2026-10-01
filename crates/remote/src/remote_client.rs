@@ -1553,10 +1553,8 @@ mod tests {
         let (outgoing_tx, _outgoing_rx) = mpsc::unbounded::<Envelope>();
         let client =
             cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
-        let request = client.request_stream_dynamic(
-            proto::Test { id: 0 }.into_envelope(0, None, None),
-            "Test",
-        );
+        let request = client
+            .request_stream_dynamic(proto::Test { id: 0 }.into_envelope(0, None, None), "Test");
         assert_eq!(client.stream_response_channels.lock().len(), 1);
         drop(request);
         assert!(client.stream_response_channels.lock().is_empty());
@@ -1569,10 +1567,7 @@ mod tests {
         let client =
             cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
         let mut stream = client
-            .request_stream_dynamic(
-                proto::Test { id: 0 }.into_envelope(0, None, None),
-                "Test",
-            )
+            .request_stream_dynamic(proto::Test { id: 0 }.into_envelope(0, None, None), "Test")
             .await
             .unwrap();
         drop(client);

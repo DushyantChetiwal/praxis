@@ -627,6 +627,16 @@ fn canonical_file_surface_path(path: &str) -> Result<String, String> {
     Ok(components.join("/"))
 }
 
+fn file_surface_declaration_identity(path: &str) -> Result<String, String> {
+    let canonical = canonical_file_surface_path(path)?;
+    let (root, relative) = canonical
+        .split_once('/')
+        .ok_or_else(|| "include the project root and file path".to_string())?;
+    // Root names identify the open project namespace. Paths within that root
+    // may name distinct files on a case-sensitive host.
+    Ok(format!("{}/{relative}", root.to_lowercase()))
+}
+
 impl ArchitectGraph {
     /// Conservative comparison identity for a worktree-qualified file path.
     /// Normalizes separators, '.' components, and Unicode lowercase spelling.
@@ -690,11 +700,14 @@ impl ArchitectGraph {
             };
             let mut identities = HashSet::default();
             for file in files {
-                let problem = match canonical_file_surface_path(file) {
+                let problem = match canonical_file_surface_path(file).and_then(|canonical| {
+                    file_surface_declaration_identity(&canonical)
+                        .map(|identity| (canonical, identity))
+                }) {
                     Err(reason) => Some(reason),
-                    Ok(canonical) => {
-                        if !identities.insert(canonical.to_lowercase()) {
-                            Some("this file is already declared, possibly with different case; remove the duplicate".into())
+                    Ok((canonical, identity)) => {
+                        if !identities.insert(identity) {
+                            Some("this file path is already declared; remove the duplicate".into())
                         } else if &canonical != file {
                             Some(format!(
                                 "use the canonical spelling {canonical:?}, with '/' separators and no empty or '.' components"
@@ -803,11 +816,11 @@ impl ArchitectGraph {
                 for file in files {
                     let canonical =
                         canonical_file_surface_path(file).unwrap_or_else(|_| file.clone());
-                    let identity = Self::normalize_file_surface_path(&canonical);
+                    let identity = file_surface_declaration_identity(&canonical);
                     if !surface.iter().any(|existing| {
                         existing == &canonical
                             || identity.as_ref().is_ok_and(|identity| {
-                                Self::normalize_file_surface_path(existing).as_ref() == Ok(identity)
+                                file_surface_declaration_identity(existing).as_ref() == Ok(identity)
                             })
                     }) {
                         surface.push(canonical);
@@ -2183,6 +2196,32 @@ mod tests {
                     GraphProblem::InvalidFileSurface { reason, .. } if reason.contains("duplicate")
                 ))
         );
+    }
+
+    #[test]
+    fn one_step_can_declare_distinct_case_variants_without_weakening_parallel_checks() {
+        let mut graph = surface_graph(&["step"], &[]);
+        graph.node_mut(&"step".into()).unwrap().file_surface = Some(vec![
+            "worktree/README.md".into(),
+            "worktree/readme.md".into(),
+        ]);
+        assert!(graph.file_surface_problems().is_empty());
+        let mut parallel = ArchitectNode::new("parallel", "Parallel");
+        parallel.file_surface = Some(vec!["worktree/README.md".into()]);
+        graph.add_node(parallel);
+        assert!(graph.file_surface_problems().iter().any(|problem| {
+            matches!(problem, GraphProblem::FileSurfaceOverlap { .. })
+        }));
+    }
+
+    #[test]
+    fn created_case_variant_is_added_even_when_another_spelling_is_declared() {
+        let mut graph = surface_graph(&["source", "after"], &[("source", "after")]);
+        graph.node_mut(&"after".into()).unwrap().file_surface = Some(vec!["worktree/README.md".into()]);
+        graph.record_created_files(&NodePath::root("source".into()), &["worktree/readme.md".into()]);
+        assert_eq!(graph.node(&"after".into()).unwrap().file_surface,
+            Some(vec!["worktree/README.md".into(), "worktree/readme.md".into()]));
+        assert!(graph.file_surface_problems().is_empty());
     }
 
     #[test]

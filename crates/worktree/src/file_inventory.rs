@@ -1,4 +1,5 @@
 use super::*;
+use futures::FutureExt as _;
 use gpui::FutureExt as _;
 
 pub const MAX_FILE_INVENTORY_ENTRIES: usize = 100_000;
@@ -46,6 +47,9 @@ impl Worktree {
         if matches!(remote.file_inventory_support, Some(Ok(()))) && !remote.disconnected {
             return Task::ready(());
         }
+        if let Some(probe) = remote.file_inventory_probe.clone() {
+            return cx.spawn(async move |_, _| probe.await);
+        }
         remote.file_inventory_support = None;
         let response = remote.client.request(proto::ExpandProjectEntry {
             project_id: remote.project_id,
@@ -57,7 +61,7 @@ impl Worktree {
                 include_private: false,
             }),
         });
-        cx.spawn(async move |this, cx| {
+        let probe = cx.spawn(async move |this, cx| {
             let support = match response
                 .with_timeout(FILE_INVENTORY_SUPPORT_TIMEOUT, cx.background_executor())
                 .await
@@ -78,11 +82,15 @@ impl Worktree {
             this.update(cx, |this, cx| {
                 if let Self::Remote(remote) = this {
                     remote.file_inventory_support = Some(support);
+                    remote.file_inventory_probe = None;
                     cx.notify();
                 }
             })
             .log_err();
-        })
+        });
+        let probe = probe.shared();
+        remote.file_inventory_probe = Some(probe.clone());
+        cx.spawn(async move |_, _| probe.await)
     }
 
     pub fn file_inventory(
@@ -407,19 +415,21 @@ async fn local_file_inventory(
         else {
             continue;
         };
-        if !metadata.is_dir {
-            let canonical = fs
-                .canonicalize(&absolute)
-                .await
-                .with_context(|| format!("Cannot resolve declared file {relative}"))?;
-            inventory.canonical_paths.insert(
-                relative,
-                canonical
-                    .to_str()
-                    .context("A canonical project path is not valid UTF-8")?
-                    .to_owned(),
-            );
-        }
+        anyhow::ensure!(
+            !metadata.is_dir,
+            "Declared file surface path {relative:?} is a directory. List the existing files individually before running the plan."
+        );
+        let canonical = fs
+            .canonicalize(&absolute)
+            .await
+            .with_context(|| format!("Cannot resolve declared file {relative}"))?;
+        inventory.canonical_paths.insert(
+            relative,
+            canonical
+                .to_str()
+                .context("A canonical project path is not valid UTF-8")?
+                .to_owned(),
+        );
     }
     worktree.read_with(cx, |tree, _| {
         tree.check_file_inventory_support()?;

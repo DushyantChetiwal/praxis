@@ -102,6 +102,7 @@ use worktree::WorktreeModelHandle as _;
 async fn test_remote_file_inventory_support_probe_times_out(cx: &mut TestAppContext) {
     struct UnresponsiveClient {
         handlers: Mutex<rpc::ProtoMessageHandlerSet>,
+        requests: Arc<atomic::AtomicUsize>,
     }
 
     impl rpc::ProtoClient for UnresponsiveClient {
@@ -110,6 +111,7 @@ async fn test_remote_file_inventory_support_probe_times_out(cx: &mut TestAppCont
             _: rpc::proto::Envelope,
             _: &'static str,
         ) -> futures::future::BoxFuture<'static, Result<rpc::proto::Envelope>> {
+            self.requests.fetch_add(1, atomic::Ordering::SeqCst);
             future::pending().boxed()
         }
 
@@ -135,6 +137,7 @@ async fn test_remote_file_inventory_support_probe_times_out(cx: &mut TestAppCont
     }
 
     init_test(cx);
+    let requests = Arc::new(atomic::AtomicUsize::new(0));
     let tree = cx.update(|cx| {
         Worktree::remote(
             1,
@@ -149,13 +152,20 @@ async fn test_remote_file_inventory_support_probe_times_out(cx: &mut TestAppCont
             },
             rpc::AnyProtoClient::new(Arc::new(UnresponsiveClient {
                 handlers: Mutex::default(),
+                requests: requests.clone(),
             })),
             PathStyle::Unix,
             cx,
         )
     });
     let negotiation = tree.update(cx, |tree, cx| tree.negotiate_file_inventory(cx));
+    let concurrent = tree.update(cx, |tree, cx| tree.negotiate_file_inventory(cx));
     cx.run_until_parked();
+    assert_eq!(
+        requests.load(atomic::Ordering::SeqCst),
+        1,
+        "simultaneous probes must share one request"
+    );
     tree.read_with(cx, |tree, _| {
         assert!(
             tree.check_file_inventory_support()
@@ -164,13 +174,23 @@ async fn test_remote_file_inventory_support_probe_times_out(cx: &mut TestAppCont
                 .contains("still loading")
         );
     });
-    cx.advance_clock(Duration::from_secs(31)).await;
+    cx.executor().advance_clock(Duration::from_secs(31));
     negotiation.await;
+    concurrent.await;
     tree.read_with(cx, |tree, _| {
         let error = tree.check_file_inventory_support().unwrap_err().to_string();
         assert!(error.contains("timed out"), "{error}");
         assert!(error.contains("Reconnect"), "{error}");
     });
+    let retry = tree.update(cx, |tree, cx| tree.negotiate_file_inventory(cx));
+    cx.run_until_parked();
+    assert_eq!(
+        requests.load(atomic::Ordering::SeqCst),
+        2,
+        "a completed failed probe must allow retry"
+    );
+    cx.executor().advance_clock(Duration::from_secs(31));
+    retry.await;
 }
 
 #[gpui::test(iterations = 3)]
@@ -274,6 +294,50 @@ async fn test_remote_file_inventory_uses_host_files_and_refresh_barriers(
         )
     );
     host_fs.unpause_events_and_flush();
+}
+
+#[gpui::test]
+async fn test_remote_file_inventory_rejects_directory_declarations(
+    cx: &mut TestAppContext,
+    host_cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let client_fs = FakeFs::new(cx.executor());
+    let host_fs = FakeFs::new(host_cx.executor());
+    host_fs
+        .insert_tree(path!("/a"), json!({ "src": { "main.rs": "host" } }))
+        .await;
+    let (project, host) = Project::test_remote_worktrees(
+        client_fs,
+        host_fs,
+        [Path::new(path!("/a"))],
+        cx,
+        host_cx,
+    )
+    .await;
+    let host_tree = host.read_with(host_cx, |project, cx| {
+        project.visible_worktrees(cx).next().unwrap()
+    });
+    let remote_tree = project.read_with(cx, |project, cx| {
+        project.visible_worktrees(cx).next().unwrap()
+    });
+    let local_error = host_tree
+        .update(host_cx, |tree, cx| tree.file_inventory(vec!["src".into()], cx))
+        .await
+        .unwrap_err();
+    assert!(format!("{local_error:#}").contains("is a directory"));
+    let remote_error = remote_tree
+        .update(cx, |tree, cx| tree.file_inventory(vec!["src".into()], cx))
+        .await
+        .unwrap_err();
+    assert!(format!("{remote_error:#}").contains("is a directory"));
+    let inventory = remote_tree
+        .update(cx, |tree, cx| {
+            tree.file_inventory(vec!["src/main.rs".into()], cx)
+        })
+        .await
+        .unwrap();
+    assert!(inventory.files.contains(&"src/main.rs".to_string()));
 }
 
 #[gpui::test(iterations = 3)]
