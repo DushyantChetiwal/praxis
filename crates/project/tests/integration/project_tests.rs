@@ -107,10 +107,7 @@ async fn test_remote_file_inventory_uses_host_files_and_refresh_barriers(
     let client_fs = FakeFs::new(cx.executor());
     let host_fs = FakeFs::new(host_cx.executor());
     client_fs
-        .insert_tree(
-            path!("/a"),
-            json!({ "client_only.rs": "wrong filesystem" }),
-        )
+        .insert_tree(path!("/a"), json!({ "client_only.rs": "wrong filesystem" }))
         .await;
     host_fs
         .insert_tree(
@@ -196,7 +193,10 @@ async fn test_remote_file_inventory_uses_host_files_and_refresh_barriers(
     });
     assert_eq!(
         client_reads,
-        (client_fs.read_dir_call_count(), client_fs.metadata_call_count())
+        (
+            client_fs.read_dir_call_count(),
+            client_fs.metadata_call_count()
+        )
     );
     host_fs.unpause_events_and_flush();
 }
@@ -243,7 +243,10 @@ async fn test_remote_file_inventory_disconnect_is_not_an_empty_snapshot(
     });
     assert_eq!(
         client_reads,
-        (client_fs.read_dir_call_count(), client_fs.metadata_call_count())
+        (
+            client_fs.read_dir_call_count(),
+            client_fs.metadata_call_count()
+        )
     );
 }
 

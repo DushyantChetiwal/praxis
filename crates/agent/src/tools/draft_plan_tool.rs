@@ -215,11 +215,10 @@ pub(crate) fn resolve_file_surface(
     let roots: Vec<_> = project
         .read(cx)
         .visible_worktrees(cx)
-        .filter_map(|worktree| {
-            let tree = worktree.read(cx);
-            (!tree.is_single_file()).then(|| {
-                (tree.snapshot().root_name_str().to_string(), tree.snapshot())
-            })
+        .filter(|worktree| !worktree.read(cx).is_single_file())
+        .map(|worktree| {
+            let snapshot = worktree.read(cx).snapshot();
+            (snapshot.root_name_str().to_string(), snapshot)
         })
         .collect();
     files
@@ -238,14 +237,15 @@ pub(crate) fn resolve_file_surface(
                 .filter(|component| !component.is_empty() && *component != ".")
                 .collect::<Vec<_>>()
                 .join("/");
-            let qualified: Vec<_> = relative
-                .split_once('/')
-                .into_iter()
-                .flat_map(|(prefix, suffix)| {
-                    roots.iter().filter_map(move |(name, _)| {
-                        (name.to_lowercase() == prefix.to_lowercase())
-                            .then(|| format!("{name}/{suffix}"))
-                    })
+            let qualified: Vec<_> = roots
+                .iter()
+                .filter_map(|(name, _)| {
+                    let (prefix, suffix) = relative.split_once('/')?;
+                    if name.to_lowercase() == prefix.to_lowercase() {
+                        Some(format!("{name}/{suffix}"))
+                    } else {
+                        None
+                    }
                 })
                 .collect();
             anyhow::ensure!(qualified.len() <= 1, "Project root names are ambiguous. Give the roots distinct names before declaring file_surface.");
@@ -505,29 +505,59 @@ mod tests {
             super::super::architect_run_tool::architect_tool_test_session(cx).await;
         let project = thread.read_with(cx, |thread, _| thread.project().clone());
         cx.update(|cx| {
-            for input in ["src/main.rs", "./src/main.rs", "src\\main.rs", "a/src/main.rs"] {
+            for input in [
+                "src/main.rs",
+                "./src/main.rs",
+                "src\\main.rs",
+                "a/src/main.rs",
+            ] {
                 assert_eq!(
                     resolve_file_surface(&[input.into()], &project, cx).expect("relative path"),
                     vec!["a/src/main.rs"]
                 );
             }
-            assert_eq!(resolve_file_surface(&["README.md".into()], &project, cx).expect("root file"), vec!["a/README.md"]);
+            assert_eq!(
+                resolve_file_surface(&["README.md".into()], &project, cx).expect("root file"),
+                vec!["a/README.md"]
+            );
             for invalid in ["../outside.rs", "/a/main.rs", "C:/project/main.rs"] {
-                assert_eq!(resolve_file_surface(&[invalid.into()], &project, cx).expect("retain invalid declaration"), vec![invalid]);
+                assert_eq!(
+                    resolve_file_surface(&[invalid.into()], &project, cx)
+                        .expect("retain invalid declaration"),
+                    vec![invalid]
+                );
             }
         });
         let fs = fs::FakeFs::new(cx.executor());
-        fs.insert_tree("/", json!({
-            "backend": {"src": {"main.rs": "", "server.rs": ""}},
-            "frontend": {"src": {"main.rs": ""}}
-        })).await;
+        fs.insert_tree(
+            "/",
+            json!({
+                "backend": {"src": {"main.rs": "", "server.rs": ""}},
+                "frontend": {"src": {"main.rs": ""}}
+            }),
+        )
+        .await;
         let project = project::Project::test(
-            fs, [std::path::Path::new("/backend"), std::path::Path::new("/frontend")], cx,
-        ).await;
+            fs,
+            [
+                std::path::Path::new("/backend"),
+                std::path::Path::new("/frontend"),
+            ],
+            cx,
+        )
+        .await;
         cx.update(|cx| {
-            assert_eq!(resolve_file_surface(&["src/server.rs".into()], &project, cx).expect("unique file"), vec!["backend/src/server.rs"]);
-            assert_eq!(resolve_file_surface(&["frontend/src/main.rs".into()], &project, cx).expect("qualified file"), vec!["frontend/src/main.rs"]);
-            let error = resolve_file_surface(&["src/main.rs".into()], &project, cx).expect_err("ambiguous roots");
+            assert_eq!(
+                resolve_file_surface(&["src/server.rs".into()], &project, cx).expect("unique file"),
+                vec!["backend/src/server.rs"]
+            );
+            assert_eq!(
+                resolve_file_surface(&["frontend/src/main.rs".into()], &project, cx)
+                    .expect("qualified file"),
+                vec!["frontend/src/main.rs"]
+            );
+            let error = resolve_file_surface(&["src/main.rs".into()], &project, cx)
+                .expect_err("ambiguous roots");
             assert!(error.to_string().contains("Use root/path"));
             assert!(resolve_file_surface(&["missing.rs".into()], &project, cx).is_err());
         });
@@ -543,13 +573,21 @@ mod tests {
         let client_fs = fs::FakeFs::new(cx.executor());
         client_fs.insert_tree("/", json!({"client-only": {}})).await;
         let host_fs = fs::FakeFs::new(host_cx.executor());
-        host_fs.insert_tree("/", json!({"remote": {"src": {"main.rs": ""}}})).await;
+        host_fs
+            .insert_tree("/", json!({"remote": {"src": {"main.rs": ""}}}))
+            .await;
         let (project, _host) = project::Project::test_remote_worktrees(
-            client_fs, host_fs, [std::path::Path::new("/remote")], cx, host_cx,
-        ).await;
+            client_fs,
+            host_fs,
+            [std::path::Path::new("/remote")],
+            cx,
+            host_cx,
+        )
+        .await;
         cx.update(|cx| {
             assert_eq!(
-                resolve_file_surface(&["src/main.rs".into()], &project, cx).expect("remote-relative path"),
+                resolve_file_surface(&["src/main.rs".into()], &project, cx)
+                    .expect("remote-relative path"),
                 vec!["remote/src/main.rs"]
             );
         });
@@ -566,13 +604,18 @@ mod tests {
             {"id": "left", "title": "Left", "file_surface": ["src/main.rs"]},
             {"id": "right", "title": "Right", "file_surface": ["a/src/main.rs"]}
         ]}));
-        let output = cx.update(|cx| {
-            Arc::new(DraftPlanTool::new(thread.downgrade())).run(input, events, cx)
-        }).await.expect("retain conflicting draft");
+        let output = cx
+            .update(|cx| Arc::new(DraftPlanTool::new(thread.downgrade())).run(input, events, cx))
+            .await
+            .expect("retain conflicting draft");
         let DraftPlanToolOutput::Success { problems, .. } = output else {
             panic!("expected draft");
         };
-        assert!(problems.iter().any(|problem| problem.contains("may run concurrently")));
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("may run concurrently"))
+        );
         thread.read_with(cx, |thread, _| {
             for node in &thread.architect_graph().expect("graph").nodes {
                 assert_eq!(node.file_surface, Some(vec!["a/src/main.rs".into()]));

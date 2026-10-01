@@ -286,8 +286,7 @@ async fn local_file_inventory(
                 if directory != root && fs.metadata(&directory).await?.is_none() {
                     continue;
                 }
-                return Err(error)
-                    .with_context(|| format!("Cannot list {}", directory.display()));
+                return Err(error).with_context(|| format!("Cannot list {}", directory.display()));
             }
         };
         refresh_inventory_ignore_file(worktree, &root, &directory, fs.as_ref(), cx).await?;

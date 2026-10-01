@@ -7,6 +7,7 @@ use anyhow::{Context as _, Result, anyhow};
 use clock::ReplicaId;
 use collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use encoding_rs::Encoding;
+pub use file_inventory::{FileInventory, MAX_FILE_INVENTORY_ENTRIES};
 use fs::{
     Fs, MTime, PathEvent, PathEventKind, RemoveOptions, TrashId, Watcher, copy_recursive,
     read_dir_items,
@@ -32,7 +33,6 @@ use gpui::{
     App, AppContext as _, AsyncApp, BackgroundExecutor, Context, Entity, EventEmitter, Priority,
     Task,
 };
-pub use file_inventory::{FileInventory, MAX_FILE_INVENTORY_ENTRIES};
 pub use ignore::{IgnoreKind, IgnoreStack};
 use language::{
     ByteContent, DiskState, FILE_ANALYSIS_BYTES, analyze_byte_content, decode_text, encode_text,

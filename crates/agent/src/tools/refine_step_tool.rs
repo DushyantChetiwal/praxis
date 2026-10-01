@@ -387,20 +387,35 @@ mod tests {
         let (_connection, _agent, thread, _session) =
             super::super::architect_run_tool::architect_tool_test_session(cx).await;
         thread.update(cx, |thread, cx| {
-            thread.set_architect_graph(Some(ArchitectGraph {
-                nodes: vec![ArchitectNode::new("step", "Step")],
-                edges: vec![],
-            }), cx);
+            thread.set_architect_graph(
+                Some(ArchitectGraph {
+                    nodes: vec![ArchitectNode::new("step", "Step")],
+                    edges: vec![],
+                }),
+                cx,
+            );
         });
         let (events, _receiver) = ToolCallEventStream::test();
         let input = ToolInput::ready(json!({"file_surface": ["README.md", "src/main.rs"]}));
         cx.update(|cx| {
-            Arc::new(RefineStepTool::new(thread.downgrade(), NodePath::root("step".into())))
-                .run(input, events, cx)
-        }).await.expect("refine relative surface");
+            Arc::new(RefineStepTool::new(
+                thread.downgrade(),
+                NodePath::root("step".into()),
+            ))
+            .run(input, events, cx)
+        })
+        .await
+        .expect("refine relative surface");
         thread.read_with(cx, |thread, _| {
-            assert_eq!(thread.architect_graph().expect("graph").node(&"step".into()).expect("step").file_surface,
-                Some(vec!["a/README.md".into(), "a/src/main.rs".into()]));
+            assert_eq!(
+                thread
+                    .architect_graph()
+                    .expect("graph")
+                    .node(&"step".into())
+                    .expect("step")
+                    .file_surface,
+                Some(vec!["a/README.md".into(), "a/src/main.rs".into()])
+            );
         });
     }
 

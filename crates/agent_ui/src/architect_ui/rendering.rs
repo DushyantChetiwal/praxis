@@ -663,13 +663,15 @@ impl ArchitectPane {
                                             IconName::Check
                                         })
                                         .size(IconSize::XSmall)
-                                        .color(if running {
-                                            Color::Info
-                                        } else if run_needs_attention {
-                                            Color::Warning
-                                        } else {
-                                            Color::Muted
-                                        }),
+                                        .color(
+                                            if running {
+                                                Color::Info
+                                            } else if run_needs_attention {
+                                                Color::Warning
+                                            } else {
+                                                Color::Muted
+                                            },
+                                        ),
                                     )
                                     .child(
                                         Label::new(truncate(&status, 34))
@@ -3438,13 +3440,15 @@ mod tests {
                     }),
                     "the mounted progress fill must match the icon for {outcome:?}"
                 );
-                if outcome.as_ref().is_some_and(|outcome| !outcome.is_success()) {
+                if outcome
+                    .as_ref()
+                    .is_some_and(|outcome| !outcome.is_success())
+                {
                     assert!(
                         quads.iter().any(|quad| {
                             quad.background == status.warning_background.into()
                                 && quad.border_color == status.warning_border
-                                && quad.border_widths.top
-                                    == px(1.0).scale(window.scale_factor())
+                                && quad.border_widths.top == px(1.0).scale(window.scale_factor())
                         }),
                         "the header's finished-run status must also use warning tokens"
                     );
@@ -3456,7 +3460,10 @@ mod tests {
                 assert_eq!(run.outcome, outcome);
                 if matches!(outcome, Some(RunOutcome::Failed { .. })) {
                     assert_eq!(
-                        run.outcome.as_ref().expect("the run failed").summary(&graph),
+                        run.outcome
+                            .as_ref()
+                            .expect("the run failed")
+                            .summary(&graph),
                         format!("Run failed: {failure_message}")
                     );
                 }

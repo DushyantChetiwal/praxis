@@ -744,8 +744,8 @@ async fn project_file_snapshot(
         );
         for relative in inventory.files {
             let file = format!("{name}/{relative}");
-            let identity = ArchitectGraph::normalize_file_surface_path(&file)
-                .map_err(anyhow::Error::msg)?;
+            let identity =
+                ArchitectGraph::normalize_file_surface_path(&file).map_err(anyhow::Error::msg)?;
             snapshot.files.insert(identity, file);
         }
         for relative in inventory.skipped_paths {
@@ -3036,19 +3036,35 @@ mod checkpoint_tests {
         for entrypoint in 0..4 {
             let error = cx.update(|cx| match entrypoint {
                 0 => start_architect_run(thread.clone(), acp_thread.clone(), graph.clone(), cx)
-                    .unwrap_err().to_string(),
+                    .unwrap_err()
+                    .to_string(),
                 1 => start_architect_run_from(
-                    thread.clone(), acp_thread.clone(), graph.clone(), path("after"), cx,
-                ).unwrap_err().to_string(),
+                    thread.clone(),
+                    acp_thread.clone(),
+                    graph.clone(),
+                    path("after"),
+                    cx,
+                )
+                .unwrap_err()
+                .to_string(),
                 2 => resume_architect_run(thread.clone(), acp_thread.clone(), cx)
-                    .unwrap_err().to_string(),
+                    .unwrap_err()
+                    .to_string(),
                 _ => resume_architect_run_at(thread.clone(), acp_thread.clone(), path("after"), cx)
-                    .unwrap_err().to_string(),
+                    .unwrap_err()
+                    .to_string(),
             });
             assert!(error.contains(explanation), "{error}");
-            assert_eq!(execution_state(thread, cx), before, "entrypoint {entrypoint} mutated execution");
+            assert_eq!(
+                execution_state(thread, cx),
+                before,
+                "entrypoint {entrypoint} mutated execution"
+            );
             let persisted = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
-            assert_eq!(serde_json::to_value(persisted.persistent_architect).unwrap(), saved);
+            assert_eq!(
+                serde_json::to_value(persisted.persistent_architect).unwrap(),
+                saved
+            );
         }
     }
 
@@ -3059,7 +3075,9 @@ mod checkpoint_tests {
         let (_connection, thread, acp_thread, fake) = native_session(cx).await;
         let graph = linear_graph(&["source", "after"]);
         cx.update(|cx| {
-            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph.clone()), cx)
+            });
             start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
         });
         cx.run_until_parked();
@@ -3068,18 +3086,28 @@ mod checkpoint_tests {
         assert_running(&thread, "after", cx);
         cx.update(|cx| {
             stop_architect_run(&thread, Some(&acp_thread), cx);
-            thread.update(cx, |thread, cx| thread.set_session_mode(SessionMode::Architect, cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_session_mode(SessionMode::Architect, cx)
+            });
             let project = thread.read(cx).project().clone();
-            let id = project.read(cx).visible_worktrees(cx).next().unwrap().read(cx).id();
+            let id = project
+                .read(cx)
+                .visible_worktrees(cx)
+                .next()
+                .unwrap()
+                .read(cx)
+                .id();
             project.update(cx, |project, cx| project.remove_worktree(id, cx));
         });
         let requests_before = fake.pending_completions();
-        assert_preflight_preserves_execution(&thread, &acp_thread, "Open a project folder", cx).await;
+        assert_preflight_preserves_execution(&thread, &acp_thread, "Open a project folder", cx)
+            .await;
         assert_eq!(fake.pending_completions(), requests_before);
         for request in requests_before.iter().filter(|request| {
-            request.messages.last().is_some_and(|message| {
-                message.string_contents().contains("## Step")
-            })
+            request
+                .messages
+                .last()
+                .is_some_and(|message| message.string_contents().contains("## Step"))
         }) {
             assert!(fake.is_stream_closed(&fake.model("fake"), request));
         }
@@ -3095,13 +3123,21 @@ mod checkpoint_tests {
         let host_fs = fs::FakeFs::new(host_cx.executor());
         host_fs.insert_tree("/a", serde_json::json!({})).await;
         let (project, _host) = project::Project::test_remote_worktrees(
-            client_fs, host_fs, [Path::new("/a")], cx, host_cx,
-        ).await;
+            client_fs,
+            host_fs,
+            [Path::new("/a")],
+            cx,
+            host_cx,
+        )
+        .await;
         let remote = project.read_with(cx, |project, _| project.remote_client().unwrap());
-        let (_connection, thread, acp_thread, fake) = native_project_session(project, fake, cx).await;
+        let (_connection, thread, acp_thread, fake) =
+            native_project_session(project, fake, cx).await;
         let graph = linear_graph(&["source", "after"]);
         cx.update(|cx| {
-            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph.clone()), cx)
+            });
             start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
         });
         cx.run_until_parked();
@@ -3112,12 +3148,16 @@ mod checkpoint_tests {
         remote.update(cx, |remote, cx| remote.force_server_not_running(cx));
         cx.run_until_parked();
         let paused = execution_state(&thread, cx);
-        let error = cx.update(|cx| resume_architect_run(thread.clone(), acp_thread.clone(), cx)).unwrap_err();
+        let error = cx
+            .update(|cx| resume_architect_run(thread.clone(), acp_thread.clone(), cx))
+            .unwrap_err();
         assert!(error.to_string().contains("Reconnect"));
         assert_eq!(execution_state(&thread, cx), paused);
         cx.update(|cx| {
             stop_architect_run(&thread, Some(&acp_thread), cx);
-            thread.update(cx, |thread, cx| thread.set_session_mode(SessionMode::Architect, cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_session_mode(SessionMode::Architect, cx)
+            });
         });
         assert_preflight_preserves_execution(&thread, &acp_thread, "Reconnect", cx).await;
     }
@@ -3130,23 +3170,36 @@ mod checkpoint_tests {
         let fake = crate::tests::init_test(cx);
         let client_fs = fs::FakeFs::new(cx.executor());
         let host_fs = fs::FakeFs::new(host_cx.executor());
-        host_fs.insert_tree("/", serde_json::json!({ "a": {}, "unsupported": {} })).await;
+        host_fs
+            .insert_tree("/", serde_json::json!({ "a": {}, "unsupported": {} }))
+            .await;
         let (project, host) = project::Project::test_remote_worktrees(
-            client_fs, host_fs, [Path::new("/a")], cx, host_cx,
-        ).await;
+            client_fs,
+            host_fs,
+            [Path::new("/a")],
+            cx,
+            host_cx,
+        )
+        .await;
         host.update(host_cx, |host, cx| {
-            host.worktree_store().update(cx, |store, _| store.disable_scanner());
+            host.worktree_store()
+                .update(cx, |store, _| store.disable_scanner());
         });
-        let _unsupported = host.update(host_cx, |host, cx| {
-            host.create_worktree(Path::new("/unsupported"), true, cx)
-        }).await.unwrap();
+        let _unsupported = host
+            .update(host_cx, |host, cx| {
+                host.create_worktree(Path::new("/unsupported"), true, cx)
+            })
+            .await
+            .unwrap();
         cx.run_until_parked();
-        let (_connection, thread, acp_thread, _fake) = native_project_session(project, fake, cx).await;
+        let (_connection, thread, acp_thread, _fake) =
+            native_project_session(project, fake, cx).await;
         thread.update(cx, |thread, cx| {
             thread.set_architect_graph(Some(linear_graph(&["source", "after"])), cx);
             thread.set_session_mode(SessionMode::Architect, cx);
         });
-        assert_preflight_preserves_execution(&thread, &acp_thread, "scanning is disabled", cx).await;
+        assert_preflight_preserves_execution(&thread, &acp_thread, "scanning is disabled", cx)
+            .await;
         assert!(thread.read_with(cx, |thread, _| thread.architect_run().is_none()));
     }
 
@@ -3166,17 +3219,29 @@ mod checkpoint_tests {
     ) {
         let fake = crate::tests::init_test(cx);
         let client_fs = fs::FakeFs::new(cx.executor());
-        client_fs.insert_tree("/a", serde_json::json!({ "client_only.rs": "not remote" })).await;
+        client_fs
+            .insert_tree("/a", serde_json::json!({ "client_only.rs": "not remote" }))
+            .await;
         let host_fs = fs::FakeFs::new(host_cx.executor());
         host_fs.insert_tree("/a", serde_json::json!({})).await;
         let (project, _host) = project::Project::test_remote_worktrees(
-            client_fs, host_fs.clone(), [Path::new("/a")], cx, host_cx,
-        ).await;
+            client_fs,
+            host_fs.clone(),
+            [Path::new("/a")],
+            cx,
+            host_cx,
+        )
+        .await;
         project.read_with(cx, |project, cx| {
             assert!(project.is_remote());
-            assert!(project.visible_worktrees(cx).all(|tree| tree.read(cx).is_remote()));
+            assert!(
+                project
+                    .visible_worktrees(cx)
+                    .all(|tree| tree.read(cx).is_remote())
+            );
         });
-        let (_connection, thread, acp_thread, fake) = native_project_session(project, fake, cx).await;
+        let (_connection, thread, acp_thread, fake) =
+            native_project_session(project, fake, cx).await;
         assert_external_creation_propagation(thread, acp_thread, fake, host_fs, cx).await;
     }
 
@@ -3216,7 +3281,10 @@ mod checkpoint_tests {
             host_cx,
         )
         .await;
-        let client_reads = (client_fs.read_dir_call_count(), client_fs.metadata_call_count());
+        let client_reads = (
+            client_fs.read_dir_call_count(),
+            client_fs.metadata_call_count(),
+        );
         let mut graph = linear_graph(&["source", "after"]);
         graph.node_at_mut(&path("after")).unwrap().file_surface =
             Some(vec!["a/hidden/old.rs".into()]);
@@ -3243,19 +3311,33 @@ mod checkpoint_tests {
         let updated = project_file_snapshot(&project, &graph, &mut cx.to_async())
             .await
             .unwrap();
-        assert_eq!(updated.created_since(&exposed).unwrap(), vec!["a/hidden/new.rs"]);
-        graph.node_at_mut(&path("source")).unwrap().file_surface =
-            Some(vec!["a/shared.rs".into()]);
-        graph.node_at_mut(&path("after")).unwrap().file_surface =
-            Some(vec!["a/alias.rs".into()]);
-        assert!(project_file_snapshot(&project, &graph, &mut cx.to_async()).await.is_ok());
+        assert_eq!(
+            updated.created_since(&exposed).unwrap(),
+            vec!["a/hidden/new.rs"]
+        );
+        graph.node_at_mut(&path("source")).unwrap().file_surface = Some(vec!["a/shared.rs".into()]);
+        graph.node_at_mut(&path("after")).unwrap().file_surface = Some(vec!["a/alias.rs".into()]);
+        assert!(
+            project_file_snapshot(&project, &graph, &mut cx.to_async())
+                .await
+                .is_ok()
+        );
         graph.edges.clear();
         let error = project_file_snapshot(&project, &graph, &mut cx.to_async())
             .await
             .err()
             .unwrap();
-        assert!(error.to_string().contains("overlapping surfaces"), "{error}");
-        assert_eq!(client_reads, (client_fs.read_dir_call_count(), client_fs.metadata_call_count()));
+        assert!(
+            error.to_string().contains("overlapping surfaces"),
+            "{error}"
+        );
+        assert_eq!(
+            client_reads,
+            (
+                client_fs.read_dir_call_count(),
+                client_fs.metadata_call_count()
+            )
+        );
         host_fs.unpause_events_and_flush();
     }
 
@@ -3602,7 +3684,8 @@ mod checkpoint_tests {
     ) {
         let (_connection, thread, acp_thread, fake) = native_session(cx).await;
         let fs = project_fs(&thread, cx);
-        assert_post_turn_scan_failure_preserves_completed_work(thread, acp_thread, fake, fs, cx).await;
+        assert_post_turn_scan_failure_preserves_completed_work(thread, acp_thread, fake, fs, cx)
+            .await;
     }
 
     #[gpui::test(iterations = 3)]
@@ -3615,10 +3698,19 @@ mod checkpoint_tests {
         let host_fs = fs::FakeFs::new(host_cx.executor());
         host_fs.insert_tree("/a", serde_json::json!({})).await;
         let (project, _host) = project::Project::test_remote_worktrees(
-            client_fs, host_fs.clone(), [Path::new("/a")], cx, host_cx,
-        ).await;
-        let (_connection, thread, acp_thread, fake) = native_project_session(project, fake, cx).await;
-        assert_post_turn_scan_failure_preserves_completed_work(thread, acp_thread, fake, host_fs, cx).await;
+            client_fs,
+            host_fs.clone(),
+            [Path::new("/a")],
+            cx,
+            host_cx,
+        )
+        .await;
+        let (_connection, thread, acp_thread, fake) =
+            native_project_session(project, fake, cx).await;
+        assert_post_turn_scan_failure_preserves_completed_work(
+            thread, acp_thread, fake, host_fs, cx,
+        )
+        .await;
     }
 
     async fn assert_post_turn_scan_failure_preserves_completed_work(

@@ -484,7 +484,9 @@ impl EditArchitectPlanTool {
             match edit {
                 GraphEdit::SetFileSurface { file_surface, .. } => {
                     *file_surface = super::draft_plan_tool::resolve_file_surface(
-                        file_surface, owner.project(), cx,
+                        file_surface,
+                        owner.project(),
+                        cx,
                     )?;
                 }
                 GraphEdit::InsertNode { node, .. } => {
