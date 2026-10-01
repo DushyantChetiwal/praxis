@@ -667,52 +667,103 @@ mod tests {
     #[test]
     fn model_descriptions_keep_inspection_and_edit_lifecycle_contracts() {
         let inspection = <InspectArchitectPlanTool as AgentTool>::description()
-            .split_whitespace().collect::<Vec<_>>().join(" ");
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         for required in [
-            "file_surface", "effective_file_surface", "null means unreviewed legacy",
-            "full paths", "local IDs", "next_offset", "revision", "32768",
+            "file_surface",
+            "effective_file_surface",
+            "null means unreviewed legacy",
+            "full paths",
+            "local IDs",
+            "next_offset",
+            "revision",
+            "32768",
             "inspect_architect_run",
         ] {
-            assert!(inspection.contains(required), "missing inspection guidance: {required}");
+            assert!(
+                inspection.contains(required),
+                "missing inspection guidance: {required}"
+            );
         }
         let editing = <EditArchitectPlanTool as AgentTool>::description();
         let guidance = editing.split_whitespace().collect::<Vec<_>>().join(" ");
         for required in [
-            "draft_plan", "control_architect_run", "refine_step", "parent",
-            "[] is the root", "local IDs", "NOT execution ordering or reparenting",
-            "ENTIRE declaration", "1 to 100", "1 MiB", "five minutes", "single-use",
-            "approval is denied", "Relock", "unsupported checkpoint rebases",
-            "from == to", "edge traversals", "not write restrictions", "32768",
-            "not proof of mutual exclusion", "explicitly skipped",
+            "draft_plan",
+            "control_architect_run",
+            "refine_step",
+            "parent",
+            "[] is the root",
+            "local IDs",
+            "NOT execution ordering or reparenting",
+            "ENTIRE declaration",
+            "1 to 100",
+            "1 MiB",
+            "five minutes",
+            "single-use",
+            "approval is denied",
+            "Relock",
+            "unsupported checkpoint rebases",
+            "from == to",
+            "edge traversals",
+            "not write restrictions",
+            "32768",
+            "not proof of mutual exclusion",
+            "explicitly skipped",
         ] {
-            assert!(guidance.contains(required), "missing edit guidance: {required}");
+            assert!(
+                guidance.contains(required),
+                "missing edit guidance: {required}"
+            );
         }
-        let examples: Vec<GraphEdit> = editing.lines()
+        let examples: Vec<GraphEdit> = editing
+            .lines()
             .filter_map(|line| line.strip_prefix("- "))
             .filter(|line| line.starts_with("{\"kind\""))
             .map(|line| {
                 let value = serde_json::Deserializer::from_str(line)
-                    .into_iter::<Value>().next().expect("example").expect("valid JSON prefix");
+                    .into_iter::<Value>()
+                    .next()
+                    .expect("example")
+                    .expect("valid JSON prefix");
                 serde_json::from_value(value).expect("documented GraphEdit must deserialize")
             })
             .collect();
         assert_eq!(examples.len(), 7, "document every supported edit operation");
-        assert!(matches!(&examples[0], GraphEdit::InsertNode { parent, node }
-            if parent.is_empty() && node.file_surface == Some(vec![])));
-        assert!(matches!(&examples[2], GraphEdit::InsertEdge { parent, edge }
-            if parent == &NodePath::root("outer".into()) && edge.from.0 == "build"));
+        assert!(
+            matches!(&examples[0], GraphEdit::InsertNode { parent, node }
+            if parent.is_empty() && node.file_surface == Some(vec![]))
+        );
+        assert!(
+            matches!(&examples[2], GraphEdit::InsertEdge { parent, edge }
+            if parent == &NodePath::root("outer".into()) && edge.from.0 == "build")
+        );
         for (mut schema, fields) in [
-            (InspectArchitectPlanTool::input_schema().to_value(), vec![
-                ("offset", "next_offset"), ("limit", "1 to 20"), ("revision", "restart")]),
-            (EditArchitectPlanTool::input_schema().to_value(), vec![
-                ("action", "preview_token"), ("edits", "not ordering or reparenting"),
-                ("preview_token", "Single-use")]),
+            (
+                InspectArchitectPlanTool::input_schema().to_value(),
+                vec![
+                    ("offset", "next_offset"),
+                    ("limit", "1 to 20"),
+                    ("revision", "restart"),
+                ],
+            ),
+            (
+                EditArchitectPlanTool::input_schema().to_value(),
+                vec![
+                    ("action", "preview_token"),
+                    ("edits", "not ordering or reparenting"),
+                    ("preview_token", "Single-use"),
+                ],
+            ),
         ] {
             language_model::tool_schema::normalize_tool_schema(&mut schema);
             for (field, required) in fields {
                 let description = schema["properties"][field]["description"]
-                    .as_str().expect(field)
-                    .split_whitespace().collect::<Vec<_>>().join(" ");
+                    .as_str()
+                    .expect(field)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 assert!(description.contains(required), "{field}: {required}");
             }
         }
@@ -922,22 +973,32 @@ mod tests {
         let (_connection, _agent, thread, _coordinator) = architect_tool_test_session(cx).await;
         let mut graph = plan(&thread, cx);
         graph.nodes[0].file_surface = None;
-        thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+        thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(graph.clone()), cx)
+        });
         permission(ToolPermissionMode::Allow, cx);
         let tool = Arc::new(EditArchitectPlanTool::new(thread.downgrade()));
         let input = serde_json::from_value(json!({"edits": [
             {"kind": "set_file_surface", "path": ["step"], "file_surface": []}
-        ]})).expect("surface edit");
+        ]}))
+        .expect("surface edit");
         let preview = cx.update(|cx| tool.preview(&input, cx)).expect("preview");
         assert_eq!(preview["can_apply"], true);
         assert_eq!(preview["ready_to_run"], false);
         assert_eq!(preview["affected_locks"], json!([["step"]]));
-        thread.read_with(cx, |thread, _| assert_eq!(thread.architect_graph(), Some(&graph)));
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.architect_graph(), Some(&graph))
+        });
         let (events, _receiver) = ToolCallEventStream::test();
         cx.update(|cx| tool.run(apply_input(&preview), events, cx))
-            .await.expect("approved surface edit");
+            .await
+            .expect("approved surface edit");
         thread.read_with(cx, |thread, _| {
-            let node = thread.architect_graph().expect("graph").node(&"step".into()).expect("step");
+            let node = thread
+                .architect_graph()
+                .expect("graph")
+                .node(&"step".into())
+                .expect("step");
             assert_eq!(node.file_surface, Some(vec![]));
             assert!(!node.locked);
         });
@@ -1206,8 +1267,14 @@ mod tests {
         assert_eq!(records[3]["node_path"], json!(["outer", "step"]));
         assert_eq!(records[3]["fields"]["locked"], true);
         assert_eq!(records[1]["file_surface"], json!(["project/Parent.rs"]));
-        assert_eq!(records[1]["effective_file_surface"], json!(["project/child.rs", "project/parent.rs"]));
-        assert_eq!(records[3]["effective_file_surface"], json!(["project/child.rs"]));
+        assert_eq!(
+            records[1]["effective_file_surface"],
+            json!(["project/child.rs", "project/parent.rs"])
+        );
+        assert_eq!(
+            records[3]["effective_file_surface"],
+            json!(["project/child.rs"])
+        );
         assert!(records[3]["file_surface_error"].is_null());
     }
 
@@ -1216,7 +1283,10 @@ mod tests {
         for declaration in [None, Some(vec!["../outside.rs".into()]), Some(vec![])] {
             let mut node = ArchitectNode::new("step", "Step");
             node.file_surface = declaration.clone();
-            let graph = ArchitectGraph { nodes: vec![node], edges: vec![] };
+            let graph = ArchitectGraph {
+                nodes: vec![node],
+                edges: vec![],
+            };
             let mut records = Vec::new();
             graph_records(&graph, &NodePath::default(), &json!({}), &mut records).expect("inspect");
             assert_eq!(records[1]["fields"]["file_surface"], json!(declaration));
@@ -1226,7 +1296,12 @@ mod tests {
             } else {
                 assert!(records[1]["effective_file_surface"].is_null());
                 assert!(records[1]["file_surface_error"].is_string());
-                assert!(!records[0]["problems"].as_array().expect("problems").is_empty());
+                assert!(
+                    !records[0]["problems"]
+                        .as_array()
+                        .expect("problems")
+                        .is_empty()
+                );
             }
         }
     }

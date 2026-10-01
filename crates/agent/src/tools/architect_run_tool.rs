@@ -1272,53 +1272,99 @@ mod tests {
     #[test]
     fn model_descriptions_and_schemas_keep_run_recovery_contracts() {
         let inspection = <InspectArchitectRunTool as AgentTool>::description()
-            .split_whitespace().collect::<Vec<_>>().join(" ");
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         for required in [
-            "inspect_architect_plan", "at most one view", "visit_id", "full node paths",
-            "not a command to resume", "next_byte_offset", "32768", "16384",
+            "inspect_architect_plan",
+            "at most one view",
+            "visit_id",
+            "full node paths",
+            "not a command to resume",
+            "next_byte_offset",
+            "32768",
+            "16384",
         ] {
-            assert!(inspection.contains(required), "missing run inspection guidance: {required}");
+            assert!(
+                inspection.contains(required),
+                "missing run inspection guidance: {required}"
+            );
         }
         let control = <ControlArchitectRunTool as AgentTool>::description();
         let guidance = control.split_whitespace().collect::<Vec<_>>().join(" ");
         for required in [
-            "Build mode", "permission approval", "edit_architect_plan", "draft_plan",
-            "not a checkpoint-preserving recovery tool", "retaining locks and checkpoints",
-            "unfinished step", "skip prerequisites", "1 to 100", "32768",
-            "not tool write restrictions", "Completed results are retained",
+            "Build mode",
+            "permission approval",
+            "edit_architect_plan",
+            "draft_plan",
+            "not a checkpoint-preserving recovery tool",
+            "retaining locks and checkpoints",
+            "unfinished step",
+            "skip prerequisites",
+            "1 to 100",
+            "32768",
+            "not tool write restrictions",
+            "Completed results are retained",
         ] {
-            assert!(guidance.contains(required), "missing control guidance: {required}");
+            assert!(
+                guidance.contains(required),
+                "missing control guidance: {required}"
+            );
         }
-        let examples: Vec<ControlArchitectRunToolInput> = control.lines()
+        let examples: Vec<ControlArchitectRunToolInput> = control
+            .lines()
             .filter_map(|line| line.strip_prefix("- "))
             .filter(|line| line.starts_with("{\"action\""))
             .map(|line| {
                 let value = serde_json::Deserializer::from_str(line)
-                    .into_iter::<Value>().next().expect("example").expect("valid JSON prefix");
+                    .into_iter::<Value>()
+                    .next()
+                    .expect("example")
+                    .expect("valid JSON prefix");
                 let input: ControlArchitectRunToolInput = serde_json::from_value(value)
                     .expect("documented control request must deserialize");
-                input.validate().expect("documented fields must match the action");
+                input
+                    .validate()
+                    .expect("documented fields must match the action");
                 input
             })
             .collect();
         assert_eq!(examples.len(), 7, "document every supported control action");
         for (mut schema, fields) in [
-            (InspectArchitectRunTool::input_schema().to_value(), vec![
-                ("run_id", "historical visits"), ("archives", "mutually exclusive"),
-                ("readiness", "not automatically ready"), ("active", "not backend heartbeats"),
-                ("conversation", "BOTH"), ("offset", "next_offset"),
-                ("after_sequence", "next_sequence"), ("limit", "1 to 20")]),
-            (ControlArchitectRunTool::input_schema().to_value(), vec![
-                ("action", "Never edits topology"), ("node_path", "scheduler-ready"),
-                ("models", "1 to 100"), ("model", "Null or omission"),
-                ("goal", "empty string clears"), ("rules", "empty list clears"),
-                ("capture", "empty string clears")]),
+            (
+                InspectArchitectRunTool::input_schema().to_value(),
+                vec![
+                    ("run_id", "historical visits"),
+                    ("archives", "mutually exclusive"),
+                    ("readiness", "not automatically ready"),
+                    ("active", "not backend heartbeats"),
+                    ("conversation", "BOTH"),
+                    ("offset", "next_offset"),
+                    ("after_sequence", "next_sequence"),
+                    ("limit", "1 to 20"),
+                ],
+            ),
+            (
+                ControlArchitectRunTool::input_schema().to_value(),
+                vec![
+                    ("action", "Never edits topology"),
+                    ("node_path", "scheduler-ready"),
+                    ("models", "1 to 100"),
+                    ("model", "Null or omission"),
+                    ("goal", "empty string clears"),
+                    ("rules", "empty list clears"),
+                    ("capture", "empty string clears"),
+                ],
+            ),
         ] {
             language_model::tool_schema::normalize_tool_schema(&mut schema);
             for (field, required) in fields {
                 let description = schema["properties"][field]["description"]
-                    .as_str().expect(field)
-                    .split_whitespace().collect::<Vec<_>>().join(" ");
+                    .as_str()
+                    .expect(field)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 assert!(description.contains(required), "{field}: {required}");
             }
         }

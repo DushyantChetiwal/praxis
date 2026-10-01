@@ -1424,9 +1424,11 @@ pub(crate) fn potentially_concurrent_loop_steps(
         }
         let entries: Vec<_> = branches.iter().map(|(_, target)| target.clone()).collect();
         let region = reachable_before(&graph, &entries, &[]);
-        if !graph.edges.iter().any(|edge| {
-            region.contains(&edge.from) && loop_edges.contains(&(&edge.from, &edge.to))
-        }) {
+        if !graph
+            .edges
+            .iter()
+            .any(|edge| region.contains(&edge.from) && loop_edges.contains(&(&edge.from, &edge.to)))
+        {
             continue;
         }
         let join = join_of(&graph, &node.id, &branches);
@@ -2623,7 +2625,12 @@ mod tests {
         for conditional in [false, true] {
             let mut graph = plain_graph(
                 &["before", "edit", "review", "after", "tail"],
-                &[("before", "edit"), ("edit", "review"), ("review", "after"), ("after", "tail")],
+                &[
+                    ("before", "edit"),
+                    ("edit", "review"),
+                    ("review", "after"),
+                    ("after", "tail"),
+                ],
             );
             for node in &mut graph.nodes {
                 node.file_surface = Some(vec!["worktree/src/shared.rs".into()]);
@@ -2631,7 +2638,9 @@ mod tests {
             let mut retry = ArchitectEdge::new("retry", "review", "edit");
             retry.max_repeats = Some(1);
             if conditional {
-                retry.condition = EdgeCondition::Objective { statement: "Needs another edit".into() };
+                retry.condition = EdgeCondition::Objective {
+                    statement: "Needs another edit".into(),
+                };
             }
             graph.edges.push(retry);
             assert!(graph.file_surface_problems().is_empty());
@@ -2646,11 +2655,15 @@ mod tests {
                 decision = run.answer(&graph, true);
             }
             assert_eq!(decision, Decision::Run(path(&["edit"])));
-            run.validate_checkpoint(&graph).expect("serial loop checkpoint");
+            run.validate_checkpoint(&graph)
+                .expect("serial loop checkpoint");
             assert_eq!(run.finish_step(&graph), Decision::Run(path(&["review"])));
             assert_eq!(run.finish_step(&graph), Decision::Run(path(&["after"])));
             assert_eq!(run.finish_step(&graph), Decision::Run(path(&["tail"])));
-            assert_eq!(run.finish_step(&graph), Decision::Done(RunOutcome::Completed));
+            assert_eq!(
+                run.finish_step(&graph),
+                Decision::Done(RunOutcome::Completed)
+            );
         }
     }
 
@@ -2659,8 +2672,13 @@ mod tests {
         let mut graph = plain_graph(
             &["before", "split", "edit", "review", "peer", "join", "after"],
             &[
-                ("before", "split"), ("split", "edit"), ("split", "peer"),
-                ("edit", "review"), ("review", "join"), ("peer", "join"), ("join", "after"),
+                ("before", "split"),
+                ("split", "edit"),
+                ("split", "peer"),
+                ("edit", "review"),
+                ("review", "join"),
+                ("peer", "join"),
+                ("join", "after"),
             ],
         );
         let mut retry = ArchitectEdge::new("retry", "review", "edit");
@@ -2669,15 +2687,23 @@ mod tests {
         for node in &mut graph.nodes {
             node.file_surface = Some(vec!["worktree/src/shared.rs".into()]);
         }
-        assert_eq!(graph.file_surface_problems(), vec![
-            GraphProblem::FileSurfaceOverlap {
-                first: id("edit"), second: id("peer"), file: "worktree/src/shared.rs".into(),
-            },
-            GraphProblem::FileSurfaceOverlap {
-                first: id("review"), second: id("peer"), file: "worktree/src/shared.rs".into(),
-            },
-        ]);
-        graph.node_mut(&id("peer")).expect("peer").file_surface = Some(vec!["worktree/peer.rs".into()]);
+        assert_eq!(
+            graph.file_surface_problems(),
+            vec![
+                GraphProblem::FileSurfaceOverlap {
+                    first: id("edit"),
+                    second: id("peer"),
+                    file: "worktree/src/shared.rs".into(),
+                },
+                GraphProblem::FileSurfaceOverlap {
+                    first: id("review"),
+                    second: id("peer"),
+                    file: "worktree/src/shared.rs".into(),
+                },
+            ]
+        );
+        graph.node_mut(&id("peer")).expect("peer").file_surface =
+            Some(vec!["worktree/peer.rs".into()]);
         assert!(graph.file_surface_problems().is_empty());
         let mut run = PlanRun::start(&graph).expect("disjoint loop lane");
         assert_eq!(run.finish_step(&graph), Decision::Run(path(&["split"])));
@@ -2685,14 +2711,25 @@ mod tests {
         let mut lanes = run.fork_lanes(&graph);
         assert_eq!(lanes.len(), 2);
         let (steps, outcome) = run_lane(lanes.first_mut().expect("loop lane"), &graph);
-        assert_eq!(steps, vec![path(&["edit"]), path(&["review"]), path(&["edit"]), path(&["review"])]);
+        assert_eq!(
+            steps,
+            vec![
+                path(&["edit"]),
+                path(&["review"]),
+                path(&["edit"]),
+                path(&["review"])
+            ]
+        );
         assert_eq!(outcome, RunOutcome::Completed);
         let (steps, outcome) = run_lane(lanes.get_mut(1).expect("peer lane"), &graph);
         assert_eq!(steps, vec![path(&["peer"])]);
         assert_eq!(outcome, RunOutcome::Completed);
         assert_eq!(run.join(&graph), Decision::Run(path(&["join"])));
         assert_eq!(run.finish_step(&graph), Decision::Run(path(&["after"])));
-        assert_eq!(run.finish_step(&graph), Decision::Done(RunOutcome::Completed));
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Done(RunOutcome::Completed)
+        );
     }
 
     #[test]
@@ -2700,8 +2737,12 @@ mod tests {
         let mut graph = plain_graph(
             &["before", "split", "left", "right", "join", "after"],
             &[
-                ("before", "split"), ("split", "left"), ("split", "right"),
-                ("left", "join"), ("right", "join"), ("join", "after"),
+                ("before", "split"),
+                ("split", "left"),
+                ("split", "right"),
+                ("left", "join"),
+                ("right", "join"),
+                ("join", "after"),
             ],
         );
         let mut retry = ArchitectEdge::new("retry", "join", "left");
@@ -2712,7 +2753,9 @@ mod tests {
         }
         let problems = graph.file_surface_problems();
         assert!(problems.contains(&GraphProblem::FileSurfaceOverlap {
-            first: id("left"), second: id("right"), file: "worktree/src/shared.rs".into(),
+            first: id("left"),
+            second: id("right"),
+            file: "worktree/src/shared.rs".into(),
         }));
         assert!(!problems.iter().any(|problem| matches!(problem,
             GraphProblem::FileSurfaceOverlap { first, second, .. }
@@ -2767,7 +2810,10 @@ mod tests {
         let prompt = parallel_steps_prompt(&graph, &[path(&["c"])]);
         assert!(prompt.contains("C: Write the migration"), "{prompt}");
         assert!(prompt.contains("git commit"), "{prompt}");
-        assert!(prompt.contains("anticipated scope for advisory scheduling"), "{prompt}");
+        assert!(
+            prompt.contains("anticipated scope for advisory scheduling"),
+            "{prompt}"
+        );
         assert!(!prompt.contains("Do not change files"), "{prompt}");
         assert_eq!(parallel_steps_prompt(&graph, &[]), "");
     }
@@ -3292,7 +3338,10 @@ mod tests {
 
     #[test]
     fn starting_and_restoring_checkpoints_refuse_missing_or_conflicting_surfaces() {
-        let mut graph = plain_graph(&["root", "left", "right"], &[("root", "left"), ("root", "right")]);
+        let mut graph = plain_graph(
+            &["root", "left", "right"],
+            &[("root", "left"), ("root", "right")],
+        );
         let run = PlanRun::start(&graph).expect("empty explicit surfaces are runnable");
         let saved = serde_json::to_value(&run).expect("save checkpoint");
         let restored: PlanRun = serde_json::from_value(saved).expect("restore checkpoint");
@@ -3303,20 +3352,24 @@ mod tests {
             assert!(restored.validate_checkpoint(&graph).is_err());
         }
         for step in ["left", "right"] {
-            graph.node_mut(&id(step)).expect("branch").file_surface = Some(vec!["worktree/shared.rs".into()]);
+            graph.node_mut(&id(step)).expect("branch").file_surface =
+                Some(vec!["worktree/shared.rs".into()]);
         }
         assert!(PlanRun::start(&graph).is_err());
         assert!(PlanRun::validate_structure(&graph).is_err());
         assert!(restored.validate_checkpoint(&graph).is_err());
         assert!(PlanRun::rebase_remaining(&graph, &[]).is_err());
         graph.node_mut(&id("right")).expect("right").file_surface = Some(Vec::new());
-        restored.validate_checkpoint(&graph).expect("corrected surface");
+        restored
+            .validate_checkpoint(&graph)
+            .expect("corrected surface");
     }
 
     #[test]
     fn step_and_parallel_prompts_include_existing_file_contracts() {
         let mut graph = plain_graph(&["left", "right"], &[]);
-        graph.node_mut(&id("left")).expect("left").file_surface = Some(vec!["worktree/src/left.rs".into()]);
+        graph.node_mut(&id("left")).expect("left").file_surface =
+            Some(vec!["worktree/src/left.rs".into()]);
         let prompt = step_prompt(&graph, &path(&["left"]), 1, 1);
         assert!(prompt.contains("worktree/src/left.rs"));
         assert!(prompt.contains("anticipated existing-file scope for advisory scheduling"));
@@ -3326,7 +3379,9 @@ mod tests {
         assert!(prompt.contains("created file by its worktree-qualified path"));
         let prompt = parallel_steps_prompt(&graph, &[path(&["left"])]);
         assert!(prompt.contains("worktree/src/left.rs"));
-        assert!(step_prompt(&graph, &path(&["right"]), 1, 1).contains("no existing files anticipated"));
+        assert!(
+            step_prompt(&graph, &path(&["right"]), 1, 1).contains("no existing files anticipated")
+        );
         graph.node_mut(&id("right")).expect("right").file_surface = None;
         assert!(step_prompt(&graph, &path(&["right"]), 1, 1).contains("MISSING"));
     }

@@ -1859,13 +1859,20 @@ mod tests {
     fn setting_a_nested_file_surface_invalidates_results_and_reopens_affected_locks() {
         let graph = nested_graph();
         let changed = path(&["left", "a"]);
-        let preview = preview_graph_edits(&graph, &[GraphEdit::SetFileSurface {
-            path: changed.clone(),
-            file_surface: vec!["worktree/src/a.rs".into()],
-        }]).expect("surface edit");
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::SetFileSurface {
+                path: changed.clone(),
+                file_surface: vec!["worktree/src/a.rs".into()],
+            }],
+        )
+        .expect("surface edit");
         for affected in [
-            path(&["left"]), changed.clone(), path(&["left", "b"]),
-            path(&["left", "c"]), path(&["ship"]),
+            path(&["left"]),
+            changed.clone(),
+            path(&["left", "b"]),
+            path(&["left", "c"]),
+            path(&["ship"]),
         ] {
             assert!(preview.invalidated_steps.contains(&affected));
             assert!(preview.affected_locks.contains(&affected));
@@ -1874,17 +1881,30 @@ mod tests {
             assert!(node.result.is_none());
             assert!(graph.node_at(&affected).expect("original").locked);
         }
-        for untouched in [path(&["left", "sibling"]), path(&["right"]), path(&["right", "a"])] {
+        for untouched in [
+            path(&["left", "sibling"]),
+            path(&["right"]),
+            path(&["right", "a"]),
+        ] {
             assert_eq!(preview.graph.node_at(&untouched), graph.node_at(&untouched));
         }
-        assert_eq!(preview.graph.node_at(&changed).expect("changed").file_surface,
-            Some(vec!["worktree/src/a.rs".into()]));
+        assert_eq!(
+            preview
+                .graph
+                .node_at(&changed)
+                .expect("changed")
+                .file_surface,
+            Some(vec!["worktree/src/a.rs".into()])
+        );
         assert!(preview.routing_changes.is_empty());
         assert!(preview.requires_approval);
         assert!(preview.is_valid);
         let mut replacement = graph.clone();
-        replacement.node_at_mut(&changed).expect("changed").file_surface = Some(vec!["worktree/src/a.rs".into()]);
-        let replacement = preview_graph_replacement(&graph, replacement).expect("replacement");
+        replacement
+            .node_at_mut(&changed)
+            .expect("changed")
+            .file_surface = Some(vec!["worktree/src/a.rs".into()]);
+        let replacement = preview_graph_replacement(&graph, &replacement).expect("replacement");
         assert_eq!(replacement.invalidated_steps, preview.invalidated_steps);
         assert_eq!(replacement.affected_locks, preview.affected_locks);
     }
@@ -1893,41 +1913,91 @@ mod tests {
     fn file_surface_edits_retain_conflicts_and_legacy_corrections_for_review() {
         let mut graph = local_graph();
         graph.node_mut(&"a".into()).expect("a").file_surface = None;
-        let corrected = preview_graph_edits(&graph, &[GraphEdit::SetFileSurface {
-            path: path(&["a"]), file_surface: Vec::new(),
-        }]).expect("legacy correction");
+        let corrected = preview_graph_edits(
+            &graph,
+            &[GraphEdit::SetFileSurface {
+                path: path(&["a"]),
+                file_surface: Vec::new(),
+            }],
+        )
+        .expect("legacy correction");
         assert!(corrected.is_valid);
         assert!(corrected.requires_approval);
         assert!(!corrected.ready_to_run);
-        let conflicting = preview_graph_edits(&graph, &[
-            GraphEdit::SetFileSurface { path: path(&["a"]), file_surface: vec!["worktree/a.rs".into()] },
-            GraphEdit::SetFileSurface { path: path(&["sibling"]), file_surface: vec!["WORKTREE/a.rs".into()] },
-        ]).expect("conflicting draft stays inspectable");
+        let conflicting = preview_graph_edits(
+            &graph,
+            &[
+                GraphEdit::SetFileSurface {
+                    path: path(&["a"]),
+                    file_surface: vec!["worktree/a.rs".into()],
+                },
+                GraphEdit::SetFileSurface {
+                    path: path(&["sibling"]),
+                    file_surface: vec!["WORKTREE/a.rs".into()],
+                },
+            ],
+        )
+        .expect("conflicting draft stays inspectable");
         assert!(!conflicting.is_valid);
-        assert!(conflicting.problems.iter().any(|problem| matches!(problem, GraphProblem::FileSurfaceOverlap { .. })));
+        assert!(
+            conflicting
+                .problems
+                .iter()
+                .any(|problem| matches!(problem, GraphProblem::FileSurfaceOverlap { .. }))
+        );
         assert!(crate::PlanRun::start(&conflicting.graph).is_err());
-        assert!(preview_graph_edits(&graph, &[GraphEdit::SetFileSurface {
-            path: NodePath::default(), file_surface: Vec::new(),
-        }]).is_err());
-        assert!(preview_graph_edits(&graph, &[GraphEdit::SetFileSurface {
-            path: path(&["missing"]), file_surface: Vec::new(),
-        }]).is_err());
+        assert!(
+            preview_graph_edits(
+                &graph,
+                &[GraphEdit::SetFileSurface {
+                    path: NodePath::default(),
+                    file_surface: Vec::new(),
+                }]
+            )
+            .is_err()
+        );
+        assert!(
+            preview_graph_edits(
+                &graph,
+                &[GraphEdit::SetFileSurface {
+                    path: path(&["missing"]),
+                    file_surface: Vec::new(),
+                }]
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn file_surface_no_ops_preserve_automatic_positions_and_checkpoints() {
         let graph = automatic_graph();
         let first = graph.nodes.first().expect("first");
-        let preview = preview_graph_edits(&graph, &[GraphEdit::SetFileSurface {
-            path: NodePath::root(first.id.clone()), file_surface: Vec::new(),
-        }]).expect("no op");
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::SetFileSurface {
+                path: NodePath::root(first.id.clone()),
+                file_surface: Vec::new(),
+            }],
+        )
+        .expect("no op");
         assert_eq!(preview.graph, graph);
         assert!(!preview.requires_approval);
         assert!(preview.invalidated_steps.is_empty());
-        let preview = preview_graph_edits(&graph, &[GraphEdit::SetFileSurface {
-            path: NodePath::root(first.id.clone()), file_surface: vec!["worktree/first.rs".into()],
-        }]).expect("changed surface");
-        assert!(preview.graph.nodes.iter().all(|node| node.position.is_none()));
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::SetFileSurface {
+                path: NodePath::root(first.id.clone()),
+                file_surface: vec!["worktree/first.rs".into()],
+            }],
+        )
+        .expect("changed surface");
+        assert!(
+            preview
+                .graph
+                .nodes
+                .iter()
+                .all(|node| node.position.is_none())
+        );
     }
 
     #[test]

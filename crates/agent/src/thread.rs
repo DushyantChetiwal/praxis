@@ -3416,7 +3416,11 @@ impl Thread {
         if let Some(graph) = &mut self.architect_graph {
             graph.record_created_files(source, files);
         }
-        if let Some(graph) = self.architect_run.as_mut().and_then(|run| run.graph.as_mut()) {
+        if let Some(graph) = self
+            .architect_run
+            .as_mut()
+            .and_then(|run| run.graph.as_mut())
+        {
             graph.record_created_files(source, files);
         }
         self.note_architect_graph_change(cx);

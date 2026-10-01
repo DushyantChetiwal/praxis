@@ -242,10 +242,7 @@ mod tests {
             for step in 1..=32 {
                 let sample = curve.at(step as f32 / 32.0);
                 assert!(sample.x.is_finite() && sample.y.is_finite());
-                assert!(
-                    sample.x < previous.x,
-                    "the loop must not retrace itself"
-                );
+                assert!(sample.x < previous.x, "the loop must not retrace itself");
                 if step < 32 {
                     assert!(sample.y > bottom, "the loop must clear the card");
                 }

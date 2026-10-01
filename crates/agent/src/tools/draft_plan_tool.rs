@@ -57,8 +57,9 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 ///
 /// ### Existing files: `file_surface`
 /// Every step, including parents and nested children, MUST declare existing files
-/// it anticipates working on as exact `worktree/path` strings. Use explicit []
-/// when no existing files are anticipated; omission and null are not accepted.
+/// it anticipates modifying, renaming, or deleting as exact `worktree/path` strings.
+/// Reading a file alone does not require declaring it. Use explicit [] when no
+/// existing files will be affected; omission and null are not accepted.
 /// Use '/' separators, no directories, globs, absolute paths, '..', duplicates,
 /// or alternate slash/dot spellings. Keep the actual path's case; comparisons
 /// are case-insensitive. A parent's effective surface includes all descendants.
@@ -420,7 +421,10 @@ mod tests {
             "explicitly declared ignored files",
             "not filesystem write enforcement",
         ] {
-            assert!(guidance.contains(required), "missing model guidance: {required}");
+            assert!(
+                guidance.contains(required),
+                "missing model guidance: {required}"
+            );
         }
         let mut schema = DraftPlanTool::input_schema().to_value();
         language_model::tool_schema::normalize_tool_schema(&mut schema);
@@ -432,17 +436,23 @@ mod tests {
             ("edges", "edge traversals"),
         ] {
             let description = schema["properties"][field]["description"]
-                .as_str().expect(field)
-                .split_whitespace().collect::<Vec<_>>().join(" ");
+                .as_str()
+                .expect(field)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             assert!(description.contains(required), "{field}: {required}");
         }
-        let example = description.lines()
+        let example = description
+            .lines()
             .map(str::trim)
             .find(|line| line.starts_with("{\"from\""))
             .expect("self-loop JSON example");
         let value = serde_json::Deserializer::from_str(example)
             .into_iter::<serde_json::Value>()
-            .next().expect("example").expect("valid JSON prefix");
+            .next()
+            .expect("example")
+            .expect("valid JSON prefix");
         let edge: ProposedEdge = serde_json::from_value(value).expect("valid proposed edge");
         assert_eq!(edge.from, edge.to);
         assert_eq!(edge.max_repeats, Some(3));
@@ -455,11 +465,15 @@ mod tests {
             "steps": {"nodes": [{
                 "id": "child", "title": "Child", "file_surface": ["../outside.rs"]
             }]}
-        }]})).expect("draft");
+        }]}))
+        .expect("draft");
         let problems = plan_validation_problems(&graph.into_graph());
-        assert!(problems.iter().any(|problem| {
-            problem.contains("inside parent: child") && problem.contains("invalid file surface")
-        }), "{problems:?}");
+        assert!(
+            problems.iter().any(|problem| {
+                problem.contains("inside parent: child") && problem.contains("invalid file surface")
+            }),
+            "{problems:?}"
+        );
     }
 
     #[test]
@@ -470,7 +484,9 @@ mod tests {
             json!({"id": "parent", "title": "Parent", "file_surface": [],
                 "steps": {"nodes": [{"id": "child", "title": "Child"}]}}),
         ] {
-            assert!(serde_json::from_value::<DraftPlanToolInput>(json!({"nodes": [node]})).is_err());
+            assert!(
+                serde_json::from_value::<DraftPlanToolInput>(json!({"nodes": [node]})).is_err()
+            );
         }
         let schema =
             serde_json::to_value(schemars::schema_for!(DraftPlanToolInput)).expect("schema");
@@ -515,7 +531,9 @@ mod tests {
                 panic!("expected a saved draft");
             };
             assert!(
-                problems.iter().any(|problem| problem.contains(expected_problem)),
+                problems
+                    .iter()
+                    .any(|problem| problem.contains(expected_problem)),
                 "{problems:?}"
             );
             thread.read_with(cx, |thread, _| {

@@ -375,27 +375,48 @@ mod tests {
     #[test]
     fn model_description_and_schema_keep_partial_update_contracts() {
         let description = <RefineStepTool as AgentTool>::description()
-            .split_whitespace().collect::<Vec<_>>().join(" ");
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         for required in [
-            "partial update", "draft_plan", "edit_architect_plan", "control_architect_run",
-            "Active or resumable runs", "replaces ALL outgoing routes", "Unknown destinations",
-            "cannot set max_repeats", "self-loop", "first conditional YES",
-            "Locked ancestors", "validation problems", "not a write allowlist",
+            "partial update",
+            "draft_plan",
+            "edit_architect_plan",
+            "control_architect_run",
+            "Active or resumable runs",
+            "replaces ALL outgoing routes",
+            "Unknown destinations",
+            "cannot set max_repeats",
+            "self-loop",
+            "first conditional YES",
+            "Locked ancestors",
+            "validation problems",
+            "not a write allowlist",
         ] {
-            assert!(description.contains(required), "missing refinement guidance: {required}");
+            assert!(
+                description.contains(required),
+                "missing refinement guidance: {required}"
+            );
         }
         let mut schema = RefineStepTool::input_schema().to_value();
         language_model::tool_schema::normalize_tool_schema(&mut schema);
         for (field, required) in [
-            ("goal", "explicitly clears"), ("rules", "[] explicitly clears"),
-            ("capture", "Omit or null to preserve"), ("file_surface", "null is rejected"),
-            ("file_surface", "replaces, not appends"), ("model", "send null"),
-            ("routing", "Replace all outgoing routes"), ("routing", "no max_repeats"),
+            ("goal", "explicitly clears"),
+            ("rules", "[] explicitly clears"),
+            ("capture", "Omit or null to preserve"),
+            ("file_surface", "null is rejected"),
+            ("file_surface", "replaces, not appends"),
+            ("model", "send null"),
+            ("routing", "Replace all outgoing routes"),
+            ("routing", "no max_repeats"),
             ("lock", "does not unlock"),
         ] {
             let description = schema["properties"][field]["description"]
-                .as_str().expect(field)
-                .split_whitespace().collect::<Vec<_>>().join(" ");
+                .as_str()
+                .expect(field)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             assert!(description.contains(required), "{field}: {required}");
         }
     }
@@ -516,7 +537,11 @@ mod tests {
             };
             assert_eq!(!problems.is_empty(), blocked);
             thread.read_with(cx, |thread, _| {
-                let node = thread.architect_graph().expect("graph").node_at(&path).expect("step");
+                let node = thread
+                    .architect_graph()
+                    .expect("graph")
+                    .node_at(&path)
+                    .expect("step");
                 assert_eq!(json!(node.file_surface), surface);
             });
         }
@@ -528,12 +553,13 @@ mod tests {
         let input = ToolInput::ready(json!({"file_surface": ["project/new.rs"]}));
         let result = cx
             .update(|cx| {
-                Arc::new(RefineStepTool::new(thread.downgrade(), path))
-                    .run(input, events, cx)
+                Arc::new(RefineStepTool::new(thread.downgrade(), path)).run(input, events, cx)
             })
             .await;
         assert!(result.is_err());
-        thread.read_with(cx, |thread, _| assert_eq!(thread.architect_graph(), before.as_ref()));
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.architect_graph(), before.as_ref())
+        });
         thread.update(cx, |thread, cx| {
             thread.finish_architect_run(architect::RunOutcome::Completed, cx);
         });
@@ -541,8 +567,8 @@ mod tests {
 
     #[test]
     fn file_surface_updates_preserve_omission_and_reject_null() {
-        let schema = serde_json::to_value(schemars::schema_for!(RefineStepToolInput))
-            .expect("schema");
+        let schema =
+            serde_json::to_value(schemars::schema_for!(RefineStepToolInput)).expect("schema");
         assert_eq!(schema["properties"]["file_surface"]["type"], "array");
         let mut node = ArchitectNode::new("step", "Step");
         node.file_surface = None;
@@ -569,7 +595,9 @@ mod tests {
             apply_refinement(&mut graph, &path, restored).expect("refine");
             assert_eq!(graph.node_at(&path).expect("step").file_surface, expected);
         }
-        assert!(serde_json::from_value::<RefineStepToolInput>(json!({"file_surface": null})).is_err());
+        assert!(
+            serde_json::from_value::<RefineStepToolInput>(json!({"file_surface": null})).is_err()
+        );
         graph.set_locked_at(&path, true).expect("lock");
         let before = graph.clone();
         let input =
@@ -636,16 +664,23 @@ mod tests {
             Some(vec!["project/nested.rs".into()])
         );
         assert_eq!(
-            graph.node_at(&NodePath::from(vec!["first".into(), "same".into()]))
-                .expect("other child").file_surface,
+            graph
+                .node_at(&NodePath::from(vec!["first".into(), "same".into()]))
+                .expect("other child")
+                .file_surface,
             Some(vec![])
         );
-        graph.lock_deeply_at(&NodePath::root("second".into())).expect("lock parent");
+        graph
+            .lock_deeply_at(&NodePath::root("second".into()))
+            .expect("lock parent");
         graph.node_at_mut(&path).expect("target").locked = false;
         let before = graph.clone();
         let input = serde_json::from_value(json!({"file_surface": []})).expect("input");
         assert!(apply_refinement(&mut graph, &path, input).is_err());
-        assert_eq!(graph, before, "a locked ancestor protects the child's surface");
+        assert_eq!(
+            graph, before,
+            "a locked ancestor protects the child's surface"
+        );
     }
 
     #[test]

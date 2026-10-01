@@ -49,7 +49,7 @@ Architect mode can read and search your project but cannot change it through nat
 
 ## Existing-file surfaces
 
-Every drafted step must declare `file_surface`: the existing files it anticipates working on, using exact worktree-qualified paths such as `project/src/main.rs`. Include the declaration on parent steps and every nested child. Send explicit `[]` when no existing files are anticipated. Omission is not the same as an empty declaration: older saved steps with no surface remain visible but block execution until reviewed.
+Every drafted step must declare `file_surface`: the existing files it anticipates modifying, renaming, or deleting, using exact worktree-qualified paths such as `project/src/main.rs`. Read-only access does not require declaring a file. Include the declaration on parent steps and every nested child. Send explicit `[]` when no existing files are anticipated. Omission is not the same as an empty declaration: older saved steps with no surface remain visible but block execution until reviewed.
 
 Use file paths, not directories or globs. Use `/` separators without absolute paths, `..`, empty or `.` components, or duplicate entries. Keep the file's actual case; concurrency comparisons use normalized, case-insensitive identities. These identities are lexical, not filesystem or symlink resolution. A parent step's effective surface includes its own declaration and every descendant's declaration.
 
@@ -58,6 +58,8 @@ Steps that may run concurrently must have disjoint effective surfaces. If two br
 **A surface is planning information, not a write allowlist.** It does not restrict tools from writing other files or creating new ones; ordinary tool permissions still apply. Do not omit anticipated existing files simply to suppress an overlap error.
 
 The native runtime also observes new files and adds them to reachable successors' declarations and containing scopes, including nested successors. Automatic discovery excludes ignored files unless always included; explicitly declared ignored paths are still checked. If this exposes a conflict, further dispatch stops with an actionable error and completed results remain. Inspect, preview a targeted repair, review/relock, then resume; this is a scheduling guard, not write enforcement.
+
+Discovery covers visible local project folders, respects ignore/exclusion settings, and does not traverse directory symlinks. Newly exposed folders are baselined once rather than treating all their existing files as creations. Files created and deleted between observations, hard-link aliases, and writes from processes continuing after a step ends are not reliably attributable. Declare relevant files explicitly; this is not a guarantee against edits outside the declared surfaces.
 
 The canvas shows each declaration; its tooltip and the step's **Details** inspector show nested effective surfaces and actionable problems. Invalid or conflicting drafts stay on the canvas for correction, but cannot run. Ask the step chat to update `refine_step.file_surface` (omission preserves the saved declaration; `[]` explicitly clears it; `null` is rejected), or ask the plan chat to preview `edit_architect_plan` with `{"kind":"set_file_surface","path":["step"],"file_surface":["project/src/main.rs"]}`. Surface edits follow existing lock, approval, and checkpoint guards; they are not brief-only `revise_step` updates. Review and relock affected steps before execution.
 

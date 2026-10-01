@@ -1,8 +1,8 @@
 use acp_thread::AcpThread;
 use agent_client_protocol::schema::v1 as acp;
 use architect::{
-    ArchitectEdge, ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, GraphProblem, NodeId, NodePath,
-    StepModel,
+    ArchitectEdge, ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, GraphProblem, NodeId,
+    NodePath, StepModel,
 };
 use editor::{Editor, EditorEvent};
 use gpui::{App, Context, Entity, Focusable, SharedString, Subscription, Window, div, px};
@@ -104,11 +104,7 @@ pub(super) fn file_surface_summary(node: &ArchitectNode) -> String {
 }
 
 impl ArchitectPane {
-    pub(super) fn file_surface_details(
-        &self,
-        node: &ArchitectNode,
-        cx: &Context<Self>,
-    ) -> String {
+    pub(super) fn file_surface_details(&self, node: &ArchitectNode, cx: &Context<Self>) -> String {
         let mut details = file_surface_summary(node);
         if let Some(graph) = self.graph(cx) {
             if node.has_subplan() {
@@ -146,8 +142,8 @@ impl ArchitectPane {
                      a surface or routing edit, or refine file_surface in an unlocked step's chat. \
                      Use [] only when no existing files are anticipated.",
                 )
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
+                .size(LabelSize::XSmall)
+                .color(Color::Muted),
             )
             .into_any()
     }

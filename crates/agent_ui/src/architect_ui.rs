@@ -1381,7 +1381,10 @@ impl ArchitectPane {
         if edge.from == edge.to {
             Some(EdgeCurve::self_loop(position, self.node_size(from)))
         } else {
-            Some(EdgeCurve::between(position, graph.node(&edge.to)?.position?))
+            Some(EdgeCurve::between(
+                position,
+                graph.node(&edge.to)?.position?,
+            ))
         }
     }
 
@@ -1600,15 +1603,11 @@ impl ArchitectPane {
                 let (width, height) = self.node_size(node);
                 node.position.map(|position| (position, width, height))
             }),
-            Selection::Edge(id) => {
-                graph
-                    .edges
-                    .iter()
-                    .find(|edge| &edge.id == id)
-                    .and_then(|edge| {
-                        Some((self.edge_curve(graph, edge)?.midpoint(), 0.0, 0.0))
-                    })
-            }
+            Selection::Edge(id) => graph
+                .edges
+                .iter()
+                .find(|edge| &edge.id == id)
+                .and_then(|edge| Some((self.edge_curve(graph, edge)?.midpoint(), 0.0, 0.0))),
         };
         let Some((centre, width, height)) = target else {
             return;
@@ -4154,21 +4153,37 @@ mod tests {
         legacy.file_surface = None;
         legacy.position = Some(Position::ZERO);
         legacy.locked = true;
-        let graph = ArchitectGraph { nodes: vec![legacy], edges: vec![] };
-        plan.thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
+        let graph = ArchitectGraph {
+            nodes: vec![legacy],
+            edges: vec![],
+        };
+        plan.thread
+            .update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
         let direct_architect = Rc::new(RefCell::new(None));
         let direct_architect_for_root = direct_architect.clone();
         let (test_root, cx) = cx.add_window_view(|window, cx| {
             let workspace = cx.new(|cx| Workspace::test_new(plan.project.clone(), window, cx));
-            ArchitectIntegrationRoot { workspace, architect: direct_architect_for_root }
+            ArchitectIntegrationRoot {
+                workspace,
+                architect: direct_architect_for_root,
+            }
         });
         let workspace = test_root.read_with(cx, |root, _| root.workspace.clone());
         let pane = workspace.update_in(cx, |_, window, cx| {
             let workspace = cx.weak_entity();
-            cx.new(|cx| ArchitectPane::new(
-                plan.thread.clone(), workspace, None, Vec::new(), None,
-                px(226.0), px(348.0), window, cx,
-            ))
+            cx.new(|cx| {
+                ArchitectPane::new(
+                    plan.thread.clone(),
+                    workspace,
+                    None,
+                    Vec::new(),
+                    None,
+                    px(226.0),
+                    px(348.0),
+                    window,
+                    cx,
+                )
+            })
         });
         *direct_architect.borrow_mut() = Some(pane.clone());
         test_root.update(cx, |_, cx| cx.notify());
@@ -4178,7 +4193,10 @@ mod tests {
             assert_eq!(pane.selection, Some(Selection::Node("step".into())));
             let graph = pane.graph(cx).expect("graph");
             let node = graph.node(&"step".into()).expect("legacy step");
-            assert_eq!(inspector::file_surface_summary(node), "Existing files: not declared");
+            assert_eq!(
+                inspector::file_surface_summary(node),
+                "Existing files: not declared"
+            );
             let details = pane.file_surface_details(node, cx);
             assert!(details.contains("worktree/path"));
             assert!(!graph.blocking_problems().is_empty());
@@ -4194,29 +4212,48 @@ mod tests {
         assert!(cx.debug_bounds("architect-node-file-surface-0").is_some());
 
         plan.thread.update(cx, |thread, cx| {
-            thread.update_architect_graph(|graph| {
-                graph.node_mut(&"step".into()).expect("step").file_surface = Some(vec![]);
-            }, cx);
+            thread.update_architect_graph(
+                |graph| {
+                    graph.node_mut(&"step".into()).expect("step").file_surface = Some(vec![]);
+                },
+                cx,
+            );
         });
         cx.run_until_parked();
         pane.update_in(cx, |pane, _, cx| {
             let graph = pane.graph(cx).expect("graph");
             let node = graph.node(&"step".into()).expect("step");
-            assert_eq!(pane.file_surface_details(node, cx), "Existing files: none anticipated ([])");
+            assert_eq!(
+                pane.file_surface_details(node, cx),
+                "Existing files: none anticipated ([])"
+            );
             assert!(graph.blocking_problems().is_empty());
-            assert_eq!(pane.inspector.as_ref().expect("inspector").title, title_editor);
-            assert!(pane.undo_stack.is_empty(), "rendering must not rewrite the graph");
+            assert_eq!(
+                pane.inspector.as_ref().expect("inspector").title,
+                title_editor
+            );
+            assert!(
+                pane.undo_stack.is_empty(),
+                "rendering must not rewrite the graph"
+            );
         });
 
         let mut child = ArchitectNode::new("child", "Child");
         child.file_surface = Some(vec!["project/Shared.rs".into()]);
         let mut parent = ArchitectNode::new("parent", "Parent");
-        parent.subplan = Some(Box::new(ArchitectGraph { nodes: vec![child], edges: vec![] }));
+        parent.subplan = Some(Box::new(ArchitectGraph {
+            nodes: vec![child],
+            edges: vec![],
+        }));
         let mut other = ArchitectNode::new("other", "Other");
         other.file_surface = Some(vec!["project/shared.rs".into()]);
-        let mut graph = ArchitectGraph { nodes: vec![parent, other], edges: vec![] };
+        let mut graph = ArchitectGraph {
+            nodes: vec![parent, other],
+            edges: vec![],
+        };
         graph.lock_all();
-        plan.thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
+        plan.thread
+            .update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
         cx.run_until_parked();
         pane.update_in(cx, |pane, window, cx| {
             pane.review_plan(window, cx);
@@ -4229,24 +4266,43 @@ mod tests {
             for id in ["parent", "other"] {
                 let node = graph.node(&id.into()).expect("step");
                 let details = pane.file_surface_details(node, cx);
-                assert!(details.contains("Serialize"), "both sides must explain the conflict: {details}");
+                assert!(
+                    details.contains("Serialize"),
+                    "both sides must explain the conflict: {details}"
+                );
             }
             pane.drill_into("parent".into(), window, cx);
             pane.set_selection(Some(Selection::Node("child".into())), window, cx);
-            let child = pane.graph(cx).expect("subplan").node(&"child".into()).expect("child");
-            assert_eq!(inspector::file_surface_summary(child), "Existing files: project/Shared.rs");
+            let child = pane
+                .graph(cx)
+                .expect("subplan")
+                .node(&"child".into())
+                .expect("child");
+            assert_eq!(
+                inspector::file_surface_summary(child),
+                "Existing files: project/Shared.rs"
+            );
         });
         plan.thread.update(cx, |thread, cx| {
-            thread.update_architect_graph(|graph| {
-                graph.node_at_mut(&NodePath::from(vec!["parent".into(), "child".into()]))
-                    .expect("child").file_surface = Some(vec!["../outside.rs".into()]);
-            }, cx);
+            thread.update_architect_graph(
+                |graph| {
+                    graph
+                        .node_at_mut(&NodePath::from(vec!["parent".into(), "child".into()]))
+                        .expect("child")
+                        .file_surface = Some(vec!["../outside.rs".into()]);
+                },
+                cx,
+            );
         });
         cx.run_until_parked();
         pane.update_in(cx, |pane, window, cx| {
             pane.review_plan(window, cx);
             assert_eq!(pane.selection, Some(Selection::Node("child".into())));
-            let child = pane.graph(cx).expect("subplan").node(&"child".into()).expect("child");
+            let child = pane
+                .graph(cx)
+                .expect("subplan")
+                .node(&"child".into())
+                .expect("child");
             let details = pane.file_surface_details(child, cx);
             assert!(details.contains("../outside.rs"));
             assert!(details.contains("invalid"));
