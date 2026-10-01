@@ -637,6 +637,12 @@ fn participating_worktrees(
         !project.is_read_only(cx),
         "The project is read-only. Ask the host for write access before running the plan."
     );
+    anyhow::ensure!(
+        project
+            .remote_client()
+            .is_none_or(|remote| remote.read(cx).is_connected()),
+        "The project connection is not ready. Wait for it to reconnect before running or resuming the plan."
+    );
     let mut worktrees = BTreeMap::new();
     for worktree in project.visible_worktrees(cx) {
         let tree = worktree.read(cx);
@@ -3111,6 +3117,53 @@ mod checkpoint_tests {
         }) {
             assert!(fake.is_stream_closed(&fake.model("fake"), request));
         }
+    }
+
+    #[gpui::test]
+    async fn reconnecting_remote_is_refused_before_start_mutates_results(
+        cx: &mut TestAppContext,
+        host_cx: &mut TestAppContext,
+    ) {
+        let fake = crate::tests::init_test(cx);
+        let client_fs = fs::FakeFs::new(cx.executor());
+        let host_fs = fs::FakeFs::new(host_cx.executor());
+        host_fs.insert_tree("/a", serde_json::json!({})).await;
+        let (project, _host) = project::Project::test_remote_worktrees(
+            client_fs,
+            host_fs,
+            [Path::new("/a")],
+            cx,
+            host_cx,
+        )
+        .await;
+        let remote = project.read_with(cx, |project, _| project.remote_client().unwrap());
+        let (_connection, thread, acp_thread, fake) =
+            native_project_session(project, fake, cx).await;
+        let mut graph = linear_graph(&["source"]);
+        graph.node_at_mut(&path("source")).unwrap().result = Some(architect::StepResult {
+            summary: "Retained work".into(),
+            attempt: 1,
+        });
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph.clone()), cx);
+                thread.set_session_mode(SessionMode::Architect, cx);
+            });
+            remote.update(cx, |remote, cx| remote.force_heartbeat_timeout(0, cx));
+            assert!(!remote.read(cx).is_connected());
+            assert!(!remote.read(cx).is_disconnected());
+            let error =
+                start_architect_run(thread.clone(), acp_thread, graph.clone(), cx).unwrap_err();
+            assert!(
+                error.to_string().contains("connection is not ready"),
+                "{error}"
+            );
+            let owner = thread.read(cx);
+            assert_eq!(owner.architect_graph(), Some(&graph));
+            assert_eq!(owner.session_mode(), SessionMode::Architect);
+            assert!(owner.architect_run().is_none());
+        });
+        assert!(fake.pending_completions().is_empty());
     }
 
     #[gpui::test(iterations = 3)]

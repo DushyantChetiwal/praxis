@@ -424,7 +424,7 @@ async fn local_file_inventory(
     worktree.read_with(cx, |tree, _| {
         tree.check_file_inventory_support()?;
         anyhow::ensure!(
-            tree.abs_path() == root.as_path(),
+            tree.abs_path().as_ref() == root.as_path(),
             "Project root changed while scanning. Restore it and retry."
         );
         Ok::<_, anyhow::Error>(())
