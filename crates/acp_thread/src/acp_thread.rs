@@ -468,7 +468,16 @@ impl QuestionWindowActivity {
         window: &mut gpui::Window,
         cx: &mut Context<T>,
     ) -> Subscription {
-        let activity = self.track_window(window.is_window_active(), cx.background_executor().now());
+        let now = cx.background_executor().now();
+        let activity = self.track_window(window.is_window_active(), now);
+        // A question may first appear while another Praxis window is active.
+        // Initialize that transition now, not on the next polling tick.
+        Self::update_app_activity(
+            &self.app_inactive_since,
+            &self.foreground_idle_since,
+            window.is_window_active() || cx.active_window().is_some(),
+            now,
+        );
         let app_inactive_since = self.app_inactive_since.clone();
         let foreground_idle_since = self.foreground_idle_since.clone();
         cx.observe_window_activation(window, move |_, window, cx| {
@@ -10232,7 +10241,8 @@ mod tests {
             .update(cx, |_, window, _| window.activate_window())
             .unwrap();
         cx.simulate_keystrokes(other_window.into(), "a");
-        cx.executor().advance_clock(Duration::from_secs(120));
+        // Display between timer ticks so registration, not polling, defines the grace period.
+        cx.executor().advance_clock(Duration::from_millis(120_250));
         let (_, cx) = cx.add_window_view(|window, cx| QuestionActivityView {
             _subscription: activity.observe_window(window, cx),
         });
