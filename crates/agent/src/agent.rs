@@ -9287,6 +9287,171 @@ mod internal_tests {
     }
 
     #[gpui::test]
+    async fn test_set_step_locks_streaming_and_replay_avoid_thread_self_read(cx: &mut TestAppContext) {
+        use language_model::{LanguageModelToolUse, LanguageModelToolUseInput};
+
+        let fake = init_test(cx);
+        let (connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let model = fake.model("thread");
+        let mut nested = architect::ArchitectGraph::default();
+        nested.add_node(architect::ArchitectNode::new("edit", "Implement the change"));
+        let mut group = architect::ArchitectNode::new("group", "Implementation");
+        group.subplan = Some(Box::new(nested));
+        let mut graph = architect::ArchitectGraph::default();
+        graph.add_node(group);
+        graph.add_node(architect::ArchitectNode::new("edit", "Unrelated root step"));
+        let nested_path = architect::NodePath(vec!["group".into(), "edit".into()]);
+        thread.update(cx, |thread, cx| {
+            thread.set_model(model.clone(), cx);
+            thread.set_session_mode(crate::SessionMode::Architect, cx);
+            thread.set_architect_graph(Some(graph), cx);
+        });
+
+        let tool_calls = |thread: &AcpThread, cx: &App| {
+            thread
+                .entries()
+                .iter()
+                .filter_map(|entry| match entry {
+                    acp_thread::AgentThreadEntry::ToolCall(tool_call) => {
+                        assert_eq!(tool_call.tool_name.as_deref(), Some("set_step_locks"));
+                        Some((
+                            tool_call.label.read(cx).source().to_string(),
+                            tool_call.raw_input.clone(),
+                            tool_call.raw_output.clone(),
+                            matches!(tool_call.status, acp_thread::ToolCallStatus::Completed),
+                        ))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut expected_history = Vec::new();
+        for (locked, verb) in [(true, "Lock"), (false, "Unlock")] {
+            let prompt_task = cx.update(|cx| {
+                acp_thread::AgentSessionClientUserMessageIds::prompt(
+                    connection.as_ref(),
+                    ClientUserMessageId::new(),
+                    acp::PromptRequest::new(session_id.clone(), vec!["Change the step lock".into()]),
+                    cx,
+                )
+            });
+            cx.run_until_parked();
+            let request = fake
+                .pending_completions_for(&model)
+                .pop()
+                .expect("lock request should reach the model");
+            let input = json!({"locked": locked, "steps": ["  group/edit  "]});
+            let mut tool_use = LanguageModelToolUse {
+                id: verb.into(),
+                name: "set_step_locks".into(),
+                raw_input: input.to_string(),
+                input: LanguageModelToolUseInput::Json(input.clone()),
+                is_input_complete: false,
+                thought_signature: None,
+            };
+            // A valid singleton input renders its title while the owning Thread is leased,
+            // even before the model finishes streaming the arguments and the tool can run.
+            fake.send_event(
+                &model,
+                &request,
+                LanguageModelCompletionEvent::ToolUse(tool_use.clone()),
+            );
+            cx.run_until_parked();
+            let title = format!("{verb} “group/edit”");
+            let pending_calls = acp_thread.read_with(cx, tool_calls);
+            assert_eq!(pending_calls.len(), expected_history.len() + 1);
+            assert_eq!(
+                pending_calls.last(),
+                Some(&(title.clone(), Some(input.clone()), None, false))
+            );
+            thread.read_with(cx, |thread, _| {
+                let graph = thread.architect_graph().expect("draft should exist");
+                let step = graph.node_at(&nested_path).expect("nested step should exist");
+                assert_eq!(
+                    step.locked, !locked,
+                    "streaming arguments must not apply the lock yet"
+                );
+            });
+
+            tool_use.is_input_complete = true;
+            fake.send_event(
+                &model,
+                &request,
+                LanguageModelCompletionEvent::ToolUse(tool_use),
+            );
+            fake.end_stream(&model, &request);
+            cx.run_until_parked();
+            let request = fake
+                .pending_completions_for(&model)
+                .pop()
+                .expect("step lock result should reach the model");
+            assert_eq!(request.intent, Some(CompletionIntent::ToolResults));
+            fake.send_text(&model, &request, "Done");
+            fake.end_stream(&model, &request);
+            cx.run_until_parked();
+            prompt_task.await.expect("step lock turn should complete");
+
+            thread.read_with(cx, |thread, _| {
+                let graph = thread.architect_graph().expect("draft should remain");
+                let step = graph.node_at(&nested_path).expect("nested step should remain");
+                assert_eq!(step.locked, locked);
+                for id in ["group", "edit"] {
+                    let step = graph
+                        .node_at(&architect::NodePath::root(id.into()))
+                        .expect("unaffected step should remain");
+                    assert!(!step.locked);
+                }
+            });
+            expected_history.push((
+                title,
+                Some(input),
+                Some(json!({
+                    "locked": locked,
+                    "changed": ["\"Implement the change\" (group/edit)"],
+                    "locked_steps": if locked { 1 } else { 0 },
+                    "total_steps": 3,
+                })),
+                true,
+            ));
+            assert_eq!(acp_thread.read_with(cx, tool_calls), expected_history);
+        }
+
+        agent.update(cx, |agent, cx| agent.save_thread(thread.clone(), cx));
+        cx.run_until_parked();
+        drop(thread);
+        drop(acp_thread);
+        release_dropped_entities(cx);
+        agent.read_with(cx, |agent, _| {
+            assert!(!agent.sessions.contains_key(&session_id));
+        });
+
+        // Reload regenerates both titles through Thread::replay_tool_call under a
+        // mutable entity lease, rather than reusing the live ACP labels.
+        let restored = cx
+            .update(|cx| {
+                connection.clone().load_session(
+                    session_id.clone(),
+                    project,
+                    PathList::new(&[Path::new("/a")]),
+                    None,
+                    cx,
+                )
+            })
+            .await
+            .expect("step lock history should reload without reading its leased Thread");
+        cx.run_until_parked();
+        assert_eq!(restored.read_with(cx, tool_calls), expected_history);
+        let restored_thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        restored_thread.read_with(cx, |thread, _| {
+            let graph = thread.architect_graph().expect("draft should reload");
+            let step = graph.node_at(&nested_path).expect("nested step should reload");
+            assert!(!step.locked);
+        });
+    }
+
+    #[gpui::test]
     async fn test_ask_question_is_available_to_root_threads_in_both_modes(cx: &mut TestAppContext) {
         init_test(cx);
         let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;

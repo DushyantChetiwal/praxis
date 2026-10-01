@@ -94,21 +94,6 @@ impl SetStepLocksTool {
     pub fn new(thread: WeakEntity<Thread>) -> Self {
         Self { thread }
     }
-
-    /// The title of the step a name resolves to, for the tool call's title.
-    /// Falls back to the name as written while the plan cannot be read.
-    fn step_title(&self, name: &str, cx: &App) -> String {
-        self.thread
-            .upgrade()
-            .and_then(|thread| {
-                let graph = thread.read(cx).architect_graph()?;
-                match resolve_step(graph, &step_paths(graph), name) {
-                    Resolution::Found(path) => graph.node_at(&path).map(|node| node.title.clone()),
-                    Resolution::Unknown | Resolution::Ambiguous(_) => None,
-                }
-            })
-            .unwrap_or_else(|| name.trim().to_string())
-    }
 }
 
 /// What a successful change did to the plan.
@@ -369,7 +354,7 @@ impl AgentTool for SetStepLocksTool {
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,
-        cx: &mut App,
+        _cx: &mut App,
     ) -> SharedString {
         let Ok(input) = input else {
             return "Change which steps are locked".into();
@@ -380,7 +365,9 @@ impl AgentTool for SetStepLocksTool {
         }
         match input.steps.as_slice() {
             [] => format!("{verb} steps").into(),
-            [only] => format!("{verb} “{}”", self.step_title(only, cx)).into(),
+            // Initial titles are built while the owning Thread is updating,
+            // including during replay. Reading its graph here re-enters it.
+            [only] => format!("{verb} “{}”", only.trim()).into(),
             steps => format!("{verb} {} steps", steps.len()).into(),
         }
     }

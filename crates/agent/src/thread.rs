@@ -6539,6 +6539,8 @@ where
     fn kind() -> acp::ToolKind;
 
     /// The initial tool title to display. Can be updated during the tool run.
+    /// Called while the owning Thread is mutably borrowed, including on replay;
+    /// implementations must not read or update that Thread entity here.
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,
