@@ -9287,7 +9287,9 @@ mod internal_tests {
     }
 
     #[gpui::test]
-    async fn test_set_step_locks_streaming_and_replay_avoid_thread_self_read(cx: &mut TestAppContext) {
+    async fn test_set_step_locks_streaming_and_replay_avoid_thread_self_read(
+        cx: &mut TestAppContext,
+    ) {
         use language_model::{LanguageModelToolUse, LanguageModelToolUseInput};
 
         let fake = init_test(cx);
@@ -9296,7 +9298,10 @@ mod internal_tests {
         let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
         let model = fake.model("thread");
         let mut nested = architect::ArchitectGraph::default();
-        nested.add_node(architect::ArchitectNode::new("edit", "Implement the change"));
+        nested.add_node(architect::ArchitectNode::new(
+            "edit",
+            "Implement the change",
+        ));
         let mut group = architect::ArchitectNode::new("group", "Implementation");
         group.subplan = Some(Box::new(nested));
         let mut graph = architect::ArchitectGraph::default();
@@ -9333,7 +9338,10 @@ mod internal_tests {
                 acp_thread::AgentSessionClientUserMessageIds::prompt(
                     connection.as_ref(),
                     ClientUserMessageId::new(),
-                    acp::PromptRequest::new(session_id.clone(), vec!["Change the step lock".into()]),
+                    acp::PromptRequest::new(
+                        session_id.clone(),
+                        vec!["Change the step lock".into()],
+                    ),
                     cx,
                 )
             });
@@ -9368,7 +9376,9 @@ mod internal_tests {
             );
             thread.read_with(cx, |thread, _| {
                 let graph = thread.architect_graph().expect("draft should exist");
-                let step = graph.node_at(&nested_path).expect("nested step should exist");
+                let step = graph
+                    .node_at(&nested_path)
+                    .expect("nested step should exist");
                 assert_eq!(
                     step.locked, !locked,
                     "streaming arguments must not apply the lock yet"
@@ -9395,7 +9405,9 @@ mod internal_tests {
 
             thread.read_with(cx, |thread, _| {
                 let graph = thread.architect_graph().expect("draft should remain");
-                let step = graph.node_at(&nested_path).expect("nested step should remain");
+                let step = graph
+                    .node_at(&nested_path)
+                    .expect("nested step should remain");
                 assert_eq!(step.locked, locked);
                 for id in ["group", "edit"] {
                     let step = graph
@@ -9446,7 +9458,9 @@ mod internal_tests {
         let restored_thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
         restored_thread.read_with(cx, |thread, _| {
             let graph = thread.architect_graph().expect("draft should reload");
-            let step = graph.node_at(&nested_path).expect("nested step should reload");
+            let step = graph
+                .node_at(&nested_path)
+                .expect("nested step should reload");
             assert!(!step.locked);
         });
     }
