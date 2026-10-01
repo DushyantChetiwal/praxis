@@ -784,14 +784,24 @@ pub fn architect_run_readiness(thread: &Thread) -> serde_json::Value {
     } else {
         None
     };
-    let checkpoint_error = saved.as_ref().and_then(|result| result.as_ref().err())
+    let checkpoint_error = saved
+        .as_ref()
+        .and_then(|result| result.as_ref().err())
         .map(|error| error.to_string());
-    let state = live.as_deref().or_else(|| saved.as_ref().and_then(|result| result.as_ref().ok()));
+    let state = live
+        .as_deref()
+        .or_else(|| saved.as_ref().and_then(|result| result.as_ref().ok()));
     let legacy_snapshot = run.filter(|_| state.is_none()).map(ArchitectRun::snapshot);
-    let completed_run = run.is_some_and(|run| run.outcome.as_ref().is_some_and(RunOutcome::is_success));
+    let completed_run =
+        run.is_some_and(|run| run.outcome.as_ref().is_some_and(RunOutcome::is_success));
     let read_only = run.is_some() && control.is_none();
-    let graph = state.map(|state| &state.graph)
-        .or_else(|| legacy_snapshot.as_ref().and_then(|snapshot| snapshot.graph.as_ref()))
+    let graph = state
+        .map(|state| &state.graph)
+        .or_else(|| {
+            legacy_snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.graph.as_ref())
+        })
         .or_else(|| thread.architect_graph());
     let Some(graph) = graph else {
         return serde_json::json!({ "steps": [], "reason": "No plan exists" });
@@ -813,7 +823,10 @@ pub fn architect_run_readiness(thread: &Thread) -> serde_json::Value {
         serde_json::json!({ "path": path, "status": status, "reason": reason })
     }).collect();
     let mut apply = |path: &NodePath, status: &str, reason: &str| {
-        if let Some(step) = steps.iter_mut().find(|step| step["path"] == serde_json::json!(path)) {
+        if let Some(step) = steps
+            .iter_mut()
+            .find(|step| step["path"] == serde_json::json!(path))
+        {
             step["status"] = status.into();
             step["reason"] = reason.into();
         }
@@ -847,7 +860,9 @@ pub fn architect_run_readiness(thread: &Thread) -> serde_json::Value {
                 _ => {}
             }
         }
-    } else if run.is_none() && let Ok(mut fresh) = PlanRun::start(graph) {
+    } else if run.is_none()
+        && let Ok(mut fresh) = PlanRun::start(graph)
+    {
         for ready in fresh.readiness(graph) {
             apply(&ready.path, &ready.status, &ready.reason);
         }
@@ -909,7 +924,8 @@ pub fn architect_run_readiness(thread: &Thread) -> serde_json::Value {
         for step in &mut steps {
             if step["status"] == "ready" || step["status"] == "running" {
                 step["status"] = "unknown".into();
-                step["reason"] = "This is a read-only saved run, not an executable pending visit".into();
+                step["reason"] =
+                    "This is a read-only saved run, not an executable pending visit".into();
             }
         }
     }
@@ -2263,13 +2279,30 @@ mod checkpoint_tests {
             assert_eq!(readiness["read_only"], true);
             let steps = readiness["steps"].as_array().unwrap();
             for (node, status) in expected {
-                let step = steps.iter().find(|step| step["path"] == serde_json::json!([node])).unwrap();
-                assert_eq!(step["status"], *status, "incorrect terminal state for {node}");
+                let step = steps
+                    .iter()
+                    .find(|step| step["path"] == serde_json::json!([node]))
+                    .unwrap();
+                assert_eq!(
+                    step["status"], *status,
+                    "incorrect terminal state for {node}"
+                );
             }
-            assert!(steps.iter().all(|step| step["status"] != "ready" && step["status"] != "running"));
+            assert!(
+                steps
+                    .iter()
+                    .all(|step| step["status"] != "ready" && step["status"] != "running")
+            );
             assert_eq!(run.saved_checkpoint(), checkpoint.as_ref());
-            assert!(run.control().is_none(), "inspection must not install resumable control");
-            assert_eq!(thread.architect_event_sequence(), sequence, "inspection must not emit execution events");
+            assert!(
+                run.control().is_none(),
+                "inspection must not install resumable control"
+            );
+            assert_eq!(
+                thread.architect_event_sequence(),
+                sequence,
+                "inspection must not emit execution events"
+            );
             readiness
         })
     }
@@ -2282,22 +2315,48 @@ mod checkpoint_tests {
         cx: &mut TestAppContext,
     ) -> (Entity<Thread>, Entity<AcpThread>) {
         let mut saved = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
-        let snapshot = saved.persistent_architect.as_mut().unwrap().current.as_mut().unwrap();
-        assert!(matches!(snapshot.outcome, Some(ArchitectRunOutcome::Completed)));
-        assert!(snapshot.checkpoint.is_some(), "a terminal checkpoint must survive serialization");
+        let snapshot = saved
+            .persistent_architect
+            .as_mut()
+            .unwrap()
+            .current
+            .as_mut()
+            .unwrap();
+        assert!(matches!(
+            snapshot.outcome,
+            Some(ArchitectRunOutcome::Completed)
+        ));
+        assert!(
+            snapshot.checkpoint.is_some(),
+            "a terminal checkpoint must survive serialization"
+        );
         if !keep_checkpoint {
             snapshot.checkpoint = None;
         }
         let id = thread.read_with(cx, |thread, _| thread.id().clone());
         let restored_id = acp::SessionId::new(format!("{id}-readiness-{keep_checkpoint}"));
-        let (project, work_dirs) = acp_thread.read_with(cx, |thread, _| (
-            thread.project().clone(), thread.work_dirs().cloned().unwrap_or_default(),
-        ));
-        let database = cx.update(|cx| crate::ThreadsDatabase::connect(cx)).await.unwrap();
-        database.save_thread(restored_id.clone(), saved, work_dirs.clone()).await.unwrap();
-        let restored_acp = cx.update(|cx| connection.clone().load_session(
-            restored_id.clone(), project, work_dirs, None, cx,
-        )).await.unwrap();
+        let (project, work_dirs) = acp_thread.read_with(cx, |thread, _| {
+            (
+                thread.project().clone(),
+                thread.work_dirs().cloned().unwrap_or_default(),
+            )
+        });
+        let database = cx
+            .update(|cx| crate::ThreadsDatabase::connect(cx))
+            .await
+            .unwrap();
+        database
+            .save_thread(restored_id.clone(), saved, work_dirs.clone())
+            .await
+            .unwrap();
+        let restored_acp = cx
+            .update(|cx| {
+                connection
+                    .clone()
+                    .load_session(restored_id.clone(), project, work_dirs, None, cx)
+            })
+            .await
+            .unwrap();
         cx.run_until_parked();
         let restored = cx.update(|cx| connection.thread(&restored_id, cx).unwrap());
         (restored, restored_acp)
@@ -2312,7 +2371,9 @@ mod checkpoint_tests {
     }
 
     #[gpui::test(iterations = 3)]
-    async fn native_pipeline_does_not_enter_a_join_with_only_closed_routes(cx: &mut TestAppContext) {
+    async fn native_pipeline_does_not_enter_a_join_with_only_closed_routes(
+        cx: &mut TestAppContext,
+    ) {
         let (connection, thread, acp_thread, fake) = native_session(cx).await;
         let mut graph = graph();
         for edge in &mut graph.edges {
@@ -2340,19 +2401,44 @@ mod checkpoint_tests {
             assert_eq!(run.outcome, Some(RunOutcome::Completed));
             assert_eq!(run.history().len(), 3);
             assert!(!run.history().iter().any(|step| step.path == path("join")));
-            assert!(thread.architect_graph().unwrap().node_at(&path("join")).unwrap().result.is_none());
+            assert!(
+                thread
+                    .architect_graph()
+                    .unwrap()
+                    .node_at(&path("join"))
+                    .unwrap()
+                    .result
+                    .is_none()
+            );
         });
-        let expected = [("start", "completed"), ("a", "completed"), ("b", "completed"), ("join", "skipped")];
+        let expected = [
+            ("start", "completed"),
+            ("a", "completed"),
+            ("b", "completed"),
+            ("join", "skipped"),
+        ];
         let before = assert_finished_readiness(&thread, &expected, cx);
-        let (restored, restored_acp) = reload_run_for_readiness(&connection, &thread, &acp_thread, true, cx).await;
+        let (restored, restored_acp) =
+            reload_run_for_readiness(&connection, &thread, &acp_thread, true, cx).await;
         assert_eq!(assert_finished_readiness(&restored, &expected, cx), before);
         cx.update(|cx| {
-            assert!(matches!(resume_architect_run(restored.clone(), restored_acp.clone(), cx),
-                Err(ArchitectRunStartError::NotResumable)));
+            assert!(matches!(
+                resume_architect_run(restored.clone(), restored_acp.clone(), cx),
+                Err(ArchitectRunStartError::NotResumable)
+            ));
         });
-        let (legacy, _legacy_acp) = reload_run_for_readiness(&connection, &thread, &acp_thread, false, cx).await;
-        assert_finished_readiness(&legacy,
-            &[("start", "completed"), ("a", "completed"), ("b", "completed"), ("join", "unknown")], cx);
+        let (legacy, _legacy_acp) =
+            reload_run_for_readiness(&connection, &thread, &acp_thread, false, cx).await;
+        assert_finished_readiness(
+            &legacy,
+            &[
+                ("start", "completed"),
+                ("a", "completed"),
+                ("b", "completed"),
+                ("join", "unknown"),
+            ],
+            cx,
+        );
     }
 
     #[gpui::test]
@@ -2565,18 +2651,27 @@ mod checkpoint_tests {
     async fn native_pipeline_checkpoints_the_other_root_before_waiting(cx: &mut TestAppContext) {
         let (connection, thread, acp_thread, fake) = native_session(cx).await;
         let snapshots = Rc::new(RefCell::new(Vec::new()));
-        let _subscription = cx.update(|cx| cx.observe(&thread, {
-            let snapshots = snapshots.clone();
-            move |thread, cx| {
-                if let Some(checkpoint) = thread.read(cx).architect_run().and_then(|run| run.snapshot().checkpoint) {
-                    RunState::from_checkpoint(checkpoint.clone()).expect("every notified checkpoint must be coherent");
-                    snapshots.borrow_mut().push(checkpoint);
+        let _subscription = cx.update(|cx| {
+            cx.observe(&thread, {
+                let snapshots = snapshots.clone();
+                move |thread, cx| {
+                    if let Some(checkpoint) = thread
+                        .read(cx)
+                        .architect_run()
+                        .and_then(|run| run.snapshot().checkpoint)
+                    {
+                        RunState::from_checkpoint(checkpoint.clone())
+                            .expect("every notified checkpoint must be coherent");
+                        snapshots.borrow_mut().push(checkpoint);
+                    }
                 }
-            }
-        }));
+            })
+        });
         cx.update(|cx| {
             let graph = graph();
-            thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph.clone()), cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph.clone()), cx)
+            });
             start_architect_run(thread.clone(), acp_thread.clone(), graph, cx).unwrap();
         });
         cx.run_until_parked();
@@ -2623,18 +2718,31 @@ mod checkpoint_tests {
         thread.read_with(cx, |thread, _| {
             let run = thread.architect_run().unwrap();
             assert_eq!(run.outcome, Some(RunOutcome::Completed));
-            assert_eq!(run.history().iter().map(|step| step.path.clone()).collect::<Vec<_>>(),
-                vec![path("a"), path("b"), path("join")]);
+            assert_eq!(
+                run.history()
+                    .iter()
+                    .map(|step| step.path.clone())
+                    .collect::<Vec<_>>(),
+                vec![path("a"), path("b"), path("join")]
+            );
         });
-        let expected = [("a", "completed"), ("b", "completed"), ("join", "completed")];
+        let expected = [
+            ("a", "completed"),
+            ("b", "completed"),
+            ("join", "completed"),
+        ];
         let before = assert_finished_readiness(&thread, &expected, cx);
-        let (restored, restored_acp) = reload_run_for_readiness(&connection, &thread, &acp_thread, true, cx).await;
+        let (restored, restored_acp) =
+            reload_run_for_readiness(&connection, &thread, &acp_thread, true, cx).await;
         assert_eq!(assert_finished_readiness(&restored, &expected, cx), before);
         cx.update(|cx| {
-            assert!(matches!(resume_architect_run(restored.clone(), restored_acp.clone(), cx),
-                Err(ArchitectRunStartError::NotResumable)));
+            assert!(matches!(
+                resume_architect_run(restored.clone(), restored_acp.clone(), cx),
+                Err(ArchitectRunStartError::NotResumable)
+            ));
         });
-        let (legacy, _legacy_acp) = reload_run_for_readiness(&connection, &thread, &acp_thread, false, cx).await;
+        let (legacy, _legacy_acp) =
+            reload_run_for_readiness(&connection, &thread, &acp_thread, false, cx).await;
         assert_finished_readiness(&legacy, &expected, cx);
     }
 

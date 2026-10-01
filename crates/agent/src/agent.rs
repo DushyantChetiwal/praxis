@@ -5859,7 +5859,9 @@ mod internal_tests {
                 let readiness = crate::architect_runner::architect_run_readiness(thread);
                 let steps = readiness["steps"].as_array().expect("readiness steps");
                 for (path, status) in [("step", "completed"), ("skipped", "skipped")] {
-                    let step = steps.iter().find(|step| step["path"] == json!([path]))
+                    let step = steps
+                        .iter()
+                        .find(|step| step["path"] == json!([path]))
                         .expect("step readiness");
                     assert_eq!(step["status"], status);
                 }
@@ -5904,16 +5906,27 @@ mod internal_tests {
             thread.update(cx, |thread, cx| {
                 thread.finish_architect_run(architect::RunOutcome::Completed, cx);
                 thread.dismiss_architect_run(cx);
-                assert_eq!(thread.architect_run().expect("run").saved_checkpoint(), Some(&checkpoint));
+                assert_eq!(
+                    thread.architect_run().expect("run").saved_checkpoint(),
+                    Some(&checkpoint)
+                );
             });
             let saved = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
-            let database = cx.update(|cx| ThreadsDatabase::connect(cx)).await.expect("database");
+            let database = cx
+                .update(|cx| ThreadsDatabase::connect(cx))
+                .await
+                .expect("database");
             let restored_id = acp::SessionId::new("architect-terminal-readiness");
-            database.save_thread(restored_id.clone(), saved, PathList::default())
-                .await.expect("save terminal checkpoint");
-            let reopened = agent.update(cx, |agent, cx| {
-                agent.open_thread(restored_id.clone(), project, cx)
-            }).await.expect("reopen terminal checkpoint");
+            database
+                .save_thread(restored_id.clone(), saved, PathList::default())
+                .await
+                .expect("save terminal checkpoint");
+            let reopened = agent
+                .update(cx, |agent, cx| {
+                    agent.open_thread(restored_id.clone(), project, cx)
+                })
+                .await
+                .expect("reopen terminal checkpoint");
             cx.run_until_parked();
             let restored = cx.update(|cx| native_thread_for_session(&agent, &restored_id, cx));
             restored.read_with(cx, |thread, _| {
@@ -5923,7 +5936,10 @@ mod internal_tests {
                 assert_eq!(run.saved_checkpoint(), Some(&checkpoint));
                 assert_eq!(run.snapshot().checkpoint.as_ref(), Some(&checkpoint));
             });
-            assert!(pending_step_briefs(&fake).is_empty(), "reload must not start another step");
+            assert!(
+                pending_step_briefs(&fake).is_empty(),
+                "reload must not start another step"
+            );
             cx.update(|cx| {
                 assert!(matches!(
                     crate::resume_architect_run(restored.clone(), reopened.clone(), cx),
@@ -5937,13 +5953,21 @@ mod internal_tests {
                     Task::ready(()),
                     cx,
                 );
-                let previous = thread.architect_run_archive().last().expect("archived terminal run");
+                let previous = thread
+                    .architect_run_archive()
+                    .last()
+                    .expect("archived terminal run");
                 assert_eq!(previous.id, run_id);
                 assert_eq!(previous.checkpoint.as_ref(), Some(&checkpoint));
             });
             cx.run_until_parked();
-            let archived = database.load_thread(restored_id).await.expect("load archive")
-                .expect("saved archive").persistent_architect.expect("state");
+            let archived = database
+                .load_thread(restored_id)
+                .await
+                .expect("load archive")
+                .expect("saved archive")
+                .persistent_architect
+                .expect("state");
             let previous = archived.archive.last().expect("archived run");
             assert_eq!(previous.id, run_id);
             assert_eq!(previous.checkpoint.as_ref(), Some(&checkpoint));
@@ -5951,7 +5975,9 @@ mod internal_tests {
         }
 
         #[gpui::test]
-        async fn corrupt_terminal_checkpoint_is_retained_without_executable_control(cx: &mut TestAppContext) {
+        async fn corrupt_terminal_checkpoint_is_retained_without_executable_control(
+            cx: &mut TestAppContext,
+        ) {
             init_test(cx);
             let (_connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
             let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
@@ -5966,15 +5992,29 @@ mod internal_tests {
             });
             let mut saved = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
             let corrupt = json!({"version": 1, "state": "corrupt terminal checkpoint"});
-            saved.persistent_architect.as_mut().expect("state").current.as_mut().expect("run")
+            saved
+                .persistent_architect
+                .as_mut()
+                .expect("state")
+                .current
+                .as_mut()
+                .expect("run")
                 .checkpoint = Some(corrupt.clone());
-            let database = cx.update(|cx| ThreadsDatabase::connect(cx)).await.expect("database");
+            let database = cx
+                .update(|cx| ThreadsDatabase::connect(cx))
+                .await
+                .expect("database");
             let restored_id = acp::SessionId::new("architect-corrupt-terminal-checkpoint");
-            database.save_thread(restored_id.clone(), saved, PathList::default())
-                .await.expect("save corrupt terminal checkpoint");
-            let reopened = agent.update(cx, |agent, cx| {
-                agent.open_thread(restored_id.clone(), project, cx)
-            }).await.expect("terminal history must still load");
+            database
+                .save_thread(restored_id.clone(), saved, PathList::default())
+                .await
+                .expect("save corrupt terminal checkpoint");
+            let reopened = agent
+                .update(cx, |agent, cx| {
+                    agent.open_thread(restored_id.clone(), project, cx)
+                })
+                .await
+                .expect("terminal history must still load");
             let restored = cx.update(|cx| native_thread_for_session(&agent, &restored_id, cx));
             restored.read_with(cx, |thread, _| {
                 let run = thread.architect_run().expect("terminal run");
@@ -5984,7 +6024,10 @@ mod internal_tests {
                 assert!(run.control().is_none());
                 assert!(!run.can_resume());
                 assert!(!run.is_running());
-                assert_eq!(run.history().first().expect("visit").summary.as_deref(), Some("Preserved summary"));
+                assert_eq!(
+                    run.history().first().expect("visit").summary.as_deref(),
+                    Some("Preserved summary")
+                );
             });
             cx.update(|cx| {
                 assert!(matches!(

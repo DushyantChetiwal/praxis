@@ -821,7 +821,9 @@ mod tests {
         let mut before = local_graph();
         // Otherwise sibling is the sole root after closing the cycle, and the
         // validator reports the disconnected cycle as unreachable, not endless.
-        before.edges.push(ArchitectEdge::new("entry", "sibling", "a"));
+        before
+            .edges
+            .push(ArchitectEdge::new("entry", "sibling", "a"));
         assert!(before.blocking_problems().is_empty());
         let before_snapshot = before.clone();
         let mut after = before.clone();
