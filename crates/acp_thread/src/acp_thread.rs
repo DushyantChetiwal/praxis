@@ -10390,7 +10390,12 @@ mod tests {
         thread.read_with(cx, |thread, _| {
             let entry = thread.elicitation(&id).unwrap().1;
             assert!(matches!(entry.status, ElicitationStatus::Pending { .. }));
-            assert!(entry.request.message.contains("Using the recommendation in"));
+            assert!(
+                entry
+                    .request
+                    .message
+                    .contains("Using the recommendation in")
+            );
         });
         cx.executor().advance_clock(Duration::from_secs(1));
         cx.run_until_parked();
