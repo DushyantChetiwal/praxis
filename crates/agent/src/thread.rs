@@ -328,6 +328,8 @@ pub struct ArchitectRun {
     /// Which step of the run this is, counting repeats.
     pub step_number: usize,
     pub outcome: Option<architect::RunOutcome>,
+    // Dismissing presentation must not discard the checkpoint or inspection history.
+    result_dismissed: bool,
     /// A remote workflow associated with this run, when the execution provider
     /// exposes one. The UI keeps this optional so local runs do not grow a dead
     /// workflow action.
@@ -356,6 +358,10 @@ impl ArchitectRun {
 
     pub fn history(&self) -> &[RunStep] {
         &self.history
+    }
+
+    pub fn result_dismissed(&self) -> bool {
+        self.result_dismissed
     }
 
     pub fn remote_workflow_url(&self) -> Option<&str> {
@@ -2507,6 +2513,7 @@ impl Thread {
             current_title,
             step_number: 1,
             outcome: None,
+            result_dismissed: false,
             remote_workflow_url: None,
             history: Vec::new(),
             running: Vec::new(),
@@ -2523,6 +2530,7 @@ impl Thread {
     pub(crate) fn reopen_architect_run(&mut self, task: Task<()>, cx: &mut Context<Self>) {
         if let Some(run) = self.architect_run.as_mut() {
             run.outcome = None;
+            run.result_dismissed = false;
             run._task = task;
             cx.notify();
         }
@@ -2659,6 +2667,7 @@ impl Thread {
                 run.control = None;
             }
             run.outcome = Some(outcome);
+            run.result_dismissed = false;
             // A run cancelled mid-step leaves that step open, and a step that
             // never ends reads as one still running.
             run.close_running_steps();
@@ -2667,15 +2676,13 @@ impl Thread {
         cx.notify();
     }
 
-    /// Forgets a finished run once the user has read its outcome. A run still
-    /// in progress is kept, since dropping it would cancel it unannounced.
+    /// Hides the finished run's result without discarding its history or checkpoint.
     pub fn dismiss_architect_run(&mut self, cx: &mut Context<Self>) {
-        if self
-            .architect_run
-            .as_ref()
-            .is_some_and(|run| run.outcome.is_some())
+        if let Some(run) = self.architect_run.as_mut()
+            && run.outcome.is_some()
+            && !run.result_dismissed
         {
-            self.architect_run = None;
+            run.result_dismissed = true;
             cx.notify();
         }
     }
@@ -2692,6 +2699,7 @@ impl Thread {
                 }
                 run.current = None;
                 run.outcome = Some(architect::RunOutcome::Cancelled);
+                run.result_dismissed = false;
                 run.close_running_steps();
             }
             run._task = Task::ready(());

@@ -123,6 +123,7 @@ impl ArchitectPane {
             .is_some_and(agent::ArchitectRun::is_paused)
     }
 
+    // Recovery remains available even when the result banner has been dismissed.
     pub(super) fn can_resume(&self, cx: &App) -> bool {
         !self.run_starting.get()
             && self

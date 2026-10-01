@@ -355,7 +355,7 @@ impl ArchitectPane {
         let subscription = cx.observe(&thread, |this, _, cx| {
             // The agent or a run may have removed selected steps.
             this.prune_bulk_selection(cx);
-            this.refresh_inspector_if_lock_changed(cx);
+            this.refresh_inspector_if_source_changed(cx);
             cx.emit(workspace::item::ItemEvent::UpdateTab);
             cx.notify();
         });
@@ -611,7 +611,7 @@ impl ArchitectPane {
         self.thread = thread.clone();
         self._thread_subscription = cx.observe(&thread, |this, _, cx| {
             this.prune_bulk_selection(cx);
-            this.refresh_inspector_if_lock_changed(cx);
+            this.refresh_inspector_if_source_changed(cx);
             cx.emit(workspace::item::ItemEvent::UpdateTab);
             cx.notify();
         });
@@ -4128,6 +4128,170 @@ mod tests {
             assert!(!pane.set_step_model(path.clone(), Some(model.clone()), cx));
             assert!(pane.set_step_model(path.clone(), None, cx));
             assert!(step_model(pane, &path, cx).is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn inspector_tracks_revised_briefs_without_resetting_local_edits(cx: &mut TestAppContext) {
+        let plan = test_plan(cx).await;
+        let project = plan.project.clone();
+        let thread = plan.thread;
+        let path = NodePath::root("step".into());
+        let mut node = ArchitectNode::new("step", "Original title");
+        node.responsibility = "Original responsibility".into();
+        node.intent = "Original goal".into();
+        node.capture = "Original capture".into();
+        node.rules = vec!["Original rule".into()];
+        node.locked = true;
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(node);
+        thread.update(cx, |thread, cx| thread.set_architect_graph(Some(graph), cx));
+
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.update_in(cx, |_workspace, window, cx| {
+            let workspace = cx.weak_entity();
+            cx.new(|cx| {
+                ArchitectPane::new(
+                    thread.clone(),
+                    workspace,
+                    None,
+                    Vec::new(),
+                    None,
+                    px(226.0),
+                    px(348.0),
+                    window,
+                    cx,
+                )
+            })
+        });
+        let editors = pane.update_in(cx, |pane, window, cx| {
+            pane.set_selection(Some(Selection::Node("step".into())), window, cx);
+            pane.inspector
+                .as_ref()
+                .expect("step should be selected")
+                .editors()
+        });
+        cx.run_until_parked();
+        let [title, responsibility, goal, capture, new_rule] = editors.clone();
+
+        cx.update(|_, cx| {
+            agent::update_architect_step(
+                &thread,
+                &path,
+                Some("Revised goal".into()),
+                Some(vec!["Revised rule".into()]),
+                Some("Revised capture".into()),
+                cx,
+            )
+            .expect("the coordinator should be able to revise a locked pending step");
+        });
+        cx.run_until_parked();
+        assert_eq!(goal.read_with(cx, |editor, cx| editor.text(cx)), "Revised goal");
+        assert_eq!(
+            capture.read_with(cx, |editor, cx| editor.text(cx)),
+            "Revised capture"
+        );
+        pane.update_in(cx, |pane, _, cx| {
+            let node = pane
+                .root_graph(cx)
+                .and_then(|graph| graph.node_at(&path))
+                .expect("the revised step should exist");
+            assert!(node.locked);
+            assert_eq!(node.rules, vec!["Revised rule"]);
+            assert!(
+                pane.undo_stack.is_empty(),
+                "synchronizing must not write back to the plan"
+            );
+            assert_eq!(
+                pane.inspector
+                    .as_ref()
+                    .expect("inspector should remain open")
+                    .editors(),
+                editors
+            );
+        });
+        for editor in &editors {
+            assert!(editor.read_with(cx, |editor, cx| editor.read_only(cx)));
+        }
+
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(
+                |graph| {
+                    let node = graph.node_at_mut(&path).expect("step should exist");
+                    node.title = "Revised title".into();
+                    node.responsibility = "Revised responsibility".into();
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            title.read_with(cx, |editor, cx| editor.text(cx)),
+            "Revised title"
+        );
+        assert_eq!(
+            responsibility.read_with(cx, |editor, cx| editor.text(cx)),
+            "Revised responsibility"
+        );
+
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(|graph| graph.unlock_all(), cx);
+        });
+        cx.run_until_parked();
+        pane.update_in(cx, |pane, window, cx| {
+            new_rule.update(cx, |editor, cx| {
+                editor.set_text("Unsubmitted rule", window, cx);
+            });
+            capture.update(cx, |editor, cx| {
+                editor.focus_handle(cx).focus(window, cx);
+                editor.change_selections(Default::default(), window, cx, |selections| {
+                    selections.select_ranges([text::Point::new(0, 2)..text::Point::new(0, 5)]);
+                });
+            });
+            goal.update(cx, |editor, cx| editor.set_text("Local typing", window, cx));
+            agent::update_architect_step(
+                &thread,
+                &path,
+                Some("Competing external goal".into()),
+                Some(vec!["Latest rule".into()]),
+                None,
+                cx,
+            )
+            .expect("an unlocked pending step should be revisable");
+            // Flush the source while the local BufferEdited notification is
+            // still queued, to exercise the in-flight typing guard directly.
+            pane.refresh_inspector(window, cx);
+            assert_eq!(goal.read(cx).text(cx), "Local typing");
+            pane.set_selection(Some(Selection::Node("step".into())), window, cx);
+            pane.set_selection(Some(Selection::Node("step".into())), window, cx);
+        });
+        cx.run_until_parked();
+        thread.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        pane.update_in(cx, |pane, window, cx| {
+            assert_eq!(
+                pane.inspector
+                    .as_ref()
+                    .expect("inspector should remain open")
+                    .editors(),
+                editors
+            );
+            assert_eq!(goal.read(cx).text(cx), "Local typing");
+            assert_eq!(new_rule.read(cx).text(cx), "Unsubmitted rule");
+            assert!(capture.focus_handle(cx).is_focused(window));
+            capture.update(cx, |editor, cx| {
+                let snapshot = editor.snapshot(window, cx);
+                let selection = editor.selections.newest::<text::Point>(&snapshot);
+                assert_eq!(selection.start, text::Point::new(0, 2));
+                assert_eq!(selection.end, text::Point::new(0, 5));
+            });
+            let node = pane
+                .root_graph(cx)
+                .and_then(|graph| graph.node_at(&path))
+                .expect("step should exist");
+            assert_eq!(node.intent, "Local typing");
+            assert_eq!(node.rules, vec!["Latest rule"]);
         });
     }
 

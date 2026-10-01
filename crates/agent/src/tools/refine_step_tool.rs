@@ -371,7 +371,7 @@ mod tests {
             (json!({"model": model}), Some(model.clone())),
             (json!({"goal": "Refined"}), Some(model.clone())),
             (json!({"model": null}), None),
-            (json!({"model": model, "lock": true}), Some(model.clone())),
+            (json!({"model": model, "lock": true}), Some(model)),
         ] {
             let input: RefineStepToolInput =
                 serde_json::from_value(input).expect("input should load");

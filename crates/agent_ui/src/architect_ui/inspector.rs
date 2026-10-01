@@ -39,15 +39,40 @@ pub(super) struct EdgeInspector {
 
 pub(super) struct NodeInspector {
     node: NodeId,
-    /// Whether the step was locked when the editors were built, which is what
-    /// decided whether they are read-only.
     locked: bool,
+    source_text: [String; 4],
     pub(super) title: Entity<Editor>,
     responsibility: Entity<Editor>,
     goal: Entity<Editor>,
     capture: Entity<Editor>,
     new_rule: Entity<Editor>,
     _subscriptions: Vec<Subscription>,
+}
+
+impl NodeInspector {
+    fn source_text(node: &ArchitectNode) -> [String; 4] {
+        [
+            node.title.clone(),
+            node.responsibility.clone(),
+            node.intent.clone(),
+            node.capture.clone(),
+        ]
+    }
+
+    fn source_changed(&self, node: &ArchitectNode) -> bool {
+        self.locked != node.locked || self.source_text != Self::source_text(node)
+    }
+
+    #[cfg(test)]
+    pub(super) fn editors(&self) -> [Entity<Editor>; 5] {
+        [
+            self.title.clone(),
+            self.responsibility.clone(),
+            self.goal.clone(),
+            self.capture.clone(),
+            self.new_rule.clone(),
+        ]
+    }
 }
 
 pub(super) fn available_step_models(cx: &App) -> Vec<(StepModel, SharedString)> {
@@ -424,6 +449,7 @@ impl ArchitectPane {
         let new_rule = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
             editor.set_placeholder_text("Add a rule and press enter", window, cx);
+            editor.set_read_only(node.locked);
             editor
         });
 
@@ -478,6 +504,7 @@ impl ArchitectPane {
         ];
 
         NodeInspector {
+            source_text: NodeInspector::source_text(&node),
             node: node.id,
             locked: node.locked,
             title,
@@ -806,22 +833,20 @@ impl ArchitectPane {
         self.refresh_inspector(window, cx);
     }
 
-    /// Rebuilds the inspector when its step was locked or unlocked without
-    /// going through the canvas, as the agent does from the chat, so its
-    /// fields go read-only or editable again with the step.
-    pub(super) fn refresh_inspector_if_lock_changed(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh_inspector_if_source_changed(&mut self, cx: &mut Context<Self>) {
         let Some(inspector) = self.inspector.as_ref() else {
             return;
         };
-        let lock_changed = self
+        let source_changed = self
             .graph(cx)
             .and_then(|graph| graph.node(&inspector.node))
-            .is_some_and(|node| node.locked != inspector.locked);
-        if !lock_changed {
+            .is_some_and(|node| inspector.source_changed(node));
+        if !source_changed {
             return;
         }
-        // Rebuilding the editors needs the window, which an observer is not
-        // given, so it waits until this update has finished.
+        // Updating editor buffers needs the window and must wait until the
+        // notifying entity has finished updating. Read the latest source then,
+        // rather than replaying a stale snapshot over a newer edit or selection.
         let pane = cx.weak_entity();
         let window_handle = self.window_handle;
         cx.defer(move |cx| {
@@ -837,8 +862,7 @@ impl ArchitectPane {
         });
     }
 
-    /// Rebuilds the inspector so its fields match the step again, which is what
-    /// makes them go read-only the moment a step is locked.
+    /// Synchronizes external changes without replacing editors or their focus.
     pub(super) fn refresh_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self
             .inspector
@@ -851,7 +875,46 @@ impl ArchitectPane {
             self.inspector = None;
             return;
         };
-        self.inspector = Some(self.build_inspector(node, window, cx));
+        let Some(inspector) = self.inspector.as_mut() else {
+            return;
+        };
+        let source_text = NodeInspector::source_text(&node);
+        let lock_changed = inspector.locked != node.locked;
+        for ((editor, previous), next) in [
+            &inspector.title,
+            &inspector.responsibility,
+            &inspector.goal,
+            &inspector.capture,
+        ]
+        .into_iter()
+        .zip(&inspector.source_text)
+        .zip(&source_text)
+        {
+            if !lock_changed && previous == next {
+                continue;
+            }
+            editor.update(cx, |editor, cx| {
+                let text = editor.text(cx);
+                // A local BufferEdited event may still be queued. Do not erase
+                // uncommitted typing; an already-written local edit also needs
+                // no set_text, which would reset its selection/undo state.
+                if text != *next && (node.locked || editor.read_only(cx) || text == *previous) {
+                    editor.set_text(next.clone(), window, cx);
+                }
+                editor.set_read_only(node.locked);
+                if lock_changed {
+                    cx.notify();
+                }
+            });
+        }
+        if lock_changed {
+            inspector.new_rule.update(cx, |editor, cx| {
+                editor.set_read_only(node.locked);
+                cx.notify();
+            });
+        }
+        inspector.source_text = source_text;
+        inspector.locked = node.locked;
         cx.notify();
     }
 
