@@ -1093,6 +1093,23 @@ fn collect_transcript_page(
     (entries, next_before)
 }
 
+fn snapshot_message_text(content: &acp_thread::MessageContent, cx: &App) -> String {
+    // Plain text reaches the source before the desktop's streaming animation
+    // reveals it. Remote snapshots must not depend on that animation's clock.
+    let text = content
+        .source_blocks()
+        .iter()
+        .map(|block| match block {
+            acp::ContentBlock::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>();
+    match text {
+        Some(parts) => parts.concat(),
+        None => content.to_markdown(cx),
+    }
+}
+
 fn transcript_entry(index: usize, entry: &AgentThreadEntry, cx: &App) -> Option<Value> {
     let (role, text, status) = describe_entry(entry, cx);
     let mut value = json!({
@@ -1118,7 +1135,7 @@ fn transcript_entry(index: usize, entry: &AgentThreadEntry, cx: &App) -> Option<
                         ("reasoning", block)
                     }
                 };
-                let text = block.to_markdown(cx);
+                let text = snapshot_message_text(block, cx);
                 (!text.trim().is_empty())
                     .then(|| json!({ "index": index, "role": role, "text": text.trim() }))
             })
@@ -1185,7 +1202,7 @@ fn describe_entry(
                 .iter()
                 .filter_map(|chunk| match chunk {
                     acp_thread::AssistantMessageChunk::Message { block, .. } => {
-                        Some(block.to_markdown(cx))
+                        Some(snapshot_message_text(block, cx))
                     }
                     acp_thread::AssistantMessageChunk::Thought { .. } => None,
                 })
@@ -1756,6 +1773,22 @@ mod tests {
                 snapshot["step_threads"][0]["entries"][0]["parts"][0]["text"],
                 "Thinking in Leaf — more provider text"
             );
+        });
+        steps[0].1.update(cx, |thread, cx| {
+            thread.push_assistant_content_block("Answer".into(), false, cx);
+            thread.push_assistant_content_block(" — more response text".into(), false, cx);
+        });
+        cx.read(|cx| {
+            let snapshot = watched_thread_snapshot(&session, Some(&owner), cx);
+            let entry = &snapshot["step_threads"][0]["entries"][0];
+            assert_eq!(entry["text"], "Answer — more response text");
+            assert_eq!(entry["parts"][1]["text"], entry["text"]);
+            assert_eq!(entry["parts"][1]["role"], "assistant");
+            assert_eq!(
+                entry["parts"][0]["text"],
+                "Thinking in Leaf — more provider text"
+            );
+            assert!(snapshot.to_string().len() <= TRANSCRIPT_BUDGET);
         });
         for (visit, _) in &steps {
             owner.update(cx, |thread, cx| {
