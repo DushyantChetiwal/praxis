@@ -3429,17 +3429,24 @@ mod tests {
                     "the icon must agree with the banner for {outcome:?}"
                 );
                 let quads = window.painted_quads();
+                // GPUI paints backgrounds and borders separately; border strips
+                // retain the element bounds but have a narrower content mask.
                 let banner = quads
                     .iter()
                     .find(|quad| {
-                        quad.background == background.into()
+                        quad.border_color == border
                             && quad.border_widths.bottom > px(0.0).scale(window.scale_factor())
                             && quad.border_widths.top == px(0.0).scale(window.scale_factor())
                     })
                     .unwrap_or_else(|| {
-                        panic!("the mounted run banner should paint its status background for {outcome:?}")
+                        panic!("the mounted run banner should paint its status border for {outcome:?}: {quads:?}")
                     });
-                assert_eq!(banner.border_color, border, "{outcome:?}");
+                assert!(
+                    quads.iter().any(|quad| {
+                        quad.bounds == banner.bounds && quad.background == background.into()
+                    }),
+                    "the mounted run banner must paint its status background for {outcome:?}"
+                );
                 assert!(
                     quads.iter().any(|quad| {
                         quad.background == color.color(cx).into()
@@ -3454,10 +3461,15 @@ mod tests {
                     .is_some_and(|outcome| !outcome.is_success())
                 {
                     assert!(
-                        quads.iter().any(|quad| {
-                            quad.background == status.warning_background.into()
-                                && quad.border_color == status.warning_border
-                                && quad.border_widths.top == px(1.0).scale(window.scale_factor())
+                        quads.iter().any(|border_quad| {
+                            border_quad.border_color == status.warning_border
+                                && border_quad.border_widths.top
+                                    == px(1.0).scale(window.scale_factor())
+                                && quads.iter().any(|background_quad| {
+                                    background_quad.bounds == border_quad.bounds
+                                        && background_quad.background
+                                            == status.warning_background.into()
+                                })
                         }),
                         "the header's finished-run status must also use warning tokens"
                     );
