@@ -2174,7 +2174,6 @@ mod tests {
             "",
             "file.rs",
             "/worktree/file.rs",
-
             "//server/share/file.rs",
             "worktree/../file.rs",
             "worktree/src/",

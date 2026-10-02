@@ -5367,7 +5367,9 @@ impl Project {
                 let worktree_abs_path = worktree.read(cx).abs_path();
                 let root = path_style.normalize(&worktree_abs_path.to_string_lossy());
 
-                if let Some(path) = path_style.strip_prefix(Path::new(&normalized), Path::new(&root)) {
+                if let Some(path) =
+                    path_style.strip_prefix(Path::new(&normalized), Path::new(&root))
+                {
                     return Some(ProjectPath {
                         worktree_id: worktree.read(cx).id(),
                         path: path.into_arc(),
@@ -5376,36 +5378,39 @@ impl Project {
             }
         } else {
             let path = RelPath::new(path, path_style).ok()?;
-            // First pass: for each worktree, try two interpretations of the path and
-            // return whichever finds an existing entry first:
-            //   (a) Strip the worktree root name as a prefix.
-            //   (b) Treat the path as a literal worktree-relative path.
+            // A root-qualified assignment must not be redirected to an existing
+            // shadow file in another root, including before its target is created.
             for worktree in worktree_store.visible_worktrees(cx) {
                 let worktree = worktree.read(cx);
-                if let Ok(relative_path) = path.strip_prefix(worktree.root_name())
-                    && let Some(entry) = worktree.entry_for_path(relative_path)
-                {
+                if let Ok(relative_path) = path.strip_prefix(worktree.root_name()) {
                     return Some(ProjectPath {
                         worktree_id: worktree.id(),
-                        path: entry.path.clone(),
+                        path: relative_path.into(),
                     });
                 }
+            }
+            let (prefix, relative) = path
+                .as_unix_str()
+                .split_once('/')
+                .unwrap_or((path.as_unix_str(), ""));
+            let mut matching_roots = worktree_store.visible_worktrees(cx).filter(|worktree| {
+                worktree.read(cx).root_name_str().to_lowercase() == prefix.to_lowercase()
+            });
+            if let Some(worktree) = matching_roots.next() {
+                if matching_roots.next().is_some() {
+                    return None;
+                }
+                return Some(ProjectPath {
+                    worktree_id: worktree.read(cx).id(),
+                    path: RelPath::from_unix_str(relative).ok()?.into(),
+                });
+            }
+            for worktree in worktree_store.visible_worktrees(cx) {
+                let worktree = worktree.read(cx);
                 if let Some(entry) = worktree.entry_for_path(&path) {
                     return Some(ProjectPath {
                         worktree_id: worktree.id(),
                         path: entry.path.clone(),
-                    });
-                }
-            }
-
-            // Second pass: strip the worktree root name prefix without requiring the
-            // entry to exist, to allow resolving paths that don't exist yet.
-            for worktree in worktree_store.visible_worktrees(cx) {
-                let worktree_root_name = worktree.read(cx).root_name();
-                if let Ok(relative_path) = path.strip_prefix(&worktree_root_name) {
-                    return Some(ProjectPath {
-                        worktree_id: worktree.read(cx).id(),
-                        path: relative_path.into(),
                     });
                 }
             }

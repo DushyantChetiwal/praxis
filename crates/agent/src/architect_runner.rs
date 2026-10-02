@@ -752,16 +752,20 @@ fn lexical_file_surface_graph(graph: &ArchitectGraph, roots: &FileSurfaceRoots) 
                 let Some((root, relative)) = file.split_once('/') else {
                     continue;
                 };
-                let (absolute, path_style) = if let Some((root_path, path_style)) = roots.get(&root.to_lowercase()) {
-                    let Ok(absolute) = path_style.join_path(root_path, relative) else {
+                let (absolute, path_style) =
+                    if let Some((root_path, path_style)) = roots.get(&root.to_lowercase()) {
+                        let Ok(absolute) = path_style.join_path(root_path, relative) else {
+                            continue;
+                        };
+                        (absolute, *path_style)
+                    } else if let Some((_, path_style)) = roots
+                        .values()
+                        .find(|(_, path_style)| path_style.is_absolute(file))
+                    {
+                        (PathBuf::from(file.as_str()), *path_style)
+                    } else {
                         continue;
                     };
-                    (absolute, *path_style)
-                } else if let Some((_, path_style)) = roots.values().find(|(_, path_style)| path_style.is_absolute(file)) {
-                    (PathBuf::from(file.as_str()), *path_style)
-                } else {
-                    continue;
-                };
                 let Some(absolute) = absolute.to_str() else {
                     continue;
                 };
@@ -2149,7 +2153,10 @@ impl Driver {
             .log_err();
     }
 
-    async fn observe_project_files(&self, cx: &mut AsyncApp) -> anyhow::Result<Option<FileSnapshot>> {
+    async fn observe_project_files(
+        &self,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<Option<FileSnapshot>> {
         let project = self
             .thread
             .read_with(cx, |thread, _| thread.project().clone())?;
@@ -2302,9 +2309,8 @@ impl Driver {
     }
 
     fn block_file_dispatch(&self, error: anyhow::Error, cx: &mut AsyncApp) -> RunOutcome {
-        let message = format!(
-            "Praxis stopped dispatching work: {error:#}. Completed results are retained."
-        );
+        let message =
+            format!("Praxis stopped dispatching work: {error:#}. Completed results are retained.");
         log::error!("Architect: {message}");
         let waiters = {
             let mut state = self.state.borrow_mut();
@@ -3516,7 +3522,11 @@ mod checkpoint_tests {
     fn future_paths_in_nested_roots_share_an_identity_without_filesystem_access() {
         for (path_style, outer, inner) in [
             (util::paths::PathStyle::Unix, "/project", "/project/src"),
-            (util::paths::PathStyle::Windows, "C:\\project", "C:\\project\\src"),
+            (
+                util::paths::PathStyle::Windows,
+                "C:\\project",
+                "C:\\project\\src",
+            ),
         ] {
             let roots = BTreeMap::from([
                 ("outer".into(), (PathBuf::from(outer), path_style)),
@@ -3529,16 +3539,26 @@ mod checkpoint_tests {
             graph.node_at_mut(&path("right")).unwrap().file_surface =
                 Some(vec!["inner/not-created-yet.rs".into()]);
             assert!(graph.file_surface_problems().is_empty());
-            assert!(lexical_file_surface_graph(&graph, &roots)
-                .file_surface_problems().iter().any(is_file_surface_overlap));
+            assert!(
+                lexical_file_surface_graph(&graph, &roots)
+                    .file_surface_problems()
+                    .iter()
+                    .any(is_file_surface_overlap)
+            );
             graph.node_at_mut(&path("left")).unwrap().file_surface =
                 Some(vec!["outer/src\\not-created-yet.rs".into()]);
             let overlaps = lexical_file_surface_graph(&graph, &roots)
-                .file_surface_problems().iter().any(is_file_surface_overlap);
+                .file_surface_problems()
+                .iter()
+                .any(is_file_surface_overlap);
             assert_eq!(overlaps, path_style.is_windows());
             graph.connect("left", "right");
-            assert!(!lexical_file_surface_graph(&graph, &roots)
-                .file_surface_problems().iter().any(is_file_surface_overlap));
+            assert!(
+                !lexical_file_surface_graph(&graph, &roots)
+                    .file_surface_problems()
+                    .iter()
+                    .any(is_file_surface_overlap)
+            );
         }
     }
 

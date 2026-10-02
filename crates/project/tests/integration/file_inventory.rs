@@ -86,7 +86,10 @@ async fn test_native_file_inventory_preserves_host_names_and_ignore_policy(
             "discovered ignored {name:?}"
         );
         assert!(
-            inventory.skipped_paths.iter().any(|file| file.as_str() == *name),
+            inventory
+                .skipped_paths
+                .iter()
+                .any(|file| file.as_str() == *name),
             "missing scope marker {name:?}"
         );
     }
@@ -251,6 +254,35 @@ async fn test_remote_wire_inventory_preserves_host_paths_with_and_without_wsl_in
         drop(tree);
         cx.run_until_parked();
     }
+}
+
+#[gpui::test]
+async fn test_qualified_future_path_is_not_redirected_to_an_existing_shadow(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/"),
+        json!({
+            "first": { "second": { "target.rs": "shadow file" } },
+            "second": {}
+        }),
+    )
+    .await;
+    let project = Project::test(
+        fs,
+        [Path::new(path!("/first")), Path::new(path!("/second"))],
+        cx,
+    )
+    .await;
+    project.read_with(cx, |project, cx| {
+        for input in ["second/target.rs", "SECOND/target.rs"] {
+            let resolved = project.find_project_path(input, cx).unwrap();
+            let tree = project.worktree_for_id(resolved.worktree_id, cx).unwrap();
+            assert_eq!(tree.read(cx).root_name_str(), "second");
+            assert_eq!(resolved.path.as_unix_str(), "target.rs");
+            assert!(project.entry_for_path(&resolved, cx).is_none());
+        }
+    });
 }
 
 #[gpui::test]

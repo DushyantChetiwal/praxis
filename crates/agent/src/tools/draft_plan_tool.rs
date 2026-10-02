@@ -590,11 +590,7 @@ mod tests {
             super::super::architect_run_tool::architect_tool_test_session(cx).await;
         let project = thread.read_with(cx, |thread, _| thread.project().clone());
         cx.update(|cx| {
-            for input in [
-                "src/main.rs",
-                "./src/main.rs",
-                "a/src/main.rs",
-            ] {
+            for input in ["src/main.rs", "./src/main.rs", "a/src/main.rs"] {
                 assert_eq!(
                     resolve_file_surface(&[input.into()], &project, cx).expect("relative path"),
                     vec!["a/src/main.rs"]
@@ -609,7 +605,11 @@ mod tests {
                 resolve_file_surface(&["src\\main.rs".into()], &project, cx).unwrap(),
                 vec![backslash]
             );
-            for file in ["future/CON?.rs", "future/archive:Zone.Identifier", "future/file."] {
+            for file in [
+                "future/CON?.rs",
+                "future/archive:Zone.Identifier",
+                "future/file.",
+            ] {
                 assert_eq!(
                     resolve_file_surface(&[file.into()], &project, cx).unwrap(),
                     vec![format!("a/{file}")]
@@ -626,12 +626,19 @@ mod tests {
                     vec![invalid]
                 );
             }
-            for input in ["C:/project/main.rs", "C:\\project\\main.rs", "./C:/project/main.rs"] {
+            for input in [
+                "C:/project/main.rs",
+                "C:\\project\\main.rs",
+                "./C:/project/main.rs",
+            ] {
                 let resolved = resolve_file_surface(&[input.into()], &project, cx);
                 if project.read(cx).path_style(cx).is_windows() {
                     assert!(resolved.is_err());
                 } else {
-                    assert_eq!(resolved.unwrap(), vec![format!("a/{}", input.trim_start_matches("./"))]);
+                    assert_eq!(
+                        resolved.unwrap(),
+                        vec![format!("a/{}", input.trim_start_matches("./"))]
+                    );
                 }
             }
         });
@@ -655,7 +662,8 @@ mod tests {
         .await;
         cx.update(|cx| {
             assert_eq!(
-                resolve_file_surface(&["backend/src/server.rs".into()], &project, cx).expect("qualified file"),
+                resolve_file_surface(&["backend/src/server.rs".into()], &project, cx)
+                    .expect("qualified file"),
                 vec!["backend/src/server.rs"]
             );
             assert_eq!(

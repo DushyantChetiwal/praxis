@@ -516,7 +516,11 @@ mod tests {
             assert!(inventory_alias_path(path).is_none(), "{path:?}");
         }
         if cfg!(windows) {
-            for path in ["C:/outside.rs", "C:outside.rs", "\\\\server\\share\\file.rs"] {
+            for path in [
+                "C:/outside.rs",
+                "C:outside.rs",
+                "\\\\server\\share\\file.rs",
+            ] {
                 assert!(inventory_alias_path(path).is_none(), "{path:?}");
             }
         }
