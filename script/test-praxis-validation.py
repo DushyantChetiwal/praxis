@@ -977,6 +977,7 @@ class BundleAfterMergeTests(unittest.TestCase):
 
     def setUp(self):
         self.calls = []
+        self.sequences = {}
         self.main_path = f"{ROOT}/git/ref/heads/main"
         self.pulls_path = f"{ROOT}/commits/{TARGET}/pulls?per_page=100"
         self.bundles_path = f"{ROOT}/actions/workflows/bundle_fork.yml/runs?event=workflow_dispatch&per_page=100"
@@ -998,7 +999,8 @@ class BundleAfterMergeTests(unittest.TestCase):
             self.assertTrue(kwargs["check"])
             self.assertGreater(kwargs["timeout"], 0)
             if command[:2] == ["gh", "api"]:
-                response = self.responses[command[2]]
+                sequence = self.sequences.get(command[2])
+                response = sequence.pop(0) if sequence else self.responses[command[2]]
                 if isinstance(response, Exception):
                     raise response
                 if command[2] in (self.pulls_path, self.bundles_path):
@@ -1027,6 +1029,15 @@ class BundleAfterMergeTests(unittest.TestCase):
         self.execute()
         self.assertFalse(self.dispatches())
         self.assertEqual(len(self.calls), 1)
+
+    def test_main_advancing_during_history_lookup_does_not_replace_newer_build(self):
+        self.sequences[self.main_path] = [
+            {"object": {"sha": TARGET}},
+            {"object": {"sha": OTHER}},
+        ]
+        self.execute()
+        self.assertFalse(self.dispatches())
+        self.assertEqual(self.calls[-1][2], self.main_path)
 
     def test_upstream_sync_or_unmerged_foreign_and_other_base_prs_do_not_dispatch(self):
         candidates = [[], [dict(self.pull, merged_at=None)], [dict(self.pull, merge_commit_sha=OTHER)]]

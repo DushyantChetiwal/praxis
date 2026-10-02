@@ -77,6 +77,10 @@ jobs:
               ):
                   print("A full bundle for this exact source is already pending, running, or successful")
                   return
+              # History pagination must not let an older merge replace a newer queued bundle.
+              if github(f"{root}/git/ref/heads/main")["object"]["sha"] != source:
+                  print("Main advanced while checking build history; skipping the superseded source")
+                  return
               subprocess.run([
                   "gh", "workflow", "run", "bundle_fork.yml", "--repo", repository, "--ref", "main",
                   "-f", f"source_ref={source}", "-f", "build_macos=true", "-f", "build_windows=true",
