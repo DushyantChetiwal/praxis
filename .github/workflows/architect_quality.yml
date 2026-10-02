@@ -229,6 +229,9 @@ jobs:
           cargo test --locked -p agent --lib db::tests::test_architect_state_legacy_migration -- --exact
           cargo test --locked -p acp_thread --lib test_tool_call_liveness
 
+      - name: Test host-specific inventory path rules
+        run: "cargo test --locked -p worktree --lib file_inventory::tests::"
+
       - name: Build remote inventory regressions
         run: cargo test --locked -p project --features test-support --test file_inventory --no-run
 

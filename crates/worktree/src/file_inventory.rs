@@ -17,6 +17,12 @@ pub struct FileInventory {
 }
 
 impl Worktree {
+    /// Validates a canonical, slash-separated path relative to this worktree
+    /// using the owning host's path style, without accessing the filesystem.
+    pub fn validate_file_inventory_path(&self, path: &str) -> Result<()> {
+        validate_inventory_path(path, self.path_style())
+    }
+
     pub fn check_file_inventory_support(&self) -> Result<()> {
         match self {
             Self::Local(local) => anyhow::ensure!(
@@ -188,6 +194,50 @@ async fn with_worktree_connection<T>(
     }
 }
 
+fn validate_inventory_path(path: &str, path_style: PathStyle) -> Result<()> {
+    anyhow::ensure!(
+        !path.is_empty()
+            && !path_style.is_absolute(path)
+            && !path.contains(['\\', '\0'])
+            && path
+                .split('/')
+                .all(|component| !matches!(component, "" | "." | "..")),
+        "Invalid file inventory path {path:?}: use a canonical relative file path with '/' separators, without traversal, literal backslashes, or NUL"
+    );
+    if path_style == PathStyle::Windows {
+        for component in path.split('/') {
+            anyhow::ensure!(
+                !component
+                    .chars()
+                    .any(|character| character.is_control() || "<>:\"|?*".contains(character))
+                    && !component.ends_with([' ', '.']),
+                "Invalid file inventory path {path:?}: Windows paths cannot contain control or reserved characters, or components ending in spaces or dots"
+            );
+            let stem = component
+                .split('.')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_uppercase();
+            anyhow::ensure!(
+                !matches!(
+                    stem.as_str(),
+                    "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+                ) && !stem
+                    .strip_prefix("COM")
+                    .or_else(|| stem.strip_prefix("LPT"))
+                    .is_some_and(|suffix| {
+                        matches!(
+                            suffix,
+                            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+                        )
+                    }),
+                "Invalid file inventory path {path:?}: Windows device names cannot name inventory files"
+            );
+        }
+    }
+    Ok(())
+}
+
 fn inventory_relative_path(path: &Path) -> Result<String> {
     let components = path
         .iter()
@@ -273,18 +323,13 @@ async fn local_file_inventory(
         declared_paths.len() <= MAX_FILE_INVENTORY_ENTRIES,
         "Too many declared paths for project file inventory"
     );
-    // Validate all paths before any join: these may come from an untrusted peer.
-    for path in &declared_paths {
-        let relative = RelPath::from_unix_str(path)?;
-        anyhow::ensure!(
-            !relative.is_empty()
-                && relative.as_unix_str() == path
-                && !path.contains('\\')
-                && !path.contains(':'),
-            "Invalid declared project path: {path}"
-        );
-    }
-    let (fs, root, settings, initial_scan) = worktree.read_with(cx, |tree, _| {
+    let (fs, root, settings, initial_scan, path_style) = worktree.read_with(cx, |tree, _| {
+        // Validate all declarations before any join, even ignored or excluded
+        // paths: these may come from an untrusted peer.
+        for path in &declared_paths {
+            tree.validate_file_inventory_path(path)
+                .with_context(|| format!("Invalid declared file surface path {path:?}"))?;
+        }
         let local = tree
             .as_local()
             .context("The project backend changed during inventory")?;
@@ -293,6 +338,7 @@ async fn local_file_inventory(
             tree.abs_path().to_path_buf(),
             local.settings(),
             local.scan_complete(),
+            tree.path_style(),
         ))
     })?;
     initial_scan.await;
@@ -412,6 +458,9 @@ async fn local_file_inventory(
                     inventory.skipped_paths.push(relative);
                 }
             } else {
+                validate_inventory_path(&relative, path_style).with_context(|| {
+                    format!("Invalid automatic file discovery path {relative:?}")
+                })?;
                 inventory.files.push(relative);
             }
         }
@@ -460,4 +509,56 @@ async fn local_file_inventory(
         Ok::<_, anyhow::Error>(())
     })?;
     Ok(inventory)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inventory_paths_use_the_owning_filesystem_rules() {
+        for path in [
+            "api_downloads/archive.tar.gz:Zone.Identifier",
+            "output/_bench/results (3:11:18, 5:53 PM).csv",
+            "NUL.txt",
+            "COM¹.txt",
+            "LPT²",
+            "file.",
+            "file ",
+            "file\n.rs",
+            "file?.rs",
+            "file|name.rs",
+        ] {
+            validate_inventory_path(path, PathStyle::Unix).unwrap();
+            let error = validate_inventory_path(path, PathStyle::Windows).unwrap_err();
+            assert!(error.to_string().contains(&format!("{path:?}")), "{error}");
+        }
+        for path in ["src/main.rs", "COM10.txt", "ordinary file.rs"] {
+            validate_inventory_path(path, PathStyle::Unix).unwrap();
+            validate_inventory_path(path, PathStyle::Windows).unwrap();
+        }
+    }
+
+    #[test]
+    fn inventory_paths_reject_unsafe_wire_paths_before_joining() {
+        for path_style in [PathStyle::Unix, PathStyle::Windows] {
+            for path in [
+                "",
+                "/absolute.rs",
+                "../outside.rs",
+                "src/../outside.rs",
+                "src/./file.rs",
+                "src//file.rs",
+                "src/file.rs/",
+                "src\\file.rs",
+                "file\0.rs",
+            ] {
+                let error = validate_inventory_path(path, path_style).unwrap_err();
+                assert!(error.to_string().contains(&format!("{path:?}")), "{error}");
+            }
+        }
+        for path in ["C:/outside.rs", "C:outside.rs", "file.rs:stream"] {
+            assert!(validate_inventory_path(path, PathStyle::Windows).is_err());
+        }
+    }
 }
