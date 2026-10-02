@@ -1949,7 +1949,8 @@ impl ArchitectPane {
 
     fn problem_selection(problem: &GraphProblem) -> Selection {
         match problem {
-            GraphProblem::DuplicateNode(id)
+            GraphProblem::InvalidNodeId(id)
+            | GraphProblem::DuplicateNode(id)
             | GraphProblem::Unreachable(id)
             | GraphProblem::Unlocked(id)
             | GraphProblem::EndlessLoop(id)
@@ -1957,9 +1958,10 @@ impl ArchitectPane {
             | GraphProblem::InvalidFileSurface { node: id, .. }
             | GraphProblem::FileSurfaceOverlap { first: id, .. }
             | GraphProblem::InSubplan { node: id, .. } => Selection::Node(id.clone()),
-            GraphProblem::DanglingEdge { edge, .. } | GraphProblem::EmptyCondition(edge) => {
-                Selection::Edge(edge.clone())
-            }
+            GraphProblem::DanglingEdge { edge, .. }
+            | GraphProblem::InvalidEdgeId(edge)
+            | GraphProblem::DuplicateEdge(edge)
+            | GraphProblem::EmptyCondition(edge) => Selection::Edge(edge.clone()),
         }
     }
 

@@ -1,7 +1,7 @@
 use agent_client_protocol::schema::v1 as acp;
-use anyhow::Result;
-use architect::{ProposedEdge, ProposedGraph, ProposedNode, StepModel};
-use gpui::{App, SharedString, Task, WeakEntity};
+use anyhow::{Context as _, Result};
+use architect::{ArchitectGraph, ProposedEdge, ProposedGraph, ProposedNode, StepModel};
+use gpui::{App, Entity, SharedString, Task, WeakEntity};
 use language_model::{LanguageModelRegistry, LanguageModelToolResultContent};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,9 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 /// replacement. Active or resumable runs refuse draft_plan. Do not use redrafting
 /// as recovery from a stopped run; inspect it and use targeted edits or controls.
 /// Reuse the same full node paths for retained steps and send the complete graph.
+/// Step IDs must be non-blank and unique within each graph. Nested graphs have
+/// separate namespaces. Duplicate IDs are rejected before saving, never silently
+/// renamed or used to redirect connections.
 ///
 /// A step the user has **locked** is settled: its goal, rules, capture, file surface and
 /// routing were argued out, often in a chat of its own. Restate a locked step
@@ -57,12 +60,19 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 ///
 /// ### Existing files: `file_surface`
 /// Every step, including parents and nested children, MUST declare existing files
-/// it anticipates modifying, renaming, or deleting as exact `worktree/path` strings.
+/// it anticipates modifying, renaming, or deleting. Use project-relative paths:
+/// {"file_surface":["src/main.rs","README.md"]}. With one open root, paths are
+/// relative to that root. With multiple roots, an unprefixed path must identify
+/// an existing file in exactly one root; otherwise use "backend/src/main.rs",
+/// where backend is an actual open root name, not an absolute host path.
+/// Root-prefixed paths are accepted in either case. The saved plan and inspection
+/// use root/path identities so relative and prefixed aliases cannot hide overlap.
+/// This works the same for local and connected remote projects.
 /// Reading a file alone does not require declaring it. Use explicit [] when no
 /// existing files will be affected; omission and null are not accepted.
-/// Use '/' separators, no directories, globs, absolute paths, '..', duplicates,
-/// or alternate slash/dot spellings. Keep the actual path's case; comparisons
-/// are case-insensitive. A parent's effective surface includes all descendants.
+/// Prefer '/' separators; './' and backslashes are normalized. Do not send
+/// directories, globs, absolute paths, '..', or duplicates. Keep actual case;
+/// comparisons are case-insensitive. A parent's effective surface includes descendants.
 /// Steps that may run concurrently must have disjoint effective surfaces. If
 /// they need the same existing file, serialize them instead of hiding the overlap.
 /// This is a planning declaration, not a write allowlist; it does not prohibit
@@ -74,8 +84,9 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 /// Newly exposed conflicts stop further dispatch while retaining completed
 /// results. Inspect, correct surfaces or serialize work, review/relock, then
 /// resume. This scheduling guard is not filesystem write enforcement.
-/// Invalid or overlapping declarations are retained on the canvas with actionable
-/// problems, but the plan cannot run until corrected. Use targeted
+/// Ambiguous root selection and known directory entries are rejected before saving.
+/// Other invalid or overlapping declarations are retained on the canvas with
+/// actionable problems, but the plan cannot run until corrected. Use targeted
 /// `edit_architect_plan` set_file_surface or connection edits to repair it.
 ///
 /// ### What each step hands on: `capture`
@@ -149,8 +160,9 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct DraftPlanToolInput {
-    /// Complete nonempty replacement node list, not a patch. IDs are local to
-    /// each graph; preserve full paths for retained nodes. Every node, including
+    /// Complete nonempty replacement node list, not a patch. IDs must be non-blank
+    /// and unique within each graph; duplicates are rejected, never renamed.
+    /// Nested graphs have separate ID namespaces. Preserve full paths for retained nodes. Every node, including
     /// nested steps.nodes, requires file_surface (explicit [] if none). Array
     /// order does not declare dependencies; use edges for required ordering.
     pub nodes: Vec<ProposedNode>,
@@ -200,6 +212,104 @@ pub struct DraftPlanTool {
     thread: WeakEntity<Thread>,
 }
 
+pub(crate) fn resolve_file_surface(
+    files: &[String],
+    project: &Entity<project::Project>,
+    cx: &App,
+) -> Result<Vec<String>> {
+    let roots: Vec<_> = project
+        .read(cx)
+        .visible_worktrees(cx)
+        .filter(|worktree| !worktree.read(cx).is_single_file())
+        .map(|worktree| {
+            let snapshot = worktree.read(cx).snapshot();
+            (snapshot.root_name_str().to_string(), snapshot)
+        })
+        .collect();
+    files
+        .iter()
+        .map(|file| {
+            let portable = file.replace('\\', "/");
+            // Keep malformed declarations visible as graph problems, not silently
+            // repair traversal or turn an absolute path into a relative one.
+            if portable.starts_with('/')
+                || ArchitectGraph::normalize_file_surface_path(&format!("project/{portable}")).is_err()
+            {
+                return Ok(file.clone());
+            }
+            let relative = portable
+                .split('/')
+                .filter(|component| !component.is_empty() && *component != ".")
+                .collect::<Vec<_>>()
+                .join("/");
+            let qualified: Vec<_> = roots
+                .iter()
+                .filter_map(|(name, snapshot)| {
+                    let (prefix, suffix) = relative.split_once('/')?;
+                    if name.to_lowercase() == prefix.to_lowercase() {
+                        Some((name, snapshot, suffix))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            anyhow::ensure!(qualified.len() <= 1, "Project root names are ambiguous. Give the roots distinct names before declaring file_surface.");
+            if let Some((name, snapshot, relative)) = qualified.into_iter().next() {
+                let path = util::rel_path::RelPath::from_unix_str(relative)?;
+                anyhow::ensure!(
+                    snapshot.entry_for_path(path).is_none_or(|entry| !entry.is_dir()),
+                    "file_surface entry {file:?} is a directory. List the existing files individually, not the containing folder."
+                );
+                return Ok(format!("{name}/{relative}"));
+            }
+            if let [(name, snapshot)] = roots.as_slice() {
+                let path = util::rel_path::RelPath::from_unix_str(&relative)?;
+                anyhow::ensure!(
+                    snapshot.entry_for_path(path).is_none_or(|entry| !entry.is_dir()),
+                    "file_surface entry {file:?} is a directory. List the existing files individually, not the containing folder."
+                );
+                return Ok(format!("{name}/{relative}"));
+            }
+            let path = util::rel_path::RelPath::from_unix_str(&relative)?;
+            let matching: Vec<_> = roots
+                .iter()
+                .filter(|(_, snapshot)| snapshot.entry_for_path(path).is_some_and(|entry| !entry.is_dir()))
+                .map(|(name, _)| format!("{name}/{relative}"))
+                .collect();
+            anyhow::ensure!(matching.len() == 1,
+                "Cannot resolve file_surface entry {file:?} to one project root. Use root/path, for example {}/{}. Available roots: {}. Paths are relative to the project, never the host filesystem.",
+                roots.first().map(|(name, _)| name.as_str()).unwrap_or("project"), relative,
+                roots.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", "));
+            matching.into_iter().next().ok_or_else(|| anyhow::anyhow!("No project root contains {file:?}"))
+        })
+        .collect()
+}
+
+pub(crate) fn resolve_graph_file_surfaces(
+    graph: &mut ArchitectGraph,
+    project: &Entity<project::Project>,
+    cx: &App,
+) -> Result<()> {
+    for node in &mut graph.nodes {
+        resolve_node_file_surfaces(node, project, cx)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_node_file_surfaces(
+    node: &mut architect::ArchitectNode,
+    project: &Entity<project::Project>,
+    cx: &App,
+) -> Result<()> {
+    if let Some(surface) = &mut node.file_surface {
+        *surface = resolve_file_surface(surface, project, cx)?;
+    }
+    if let Some(subplan) = node.subplan.as_deref_mut() {
+        resolve_graph_file_surfaces(subplan, project, cx)?;
+    }
+    Ok(())
+}
+
 impl DraftPlanTool {
     pub fn new(thread: WeakEntity<Thread>) -> Self {
         Self { thread }
@@ -233,6 +343,26 @@ pub(super) fn plan_validation_problems(graph: &architect::ArchitectGraph) -> Vec
         }
     }
     problems
+}
+
+fn validate_proposed_ids(nodes: &[ProposedNode]) -> Result<()> {
+    let mut ids = std::collections::HashSet::new();
+    for node in nodes {
+        anyhow::ensure!(
+            !node.id.0.trim().is_empty(),
+            "Every step needs a non-blank stable id."
+        );
+        anyhow::ensure!(
+            ids.insert(&node.id),
+            "Step id {:?} is duplicated. Use a unique id for each step in the same graph; IDs are never silently renamed.",
+            node.id.0
+        );
+        if let Some(subplan) = &node.steps {
+            validate_proposed_ids(&subplan.nodes)
+                .with_context(|| format!("Inside step {:?}", node.id.0))?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_proposed_models(nodes: &[ProposedNode], cx: &App) -> Result<()> {
@@ -294,6 +424,9 @@ impl AgentTool for DraftPlanTool {
                     error: "A plan needs at least one step.".into(),
                 });
             }
+            validate_proposed_ids(&input.nodes).map_err(|error| DraftPlanToolOutput::Error {
+                error: format!("{error:#}"),
+            })?;
 
             self.thread
                 .read_with(cx, |thread, cx| {
@@ -312,11 +445,17 @@ impl AgentTool for DraftPlanTool {
                     error: error.to_string(),
                 })?;
 
-            let draft = ProposedGraph {
+            let mut draft = ProposedGraph {
                 nodes: input.nodes,
                 edges: input.edges,
             }
             .into_graph();
+            self.thread
+                .read_with(cx, |thread, cx| {
+                    resolve_graph_file_surfaces(&mut draft, thread.project(), cx)
+                })
+                .map_err(|error| DraftPlanToolOutput::Error { error: error.to_string() })?
+                .map_err(|error| DraftPlanToolOutput::Error { error: error.to_string() })?;
 
             // Drawing over a plan that already exists is an edit, not a fresh
             // start: everything settled since it was first drawn has to survive.
@@ -398,6 +537,192 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[gpui::test]
+    async fn invalid_proposed_ids_leave_the_existing_plan_untouched(cx: &mut gpui::TestAppContext) {
+        let (_connection, _agent, thread, _session) =
+            super::super::architect_run_tool::architect_tool_test_session(cx).await;
+        let mut before = ArchitectGraph::default();
+        before.add_node(architect::ArchitectNode::new("keep", "Keep"));
+        thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(before.clone()), cx);
+            thread.set_session_mode(crate::SessionMode::Architect, cx);
+        });
+        let revision = thread.read_with(cx, |thread, _| thread.architect_revision());
+        for nodes in [
+            json!([{"id":"", "title":"Blank", "file_surface":[]}]),
+            json!([{"id":" \t", "title":"Blank", "file_surface":[]}]),
+            json!([
+                {"id":"same", "title":"First", "file_surface":[]},
+                {"id":"same", "title":"Second", "file_surface":[]}
+            ]),
+            json!([{"id":"parent", "title":"Parent", "file_surface":[], "steps":{"nodes":[
+                {"id":"same", "title":"First", "file_surface":[]},
+                {"id":"same", "title":"Second", "file_surface":[]}
+            ]}}]),
+        ] {
+            let (events, _receiver) = ToolCallEventStream::test();
+            let input = ToolInput::ready(json!({"nodes": nodes}));
+            let error = cx
+                .update(|cx| {
+                    Arc::new(DraftPlanTool::new(thread.downgrade())).run(input, events, cx)
+                })
+                .await
+                .expect_err("invalid IDs must not rewrite the plan");
+            assert!(matches!(error, DraftPlanToolOutput::Error { .. }));
+            thread.read_with(cx, |thread, _| {
+                assert_eq!(thread.architect_graph(), Some(&before));
+                assert_eq!(thread.architect_revision(), revision);
+                assert_eq!(thread.session_mode(), crate::SessionMode::Architect);
+            });
+        }
+    }
+
+    #[test]
+    fn nested_graphs_have_separate_proposed_id_namespaces() {
+        let proposal: ProposedGraph = serde_json::from_value(json!({"nodes": [
+            {"id":"left", "title":"Left", "file_surface":[], "steps":{"nodes":[
+                {"id":"step", "title":"Step", "file_surface":[]}
+            ]}},
+            {"id":"right", "title":"Right", "file_surface":[], "steps":{"nodes":[
+                {"id":"step", "title":"Step", "file_surface":[]}
+            ]}}
+        ]}))
+        .unwrap();
+        validate_proposed_ids(&proposal.nodes).expect("IDs are local to each graph");
+    }
+
+    #[gpui::test]
+    async fn file_surface_paths_resolve_against_project_roots(cx: &mut gpui::TestAppContext) {
+        let (_connection, _agent, thread, _session) =
+            super::super::architect_run_tool::architect_tool_test_session(cx).await;
+        let project = thread.read_with(cx, |thread, _| thread.project().clone());
+        cx.update(|cx| {
+            for input in [
+                "src/main.rs",
+                "./src/main.rs",
+                "src\\main.rs",
+                "a/src/main.rs",
+            ] {
+                assert_eq!(
+                    resolve_file_surface(&[input.into()], &project, cx).expect("relative path"),
+                    vec!["a/src/main.rs"]
+                );
+            }
+            assert_eq!(
+                resolve_file_surface(&["README.md".into()], &project, cx).expect("root file"),
+                vec!["a/README.md"]
+            );
+            for invalid in ["../outside.rs", "/a/main.rs", "C:/project/main.rs"] {
+                assert_eq!(
+                    resolve_file_surface(&[invalid.into()], &project, cx)
+                        .expect("retain invalid declaration"),
+                    vec![invalid]
+                );
+            }
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/",
+            json!({
+                "backend": {"src": {"main.rs": "", "server.rs": ""}},
+                "frontend": {"src": {"main.rs": ""}}
+            }),
+        )
+        .await;
+        let project = project::Project::test(
+            fs,
+            [
+                std::path::Path::new("/backend"),
+                std::path::Path::new("/frontend"),
+            ],
+            cx,
+        )
+        .await;
+        cx.update(|cx| {
+            assert_eq!(
+                resolve_file_surface(&["src/server.rs".into()], &project, cx).expect("unique file"),
+                vec!["backend/src/server.rs"]
+            );
+            assert_eq!(
+                resolve_file_surface(&["frontend/src/main.rs".into()], &project, cx)
+                    .expect("qualified file"),
+                vec!["frontend/src/main.rs"]
+            );
+            let error = resolve_file_surface(&["src/main.rs".into()], &project, cx)
+                .expect_err("ambiguous roots");
+            assert!(error.to_string().contains("Use root/path"));
+            assert!(resolve_file_surface(&["missing.rs".into()], &project, cx).is_err());
+            let error = resolve_file_surface(&["backend/src".into()], &project, cx)
+                .expect_err("directories cannot stand in for files");
+            assert!(error.to_string().contains("is a directory"));
+        });
+    }
+
+    #[gpui::test]
+    async fn relative_surfaces_use_remote_worktree_paths(
+        cx: &mut gpui::TestAppContext,
+        host_cx: &mut gpui::TestAppContext,
+    ) {
+        let (_connection, _agent, _thread, _session) =
+            super::super::architect_run_tool::architect_tool_test_session(cx).await;
+        let client_fs = fs::FakeFs::new(cx.executor());
+        client_fs.insert_tree("/", json!({"client-only": {}})).await;
+        let host_fs = fs::FakeFs::new(host_cx.executor());
+        host_fs
+            .insert_tree("/", json!({"remote": {"src": {"main.rs": ""}}}))
+            .await;
+        let (project, _host) = project::Project::test_remote_worktrees(
+            client_fs,
+            host_fs,
+            [std::path::Path::new("/remote")],
+            cx,
+            host_cx,
+        )
+        .await;
+        cx.update(|cx| {
+            assert_eq!(
+                resolve_file_surface(&["src/main.rs".into()], &project, cx)
+                    .expect("remote-relative path"),
+                vec!["remote/src/main.rs"]
+            );
+            for directory in ["src", "remote/src"] {
+                let error = resolve_file_surface(&[directory.into()], &project, cx)
+                    .expect_err("remote directory is not a file surface");
+                assert!(error.to_string().contains("is a directory"));
+            }
+        });
+    }
+
+    #[gpui::test]
+    async fn relative_draft_surfaces_are_stored_qualified_and_cannot_hide_conflicts(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_connection, _agent, thread, _session) =
+            super::super::architect_run_tool::architect_tool_test_session(cx).await;
+        let (events, _receiver) = ToolCallEventStream::test();
+        let input = ToolInput::ready(json!({"nodes": [
+            {"id": "left", "title": "Left", "file_surface": ["src/main.rs"]},
+            {"id": "right", "title": "Right", "file_surface": ["a/src/main.rs"]}
+        ]}));
+        let output = cx
+            .update(|cx| Arc::new(DraftPlanTool::new(thread.downgrade())).run(input, events, cx))
+            .await
+            .expect("retain conflicting draft");
+        let DraftPlanToolOutput::Success { problems, .. } = output else {
+            panic!("expected draft");
+        };
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("may run concurrently"))
+        );
+        thread.read_with(cx, |thread, _| {
+            for node in &thread.architect_graph().expect("graph").nodes {
+                assert_eq!(node.file_surface, Some(vec!["a/src/main.rs".into()]));
+            }
+        });
+    }
+
     #[test]
     fn model_description_and_schema_keep_drafting_contracts() {
         let description = <DraftPlanTool as AgentTool>::description();
@@ -410,6 +735,10 @@ mod tests {
             "not a resumable update",
             "empty rules",
             "file_surface always replaces",
+            "project-relative paths",
+            "README.md",
+            "multiple roots",
+            "connected remote projects",
             "Self-loops are supported",
             "from == to",
             "counts edge traversals",
@@ -506,13 +835,13 @@ mod tests {
             super::super::architect_run_tool::architect_tool_test_session(cx).await;
         for (surface, expected_problem) in [
             (json!(["../outside.rs"]), "invalid file surface"),
-            (json!(["project/shared.rs"]), "may run concurrently"),
+            (json!(["a/shared.rs"]), "may run concurrently"),
         ] {
             let input = ToolInput::ready(json!({
                 "nodes": [
                     {"id": "start", "title": "Start", "file_surface": []},
                     {"id": "left", "title": "Left", "file_surface": surface},
-                    {"id": "right", "title": "Right", "file_surface": ["project/shared.rs"]},
+                    {"id": "right", "title": "Right", "file_surface": ["a/shared.rs"]},
                     {"id": "join", "title": "Join", "file_surface": []}
                 ],
                 "edges": [
@@ -552,7 +881,7 @@ mod tests {
                     &graph,
                     &[architect::GraphEdit::SetFileSurface {
                         path: architect::NodePath::root("left".into()),
-                        file_surface: vec!["project/left.rs".into()],
+                        file_surface: vec!["a/left.rs".into()],
                     }],
                 )
                 .expect("surface repair");

@@ -26,7 +26,7 @@ use buffer_diff::{
 };
 use collections::{BTreeSet, HashMap, HashSet};
 use encoding_rs;
-use fs::{FakeFs, PathEventKind, RealFs};
+use fs::{FakeFs, Fs as _, PathEventKind, RealFs};
 use futures::{FutureExt as _, StreamExt, channel::oneshot, future};
 use git::{
     GitHostingProviderRegistry,

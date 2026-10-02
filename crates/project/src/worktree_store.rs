@@ -969,6 +969,11 @@ impl WorktreeStore {
         };
         self.worktrees.push(handle);
 
+        if matches!(self.state, WorktreeStoreState::Remote { .. }) {
+            worktree.update(cx, |worktree, cx| {
+                worktree.negotiate_file_inventory(cx).detach();
+            });
+        }
         cx.emit(WorktreeStoreEvent::WorktreeAdded(worktree.clone()));
         self.send_project_updates(cx);
 
@@ -1443,10 +1448,18 @@ impl WorktreeStore {
         envelope: TypedEnvelope<proto::ExpandProjectEntry>,
         mut cx: AsyncApp,
     ) -> Result<proto::ExpandProjectEntryResponse> {
-        let entry_id = ProjectEntryId::from_proto(envelope.payload.entry_id);
         let worktree = this
-            .update(&mut cx, |this, cx| this.worktree_for_entry(entry_id, cx))
-            .context("invalid request")?;
+            .update(&mut cx, |this, cx| {
+                if let Some(inventory) = &envelope.payload.file_inventory {
+                    this.worktree_for_id(WorktreeId::from_proto(inventory.worktree_id), cx)
+                } else {
+                    this.worktree_for_entry(
+                        ProjectEntryId::from_proto(envelope.payload.entry_id),
+                        cx,
+                    )
+                }
+            })
+            .context("The project folder is no longer shared. Reconnect and retry.")?;
         Worktree::handle_expand_entry(worktree, envelope.payload, cx).await
     }
 

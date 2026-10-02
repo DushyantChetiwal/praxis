@@ -146,9 +146,9 @@ use util::{
 };
 use worktree::{CreatedEntry, Snapshot, Traversal};
 pub use worktree::{
-    Entry, EntryKind, FS_WATCH_LATENCY, File, LocalWorktree, PathChange, ProjectEntryId,
-    UpdatedEntriesSet, UpdatedGitRepositoriesSet, Worktree, WorktreeId, WorktreeSettings,
-    discover_root_repo_common_dir,
+    Entry, EntryKind, FS_WATCH_LATENCY, File, LocalWorktree, MAX_FILE_INVENTORY_ENTRIES,
+    PathChange, ProjectEntryId, UpdatedEntriesSet, UpdatedGitRepositoriesSet, Worktree, WorktreeId,
+    WorktreeSettings, discover_root_repo_common_dir,
 };
 use worktree_store::{WorktreeStore, WorktreeStoreEvent};
 
@@ -2108,6 +2108,76 @@ impl Project {
         cx: &mut gpui::TestAppContext,
     ) -> Entity<Project> {
         Self::test_project(fs, root_paths, false, cx).await
+    }
+
+    /// Connects a real remote project to a filesystem-owning project over the
+    /// mock transport. Only the worktree protocol is served by this fixture.
+    #[cfg(feature = "test-support")]
+    pub async fn test_remote_worktrees(
+        client_fs: Arc<dyn Fs>,
+        host_fs: Arc<dyn Fs>,
+        root_paths: impl IntoIterator<Item = &Path>,
+        cx: &mut gpui::TestAppContext,
+        host_cx: &mut gpui::TestAppContext,
+    ) -> (Entity<Project>, Entity<Project>) {
+        use clock::FakeSystemClock;
+
+        cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        host_cx.update(|cx| {
+            if !cx.has_global::<SettingsStore>() {
+                let settings = SettingsStore::test(cx);
+                cx.set_global(settings);
+            }
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+        });
+        let host = Self::test(host_fs, [], host_cx).await;
+        let (options, host_client, connect_guard) = RemoteClient::fake_server(cx, host_cx);
+        let host_store = host.read_with(host_cx, |host, _| host.worktree_store());
+        WorktreeStore::init(&host_client);
+        host_client.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &host_store);
+        host_client.add_request_handler(
+            host.downgrade(),
+            |_, _: TypedEnvelope<proto::Ping>, _| async { Ok(proto::Ack {}) },
+        );
+        drop(connect_guard);
+        let remote = RemoteClient::connect_mock(options, cx).await;
+        let project = cx.update(|cx| {
+            let client = Client::new(
+                Arc::new(FakeSystemClock::new()),
+                http_client::FakeHttpClient::with_404_response(),
+                cx,
+            );
+            let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
+            Self::init(&client, cx);
+            Self::remote(
+                remote,
+                client,
+                NodeRuntime::unavailable(),
+                user_store,
+                Arc::new(LanguageRegistry::test(cx.background_executor().clone())),
+                client_fs,
+                false,
+                cx,
+            )
+        });
+        host_store.update(host_cx, |store, cx| {
+            store.shared(REMOTE_SERVER_PROJECT_ID, host_client, cx);
+        });
+        // Allocate roots only after sharing so their ids come from the client,
+        // just as they do on a real remote server.
+        for path in root_paths {
+            let (worktree, _) = host
+                .update(host_cx, |host, cx| {
+                    host.find_or_create_worktree(path, true, cx)
+                })
+                .await
+                .unwrap();
+            worktree
+                .read_with(host_cx, |tree, _| tree.as_local().unwrap().scan_complete())
+                .await;
+        }
+        cx.run_until_parked();
+        (project, host)
     }
 
     #[cfg(feature = "test-support")]

@@ -224,9 +224,16 @@ jobs:
       - name: Test Architect scheduling and durable history
         run: |
           cargo test --locked -p agent --lib architect_runner::checkpoint_tests::
+
           cargo test --locked -p agent --lib internal_tests::architect_persistence_tests::
           cargo test --locked -p agent --lib db::tests::test_architect_state_legacy_migration -- --exact
           cargo test --locked -p acp_thread --lib test_tool_call_liveness
+
+      - name: Build remote inventory regressions
+        run: cargo test --locked -p project --features test-support --test file_inventory --no-run
+
+      - name: Test remote inventory regressions
+        run: timeout --kill-after=10s 120s cargo test --locked -p project --features test-support --test file_inventory
 
       - name: Test context limits and compaction
         run: |
@@ -295,6 +302,7 @@ jobs:
         run: |
           cargo test --locked -p remote --lib transport::tests::
           cargo test --locked -p remote --lib transport::wsl::tests::
+          cargo test --locked -p remote --lib remote_client::tests::test_channel_client_
 
       - name: Test MCP OAuth client registration
         run: "cargo test --locked -p context_server --lib oauth::"

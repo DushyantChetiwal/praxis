@@ -29,8 +29,11 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 /// - `capture` is what this step's summary must contain. The steps that follow
 ///   it are shown that summary and nothing else about this step, so name the
 ///   specifics they will need rather than saying "what happened".
-/// - `file_surface` replaces the existing-file declaration: exact worktree/path
-///   file paths, or explicit [] when no existing files are anticipated. Omit it
+/// - `file_surface` replaces the existing-file declaration: project-relative
+///   paths such as ["src/main.rs","README.md"], or [] when no existing files
+///   are anticipated. For multiple roots, ambiguous paths need a root prefix,
+///   such as "backend/src/main.rs". Saved declarations use root/path identities.
+///   Local and connected remote projects use the same path rules. Omit it
 ///   to preserve the declaration; null is not a declaration. This is planning
 ///   information for concurrency checks, not a write allowlist. Parallel steps,
 ///   including nested children, must have disjoint surfaces.
@@ -74,10 +77,13 @@ pub struct RefineStepToolInput {
     /// Omit or null to preserve; "" explicitly clears the summary requirements.
     #[serde(default)]
     pub capture: Option<String>,
-    /// Complete existing-file surface as worktree/path files, not directories or
-    /// globs. Omit to preserve; [] explicitly anticipates no existing files;
+    /// Complete existing-file surface: ["src/main.rs","README.md"] relative to
+    /// the project root, or root-prefixed paths for ambiguous multi-root files.
+    /// No directories, globs, absolute paths, or '..'. Omit to preserve;
+    /// [] explicitly anticipates no existing files;
     /// null is rejected. This replaces, not appends, and imposes no write allowlist.
-    /// Invalid or overlapping declarations are saved with actionable problems.
+    /// Ambiguous roots and known directories are rejected without changing the plan.
+    /// Other invalid or overlapping declarations are saved with actionable problems.
     #[serde(
         default,
         deserialize_with = "deserialize_file_surface_update",
@@ -306,7 +312,7 @@ impl AgentTool for RefineStepTool {
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
         cx.spawn(async move |cx| {
-            let input = input
+            let mut input = input
                 .recv()
                 .await
                 .map_err(|error| RefineStepToolOutput::Error {
@@ -331,6 +337,11 @@ impl AgentTool for RefineStepTool {
                                 error: error.to_string(),
                             }
                         })?;
+                    }
+                    if let Some(surface) = &mut input.file_surface {
+                        *surface = super::draft_plan_tool::resolve_file_surface(
+                            surface, thread.project(), cx,
+                        ).map_err(|error| RefineStepToolOutput::Error { error: error.to_string() })?;
                     }
                     Ok(thread.update_architect_graph(
                         |graph| {
@@ -371,6 +382,43 @@ mod tests {
     use super::*;
     use architect::ArchitectNode;
     use serde_json::json;
+
+    #[gpui::test]
+    async fn refinement_resolves_project_relative_surface(cx: &mut gpui::TestAppContext) {
+        let (_connection, _agent, thread, _session) =
+            super::super::architect_run_tool::architect_tool_test_session(cx).await;
+        thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(
+                Some(ArchitectGraph {
+                    nodes: vec![ArchitectNode::new("step", "Step")],
+                    edges: vec![],
+                }),
+                cx,
+            );
+        });
+        let (events, _receiver) = ToolCallEventStream::test();
+        let input = ToolInput::ready(json!({"file_surface": ["README.md", "src/main.rs"]}));
+        cx.update(|cx| {
+            Arc::new(RefineStepTool::new(
+                thread.downgrade(),
+                NodePath::root("step".into()),
+            ))
+            .run(input, events, cx)
+        })
+        .await
+        .expect("refine relative surface");
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(
+                thread
+                    .architect_graph()
+                    .expect("graph")
+                    .node(&"step".into())
+                    .expect("step")
+                    .file_surface,
+                Some(vec!["a/README.md".into(), "a/src/main.rs".into()])
+            );
+        });
+    }
 
     #[test]
     fn model_description_and_schema_keep_partial_update_contracts() {

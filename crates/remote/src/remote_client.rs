@@ -1024,6 +1024,10 @@ impl RemoteClient {
             .unwrap_or(ConnectionState::Disconnected)
     }
 
+    pub fn is_connected(&self) -> bool {
+        self.connection_state() == ConnectionState::Connected
+    }
+
     pub fn is_disconnected(&self) -> bool {
         self.connection_state() == ConnectionState::Disconnected
     }
@@ -1444,6 +1448,133 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_channel_client_cancelled_requests_release_response_channels(
+        cx: &mut TestAppContext,
+    ) {
+        let (incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
+        let client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
+        let _drain_outgoing = cx
+            .executor()
+            .spawn(async move { while outgoing_rx.next().await.is_some() {} });
+
+        for polled in [false, true] {
+            let request_id = client.next_message_id.load(SeqCst);
+            let request = client.request_dynamic(
+                proto::Test { id: 0 }.into_envelope(0, None, None),
+                "Test",
+                true,
+            );
+            assert_eq!(client.response_channels.lock().len(), 1);
+            if polled {
+                let task = cx.executor().spawn(request);
+                cx.run_until_parked();
+                drop(task);
+            } else {
+                drop(request);
+            }
+            cx.run_until_parked();
+            assert!(client.response_channels.lock().is_empty());
+
+            let next_id = client.next_message_id.load(SeqCst);
+            let next = client.request_dynamic(
+                proto::Test { id: 1 }.into_envelope(0, None, None),
+                "Test",
+                true,
+            );
+            incoming_tx
+                .unbounded_send(proto::Test { id: 99 }.into_envelope(
+                    100 + request_id,
+                    Some(request_id),
+                    None,
+                ))
+                .unwrap();
+            incoming_tx
+                .unbounded_send(proto::Test { id: 42 }.into_envelope(
+                    100 + next_id,
+                    Some(next_id),
+                    None,
+                ))
+                .unwrap();
+            assert_eq!(
+                proto::Test::from_envelope(next.await.unwrap()).unwrap(),
+                proto::Test { id: 42 }
+            );
+            assert!(client.response_channels.lock().is_empty());
+        }
+    }
+
+    #[gpui::test]
+    async fn test_channel_client_drop_wakes_pending_request(cx: &mut TestAppContext) {
+        let (_incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, _outgoing_rx) = mpsc::unbounded::<Envelope>();
+        let client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
+        let request = client.request_dynamic(
+            proto::Test { id: 0 }.into_envelope(0, None, None),
+            "Test",
+            true,
+        );
+        drop(client);
+        assert!(
+            request
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("connection lost")
+        );
+    }
+
+    #[gpui::test]
+    async fn test_channel_client_failed_send_releases_response_channel(cx: &mut TestAppContext) {
+        let (_incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, outgoing_rx) = mpsc::unbounded::<Envelope>();
+        drop(outgoing_rx);
+        let client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
+        let error = client
+            .request_dynamic(
+                proto::Test { id: 0 }.into_envelope(0, None, None),
+                "Test",
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("failed to send"));
+        assert!(client.response_channels.lock().is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_channel_client_unpolled_stream_request_releases_response_channel(
+        cx: &mut TestAppContext,
+    ) {
+        let (_incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, _outgoing_rx) = mpsc::unbounded::<Envelope>();
+        let client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
+        let request = client
+            .request_stream_dynamic(proto::Test { id: 0 }.into_envelope(0, None, None), "Test");
+        assert_eq!(client.stream_response_channels.lock().len(), 1);
+        drop(request);
+        assert!(client.stream_response_channels.lock().is_empty());
+    }
+
+    #[gpui::test]
+    async fn test_channel_client_drop_closes_response_stream(cx: &mut TestAppContext) {
+        let (_incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, _outgoing_rx) = mpsc::unbounded::<Envelope>();
+        let client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test-client", false));
+        let mut stream = client
+            .request_stream_dynamic(proto::Test { id: 0 }.into_envelope(0, None, None), "Test")
+            .await
+            .unwrap();
+        drop(client);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[gpui::test]
     async fn test_channel_client_request_stream_terminates_on_error(cx: &mut TestAppContext) {
         let (incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
         let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
@@ -1665,7 +1796,8 @@ pub trait RemoteConnection: Send + Sync {
     fn simulate_disconnect(&self, _: &AsyncApp) {}
 }
 
-type ResponseChannels = Mutex<HashMap<MessageId, oneshot::Sender<(Envelope, oneshot::Sender<()>)>>>;
+type ResponseChannels =
+    Arc<Mutex<HashMap<MessageId, oneshot::Sender<(Envelope, oneshot::Sender<()>)>>>>;
 type StreamResponseChannels =
     Arc<Mutex<HashMap<MessageId, UnboundedSender<(Result<Envelope>, oneshot::Sender<()>)>>>>;
 
@@ -1977,9 +2109,20 @@ impl ChannelClient {
     ) -> impl 'static + Future<Output = Result<proto::Envelope>> {
         envelope.id = self.next_message_id.fetch_add(1, SeqCst);
         let (tx, rx) = oneshot::channel();
-        let mut response_channels_lock = self.response_channels.lock();
-        response_channels_lock.insert(MessageId(envelope.id), tx);
-        drop(response_channels_lock);
+        let request_id = MessageId(envelope.id);
+        self.response_channels.lock().insert(request_id, tx);
+        // Register cleanup before returning the future: callers may drop it
+        // without ever polling, including when a timeout wins the race.
+        let cleanup = util::defer({
+            // A pending request must not keep its own sender alive after the
+            // client is dropped, or connection loss would never wake it.
+            let response_channels = Arc::downgrade(&self.response_channels);
+            move || {
+                if let Some(response_channels) = response_channels.upgrade() {
+                    response_channels.lock().remove(&request_id);
+                }
+            }
+        });
 
         let result = if use_buffer {
             self.send_buffered(envelope)
@@ -1987,6 +2130,7 @@ impl ChannelClient {
             self.send_unbuffered(envelope)
         };
         async move {
+            let _cleanup = cleanup;
             if let Err(error) = &result {
                 log::error!("failed to send message: {error}");
                 anyhow::bail!("failed to send message: {error}");
@@ -2008,8 +2152,15 @@ impl ChannelClient {
         envelope.id = self.next_message_id.fetch_add(1, SeqCst);
         let message_id = MessageId(envelope.id);
         let (tx, rx) = mpsc::unbounded();
-        let stream_response_channels = self.stream_response_channels.clone();
-        stream_response_channels.lock().insert(message_id, tx);
+        self.stream_response_channels.lock().insert(message_id, tx);
+        let cleanup_stream_response_channel = util::defer({
+            let stream_response_channels = Arc::downgrade(&self.stream_response_channels);
+            move || {
+                if let Some(stream_response_channels) = stream_response_channels.upgrade() {
+                    stream_response_channels.lock().remove(&message_id);
+                }
+            }
+        });
 
         let result = self.send_buffered(envelope);
         async move {
@@ -2017,13 +2168,6 @@ impl ChannelClient {
                 log::error!("failed to send message: {error}");
                 anyhow::bail!("failed to send message: {error}");
             }
-
-            let cleanup_stream_response_channel = util::defer({
-                let stream_response_channels = stream_response_channels.clone();
-                move || {
-                    stream_response_channels.lock().remove(&message_id);
-                }
-            });
 
             Ok(rx
                 .filter_map(move |(response, _barrier)| {
@@ -2065,8 +2209,10 @@ impl ChannelClient {
 
     fn send_unbuffered(&self, mut envelope: proto::Envelope) -> Result<()> {
         envelope.ack_id = Some(self.max_received.load(SeqCst));
-        self.outgoing_tx.lock().unbounded_send(envelope).ok();
-        Ok(())
+        self.outgoing_tx
+            .lock()
+            .unbounded_send(envelope)
+            .context("Remote transport closed before the request could be sent")
     }
 }
 

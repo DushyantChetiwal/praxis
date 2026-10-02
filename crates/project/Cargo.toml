@@ -17,6 +17,11 @@ name = "integration"
 required-features = ["test-support"]
 path = "tests/integration/project_tests.rs"
 
+[[test]]
+name = "file_inventory"
+required-features = ["test-support"]
+path = "tests/integration/file_inventory.rs"
+
 [features]
 test-support = [
     "buffer_diff/test-support",

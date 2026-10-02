@@ -1,3 +1,4 @@
+mod file_inventory;
 mod ignore;
 mod worktree_settings;
 
@@ -6,6 +7,7 @@ use anyhow::{Context as _, Result, anyhow};
 use clock::ReplicaId;
 use collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use encoding_rs::Encoding;
+pub use file_inventory::{FileInventory, MAX_FILE_INVENTORY_ENTRIES};
 use fs::{
     Fs, MTime, PathEvent, PathEventKind, RemoveOptions, TrashId, Watcher, copy_recursive,
     read_dir_items,
@@ -177,6 +179,9 @@ pub struct RemoteWorktree {
     replica_id: ReplicaId,
     visible: bool,
     disconnected: bool,
+    disconnection: (watch::Sender<bool>, watch::Receiver<bool>),
+    file_inventory_support: Option<Result<(), String>>,
+    file_inventory_probe: Option<futures::future::Shared<Task<()>>>,
     received_initial_update: bool,
 }
 
@@ -665,6 +670,9 @@ impl Worktree {
                 snapshot_subscriptions: Default::default(),
                 visible: worktree.visible,
                 disconnected: false,
+                disconnection: watch::channel_with(false),
+                file_inventory_support: None,
+                file_inventory_probe: None,
                 received_initial_update: false,
             };
 
@@ -1098,6 +1106,7 @@ impl Worktree {
                 let response = this.client.request(proto::ExpandProjectEntry {
                     project_id: this.project_id,
                     entry_id: entry_id.to_proto(),
+                    file_inventory: None,
                 });
                 Some(cx.spawn(async move |this, cx| {
                     let response = response.await?;
@@ -1244,6 +1253,40 @@ impl Worktree {
         request: proto::ExpandProjectEntry,
         mut cx: AsyncApp,
     ) -> Result<proto::ExpandProjectEntryResponse> {
+        let request_project_id = request.project_id;
+        if let Some(request) = request.file_inventory {
+            if request.check_support_only {
+                this.update(&mut cx, |this, cx| this.negotiate_file_inventory(cx))
+                    .await;
+            }
+            this.read_with(&cx, |this, _| this.check_file_inventory_support())?;
+            let inventory = if request.check_support_only {
+                None
+            } else {
+                let inventory = this
+                    .update(&mut cx, |this, cx| {
+                        this.file_inventory_internal(
+                            request.declared_paths,
+                            request.include_private
+                                && request_project_id == proto::REMOTE_SERVER_PROJECT_ID,
+                            cx,
+                        )
+                    })
+                    .await?;
+                Some(proto::WorktreeFileInventory {
+                    root_path: inventory.root_path.to_string_lossy().into_owned(),
+                    files: inventory.files,
+                    skipped_paths: inventory.skipped_paths,
+                    canonical_paths: inventory.canonical_paths.into_iter().collect(),
+                    entry_count: inventory.entry_count as u64,
+                })
+            };
+            return Ok(proto::ExpandProjectEntryResponse {
+                worktree_scan_id: this.read_with(&cx, |this, _| this.scan_id()) as u64,
+                supports_file_inventory: true,
+                file_inventory: inventory,
+            });
+        }
         let task = this.update(&mut cx, |this, cx| {
             this.expand_entry(ProjectEntryId::from_proto(request.entry_id), cx)
         });
@@ -1252,6 +1295,8 @@ impl Worktree {
         let scan_id = this.read_with(&cx, |this, _| this.scan_id());
         Ok(proto::ExpandProjectEntryResponse {
             worktree_scan_id: scan_id as u64,
+            supports_file_inventory: false,
+            file_inventory: None,
         })
     }
 
@@ -2278,6 +2323,21 @@ impl RemoteWorktree {
         self.updates_tx.take();
         self.snapshot_subscriptions.clear();
         self.disconnected = true;
+        *self.disconnection.0.borrow_mut() = true;
+    }
+
+    fn wait_for_disconnection(&self) -> impl Future<Output = ()> + use<> {
+        let mut receiver = self.disconnection.1.clone();
+        async move {
+            if *receiver.borrow() {
+                return;
+            }
+            while let Some(disconnected) = receiver.recv().await {
+                if disconnected {
+                    return;
+                }
+            }
+        }
     }
 
     pub fn update_from_remote(&self, update: proto::UpdateWorktree) {

@@ -175,6 +175,30 @@ impl Render for DraggedArchitectDivider {
 
 const DIVIDER_HIT_WIDTH: f32 = 6.0;
 
+fn run_bar_style(outcome: Option<&RunOutcome>, cx: &App) -> (Hsla, Hsla, Color, IconName) {
+    let status = cx.theme().status();
+    match outcome {
+        Some(outcome) if outcome.is_success() => (
+            status.success_border,
+            status.success_background,
+            Color::Success,
+            IconName::Check,
+        ),
+        Some(_) => (
+            status.warning_border,
+            status.warning_background,
+            Color::Warning,
+            IconName::Warning,
+        ),
+        None => (
+            status.info_border,
+            status.info_background,
+            Color::Info,
+            IconName::PlayFilled,
+        ),
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ArchitectStatusItem {
     active: Option<WeakEntity<ArchitectPane>>,
@@ -474,6 +498,9 @@ impl ArchitectPane {
             count => format!("Select the first of {count} things that need attention").into(),
         };
         let latest_run = self.thread.read(cx).architect_run();
+        let run_needs_attention = latest_run
+            .and_then(|run| run.outcome.as_ref())
+            .is_some_and(|outcome| !outcome.is_success());
         let run_status: Option<SharedString> = latest_run
             .filter(|run| !run.result_dismissed())
             .and_then(|run| match &run.outcome {
@@ -615,28 +642,44 @@ impl ArchitectPane {
                                     .border_1()
                                     .border_color(if running {
                                         cx.theme().status().info_border
+                                    } else if run_needs_attention {
+                                        cx.theme().status().warning_border
                                     } else {
                                         cx.theme().colors().border
                                     })
                                     .bg(if running {
                                         cx.theme().status().info_background
+                                    } else if run_needs_attention {
+                                        cx.theme().status().warning_background
                                     } else {
                                         cx.theme().colors().element_background
                                     })
                                     .child(
                                         Icon::new(if running {
                                             IconName::PlayFilled
+                                        } else if run_needs_attention {
+                                            IconName::Warning
                                         } else {
                                             IconName::Check
                                         })
                                         .size(IconSize::XSmall)
-                                        .color(if running { Color::Info } else { Color::Muted }),
+                                        .color(
+                                            if running {
+                                                Color::Info
+                                            } else if run_needs_attention {
+                                                Color::Warning
+                                            } else {
+                                                Color::Muted
+                                            },
+                                        ),
                                     )
                                     .child(
                                         Label::new(truncate(&status, 34))
                                             .size(LabelSize::Small)
                                             .color(if running {
                                                 Color::Info
+                                            } else if run_needs_attention {
+                                                Color::Warning
                                             } else {
                                                 Color::Muted
                                             }),
@@ -1404,11 +1447,17 @@ impl ArchitectPane {
             .map(ArchitectGraph::step_count_deeply)
             .unwrap_or_default()
             .max(1);
-        let completed = run
-            .history()
-            .iter()
-            .filter(|step| !step.is_running())
-            .count();
+        let succeeded = run.outcome.as_ref().is_some_and(RunOutcome::is_success);
+        // Visits do not include composite containers or skipped branches. A
+        // successful run has resolved the whole plan, regardless of visit count.
+        let completed = if succeeded {
+            total
+        } else {
+            run.history()
+                .iter()
+                .filter(|step| !step.is_running())
+                .count()
+        };
         let progress = (completed as f32 / total as f32).clamp(0.0, 1.0);
         let elapsed = run
             .history()
@@ -1426,9 +1475,7 @@ impl ArchitectPane {
                 steps => format!("Running {} steps", steps.len()).into(),
             },
         };
-        let succeeded = run.outcome.as_ref().is_some_and(RunOutcome::is_success);
-        let cancelled = matches!(run.outcome.as_ref(), Some(RunOutcome::Cancelled));
-        let failed = run.outcome.is_some() && !succeeded && !cancelled;
+
         let latest_output: Option<SharedString> = run.history().iter().rev().find_map(|step| {
             step.summary
                 .as_ref()
@@ -1436,31 +1483,7 @@ impl ArchitectPane {
         });
         let finished = !run.is_running();
         let remote_workflow_url = run.remote_workflow_url().map(str::to_owned);
-        let (border, background, color) = if failed {
-            (
-                cx.theme().status().error_border,
-                cx.theme().status().error_background,
-                Color::Error,
-            )
-        } else if cancelled {
-            (
-                cx.theme().status().warning_border,
-                cx.theme().status().warning_background,
-                Color::Warning,
-            )
-        } else if succeeded {
-            (
-                cx.theme().status().success_border,
-                cx.theme().status().success_background,
-                Color::Success,
-            )
-        } else {
-            (
-                cx.theme().status().info_border,
-                cx.theme().status().info_background,
-                Color::Info,
-            )
-        };
+        let (border, background, color, icon) = run_bar_style(run.outcome.as_ref(), cx);
 
         Some(
             h_flex()
@@ -1473,17 +1496,7 @@ impl ArchitectPane {
                 .border_b_1()
                 .border_color(border)
                 .bg(background)
-                .child(
-                    Icon::new(if run.is_running() {
-                        IconName::PlayFilled
-                    } else if succeeded {
-                        IconName::Check
-                    } else {
-                        IconName::Warning
-                    })
-                    .size(IconSize::Small)
-                    .color(color),
-                )
+                .child(Icon::new(icon).size(IconSize::Small).color(color))
                 .child(
                     v_flex()
                         .flex_1()
@@ -1513,17 +1526,13 @@ impl ArchitectPane {
                                 .h(px(4.0))
                                 .rounded_full()
                                 .bg(cx.theme().colors().border_variant)
-                                .child(div().w(px(220.0 * progress)).h_full().rounded_full().bg(
-                                    if succeeded {
-                                        cx.theme().status().success
-                                    } else if failed {
-                                        cx.theme().status().error
-                                    } else if cancelled {
-                                        cx.theme().status().warning
-                                    } else {
-                                        cx.theme().status().info
-                                    },
-                                )),
+                                .child(
+                                    div()
+                                        .w(px(220.0 * progress))
+                                        .h_full()
+                                        .rounded_full()
+                                        .bg(color.color(cx)),
+                                ),
                         ),
                 )
                 .child(
@@ -3274,6 +3283,256 @@ impl Item for ArchitectPane {
 mod tests {
     use super::super::geometry::NODE_HEIGHT;
     use super::*;
+
+    struct RunBarTestView {
+        pane: Entity<ArchitectPane>,
+        _workspace: Entity<workspace::Workspace>,
+    }
+
+    impl Render for RunBarTestView {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.pane.update(cx, |pane, cx| {
+                v_flex()
+                    .w_full()
+                    .child(pane.render_plan_header(false, cx))
+                    .children(pane.render_run_bar(cx))
+            })
+        }
+    }
+
+    #[gpui::test]
+    async fn run_failure_bar_uses_warning_tokens_and_preserves_other_states(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::path::Path;
+
+        use acp_thread::AgentConnection as _;
+        use gpui::Task;
+        use project::{FakeFs, Project};
+        use util::path_list::PathList;
+        use workspace::Workspace;
+
+        crate::conversation_view::tests::init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/", serde_json::json!({ "a": {} })).await;
+        let project = Project::test(fs.clone(), [Path::new("/a")], cx).await;
+        let thread_store = cx.update(|cx| agent::ThreadStore::global(cx));
+        let native_agent =
+            cx.update(|cx| agent::NativeAgent::new(thread_store, agent::Templates::new(), fs, cx));
+        let connection = Rc::new(agent::NativeAgentConnection(native_agent));
+        let session = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new("/a")]),
+                    cx,
+                )
+            })
+            .await
+            .expect("the run bar test session should open");
+        let session_id = session.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx
+            .update(|cx| connection.thread(&session_id, cx))
+            .expect("the native thread should exist");
+        let mut graph = ArchitectGraph::default();
+        let mut step = ArchitectNode::new("build", "Build");
+        step.locked = true;
+        graph.add_node(step);
+        thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(graph.clone()), cx);
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let workspace = cx.new(|cx| Workspace::test_new(project.clone(), window, cx));
+            let pane = cx.new(|cx| {
+                ArchitectPane::new(
+                    thread.clone(),
+                    workspace.downgrade(),
+                    None,
+                    Vec::new(),
+                    None,
+                    px(226.0),
+                    px(348.0),
+                    window,
+                    cx,
+                )
+            });
+            RunBarTestView {
+                pane,
+                _workspace: workspace,
+            }
+        });
+        cx.update(|window, cx| {
+            window.resize(size(px(1500.0), px(900.0)));
+            window.bounds_changed(cx);
+        });
+
+        let failure_message =
+            "Praxis stopped dispatching work: Creation tracking requires local project folders";
+        for outcome in [
+            None,
+            Some(RunOutcome::Completed),
+            Some(RunOutcome::Failed {
+                message: failure_message.into(),
+            }),
+            Some(RunOutcome::Cancelled),
+            Some(RunOutcome::StepLimit { steps: 1 }),
+            Some(RunOutcome::NodeLimit {
+                node: NodeId::from("build"),
+                visits: 1,
+            }),
+            Some(RunOutcome::DepthLimit {
+                node: NodeId::from("build"),
+            }),
+        ] {
+            thread.update(cx, |thread, cx| {
+                let path = NodePath::root(NodeId::from("build"));
+                thread.start_architect_run(path.clone(), "Build".into(), Task::ready(()), cx);
+                let visit = thread.note_architect_run_position(path, "Build".into(), 1, 1, cx);
+                thread.finish_architect_run_step(visit, Some("Built".into()), cx);
+                if let Some(outcome) = outcome.clone() {
+                    thread.finish_architect_run(outcome, cx);
+                }
+            });
+            view.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                let status = cx.theme().status();
+                let (border, background, color, icon) = match &outcome {
+                    None => (
+                        status.info_border,
+                        status.info_background,
+                        Color::Info,
+                        IconName::PlayFilled,
+                    ),
+                    Some(RunOutcome::Completed) => (
+                        status.success_border,
+                        status.success_background,
+                        Color::Success,
+                        IconName::Check,
+                    ),
+                    Some(_) => (
+                        status.warning_border,
+                        status.warning_background,
+                        Color::Warning,
+                        IconName::Warning,
+                    ),
+                };
+                assert_eq!(
+                    run_bar_style(outcome.as_ref(), cx),
+                    (border, background, color, icon),
+                    "the icon must agree with the banner for {outcome:?}"
+                );
+                let quads = window.painted_quads();
+                // GPUI paints backgrounds and borders separately; border strips
+                // retain the element bounds but have a narrower content mask.
+                let banner = quads
+                    .iter()
+                    .find(|quad| {
+                        quad.border_color == border
+                            && quad.border_widths.bottom > px(0.0).scale(window.scale_factor())
+                            && quad.border_widths.top == px(0.0).scale(window.scale_factor())
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("the mounted run banner should paint its status border for {outcome:?}: {quads:?}")
+                    });
+                assert!(
+                    quads.iter().any(|quad| {
+                        quad.bounds == banner.bounds && quad.background == background.into()
+                    }),
+                    "the mounted run banner must paint its status background for {outcome:?}"
+                );
+                assert!(
+                    quads.iter().any(|quad| {
+                        quad.background == color.color(cx).into()
+                            && quad.bounds.size
+                                == size(px(220.0), px(4.0)).scale(window.scale_factor())
+                            && banner.bounds.contains(&quad.bounds.origin)
+                    }),
+                    "the mounted progress fill must match the icon for {outcome:?}"
+                );
+                if outcome
+                    .as_ref()
+                    .is_some_and(|outcome| !outcome.is_success())
+                {
+                    assert!(
+                        quads.iter().any(|border_quad| {
+                            border_quad.border_color == status.warning_border
+                                && border_quad.border_widths.top
+                                    == px(1.0).scale(window.scale_factor())
+                                && quads.iter().any(|background_quad| {
+                                    background_quad.bounds == border_quad.bounds
+                                        && background_quad.background
+                                            == status.warning_background.into()
+                                })
+                        }),
+                        "the header's finished-run status must also use warning tokens"
+                    );
+                }
+                let run = thread
+                    .read(cx)
+                    .architect_run()
+                    .expect("the run should remain");
+                assert_eq!(run.outcome, outcome);
+                if matches!(outcome, Some(RunOutcome::Failed { .. })) {
+                    assert_eq!(
+                        run.outcome
+                            .as_ref()
+                            .expect("the run failed")
+                            .summary(&graph),
+                        format!("Run failed: {failure_message}")
+                    );
+                }
+            });
+        }
+
+        let mut nested = ArchitectGraph::default();
+        nested.add_node(ArchitectNode::new("first", "First"));
+        nested.add_node(ArchitectNode::new("second", "Second"));
+        nested.connect("first", "second");
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.subplan = Some(Box::new(nested));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(parent);
+        graph.lock_all();
+        assert_eq!(graph.step_count_deeply(), 3);
+        thread.update(cx, |thread, cx| {
+            thread.set_architect_graph(Some(graph), cx);
+            let parent = NodePath::root("parent".into());
+            thread.start_architect_run(
+                parent.child("first".into()),
+                "First".into(),
+                Task::ready(()),
+                cx,
+            );
+            for (number, id) in ["first", "second"].into_iter().enumerate() {
+                let visit = thread.note_architect_run_position(
+                    parent.child(id.into()),
+                    id.into(),
+                    number + 1,
+                    1,
+                    cx,
+                );
+                thread.finish_architect_run_step(visit, Some("Done".into()), cx);
+            }
+            thread.finish_architect_run(RunOutcome::Completed, cx);
+            assert_eq!(thread.architect_run().unwrap().history().len(), 2);
+        });
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(window.painted_quads().iter().any(|quad| {
+                quad.background == cx.theme().status().success.into()
+                    && quad.bounds.size == size(px(220.0), px(4.0)).scale(window.scale_factor())
+            }), "a completed nested plan must render full progress, not two visits out of three nodes");
+        });
+    }
 
     #[gpui::test]
     async fn dismissed_failure_hides_banner_but_keeps_resume_available(

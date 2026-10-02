@@ -34,7 +34,7 @@ use std::fmt::{self, Display};
 #[derive(
     Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
-pub struct NodeId(pub String);
+pub struct NodeId(#[schemars(length(min = 1))] pub String);
 
 impl Display for NodeId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -57,7 +57,7 @@ impl From<String> for NodeId {
 #[derive(
     Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
-pub struct EdgeId(pub String);
+pub struct EdgeId(#[schemars(length(min = 1))] pub String);
 
 impl From<&str> for EdgeId {
     fn from(value: &str) -> Self {
@@ -131,7 +131,9 @@ pub struct ArchitectNode {
     /// The area of work this step owns.
     #[serde(default)]
     pub responsibility: String,
-    /// Existing files this step anticipates modifying, qualified as `worktree/path`.
+    /// Existing files this step anticipates modifying. Tool inputs accept
+    /// project-relative paths such as ["src/main.rs", "README.md"], or root/path
+    /// to disambiguate multiple roots. Stored graphs use root-qualified paths.
     /// `None` is an unreviewed legacy declaration; `Some([])` anticipates no existing files.
     #[serde(default)]
     pub file_surface: Option<Vec<String>>,
@@ -275,7 +277,10 @@ pub struct ArchitectGraph {
 /// Something wrong with the graph that the user should see before running it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum GraphProblem {
+    InvalidNodeId(NodeId),
+    InvalidEdgeId(EdgeId),
     DuplicateNode(NodeId),
+    DuplicateEdge(EdgeId),
     /// An edge referring to a node that is not in the graph.
     DanglingEdge {
         edge: EdgeId,
@@ -312,8 +317,21 @@ pub enum GraphProblem {
 impl Display for GraphProblem {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            GraphProblem::InvalidNodeId(id) => write!(
+                formatter,
+                "step identifier {:?} is blank; use a non-blank stable id",
+                id.0
+            ),
+            GraphProblem::InvalidEdgeId(id) => write!(
+                formatter,
+                "connection identifier {:?} is blank; use a non-blank stable id",
+                id.0
+            ),
             GraphProblem::DuplicateNode(id) => {
                 write!(formatter, "more than one step uses the id {id}")
+            }
+            GraphProblem::DuplicateEdge(id) => {
+                write!(formatter, "more than one connection uses the id {}", id.0)
             }
             GraphProblem::DanglingEdge { edge, missing } => write!(
                 formatter,
@@ -376,6 +394,18 @@ impl GraphProblem {
                 .map(|edge| (title(&edge.from), title(&edge.to)))
         };
         match self {
+            GraphProblem::InvalidNodeId(id) => {
+                format!("\"{}\" needs a non-blank step ID", title(id))
+            }
+            GraphProblem::InvalidEdgeId(edge) => match edge_ends(edge) {
+                Some((from, to)) => {
+                    format!("The connection from \"{from}\" to \"{to}\" needs a non-blank ID")
+                }
+                None => "A connection needs a non-blank ID".to_string(),
+            },
+            GraphProblem::DuplicateEdge(id) => {
+                format!("More than one connection uses the id {}", id.0)
+            }
             GraphProblem::DuplicateNode(id) => format!("More than one step uses the id {id}"),
             GraphProblem::DanglingEdge { edge, .. } => match edge_ends(edge) {
                 Some((from, _)) => format!("A connection from \"{from}\" leads to a missing step"),
@@ -625,6 +655,16 @@ fn canonical_file_surface_path(path: &str) -> Result<String, String> {
     Ok(components.join("/"))
 }
 
+fn file_surface_declaration_identity(path: &str) -> Result<String, String> {
+    let canonical = canonical_file_surface_path(path)?;
+    let (root, relative) = canonical
+        .split_once('/')
+        .ok_or_else(|| "include the project root and file path".to_string())?;
+    // Root names identify the open project namespace. Paths within that root
+    // may name distinct files on a case-sensitive host.
+    Ok(format!("{}/{relative}", root.to_lowercase()))
+}
+
 impl ArchitectGraph {
     /// Conservative comparison identity for a worktree-qualified file path.
     /// Normalizes separators, '.' components, and Unicode lowercase spelling.
@@ -688,11 +728,14 @@ impl ArchitectGraph {
             };
             let mut identities = HashSet::default();
             for file in files {
-                let problem = match canonical_file_surface_path(file) {
+                let problem = match canonical_file_surface_path(file).and_then(|canonical| {
+                    file_surface_declaration_identity(&canonical)
+                        .map(|identity| (canonical, identity))
+                }) {
                     Err(reason) => Some(reason),
-                    Ok(canonical) => {
-                        if !identities.insert(canonical.to_lowercase()) {
-                            Some("this file is already declared, possibly with different case; remove the duplicate".into())
+                    Ok((canonical, identity)) => {
+                        if !identities.insert(identity) {
+                            Some("this file path is already declared; remove the duplicate".into())
                         } else if &canonical != file {
                             Some(format!(
                                 "use the canonical spelling {canonical:?}, with '/' separators and no empty or '.' components"
@@ -801,11 +844,11 @@ impl ArchitectGraph {
                 for file in files {
                     let canonical =
                         canonical_file_surface_path(file).unwrap_or_else(|_| file.clone());
-                    let identity = Self::normalize_file_surface_path(&canonical);
+                    let identity = file_surface_declaration_identity(&canonical);
                     if !surface.iter().any(|existing| {
                         existing == &canonical
                             || identity.as_ref().is_ok_and(|identity| {
-                                Self::normalize_file_surface_path(existing).as_ref() == Ok(identity)
+                                file_surface_declaration_identity(existing).as_ref() == Ok(identity)
                             })
                     }) {
                         surface.push(canonical);
@@ -1149,12 +1192,13 @@ impl ArchitectGraph {
     pub fn connect(&mut self, from: impl Into<NodeId>, to: impl Into<NodeId>) -> EdgeId {
         let from = from.into();
         let to = to.into();
-        let id = EdgeId(format!("{}->{}", from.0, to.0));
-        let id = if self.edges.iter().any(|edge| edge.id == id) {
-            EdgeId(format!("{}-{}", id.0, self.edges.len()))
-        } else {
-            id
-        };
+        let base = format!("{}->{}", from.0, to.0);
+        let mut id = EdgeId(base.clone());
+        let mut suffix = self.edges.len();
+        while self.edges.iter().any(|edge| edge.id == id) {
+            id = EdgeId(format!("{base}-{suffix}"));
+            suffix += 1;
+        }
         self.edges.push(ArchitectEdge {
             id: id.clone(),
             from,
@@ -1747,12 +1791,22 @@ impl ArchitectGraph {
 
         let mut seen = HashSet::default();
         for node in &self.nodes {
+            if node.id.0.trim().is_empty() {
+                problems.push(GraphProblem::InvalidNodeId(node.id.clone()));
+            }
             if !seen.insert(node.id.clone()) {
                 problems.push(GraphProblem::DuplicateNode(node.id.clone()));
             }
         }
 
+        let mut edge_ids = HashSet::default();
         for edge in &self.edges {
+            if edge.id.0.trim().is_empty() {
+                problems.push(GraphProblem::InvalidEdgeId(edge.id.clone()));
+            }
+            if !edge_ids.insert(edge.id.clone()) {
+                problems.push(GraphProblem::DuplicateEdge(edge.id.clone()));
+            }
             for endpoint in [&edge.from, &edge.to] {
                 if self.node(endpoint).is_none() {
                     problems.push(GraphProblem::DanglingEdge {
@@ -1939,7 +1993,8 @@ impl ArchitectGraph {
 /// has not reviewed.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ProposedNode {
-    /// A short stable identifier, such as `run-tests`.
+    /// A non-blank stable identifier, such as `run-tests`, unique within this
+    /// graph. Nested graphs have separate ID namespaces; never rely on renaming.
     pub id: NodeId,
     /// A short human-readable name for the step.
     pub title: String,
@@ -1951,8 +2006,11 @@ pub struct ProposedNode {
     /// The area of work this step owns, such as `Authentication` or `Tests`.
     #[serde(default)]
     pub responsibility: String,
-    /// Required existing-file surface, using canonical `worktree/path` files, not
-    /// directories or globs. List anticipated modifications, renames, and deletions,
+    /// Required existing-file surface. Example: ["src/main.rs", "README.md"].
+    /// Paths are project-relative; use "backend/src/main.rs" to disambiguate
+    /// multiple open roots. Root-prefixed paths also work in single-root projects.
+    /// Local and connected remote projects use the same rules. No absolute paths,
+    /// directories, globs, or '..'. List modifications, renames, and deletions,
     /// not read-only access. Use [] when no existing files will be affected.
     /// Concurrent steps must have disjoint surfaces, including nested children.
     pub file_surface: Vec<String>,
@@ -2001,7 +2059,7 @@ impl ProposedGraph {
     pub fn into_graph(self) -> ArchitectGraph {
         let mut graph = ArchitectGraph::default();
         for node in self.nodes {
-            graph.add_node(ArchitectNode {
+            graph.nodes.push(ArchitectNode {
                 id: node.id,
                 title: node.title,
                 model: node.model,
@@ -2178,6 +2236,44 @@ mod tests {
                     GraphProblem::InvalidFileSurface { reason, .. } if reason.contains("duplicate")
                 ))
         );
+    }
+
+    #[test]
+    fn one_step_can_declare_distinct_case_variants_without_weakening_parallel_checks() {
+        let mut graph = surface_graph(&["step"], &[]);
+        graph.node_mut(&"step".into()).unwrap().file_surface = Some(vec![
+            "worktree/README.md".into(),
+            "worktree/readme.md".into(),
+        ]);
+        assert!(graph.file_surface_problems().is_empty());
+        let mut parallel = ArchitectNode::new("parallel", "Parallel");
+        parallel.file_surface = Some(vec!["worktree/README.md".into()]);
+        graph.add_node(parallel);
+        assert!(
+            graph
+                .file_surface_problems()
+                .iter()
+                .any(|problem| { matches!(problem, GraphProblem::FileSurfaceOverlap { .. }) })
+        );
+    }
+
+    #[test]
+    fn created_case_variant_is_added_even_when_another_spelling_is_declared() {
+        let mut graph = surface_graph(&["source", "after"], &[("source", "after")]);
+        graph.node_mut(&"after".into()).unwrap().file_surface =
+            Some(vec!["worktree/README.md".into()]);
+        graph.record_created_files(
+            &NodePath::root("source".into()),
+            &["worktree/readme.md".into()],
+        );
+        assert_eq!(
+            graph.node(&"after".into()).unwrap().file_surface,
+            Some(vec![
+                "worktree/README.md".into(),
+                "worktree/readme.md".into()
+            ])
+        );
+        assert!(graph.file_surface_problems().is_empty());
     }
 
     #[test]
@@ -2410,9 +2506,10 @@ mod tests {
             Some(Box::new(surface_graph(&["finish"], &[])));
         let source = NodePath::root("parent".into()).child("source".into());
         let snapshot = graph.clone();
+        // Root-name and separator aliases deduplicate; filename case may differ on the host.
         let files = vec![
             "worktree\\src\\created.rs".into(),
-            "WORKTREE/src/CREATED.rs".into(),
+            "WORKTREE/src/created.rs".into(),
         ];
         let changed = graph.record_created_files(&source, &files);
         let mut expected = vec![
@@ -2606,6 +2703,90 @@ mod tests {
                 },
             ));
         graph
+    }
+
+    #[test]
+    fn connecting_after_deletions_never_reuses_a_live_edge_id() {
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(ArchitectNode::new("a", "A"));
+        graph.add_node(ArchitectNode::new("b", "B"));
+        let first = graph.connect("a", "b");
+        let removed = graph.connect("a", "b");
+        let retained = graph.connect("a", "b");
+        graph.disconnect(&removed);
+        let added = graph.connect("a", "b");
+        assert_ne!(added, retained);
+        assert_ne!(added, first);
+        let ids: HashSet<_> = graph.edges.iter().map(|edge| &edge.id).collect();
+        assert_eq!(ids.len(), graph.edges.len());
+        assert!(graph.edges.iter().any(|edge| edge.id == retained));
+    }
+
+    #[test]
+    fn blank_and_duplicate_graph_ids_block_execution_at_every_depth() {
+        for blank in ["", " \t"] {
+            let mut graph = ArchitectGraph::default();
+            graph.add_node(ArchitectNode::new(blank, "Invalid step"));
+            graph.lock_all();
+            assert!(
+                graph
+                    .problems()
+                    .iter()
+                    .any(|problem| matches!(problem, GraphProblem::InvalidNodeId(_)))
+            );
+            assert!(PlanRun::start(&graph).is_err());
+
+            let mut nested = ArchitectGraph::default();
+            nested.add_node(ArchitectNode::new("a", "A"));
+            nested.add_node(ArchitectNode::new("b", "B"));
+            nested.edges.push(ArchitectEdge::new(blank, "a", "b"));
+            nested.lock_all();
+            assert!(
+                nested
+                    .problems()
+                    .iter()
+                    .any(|problem| matches!(problem, GraphProblem::InvalidEdgeId(_)))
+            );
+            graph.nodes.clear();
+            let mut parent = ArchitectNode::new("parent", "Parent");
+            parent.subplan = Some(Box::new(nested));
+            graph.add_node(parent);
+            graph.lock_all();
+            assert!(PlanRun::start(&graph).is_err());
+        }
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(ArchitectNode::new("a", "A"));
+        graph.add_node(ArchitectNode::new("b", "B"));
+        graph.edges.push(ArchitectEdge::new("same", "a", "b"));
+        graph.edges.push(ArchitectEdge::new("same", "a", "b"));
+        graph.lock_all();
+        assert!(
+            graph
+                .problems()
+                .contains(&GraphProblem::DuplicateEdge("same".into()))
+        );
+        assert!(PlanRun::start(&graph).is_err());
+        assert!(PlanRun::validate_structure(&graph).is_err());
+    }
+
+    #[test]
+    fn proposals_do_not_silently_rename_duplicate_ids() {
+        let proposal: ProposedGraph = serde_json::from_value(serde_json::json!({"nodes": [
+            {"id":"same", "title":"First", "file_surface":[]},
+            {"id":"same", "title":"Second", "file_surface":[]}
+        ]}))
+        .unwrap();
+        let graph = proposal.into_graph();
+        assert!(
+            graph
+                .problems()
+                .contains(&GraphProblem::DuplicateNode("same".into()))
+        );
+        assert!(graph.node(&"same-2".into()).is_none());
+        let node_schema = serde_json::to_value(schemars::schema_for!(NodeId)).unwrap();
+        let edge_schema = serde_json::to_value(schemars::schema_for!(EdgeId)).unwrap();
+        assert_eq!(node_schema["minLength"], 1);
+        assert_eq!(edge_schema["minLength"], 1);
     }
 
     #[test]
