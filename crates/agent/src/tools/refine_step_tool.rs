@@ -78,11 +78,12 @@ pub struct RefineStepToolInput {
     #[serde(default)]
     pub capture: Option<String>,
     /// Complete existing-file surface: ["src/main.rs","README.md"] relative to
-    /// the project root, or root-prefixed paths for ambiguous multi-root files.
+    /// the project root, or root-prefixed paths whenever multiple roots are open.
     /// No directories, globs, absolute paths, or '..'. Omit to preserve;
     /// [] explicitly anticipates no existing files;
     /// null is rejected. This replaces, not appends, and imposes no write allowlist.
-    /// Ambiguous roots and known directories are rejected without changing the plan.
+    /// Ambiguous roots are rejected without changing the plan. File existence and
+    /// OS filename validity are not prerequisites for declaring an assignment.
     /// Other invalid or overlapping declarations are saved with actionable problems.
     #[serde(
         default,

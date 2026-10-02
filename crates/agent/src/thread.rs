@@ -2982,6 +2982,23 @@ impl Thread {
         cx.notify();
     }
 
+    pub(crate) fn note_architect_file_tracking_warning(
+        &mut self,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        let run_id = self.architect_run.as_ref().map(|run| run.id);
+        self.persistent_architect.push_event(
+            run_id,
+            "file_tracking_warning",
+            None,
+            None,
+            Some(message),
+        );
+        self.updated_at = Utc::now();
+        cx.notify();
+    }
+
     /// Call after changing runner control without a thread-level transition.
     /// Notifications use the existing deferred native save worker, not a turn stream.
     pub fn checkpoint_architect_run(&mut self, cx: &mut Context<Self>) {

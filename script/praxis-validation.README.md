@@ -76,9 +76,11 @@ it never accepts that main run's skipped jobs as evidence.
 
 ## Quality workflow behavior
 
-- PRs always execute all six existing, named quality jobs, even on identical
-  source. Their required checks are never replaced by reused/skipped checks.
-- Prepare resolves a moving source ref once; all six jobs check out that SHA.
+- PRs always execute all required quality jobs, even on identical source. Their
+  required checks are never replaced by reused/skipped checks. Graph and path
+  primitive tests run natively on Linux, Windows, and macOS; all three matrix
+  jobs must succeed. WSL path semantics are covered by remote transport tests.
+- Prepare resolves a moving source ref once; all jobs check out that SHA.
 - Direct non-PR quality uses `check --quality-run`, which verifies the actual
   executing quality definition before allowing reuse. It waits up to 300 seconds
   for a matching original PR validation when possible.
@@ -89,7 +91,7 @@ it never accepts that main run's skipped jobs as evidence.
   validating event repository ownership and the immutable run head. API
   `run.pull_requests` associations are used only for PR number and ownership:
   their head/base SHAs can advance after the run, just like the live PR.
-- `record` is internal to the receipt job. Only after all six jobs succeed can it
+- `record` is internal to the receipt job. Only after all required jobs succeed can it
   write `receipt.json`, uploaded as
   `praxis-quality-full-RUN_ID-RUN_ATTEMPT` with 30-day retention. It independently
   checks the attempt's jobs through the API, including successful executed steps.
@@ -115,7 +117,7 @@ they lack the captured event provenance. Acceptance requires all of the followin
 - The artifact belongs to that run/repository/head, is unexpired and bounded in
   size, and contains exactly one small regular `receipt.json` member. No paths,
   symlinks, duplicate members, or extra files are accepted.
-- The six expected named jobs each completed successfully in that exact attempt,
+- The expected named jobs, including every native path matrix job, each succeeded in that exact attempt,
   with successful steps and a known test step. Failed, cancelled, absent,
   ambiguous, and skipped jobs are rejected.
 - GitHub's actual tested commit tree equals the local target tree, including

@@ -357,7 +357,7 @@ class ProvenanceTests(unittest.TestCase):
             job["conclusion"] = "skipped"
         self.reject_receipt()
 
-    def test_each_of_six_jobs_must_actually_succeed(self):
+    def test_each_required_job_must_actually_succeed(self):
         for job in self.jobs:
             for conclusion in ("failure", "cancelled", "skipped"):
                 with self.subTest(job=job["name"], conclusion=conclusion):
@@ -538,7 +538,7 @@ class ProvenanceTests(unittest.TestCase):
                 with self.assertRaises(validation.Unverified):
                     self.validator.record(MERGE)
 
-    def test_record_requires_all_six_successful_jobs(self):
+    def test_record_requires_all_successful_jobs(self):
         self.set_execution_environment()
         self.jobs[-1]["conclusion"] = "skipped"
         with self.assertRaises(validation.Unverified):
@@ -921,11 +921,19 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", self.workflow)
         self.assertNotIn("group: architect-quality-${{ inputs.source_ref", self.workflow)
 
-    def test_pr_gate_never_reuses_and_all_six_jobs_use_pinned_source(self):
+    def test_pr_gate_never_reuses_and_all_job_groups_use_pinned_source(self):
         self.assertIn('if [ "$GITHUB_EVENT_NAME" = pull_request ]; then', self.workflow)
         self.assertEqual(self.workflow.count("SOURCE_REF: ${{ needs.prepare.outputs.source_sha }}"), 6)
         for name in validation.EXPECTED_JOBS:
             self.assertIn(f"name: {name}\n", self.workflow)
+
+    def test_native_path_matrix_is_required_on_all_three_client_platforms(self):
+        for platform, runner in [("Linux", "ubuntu-24.04"), ("Windows", "windows-2022"), ("macOS", "macos-15")]:
+            name = f"Architect graph tests ({platform})"
+            self.assertIn(name, validation.EXPECTED_JOBS)
+            self.assertIn(f"- name: {name}\n            runner: {runner}", self.workflow)
+        self.assertIn("run: cargo test --locked -p path --lib", self.workflow)
+        self.assertIn("fail-fast: false", self.workflow)
 
     def test_full_receipt_checks_every_job_and_reuse_has_explicit_aggregate(self):
         receipt = self.workflow.split("  full-receipt:\n", 1)[1].split("  source-validated:\n", 1)[0]

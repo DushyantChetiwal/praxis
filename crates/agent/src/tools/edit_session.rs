@@ -1257,8 +1257,9 @@ fn resolve_path(
                 }
             }
 
-            let parent_path = path
-                .parent()
+            let path_style = project.path_style(cx);
+            let parent_path = path_style
+                .parent(path)
                 .ok_or_else(|| "Can't create file: incorrect path".to_string())?;
 
             let parent_project_path = project.find_project_path(&parent_path, cx);
@@ -1272,9 +1273,8 @@ fn resolve_path(
                 return Err("Can't create file: parent is not a directory".to_string());
             }
 
-            let file_name = path
-                .file_name()
-                .and_then(|file_name| file_name.to_str())
+            let file_name = path_style
+                .file_name(path)
                 .and_then(|file_name| RelPath::from_unix_str(file_name).ok())
                 .ok_or_else(|| "Can't create file: invalid filename".to_string())?;
 

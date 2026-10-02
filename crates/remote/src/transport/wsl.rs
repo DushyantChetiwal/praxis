@@ -928,6 +928,30 @@ mod tests {
     const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
     #[test]
+    fn wsl_paths_stay_unix_with_or_without_windows_interop() {
+        for has_wsl_interop in [false, true] {
+            let connection = WslRemoteConnection {
+                remote_binary_path: None,
+                platform: RemotePlatform {
+                    os: RemoteOs::Linux,
+                    arch: RemoteArch::X86_64,
+                },
+                os_version: None,
+                shell: "/bin/bash".into(),
+                shell_kind: ShellKind::Posix,
+                default_system_shell: "/bin/sh".into(),
+                has_wsl_interop,
+                connection_options: WslConnectionOptions {
+                    distro_name: "Ubuntu".into(),
+                    user: None,
+                },
+            };
+            assert_eq!(connection.path_style(), PathStyle::Unix);
+            assert_eq!(connection.has_wsl_interop(), has_wsl_interop);
+        }
+    }
+
+    #[test]
     fn development_server_version_requires_the_expected_commit() {
         assert!(development_remote_server_version_matches(COMMIT, COMMIT));
         assert!(development_remote_server_version_matches(

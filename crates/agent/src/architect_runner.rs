@@ -16,6 +16,7 @@ use futures::future::{LocalBoxFuture, join_all};
 use gpui::{App, AsyncApp, Context, Entity, SharedString, WeakEntity};
 use language_model::{LanguageModel, LanguageModelProviderId, LanguageModelRegistry};
 use serde::{Deserialize, Serialize};
+use util::ResultExt as _;
 
 use crate::{
     ArchitectRun, ArchitectRunOutcome, ArchitectStepVisitId, NativeAgentConnection, SessionMode,
@@ -566,6 +567,25 @@ struct FileSnapshot {
     skipped_paths: Option<Vec<String>>,
 }
 
+#[derive(Debug)]
+struct FileSurfaceConflict(String);
+
+impl std::fmt::Display for FileSurfaceConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for FileSurfaceConflict {}
+
+fn is_file_surface_overlap(problem: &architect::GraphProblem) -> bool {
+    match problem {
+        architect::GraphProblem::FileSurfaceOverlap { .. } => true,
+        architect::GraphProblem::InSubplan { problem, .. } => is_file_surface_overlap(problem),
+        _ => false,
+    }
+}
+
 fn inventory_file_identity(file: &str, source: &str) -> anyhow::Result<String> {
     ArchitectGraph::normalize_file_surface_path(file)
         .map_err(|reason| anyhow::anyhow!("Rejected path {file:?} from {source}: {reason}"))
@@ -576,7 +596,7 @@ fn skipped_inventory_identity(file: &str) -> anyhow::Result<String> {
     // particular, ignored Unix names may contain glob or Windows characters.
     anyhow::ensure!(
         file.contains('/')
-            && !file.contains(['\\', '\0'])
+            && !file.contains('\0')
             && file
                 .split('/')
                 .all(|component| !matches!(component, "" | "." | "..")),
@@ -681,14 +701,9 @@ fn participating_worktrees(
     let mut worktrees = BTreeMap::new();
     for worktree in project.visible_worktrees(cx) {
         let tree = worktree.read(cx);
-        anyhow::ensure!(
-            tree.root_entry().is_some(),
-            "A project folder is still loading. Wait for the project to connect, then retry."
-        );
         if tree.is_single_file() {
             continue;
         }
-        tree.check_file_inventory_support()?;
         let name = tree.snapshot().root_name_str().to_string();
         let identity = ArchitectGraph::normalize_file_surface_path(&format!("{name}/file"))
             .map_err(anyhow::Error::msg)?;
@@ -709,56 +724,77 @@ fn participating_worktrees(
     Ok(worktrees)
 }
 
+type FileSurfaceRoots = BTreeMap<String, (PathBuf, util::paths::PathStyle)>;
+
+fn file_surface_roots(project: &Entity<project::Project>, cx: &App) -> FileSurfaceRoots {
+    project
+        .read(cx)
+        .visible_worktrees(cx)
+        .map(|worktree| {
+            let worktree = worktree.read(cx);
+            (
+                worktree.snapshot().root_name_str().to_lowercase(),
+                (worktree.abs_path().to_path_buf(), worktree.path_style()),
+            )
+        })
+        .collect()
+}
+
+fn lexical_file_surface_graph(graph: &ArchitectGraph, roots: &FileSurfaceRoots) -> ArchitectGraph {
+    let mut resolved = graph.clone();
+    let mut identities = BTreeMap::<String, String>::new();
+    for node in graph_paths(graph) {
+        if let Some(files) = resolved
+            .node_at_mut(&node)
+            .and_then(|node| node.file_surface.as_mut())
+        {
+            for file in files {
+                let Some((root, relative)) = file.split_once('/') else {
+                    continue;
+                };
+                let (absolute, path_style) = if let Some((root_path, path_style)) = roots.get(&root.to_lowercase()) {
+                    let Ok(absolute) = path_style.join_path(root_path, relative) else {
+                        continue;
+                    };
+                    (absolute, *path_style)
+                } else if let Some((_, path_style)) = roots.values().find(|(_, path_style)| path_style.is_absolute(file)) {
+                    (PathBuf::from(file.as_str()), *path_style)
+                } else {
+                    continue;
+                };
+                let Some(absolute) = absolute.to_str() else {
+                    continue;
+                };
+                // Worktree aliases and nested roots can name the same future
+                // file even when no filesystem entry exists yet.
+                let identity = format!(
+                    "{path_style:?}:{}",
+                    path_style.normalize(absolute).to_lowercase()
+                );
+                let representative = identities.entry(identity).or_insert_with(|| file.clone());
+                *file = representative.clone();
+            }
+        }
+    }
+    resolved
+}
+
 fn preflight_creation_tracking(
     thread: &Entity<Thread>,
     graph: &ArchitectGraph,
     cx: &App,
 ) -> Result<(), ArchitectRunStartError> {
-    let worktrees = participating_worktrees(thread.read(cx).project(), cx)
+    let project = thread.read(cx).project();
+    participating_worktrees(project, cx)
         .map_err(|error| ArchitectRunStartError::CreationTrackingUnavailable(error.to_string()))?;
-    for path in graph_paths(graph) {
-        for file in graph
-            .node_at(&path)
-            .and_then(|node| node.file_surface.as_ref())
-            .into_iter()
-            .flatten()
-        {
-            let Some((root, relative)) = file.split_once('/') else {
-                continue;
-            };
-            let Some((_, worktree)) = worktrees
-                .iter()
-                .find(|(name, _)| name.to_lowercase() == root.to_lowercase())
-            else {
-                return Err(ArchitectRunStartError::CreationTrackingUnavailable(
-                    format!(
-                        "Step {path} declares {file:?}, which does not belong to an open project root. Update its file surface using the current project's relative paths before running."
-                    ),
-                ));
-            };
-            worktree
-                .read(cx)
-                .validate_file_inventory_path(relative)
-                .map_err(|error| {
-                    ArchitectRunStartError::CreationTrackingUnavailable(format!(
-                        "Rejected path {file:?} from declared file surface of step {path}: {error:#}"
-                    ))
-                })?;
-            let Ok(relative) = util::rel_path::RelPath::from_unix_str(relative) else {
-                continue;
-            };
-            if worktree
-                .read(cx)
-                .entry_for_path(relative)
-                .is_some_and(|entry| entry.is_dir())
-            {
-                return Err(ArchitectRunStartError::CreationTrackingUnavailable(
-                    format!(
-                        "Step {path} declares directory {file:?}. List the existing files individually before running."
-                    ),
-                ));
-            }
-        }
+    let resolved = lexical_file_surface_graph(graph, &file_surface_roots(project, cx));
+    let conflicts: Vec<_> = resolved
+        .file_surface_problems()
+        .into_iter()
+        .filter(is_file_surface_overlap)
+        .collect();
+    if !conflicts.is_empty() {
+        return Err(RunRefusal::NotReady(conflicts).into());
     }
     Ok(())
 }
@@ -768,13 +804,22 @@ async fn project_file_snapshot(
     graph: &ArchitectGraph,
     cx: &mut AsyncApp,
 ) -> anyhow::Result<FileSnapshot> {
-    let (worktrees, roots) = cx.update(|cx| -> anyhow::Result<_> {
+    let (worktrees, roots, mut resolved_graph) = cx.update(|cx| -> anyhow::Result<_> {
+        let resolved = lexical_file_surface_graph(graph, &file_surface_roots(project, cx));
+        let conflicts: Vec<_> = resolved
+            .file_surface_problems()
+            .into_iter()
+            .filter(is_file_surface_overlap)
+            .collect();
+        if !conflicts.is_empty() {
+            return Err(FileSurfaceConflict(RunRefusal::NotReady(conflicts).to_string()).into());
+        }
         let worktrees = participating_worktrees(project, cx)?;
         let roots = worktrees
             .iter()
             .map(|(name, tree)| (name.clone(), tree.read(cx).abs_path().to_path_buf()))
             .collect();
-        Ok((worktrees, roots))
+        Ok((worktrees, roots, resolved))
     })?;
     let mut snapshot = FileSnapshot {
         roots,
@@ -834,13 +879,6 @@ async fn project_file_snapshot(
         );
         for relative in inventory.files {
             let file = format!("{name}/{relative}");
-            worktree
-                .read_with(cx, |tree, _| tree.validate_file_inventory_path(&relative))
-                .map_err(|error| {
-                    anyhow::anyhow!(
-                        "Rejected path {file:?} from automatic file discovery: {error:#}"
-                    )
-                })?;
             inventory_file_identity(&file, "automatic file discovery")?;
             snapshot.files.insert(file.clone(), file);
         }
@@ -859,7 +897,6 @@ async fn project_file_snapshot(
     skipped_paths.sort();
     skipped_paths.dedup();
     snapshot.skipped_paths = Some(skipped_paths);
-    let mut resolved_graph = graph.clone();
     for path in graph_paths(graph) {
         if let Some(surface) = resolved_graph
             .node_at_mut(&path)
@@ -874,12 +911,18 @@ async fn project_file_snapshot(
             surface.dedup();
         }
     }
-    let alias_problems = resolved_graph.file_surface_problems();
-    anyhow::ensure!(
-        alias_problems.is_empty(),
-        "Declared file paths resolve to overlapping surfaces: {}. Use consistent paths or serialize the affected steps before resuming.",
-        RunRefusal::NotReady(alias_problems)
-    );
+    let alias_problems: Vec<_> = resolved_graph
+        .file_surface_problems()
+        .into_iter()
+        .filter(is_file_surface_overlap)
+        .collect();
+    if !alias_problems.is_empty() {
+        return Err(FileSurfaceConflict(format!(
+            "Declared file paths resolve to overlapping surfaces: {}. Serialize the affected steps before resuming.",
+            RunRefusal::NotReady(alias_problems)
+        ))
+        .into());
+    }
     // Use exactly the same participation rule after the asynchronous scan.
     let current_roots = cx.update(|cx| -> anyhow::Result<BTreeMap<_, _>> {
         Ok(participating_worktrees(project, cx)?
@@ -2038,7 +2081,7 @@ impl Driver {
                         lane.file_observation = None;
                     }
                 }
-                if let Some(message) = self.file_dispatch_problem() {
+                if let Some(message) = self.file_dispatch_problem(cx) {
                     self.block_file_dispatch(anyhow::anyhow!(message), cx)
                 } else {
                     drive_lane(self.clone(), 0, cx.clone()).await
@@ -2085,7 +2128,28 @@ impl Driver {
         }
     }
 
-    async fn observe_project_files(&self, cx: &mut AsyncApp) -> anyhow::Result<FileSnapshot> {
+    fn skip_file_observation(&self, error: &anyhow::Error, cx: &mut AsyncApp) {
+        let message = format!(
+            "Created-file discovery is unavailable; continuing with declared file surfaces: {error:#}"
+        );
+        log::warn!("Architect: {message}");
+        {
+            // A gap must establish a new baseline, not attribute all changes
+            // since an old scan to an unrelated later step.
+            let mut state = self.state.borrow_mut();
+            state.pending_file_observations.clear();
+            for lane in &mut state.lanes {
+                lane.file_observation = None;
+            }
+        }
+        self.thread
+            .update(cx, |thread, cx| {
+                thread.note_architect_file_tracking_warning(message, cx);
+            })
+            .log_err();
+    }
+
+    async fn observe_project_files(&self, cx: &mut AsyncApp) -> anyhow::Result<Option<FileSnapshot>> {
         let project = self
             .thread
             .read_with(cx, |thread, _| thread.project().clone())?;
@@ -2105,8 +2169,16 @@ impl Driver {
             let scan = project_file_snapshot(&project, &graph, cx).fuse();
             futures::pin_mut!(scan, timeout);
             futures::select_biased! {
-                result = scan => result?,
-                _ = timeout => anyhow::bail!("Project file inventory timed out after 60 seconds. Check the project connection and filesystem access, then resume."),
+                result = scan => result,
+                _ = timeout => Err(anyhow::anyhow!("Project file inventory timed out after 60 seconds")),
+            }
+        };
+        let snapshot = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(error) if error.is::<FileSurfaceConflict>() => return Err(error),
+            Err(error) => {
+                self.skip_file_observation(&error, cx);
+                return Ok(None);
             }
         };
         let changes = {
@@ -2126,13 +2198,20 @@ impl Driver {
                         snapshot.created_since(&observation.snapshot)?,
                     ))
                 })
-                .collect::<anyhow::Result<Vec<_>>>()?
+                .collect::<anyhow::Result<Vec<_>>>()
+        };
+        let changes = match changes {
+            Ok(changes) => changes,
+            Err(error) => {
+                self.skip_file_observation(&error, cx);
+                return Ok(Some(snapshot));
+            }
         };
         // There is no trustworthy writer identity in filesystem notifications.
         // Attribute overlapping observations to every possible source, then let
         // graph reachability (not lane/list order) determine the consumers.
         if !changes.is_empty() {
-            self.thread.update(cx, |thread, cx| -> anyhow::Result<()> {
+            self.thread.read_with(cx, |thread, _| -> anyhow::Result<()> {
                 let live = thread.architect_graph().context("The authoritative plan is missing")?;
                 for (source, _) in &changes {
                     anyhow::ensure!(
@@ -2140,6 +2219,9 @@ impl Driver {
                         "The authoritative plan no longer contains creating step {source}. Restore the plan before resuming."
                     );
                 }
+                Ok(())
+            })??;
+            let applied = self.thread.update(cx, |thread, cx| -> anyhow::Result<()> {
                 {
                     let mut state = self.state.borrow_mut();
                     let mut graph = state.graph.clone();
@@ -2159,8 +2241,14 @@ impl Driver {
                             lane["file_observation"]["snapshot"] = saved_snapshot.clone();
                         }
                     }
-                    validate_checkpoint_value(&checkpoint)
-                        .context("Observed file surfaces exceed the checkpoint budget; no history was discarded")?;
+                    if let Err(error) = validate_checkpoint_value(&checkpoint) {
+                        let conflicts: Vec<_> = graph.file_surface_problems()
+                            .into_iter().filter(is_file_surface_overlap).collect();
+                        if !conflicts.is_empty() {
+                            return Err(FileSurfaceConflict(RunRefusal::NotReady(conflicts).to_string()).into());
+                        }
+                        return Err(error.context("Observed file surfaces exceed the checkpoint budget; no history was discarded"));
+                    }
                     state.graph = graph;
                     for observation in &mut state.pending_file_observations {
                         observation.snapshot = snapshot.clone();
@@ -2176,20 +2264,38 @@ impl Driver {
                 }
                 thread.checkpoint_architect_run(cx);
                 Ok(())
-            })??;
+            }).and_then(|result| result);
+            if let Err(error) = applied {
+                if error.is::<FileSurfaceConflict>() {
+                    return Err(error);
+                }
+                self.skip_file_observation(&error, cx);
+                return Ok(None);
+            }
         }
-        Ok(snapshot)
+        Ok(Some(snapshot))
     }
 
-    fn file_dispatch_problem(&self) -> Option<String> {
+    fn file_dispatch_problem(&self, cx: &AsyncApp) -> Option<String> {
         let state = self.state.borrow();
         if let Some(message) = &state.surface_error {
             return Some(message.clone());
         }
-        let problems = state.graph.blocking_problems();
+        let resolved = self
+            .thread
+            .read_with(cx, |thread, cx| {
+                lexical_file_surface_graph(&state.graph, &file_surface_roots(thread.project(), cx))
+            })
+            .log_err()
+            .unwrap_or_else(|| state.graph.clone());
+        let problems: Vec<_> = resolved
+            .file_surface_problems()
+            .into_iter()
+            .filter(is_file_surface_overlap)
+            .collect();
         (!problems.is_empty()).then(|| {
             format!(
-                "Existing-file surfaces are not ready: {}. Correct the declarations or serialize overlapping steps, apply and review the plan, then resume. Completed results are retained.",
+                "Concurrent steps have overlapping file surfaces: {}. Serialize the affected steps, apply and review the plan, then resume. Completed results are retained.",
                 RunRefusal::NotReady(problems)
             )
         })
@@ -2197,7 +2303,7 @@ impl Driver {
 
     fn block_file_dispatch(&self, error: anyhow::Error, cx: &mut AsyncApp) -> RunOutcome {
         let message = format!(
-            "Praxis stopped dispatching work: {error:#}. Resolve the file tracking or surface problem and resume; completed results are retained."
+            "Praxis stopped dispatching work: {error:#}. Completed results are retained."
         );
         log::error!("Architect: {message}");
         let waiters = {
@@ -2245,19 +2351,17 @@ impl Driver {
                 drop(guard);
                 continue;
             }
-            if let Some(message) = self.file_dispatch_problem() {
+            if let Some(message) = self.file_dispatch_problem(cx) {
                 return Err(self.block_file_dispatch(anyhow::anyhow!(message), cx));
             }
-            let previous = self.state.borrow_mut().lanes[lane]
-                .file_observation
-                .replace(FileObservation { source, snapshot });
+            self.state.borrow_mut().lanes[lane].file_observation =
+                snapshot.map(|snapshot| FileObservation { source, snapshot });
             let budget = validate_checkpoint_value(&self.state.borrow().checkpoint());
             if let Err(error) = budget {
-                self.state.borrow_mut().lanes[lane].file_observation = previous;
-                return Err(self.block_file_dispatch(
-                    error.context("File tracking exceeds the checkpoint budget"),
+                self.skip_file_observation(
+                    &error.context("File tracking exceeds the checkpoint budget"),
                     cx,
-                ));
+                );
             }
             self.checkpoint(cx)?;
             return Ok(());
@@ -2270,13 +2374,13 @@ impl Driver {
             Ok(_) => {
                 self.state.borrow_mut().lanes[lane].file_observation = None;
                 let already_blocked = self.state.borrow().surface_error.is_some();
-                if !already_blocked && let Some(message) = self.file_dispatch_problem() {
+                if !already_blocked && let Some(message) = self.file_dispatch_problem(cx) {
                     self.block_file_dispatch(anyhow::anyhow!(message), cx);
                 }
             }
             Err(error) => {
-                // Retain the baseline so a resumed run can reconcile writes
-                // after a failed scan without repeating completed model work.
+                // A detected overlap is retained for review and resume. Ordinary
+                // discovery failures already fell back to declared assignments.
                 self.block_file_dispatch(error, cx);
             }
         }
@@ -3214,7 +3318,7 @@ mod checkpoint_tests {
     }
 
     #[gpui::test]
-    async fn surface_root_and_directory_preflight_preserves_existing_work(cx: &mut TestAppContext) {
+    async fn declarations_do_not_require_existing_files_or_valid_os_names(cx: &mut TestAppContext) {
         let fake = crate::tests::init_test(cx);
         let fs = fs::FakeFs::new(cx.executor());
         fs.insert_tree("/a", serde_json::json!({"src": {"main.rs": ""}}))
@@ -3222,24 +3326,33 @@ mod checkpoint_tests {
         let project = project::Project::test(fs, [Path::new("/a")], cx).await;
         let (_connection, thread, acp_thread, fake) =
             native_project_session(project, fake, cx).await;
-        for (file, problem) in [
-            ("a/src", "directory"),
-            ("removed/src/main.rs", "open project root"),
-        ] {
-            let mut graph = linear_graph(&["source", "after"]);
-            let node = graph.node_at_mut(&path("source")).unwrap();
-            node.file_surface = Some(vec![file.into()]);
-            node.result = Some(architect::StepResult {
-                summary: "Retained work".into(),
-                attempt: 1,
-            });
+        let mut graph = linear_graph(&["source", "after"]);
+        graph.node_at_mut(&path("source")).unwrap().file_surface = Some(vec![
+            "a/src".into(),
+            "removed/src/main.rs".into(),
+            "a/future/archive:Zone.Identifier".into(),
+            "a/future/CON?.rs".into(),
+            "a/future/literal\\name*.rs".into(),
+        ]);
+        cx.update(|cx| {
             thread.update(cx, |thread, cx| {
-                thread.set_architect_graph(Some(graph), cx);
-                thread.set_session_mode(SessionMode::Architect, cx);
+                thread.set_architect_graph(Some(graph.clone()), cx)
             });
-            assert_preflight_preserves_execution(&thread, &acp_thread, problem, cx).await;
-            assert!(fake.pending_completions().is_empty());
-        }
+            start_architect_run(thread.clone(), acp_thread, graph, cx).unwrap();
+        });
+        cx.run_until_parked();
+        assert_running(&thread, "source", cx);
+        finish_pending_step(&fake);
+        cx.run_until_parked();
+        assert_running(&thread, "after", cx);
+        finish_pending_step(&fake);
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(
+                thread.architect_run().unwrap().outcome,
+                Some(RunOutcome::Completed)
+            );
+        });
     }
 
     #[gpui::test]
@@ -3339,7 +3452,7 @@ mod checkpoint_tests {
     }
 
     #[gpui::test]
-    async fn unsupported_remote_backend_is_refused_before_any_run_mutation(
+    async fn unavailable_remote_inventory_uses_declared_assignments(
         cx: &mut TestAppContext,
         host_cx: &mut TestAppContext,
     ) {
@@ -3368,15 +3481,65 @@ mod checkpoint_tests {
             .await
             .unwrap();
         cx.run_until_parked();
-        let (_connection, thread, acp_thread, _fake) =
+        let (_connection, thread, acp_thread, fake) =
             native_project_session(project, fake, cx).await;
-        thread.update(cx, |thread, cx| {
-            thread.set_architect_graph(Some(linear_graph(&["source", "after"])), cx);
-            thread.set_session_mode(SessionMode::Architect, cx);
+        let graph = linear_graph(&["source", "after"]);
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.set_architect_graph(Some(graph.clone()), cx)
+            });
+            start_architect_run(thread.clone(), acp_thread, graph, cx).unwrap();
         });
-        assert_preflight_preserves_execution(&thread, &acp_thread, "scanning is disabled", cx)
-            .await;
-        assert!(thread.read_with(cx, |thread, _| thread.architect_run().is_none()));
+        cx.run_until_parked();
+        assert_running(&thread, "source", cx);
+        finish_pending_step(&fake);
+        cx.run_until_parked();
+        assert_running(&thread, "after", cx);
+        finish_pending_step(&fake);
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(
+                thread.architect_run().unwrap().outcome,
+                Some(RunOutcome::Completed)
+            );
+            assert!(thread.architect_events(0, 200).iter().any(|event| {
+                event.kind == "file_tracking_warning"
+                    && event
+                        .message
+                        .as_ref()
+                        .is_some_and(|message| message.contains("scanning is disabled"))
+            }));
+        });
+    }
+
+    #[test]
+    fn future_paths_in_nested_roots_share_an_identity_without_filesystem_access() {
+        for (path_style, outer, inner) in [
+            (util::paths::PathStyle::Unix, "/project", "/project/src"),
+            (util::paths::PathStyle::Windows, "C:\\project", "C:\\project\\src"),
+        ] {
+            let roots = BTreeMap::from([
+                ("outer".into(), (PathBuf::from(outer), path_style)),
+                ("inner".into(), (PathBuf::from(inner), path_style)),
+            ]);
+            let mut graph = linear_graph(&["left", "right"]);
+            graph.edges.clear();
+            graph.node_at_mut(&path("left")).unwrap().file_surface =
+                Some(vec!["outer/src/not-created-yet.rs".into()]);
+            graph.node_at_mut(&path("right")).unwrap().file_surface =
+                Some(vec!["inner/not-created-yet.rs".into()]);
+            assert!(graph.file_surface_problems().is_empty());
+            assert!(lexical_file_surface_graph(&graph, &roots)
+                .file_surface_problems().iter().any(is_file_surface_overlap));
+            graph.node_at_mut(&path("left")).unwrap().file_surface =
+                Some(vec!["outer/src\\not-created-yet.rs".into()]);
+            let overlaps = lexical_file_surface_graph(&graph, &roots)
+                .file_surface_problems().iter().any(is_file_surface_overlap);
+            assert_eq!(overlaps, path_style.is_windows());
+            graph.connect("left", "right");
+            assert!(!lexical_file_surface_graph(&graph, &roots)
+                .file_surface_problems().iter().any(is_file_surface_overlap));
+        }
     }
 
     #[test]
@@ -3428,6 +3591,8 @@ mod checkpoint_tests {
             "a/api_downloads/archive.tar.gz:Zone.Identifier",
             "a/output/_bench/results (3:11:18, 5:53 PM).csv",
             "a/ignored?.csv",
+            "a/ignored\\literal.csv",
+            "a/ignored*.csv",
             "a/NUL.txt",
             "a/ignored.",
         ] {
@@ -3560,7 +3725,9 @@ mod checkpoint_tests {
                     "api_downloads": { "archive.tar.gz:Zone.Identifier": "ignored" },
                     "output": { "_bench": { "results (3:11:18, 5:53 PM).csv": "ignored" } },
                     "ignored?.csv": "ignored glob character",
-                    "existing:visible.rs": "source"
+                    "ignored\\literal.csv": "ignored backslash character",
+                    "existing:visible.rs": "source",
+                    "existing\\literal.rs": "literal filename"
                 }),
             )
             .await;
@@ -3596,6 +3763,7 @@ mod checkpoint_tests {
             "a/api_downloads/archive.tar.gz:Zone.Identifier",
             "a/output/_bench/results (3:11:18, 5:53 PM).csv",
             "a/ignored?.csv",
+            "a/ignored\\literal.csv",
         ] {
             assert!(!baseline.files.contains_key(file));
             assert!(
@@ -3617,7 +3785,10 @@ mod checkpoint_tests {
                 serde_json::json!({
                     "new:visible.rs": "created",
                     "new (3:11:18).csv": "ignored",
-                    "included (3:11:18).csv": "explicitly included"
+                    "included (3:11:18).csv": "explicitly included",
+                    "literal\\name.rs": "created literal filename",
+                    "literal*.rs": "not a glob",
+                    "literal?.rs": "not a glob"
                 }),
             )
             .await;
@@ -3627,7 +3798,13 @@ mod checkpoint_tests {
         let created = updated.created_since(&restored).unwrap();
         assert_eq!(
             created,
-            vec!["a/included (3:11:18).csv", "a/new:visible.rs"]
+            vec![
+                "a/included (3:11:18).csv",
+                "a/literal*.rs",
+                "a/literal?.rs",
+                "a/literal\\name.rs",
+                "a/new:visible.rs"
+            ]
         );
         graph.record_created_files(&path("source"), &created);
         assert!(graph.file_surface_problems().is_empty());
@@ -4075,7 +4252,7 @@ mod checkpoint_tests {
     }
 
     #[gpui::test(iterations = 3)]
-    async fn failed_post_turn_snapshot_resumes_without_repeating_completed_work(
+    async fn failed_post_turn_snapshot_continues_without_repeating_completed_work(
         cx: &mut TestAppContext,
     ) {
         let (_connection, thread, acp_thread, fake) = native_session(cx).await;
@@ -4085,7 +4262,7 @@ mod checkpoint_tests {
     }
 
     #[gpui::test(iterations = 3)]
-    async fn remote_failed_post_turn_snapshot_resumes_without_repeating_completed_work(
+    async fn remote_failed_post_turn_snapshot_continues_without_repeating_completed_work(
         cx: &mut TestAppContext,
         host_cx: &mut TestAppContext,
     ) {
@@ -4139,10 +4316,17 @@ mod checkpoint_tests {
         cx.run_until_parked();
         let run_id = thread.read_with(cx, |thread, _| {
             let run = thread.architect_run().unwrap();
-            assert!(matches!(run.outcome, Some(RunOutcome::Failed { .. })));
-            let state = RunState::from_checkpoint(run.snapshot().checkpoint.unwrap()).unwrap();
+            assert!(run.outcome.is_none());
+            let state = run.control().unwrap().borrow();
             assert_eq!(state.lanes[0].next, Decision::Run(path("after")));
-            assert!(state.lanes[0].file_observation.is_some());
+            assert!(state.lanes[0].file_observation.is_none());
+            assert!(state.surface_error.is_none());
+            assert!(
+                thread
+                    .architect_events(0, 200)
+                    .iter()
+                    .any(|event| event.kind == "file_tracking_warning")
+            );
             assert!(
                 state
                     .graph
@@ -4158,8 +4342,6 @@ mod checkpoint_tests {
             serde_json::json!({ "a": { "recovered.rs": "recovered" } }),
         )
         .await;
-        cx.update(|cx| resume_architect_run(thread.clone(), acp_thread.clone(), cx).unwrap());
-        cx.run_until_parked();
         assert_running(&thread, "after", cx);
         thread.read_with(cx, |thread, _| {
             let run = thread.architect_run().unwrap();
@@ -4172,7 +4354,7 @@ mod checkpoint_tests {
             );
             assert_eq!(
                 state.graph.node_at(&path("after")).unwrap().file_surface,
-                Some(vec!["a/recovered.rs".into()])
+                Some(Vec::new())
             );
         });
         finish_pending_step(&fake);
@@ -4416,7 +4598,8 @@ mod checkpoint_tests {
             driver
                 .observe_project_files(&mut cx.to_async())
                 .await
-                .is_err()
+                .unwrap()
+                .is_none()
         );
         let restored = RunState::from_checkpoint(control.borrow().checkpoint()).unwrap();
         *control.borrow_mut() = restored;

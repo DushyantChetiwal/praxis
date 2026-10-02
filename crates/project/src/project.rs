@@ -5362,12 +5362,12 @@ impl Project {
         let worktree_store = self.worktree_store.read(cx);
 
         if is_absolute(&path.to_string_lossy(), path_style) {
+            let normalized = path_style.normalize(&path.to_string_lossy());
             for worktree in worktree_store.visible_worktrees(cx) {
                 let worktree_abs_path = worktree.read(cx).abs_path();
+                let root = path_style.normalize(&worktree_abs_path.to_string_lossy());
 
-                if let Ok(relative_path) = path.strip_prefix(worktree_abs_path)
-                    && let Ok(path) = RelPath::new(relative_path, path_style)
-                {
+                if let Some(path) = path_style.strip_prefix(Path::new(&normalized), Path::new(&root)) {
                     return Some(ProjectPath {
                         worktree_id: worktree.read(cx).id(),
                         path: path.into_arc(),
@@ -5375,24 +5375,22 @@ impl Project {
                 }
             }
         } else {
+            let path = RelPath::new(path, path_style).ok()?;
             // First pass: for each worktree, try two interpretations of the path and
             // return whichever finds an existing entry first:
             //   (a) Strip the worktree root name as a prefix.
             //   (b) Treat the path as a literal worktree-relative path.
             for worktree in worktree_store.visible_worktrees(cx) {
                 let worktree = worktree.read(cx);
-                if let Ok(relative_path) = path.strip_prefix(worktree.root_name().as_std_path())
-                    && let Ok(rel_path) = RelPath::new(relative_path, path_style)
-                    && let Some(entry) = worktree.entry_for_path(&rel_path)
+                if let Ok(relative_path) = path.strip_prefix(worktree.root_name())
+                    && let Some(entry) = worktree.entry_for_path(relative_path)
                 {
                     return Some(ProjectPath {
                         worktree_id: worktree.id(),
                         path: entry.path.clone(),
                     });
                 }
-                if let Ok(rel_path) = RelPath::new(path, path_style)
-                    && let Some(entry) = worktree.entry_for_path(&rel_path)
-                {
+                if let Some(entry) = worktree.entry_for_path(&path) {
                     return Some(ProjectPath {
                         worktree_id: worktree.id(),
                         path: entry.path.clone(),
@@ -5404,12 +5402,10 @@ impl Project {
             // entry to exist, to allow resolving paths that don't exist yet.
             for worktree in worktree_store.visible_worktrees(cx) {
                 let worktree_root_name = worktree.read(cx).root_name();
-                if let Ok(relative_path) = path.strip_prefix(worktree_root_name.as_std_path())
-                    && let Ok(path) = RelPath::new(relative_path, path_style)
-                {
+                if let Ok(relative_path) = path.strip_prefix(&worktree_root_name) {
                     return Some(ProjectPath {
                         worktree_id: worktree.read(cx).id(),
-                        path: path.into_arc(),
+                        path: relative_path.into(),
                     });
                 }
             }
