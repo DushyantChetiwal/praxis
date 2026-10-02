@@ -139,7 +139,8 @@ impl rpc::ProtoClient for InventoryClient {
         envelope: rpc::proto::Envelope,
         _: &'static str,
     ) -> futures::future::BoxFuture<'static, Result<rpc::proto::Envelope>> {
-        let Some(rpc::proto::envelope::Payload::ExpandProjectEntry(request)) = envelope.payload else {
+        let Some(rpc::proto::envelope::Payload::ExpandProjectEntry(request)) = envelope.payload
+        else {
             return future::ready(Err(anyhow::anyhow!("Unexpected inventory fixture request")))
                 .boxed();
         };
