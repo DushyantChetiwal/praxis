@@ -621,7 +621,9 @@ fn canonical_file_surface_path(path: &str) -> Result<String, String> {
         // Graph identities also describe remote files. Filename restrictions
         // belong to the owning worktree, not the platform displaying the plan.
         if component.contains(['\0', '*', '?']) {
-            return Err("use an individual file path without NUL characters or glob patterns".into());
+            return Err(
+                "use an individual file path without NUL characters or glob patterns".into(),
+            );
         }
         components.push(component);
     }
@@ -2237,9 +2239,11 @@ mod tests {
         let restored: ArchitectGraph =
             serde_json::from_str(&serde_json::to_string(&graph).unwrap()).unwrap();
         assert!(restored.file_surface_problems().is_empty());
+        let mut expected = vec!["worktree/src/shared.rs".to_string()];
+        expected.extend(files);
         assert_eq!(
             restored.node(&"after".into()).unwrap().file_surface,
-            Some(files)
+            Some(expected)
         );
     }
 

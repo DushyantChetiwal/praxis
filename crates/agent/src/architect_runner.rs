@@ -820,7 +820,9 @@ async fn project_file_snapshot(
                 tree.file_inventory(declarations.keys().cloned().collect(), cx)
             })
             .await
-            .map_err(|error| anyhow::anyhow!("Cannot inventory project root {name:?}: {error:#}"))?;
+            .map_err(|error| {
+                anyhow::anyhow!("Cannot inventory project root {name:?}: {error:#}")
+            })?;
         anyhow::ensure!(
             &inventory.root_path == root,
             "Project root changed while scanning. Restore the original root and resume."
@@ -3583,8 +3585,9 @@ mod checkpoint_tests {
             client_fs.metadata_call_count(),
         );
         let mut graph = linear_graph(&["source", "after"]);
-        graph.node_at_mut(&path("after")).unwrap().file_surface =
-            Some(vec!["a/api_downloads/archive.tar.gz:Zone.Identifier".into()]);
+        graph.node_at_mut(&path("after")).unwrap().file_surface = Some(vec![
+            "a/api_downloads/archive.tar.gz:Zone.Identifier".into(),
+        ]);
         let baseline = project_file_snapshot(&project, &graph, &mut cx.to_async())
             .await
             .unwrap();
@@ -3622,7 +3625,10 @@ mod checkpoint_tests {
             .await
             .unwrap();
         let created = updated.created_since(&restored).unwrap();
-        assert_eq!(created, vec!["a/included (3:11:18).csv", "a/new:visible.rs"]);
+        assert_eq!(
+            created,
+            vec!["a/included (3:11:18).csv", "a/new:visible.rs"]
+        );
         graph.record_created_files(&path("source"), &created);
         assert!(graph.file_surface_problems().is_empty());
         assert_eq!(
