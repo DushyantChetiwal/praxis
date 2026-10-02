@@ -618,34 +618,19 @@ fn canonical_file_surface_path(path: &str) -> Result<String, String> {
         if component == ".." {
             return Err("parent traversal is ambiguous; spell the file directly as worktree/path without '..'".into());
         }
-        if component
-            .chars()
-            .any(|character| character.is_control() || "<>:\"|?*".contains(character))
-            || component.ends_with([' ', '.'])
-        {
-            return Err("remove control characters, Windows-reserved characters, or trailing spaces or dots from the file path".into());
-        }
-        let stem = component
-            .split('.')
-            .next()
-            .unwrap_or_default()
-            .to_ascii_uppercase();
-        if matches!(
-            stem.as_str(),
-            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-        ) || stem
-            .strip_prefix("COM")
-            .or_else(|| stem.strip_prefix("LPT"))
-            .is_some_and(|suffix| {
-                matches!(
-                    suffix,
-                    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-                )
-            })
-        {
-            return Err("Windows device names are not portable file paths; name a regular worktree/path file".into());
+        // Graph identities also describe remote files. Filename restrictions
+        // belong to the owning worktree, not the platform displaying the plan.
+        if component.contains(['\0', '*', '?']) {
+            return Err("use an individual file path without NUL characters or glob patterns".into());
         }
         components.push(component);
+    }
+    if components.first().is_some_and(|root| {
+        root.len() == 2
+            && root.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            && root.ends_with(':')
+    }) {
+        return Err("use a worktree-qualified path, not a Windows drive path".into());
     }
     if components.len() < 2 {
         return Err(
@@ -2194,18 +2179,12 @@ mod tests {
             "file.rs",
             "/worktree/file.rs",
             "C:\\worktree\\file.rs",
+            "./C:/worktree/file.rs",
             "//server/share/file.rs",
             "worktree/../file.rs",
             "worktree/src/",
             "worktree/*.rs",
-            "worktree/file.rs:stream",
-            "worktree/NUL.txt",
-            "worktree/COM1",
-            "worktree/file.",
-            "worktree/file ",
-            "worktree/file\n.rs",
-            "worktree/COM¹.txt",
-            "worktree/LPT²",
+            "worktree/file\0.rs",
         ] {
             assert!(
                 ArchitectGraph::normalize_file_surface_path(invalid).is_err(),
@@ -2235,6 +2214,32 @@ mod tests {
                 .any(|problem| matches!(problem,
                     GraphProblem::InvalidFileSurface { reason, .. } if reason.contains("duplicate")
                 ))
+        );
+    }
+
+    #[test]
+    fn file_surfaces_preserve_host_specific_names_through_creation_and_serialization() {
+        let files: Vec<String> = [
+            "worktree/api_downloads/archive.tar.gz:Zone.Identifier",
+            "worktree/output/_bench/results (3:11:18, 5:53 PM).csv",
+            "worktree/NUL.txt",
+            "worktree/COM¹.txt",
+            "worktree/file.",
+            "worktree/file ",
+            "worktree/file\n.rs",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let mut graph = surface_graph(&["source", "after"], &[("source", "after")]);
+        graph.record_created_files(&NodePath::root("source".into()), &files);
+        assert!(graph.file_surface_problems().is_empty());
+        let restored: ArchitectGraph =
+            serde_json::from_str(&serde_json::to_string(&graph).unwrap()).unwrap();
+        assert!(restored.file_surface_problems().is_empty());
+        assert_eq!(
+            restored.node(&"after".into()).unwrap().file_surface,
+            Some(files)
         );
     }
 

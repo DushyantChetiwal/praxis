@@ -242,6 +242,9 @@ pub(crate) fn resolve_file_surface(
                 .filter(|component| !component.is_empty() && *component != ".")
                 .collect::<Vec<_>>()
                 .join("/");
+            if util::paths::PathStyle::Windows.is_absolute(&relative) {
+                return Ok(file.clone());
+            }
             let qualified: Vec<_> = roots
                 .iter()
                 .filter_map(|(name, snapshot)| {
@@ -612,7 +615,13 @@ mod tests {
                 resolve_file_surface(&["README.md".into()], &project, cx).expect("root file"),
                 vec!["a/README.md"]
             );
-            for invalid in ["../outside.rs", "/a/main.rs", "C:/project/main.rs"] {
+            for invalid in [
+                "../outside.rs",
+                "/a/main.rs",
+                "C:/project/main.rs",
+                "C:\\project\\main.rs",
+                "./C:/project/main.rs",
+            ] {
                 assert_eq!(
                     resolve_file_surface(&[invalid.into()], &project, cx)
                         .expect("retain invalid declaration"),
@@ -685,6 +694,15 @@ mod tests {
                     .expect("remote-relative path"),
                 vec!["remote/src/main.rs"]
             );
+            for file in [
+                "api_downloads/archive.tar.gz:Zone.Identifier",
+                "output/_bench/results (3:11:18, 5:53 PM).csv",
+            ] {
+                assert_eq!(
+                    resolve_file_surface(&[file.into()], &project, cx).unwrap(),
+                    vec![format!("remote/{file}")]
+                );
+            }
             for directory in ["src", "remote/src"] {
                 let error = resolve_file_surface(&[directory.into()], &project, cx)
                     .expect_err("remote directory is not a file surface");

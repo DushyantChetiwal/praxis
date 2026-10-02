@@ -566,6 +566,25 @@ struct FileSnapshot {
     skipped_paths: Option<Vec<String>>,
 }
 
+fn inventory_file_identity(file: &str, source: &str) -> anyhow::Result<String> {
+    ArchitectGraph::normalize_file_surface_path(file)
+        .map_err(|reason| anyhow::anyhow!("Rejected path {file:?} from {source}: {reason}"))
+}
+
+fn skipped_inventory_identity(file: &str) -> anyhow::Result<String> {
+    // Skipped entries are scope markers, not file-surface declarations. In
+    // particular, ignored Unix names may contain glob or Windows characters.
+    anyhow::ensure!(
+        file.contains('/')
+            && !file.contains(['\\', '\0'])
+            && file
+                .split('/')
+                .all(|component| !matches!(component, "" | "." | "..")),
+        "Rejected path {file:?} from skipped-path inventory: expected a canonical root-relative path"
+    );
+    Ok(file.to_lowercase())
+}
+
 impl FileSnapshot {
     fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -573,8 +592,7 @@ impl FileSnapshot {
             "The file snapshot has no roots or exceeds the file budget"
         );
         for (identity, file) in &self.files {
-            let normalized =
-                ArchitectGraph::normalize_file_surface_path(file).map_err(anyhow::Error::msg)?;
+            let normalized = inventory_file_identity(file, "saved creation snapshot")?;
             anyhow::ensure!(
                 identity
                     == if self.case_preserving {
@@ -592,7 +610,7 @@ impl FileSnapshot {
             );
             for path in skipped_paths {
                 anyhow::ensure!(
-                    ArchitectGraph::normalize_file_surface_path(path).as_ref() == Ok(path),
+                    skipped_inventory_identity(path)?.as_str() == path,
                     "Invalid skipped snapshot path {path}"
                 );
             }
@@ -615,8 +633,7 @@ impl FileSnapshot {
             skipped_paths.iter().map(String::as_str).collect();
         let mut created = Vec::new();
         for file in self.files.values() {
-            let normalized =
-                ArchitectGraph::normalize_file_surface_path(file).map_err(anyhow::Error::msg)?;
+            let normalized = inventory_file_identity(file, "creation comparison")?;
             let previous_identity = if previous.case_preserving {
                 file
             } else {
@@ -719,6 +736,14 @@ fn preflight_creation_tracking(
                     ),
                 ));
             };
+            worktree
+                .read(cx)
+                .validate_file_inventory_path(relative)
+                .map_err(|error| {
+                    ArchitectRunStartError::CreationTrackingUnavailable(format!(
+                        "Rejected path {file:?} from declared file surface of step {path}: {error:#}"
+                    ))
+                })?;
             let Ok(relative) = util::rel_path::RelPath::from_unix_str(relative) else {
                 continue;
             };
@@ -794,7 +819,8 @@ async fn project_file_snapshot(
             .update(cx, |tree, cx| {
                 tree.file_inventory(declarations.keys().cloned().collect(), cx)
             })
-            .await?;
+            .await
+            .map_err(|error| anyhow::anyhow!("Cannot inventory project root {name:?}: {error:#}"))?;
         anyhow::ensure!(
             &inventory.root_path == root,
             "Project root changed while scanning. Restore the original root and resume."
@@ -806,14 +832,18 @@ async fn project_file_snapshot(
         );
         for relative in inventory.files {
             let file = format!("{name}/{relative}");
-            ArchitectGraph::normalize_file_surface_path(&file).map_err(anyhow::Error::msg)?;
+            worktree
+                .read_with(cx, |tree, _| tree.validate_file_inventory_path(&relative))
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Rejected path {file:?} from automatic file discovery: {error:#}"
+                    )
+                })?;
+            inventory_file_identity(&file, "automatic file discovery")?;
             snapshot.files.insert(file.clone(), file);
         }
         for relative in inventory.skipped_paths {
-            skipped_paths.push(
-                ArchitectGraph::normalize_file_surface_path(&format!("{name}/{relative}"))
-                    .map_err(anyhow::Error::msg)?,
-            );
+            skipped_paths.push(skipped_inventory_identity(&format!("{name}/{relative}"))?);
         }
         for (relative, canonical) in inventory.canonical_paths {
             for file in declarations.get(&relative).into_iter().flatten() {
@@ -3383,6 +3413,54 @@ mod checkpoint_tests {
         assert!(current.created_since(&baseline).unwrap().is_empty());
     }
 
+    #[test]
+    fn skipped_inventory_names_survive_checkpoints_without_filename_validation() {
+        let mut snapshot: FileSnapshot = serde_json::from_value(serde_json::json!({
+            "roots": {"a": "/a"},
+            "files": {"a/source.rs": "a/source.rs"},
+            "case_preserving": true,
+            "skipped_paths": []
+        }))
+        .unwrap();
+        for file in [
+            "a/api_downloads/archive.tar.gz:Zone.Identifier",
+            "a/output/_bench/results (3:11:18, 5:53 PM).csv",
+            "a/ignored?.csv",
+            "a/NUL.txt",
+            "a/ignored.",
+        ] {
+            snapshot
+                .skipped_paths
+                .as_mut()
+                .unwrap()
+                .push(skipped_inventory_identity(file).unwrap());
+        }
+        snapshot.validate().unwrap();
+        let restored: FileSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        restored.validate().unwrap();
+        snapshot.files.insert(
+            "a/output/_bench/results (3:11:18, 5:53 PM).csv".into(),
+            "a/output/_bench/results (3:11:18, 5:53 PM).csv".into(),
+        );
+        assert!(snapshot.created_since(&restored).unwrap().is_empty());
+        snapshot
+            .files
+            .insert("a/new:visible.rs".into(), "a/new:visible.rs".into());
+        snapshot.validate().unwrap();
+        assert_eq!(
+            snapshot.created_since(&restored).unwrap(),
+            vec!["a/new:visible.rs"]
+        );
+        let file = "a/../rejected.rs";
+        let error = inventory_file_identity(file, "automatic file discovery").unwrap_err();
+        assert!(error.to_string().contains(file));
+        assert!(error.to_string().contains("automatic file discovery"));
+        let error = skipped_inventory_identity(file).unwrap_err();
+        assert!(error.to_string().contains(file));
+        assert!(error.to_string().contains("skipped-path inventory"));
+    }
+
     #[gpui::test(iterations = 3)]
     async fn newly_created_case_variant_is_propagated_to_successors(cx: &mut TestAppContext) {
         let (_connection, thread, acp_thread, fake) = native_session(cx).await;
@@ -3461,6 +3539,100 @@ mod checkpoint_tests {
         let (_connection, thread, acp_thread, fake) =
             native_project_session(project, fake, cx).await;
         assert_external_creation_propagation(thread, acp_thread, fake, host_fs, cx).await;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[gpui::test(iterations = 3)]
+    async fn remote_inventory_filters_ignored_names_and_preserves_host_paths(
+        cx: &mut TestAppContext,
+        host_cx: &mut TestAppContext,
+    ) {
+        crate::tests::init_test(cx);
+        let client_fs = fs::FakeFs::new(cx.executor());
+        let host_fs = fs::FakeFs::new(host_cx.executor());
+        host_fs
+            .insert_tree(
+                "/a",
+                serde_json::json!({
+                    ".gitignore": "*.csv\n*:Zone.Identifier\n",
+                    "api_downloads": { "archive.tar.gz:Zone.Identifier": "ignored" },
+                    "output": { "_bench": { "results (3:11:18, 5:53 PM).csv": "ignored" } },
+                    "ignored?.csv": "ignored glob character",
+                    "existing:visible.rs": "source"
+                }),
+            )
+            .await;
+        let (project, _host) = project::Project::test_remote_worktrees(
+            client_fs.clone(),
+            host_fs.clone(),
+            [Path::new("/a")],
+            cx,
+            host_cx,
+        )
+        .await;
+        host_cx.update(|cx| {
+            settings::SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.project.worktree.file_scan_inclusions =
+                        Some(vec!["**/included*.csv".into()].into());
+                });
+            });
+        });
+        let client_reads = (
+            client_fs.read_dir_call_count(),
+            client_fs.metadata_call_count(),
+        );
+        let mut graph = linear_graph(&["source", "after"]);
+        graph.node_at_mut(&path("after")).unwrap().file_surface =
+            Some(vec!["a/api_downloads/archive.tar.gz:Zone.Identifier".into()]);
+        let baseline = project_file_snapshot(&project, &graph, &mut cx.to_async())
+            .await
+            .unwrap();
+        assert!(baseline.files.contains_key("a/existing:visible.rs"));
+        for file in [
+            "a/api_downloads/archive.tar.gz:Zone.Identifier",
+            "a/output/_bench/results (3:11:18, 5:53 PM).csv",
+            "a/ignored?.csv",
+        ] {
+            assert!(!baseline.files.contains_key(file));
+            assert!(
+                baseline
+                    .skipped_paths
+                    .as_ref()
+                    .unwrap()
+                    .contains(&file.to_lowercase())
+            );
+        }
+        baseline.validate().unwrap();
+        let restored: FileSnapshot =
+            serde_json::from_str(&serde_json::to_string(&baseline).unwrap()).unwrap();
+        restored.validate().unwrap();
+        host_fs.pause_events();
+        host_fs
+            .insert_tree(
+                "/a",
+                serde_json::json!({
+                    "new:visible.rs": "created",
+                    "new (3:11:18).csv": "ignored",
+                    "included (3:11:18).csv": "explicitly included"
+                }),
+            )
+            .await;
+        let updated = project_file_snapshot(&project, &graph, &mut cx.to_async())
+            .await
+            .unwrap();
+        let created = updated.created_since(&restored).unwrap();
+        assert_eq!(created, vec!["a/included (3:11:18).csv", "a/new:visible.rs"]);
+        graph.record_created_files(&path("source"), &created);
+        assert!(graph.file_surface_problems().is_empty());
+        assert_eq!(
+            client_reads,
+            (
+                client_fs.read_dir_call_count(),
+                client_fs.metadata_call_count()
+            )
+        );
+        host_fs.unpause_events_and_flush();
     }
 
     #[gpui::test(iterations = 3)]
