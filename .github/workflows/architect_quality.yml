@@ -241,6 +241,16 @@ jobs:
           cargo test --locked -p agent --lib prompt_too_large
           cargo test --locked -p agent --lib an_oversized_tool_result
 
+      - name: Test loading-thread selection retention
+        run: |
+          cargo test --locked -p agent_ui --lib test_add_selection_to_loading_thread
+          cargo test --locked -p agent_ui --lib test_loading_selection_
+          cargo test --locked -p agent_ui --lib test_pending_selections_survive_connection_retry
+          cargo test --locked -p agent_ui --lib test_auth_required_on_initial_connect
+          cargo test --locked -p agent_ui --lib test_message_editing_insert_selections
+          cargo test --locked -p agent_ui --lib test_insert_selections
+          cargo test --locked -p agent_ui --lib test_add_selection_to_terminal_thread_pastes_mention
+
       - name: Test Architect canvas support
         run: |
           cargo test --locked -p agent_ui --lib architect_ui::
