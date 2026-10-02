@@ -5445,7 +5445,8 @@ pub(crate) mod tests {
         };
         assert_eq!(separator.text, " ");
         for (selection, expected) in [(first, "first selection"), (second, "second selection")] {
-            let acp::EmbeddedResourceResource::TextResourceContents(selection) = &selection.resource
+            let acp::EmbeddedResourceResource::TextResourceContents(selection) =
+                &selection.resource
             else {
                 panic!("expected selected text");
             };
