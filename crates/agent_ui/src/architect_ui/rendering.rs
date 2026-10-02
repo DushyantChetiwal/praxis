@@ -3401,6 +3401,7 @@ mod tests {
             cx.run_until_parked();
 
             cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
                 let status = cx.theme().status();
                 let (border, background, color, icon) = match &outcome {
                     None => (
@@ -3435,7 +3436,9 @@ mod tests {
                             && quad.border_widths.bottom > px(0.0).scale(window.scale_factor())
                             && quad.border_widths.top == px(0.0).scale(window.scale_factor())
                     })
-                    .expect("the mounted run banner should paint its status background");
+                    .unwrap_or_else(|| {
+                        panic!("the mounted run banner should paint its status background for {outcome:?}")
+                    });
                 assert_eq!(banner.border_color, border, "{outcome:?}");
                 assert!(
                     quads.iter().any(|quad| {
@@ -3511,6 +3514,7 @@ mod tests {
         view.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
         cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
             assert!(window.painted_quads().iter().any(|quad| {
                 quad.background == cx.theme().status().success.into()
                     && quad.bounds.size == size(px(220.0), px(4.0)).scale(window.scale_factor())
