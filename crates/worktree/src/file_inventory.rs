@@ -21,7 +21,7 @@ impl Worktree {
         match self {
             Self::Local(local) => anyhow::ensure!(
                 local.scanning_enabled,
-                "Project scanning is disabled. Enable project scanning before running the plan."
+                "Project scanning is disabled. Enable it to discover newly created files."
             ),
             Self::Remote(remote) => {
                 anyhow::ensure!(
@@ -32,7 +32,7 @@ impl Worktree {
                     Some(Ok(())) => {}
                     Some(Err(error)) => anyhow::bail!("{error}"),
                     None => anyhow::bail!(
-                        "Project file tracking support is still loading. Wait for the project to connect, then retry."
+                        "Project file tracking support is still loading. Automatic discovery is not ready yet."
                     ),
                 }
             }
@@ -69,7 +69,7 @@ impl Worktree {
             {
                 Ok(Ok(response)) if response.supports_file_inventory => Ok(()),
                 Ok(Ok(_)) => Err(
-                    "The project host does not support creation tracking. Update Praxis on the host and reconnect before running the plan."
+                    "The project host does not support creation tracking. Update Praxis on the host and reconnect to enable automatic discovery."
                         .to_string(),
                 ),
                 Ok(Err(error)) => Err(format!(

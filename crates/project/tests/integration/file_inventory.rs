@@ -257,7 +257,9 @@ async fn test_remote_wire_inventory_preserves_host_paths_with_and_without_wsl_in
 }
 
 #[gpui::test]
-async fn test_qualified_future_path_is_not_redirected_to_an_existing_shadow(cx: &mut TestAppContext) {
+async fn test_qualified_future_path_is_not_redirected_to_an_existing_shadow(
+    cx: &mut TestAppContext,
+) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree(
