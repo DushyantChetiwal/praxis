@@ -57,7 +57,7 @@ async fn test_native_file_inventory_preserves_host_names_and_ignore_policy(
         SettingsStore::update_global(cx, |store, cx| {
             store.update_user_settings(cx, |settings| {
                 settings.project.worktree.file_scan_inclusions =
-                    Some(SplicingVec::from(vec!["**/keep.ignored".to_string()]));
+                    Some(SplicingVec::from(vec!["keep.ignored".to_string()]));
             });
         });
     });
@@ -126,65 +126,64 @@ async fn test_native_file_inventory_preserves_host_names_and_ignore_policy(
     cx.run_until_parked();
 }
 
+struct InventoryClient {
+    handlers: Mutex<rpc::ProtoMessageHandlerSet>,
+    inventory: rpc::proto::WorktreeFileInventory,
+    declarations: Mutex<Vec<String>>,
+    wsl_interop: bool,
+}
+
+impl rpc::ProtoClient for InventoryClient {
+    fn request(
+        &self,
+        envelope: rpc::proto::Envelope,
+        _: &'static str,
+    ) -> futures::future::BoxFuture<'static, Result<rpc::proto::Envelope>> {
+        let Some(rpc::proto::envelope::Payload::ExpandProjectEntry(request)) = envelope.payload else {
+            return future::ready(Err(anyhow::anyhow!("Unexpected inventory fixture request")))
+                .boxed();
+        };
+        let request = request.file_inventory.expect("inventory request");
+        *self.declarations.lock() = request.declared_paths;
+        let response = rpc::proto::ExpandProjectEntryResponse {
+            worktree_scan_id: 0,
+            supports_file_inventory: true,
+            file_inventory: (!request.check_support_only).then(|| self.inventory.clone()),
+        };
+        future::ready(Ok(rpc::proto::Envelope {
+            payload: Some(rpc::proto::envelope::Payload::ExpandProjectEntryResponse(
+                response,
+            )),
+            ..Default::default()
+        }))
+        .boxed()
+    }
+
+    fn send(&self, _: rpc::proto::Envelope, _: &'static str) -> Result<()> {
+        Ok(())
+    }
+
+    fn send_response(&self, _: rpc::proto::Envelope, _: &'static str) -> Result<()> {
+        Ok(())
+    }
+
+    fn message_handler_set(&self) -> &Mutex<rpc::ProtoMessageHandlerSet> {
+        &self.handlers
+    }
+
+    fn is_via_collab(&self) -> bool {
+        false
+    }
+
+    fn has_wsl_interop(&self) -> bool {
+        self.wsl_interop
+    }
+}
+
 #[gpui::test]
 async fn test_remote_wire_inventory_preserves_host_paths_with_and_without_wsl_interop(
     cx: &mut TestAppContext,
 ) {
-    struct InventoryClient {
-        handlers: Mutex<rpc::ProtoMessageHandlerSet>,
-        inventory: rpc::proto::WorktreeFileInventory,
-        declarations: Mutex<Vec<String>>,
-        wsl_interop: bool,
-    }
-
-    impl rpc::ProtoClient for InventoryClient {
-        fn request(
-            &self,
-            envelope: rpc::proto::Envelope,
-            _: &'static str,
-        ) -> futures::future::BoxFuture<'static, Result<rpc::proto::Envelope>> {
-            let Some(rpc::proto::envelope::Payload::ExpandProjectEntry(request)) = envelope.payload
-            else {
-                return future::ready(Err(anyhow::anyhow!("Unexpected inventory fixture request")))
-                    .boxed();
-            };
-            let request = request.file_inventory.expect("inventory request");
-            *self.declarations.lock() = request.declared_paths;
-            let response = rpc::proto::ExpandProjectEntryResponse {
-                worktree_scan_id: 0,
-                supports_file_inventory: true,
-                file_inventory: (!request.check_support_only).then(|| self.inventory.clone()),
-            };
-            future::ready(Ok(rpc::proto::Envelope {
-                payload: Some(rpc::proto::envelope::Payload::ExpandProjectEntryResponse(
-                    response,
-                )),
-                ..Default::default()
-            }))
-            .boxed()
-        }
-
-        fn send(&self, _: rpc::proto::Envelope, _: &'static str) -> Result<()> {
-            Ok(())
-        }
-
-        fn send_response(&self, _: rpc::proto::Envelope, _: &'static str) -> Result<()> {
-            Ok(())
-        }
-
-        fn message_handler_set(&self) -> &Mutex<rpc::ProtoMessageHandlerSet> {
-            &self.handlers
-        }
-
-        fn is_via_collab(&self) -> bool {
-            false
-        }
-
-        fn has_wsl_interop(&self) -> bool {
-            self.wsl_interop
-        }
-    }
-
     init_test(cx);
     for (path_style, wsl_interop) in [
         (PathStyle::Windows, false),
@@ -314,7 +313,15 @@ async fn test_project_path_resolution_uses_host_rules_for_missing_files(cx: &mut
         let project = Project::test(fs.clone(), [], cx).await;
         let store = project.read_with(cx, |project, _| project.worktree_store());
         cx.update(|cx| {
-            let client = rpc::AnyProtoClient::new(rpc::NoopProtoClient::new());
+            let client = rpc::AnyProtoClient::new(Arc::new(InventoryClient {
+                handlers: Mutex::default(),
+                inventory: rpc::proto::WorktreeFileInventory {
+                    root_path: root.into(),
+                    ..Default::default()
+                },
+                declarations: Mutex::default(),
+                wsl_interop: false,
+            }));
             store.update(cx, |store, _| {
                 *store = project::worktree_store::WorktreeStore::remote(
                     true,
