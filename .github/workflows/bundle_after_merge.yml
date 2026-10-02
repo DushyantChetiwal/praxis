@@ -1,0 +1,92 @@
+name: Build Praxis after merge
+
+on:
+  workflow_run:
+    workflows: [Architect quality]
+    branches: [main]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: bundle-after-merge-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Build the validated main merge
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.path == '.github/workflows/architect_quality.yml' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # Never check out or execute code from the triggering run with this token.
+      - name: Dispatch the full bundle once for this merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          def github(endpoint, paginate=False):
+              command = ["gh", "api", endpoint]
+              if paginate:
+                  command.extend(["--paginate", "--slurp"])
+              response = subprocess.run(command, check=True, capture_output=True, text=True, timeout=120)
+              return json.loads(response.stdout)
+
+          def dispatch():
+              repository = os.environ["GITHUB_REPOSITORY"]
+              source = os.environ["SOURCE_SHA"]
+              if re.fullmatch(r"[0-9a-f]{40}", source) is None:
+                  raise ValueError("The validated source must be an immutable commit SHA")
+              root = f"repos/{repository}"
+              if github(f"{root}/git/ref/heads/main")["object"]["sha"] != source:
+                  print("A newer main revision superseded this validation; leaving its build in charge")
+                  return
+              pages = github(f"{root}/commits/{source}/pulls?per_page=100", paginate=True)
+              if not any(
+                  pull["merged_at"] is not None
+                  and pull["merge_commit_sha"] == source
+                  and pull["base"]["ref"] == "main"
+                  and pull["base"]["repo"]["full_name"] == repository
+                  for page in pages for pull in page
+              ):
+                  print("Not a merged main PR; upstream sync retains its own bundle dispatch")
+                  return
+              title = f"Bundle Praxis {source} (macOS=true, Windows=true, Linux=true, test=false)"
+              pages = github(
+                  f"{root}/actions/workflows/bundle_fork.yml/runs?event=workflow_dispatch&per_page=100",
+                  paginate=True,
+              )
+              if any(
+                  run["display_title"] == title
+                  and (run["status"] != "completed" or run["conclusion"] == "success")
+                  for page in pages for run in page["workflow_runs"]
+              ):
+                  print("A full bundle for this exact source is already pending, running, or successful")
+                  return
+              # History pagination must not let an older merge replace a newer queued bundle.
+              if github(f"{root}/git/ref/heads/main")["object"]["sha"] != source:
+                  print("Main advanced while checking build history; skipping the superseded source")
+                  return
+              subprocess.run([
+                  "gh", "workflow", "run", "bundle_fork.yml", "--repo", repository, "--ref", "main",
+                  "-f", f"source_ref={source}", "-f", "build_macos=true", "-f", "build_windows=true",
+                  "-f", "build_linux=true", "-f", "test_build=false",
+              ], check=True, timeout=60)
+              print(f"Dispatched the full Praxis bundle for validated merge {source}")
+
+          dispatch()
+          PY

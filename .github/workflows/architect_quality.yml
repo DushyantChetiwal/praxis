@@ -119,6 +119,7 @@ jobs:
           .github/workflows/architect_quality.yml
           .github/workflows/sync_upstream.yml
           .github/workflows/bundle_fork.yml
+          .github/workflows/bundle_after_merge.yml
           .github/workflows/android_remote.yml
           --check
 

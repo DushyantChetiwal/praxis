@@ -14,8 +14,8 @@
 #             `xattr -d com.apple.quarantine /Applications/Praxis\ Dev.app`.
 #   Windows — SmartScreen warns about an unknown publisher.
 #
-# It can be run from the Actions tab and is also dispatched after a successful
-# automated upstream sync.
+# It runs automatically after a main PR merge passes Architect quality, after
+# a successful upstream sync, or manually from the Actions tab.
 #
 # Kept as short as hosted runners allow:
 #   - source trees with verified original quality receipts are not validated again;
@@ -27,6 +27,10 @@
 #   - `test_build` makes only a Windows installer, with a lighter optimization
 #     profile, for checking a change in the real app. It is never published.
 name: Bundle Praxis
+run-name: >-
+  Bundle Praxis ${{ inputs.source_ref }}
+  (macOS=${{ inputs.build_macos }}, Windows=${{ inputs.build_windows }},
+  Linux=${{ inputs.build_linux }}, test=${{ inputs.test_build }})
 
 on:
   workflow_dispatch:
