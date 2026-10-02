@@ -39,6 +39,19 @@ but the target commit/tree must exist locally. No ZIP paths are extracted.
 
 ### Bundle integration
 
+Merging a PR into `main` now starts the full bundle automatically after the
+post-merge `Architect quality` run succeeds. `bundle_after_merge.yml` dispatches
+`bundle_fork.yml` with the exact validated merge SHA and every platform enabled.
+The bundle publishes the Praxis Dev self-update release only after all desktop
+and remote-server builds succeed. Manual dispatch remains available.
+
+The dispatcher does not check out source code. It accepts only successful quality
+runs from a push to this repository's `main`, confirms the source is still the
+current main tip and belongs to a merged main PR, and skips an already queued,
+running, or successful full bundle with the same immutable source and build
+configuration. Failed bundles can be dispatched again. Upstream sync is not a PR
+merge and retains its own dispatch, including its `rebuild` option.
+
 Bundle prepare invokes `check` with its pinned checkout SHA and `GH_TOKEN`; both
 prepare and the reusable quality call need `actions: read` and `contents: read`.
 The bundle wait budget is `--wait-seconds 10800`, inside a 190-minute prepare job

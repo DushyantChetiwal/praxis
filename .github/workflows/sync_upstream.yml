@@ -127,7 +127,7 @@ jobs:
         run: |
           set -euo pipefail
           # Upstream's own automation targets zed-industries. Only these run here.
-          keep=" architect_quality.yml bundle_fork.yml sync_upstream.yml recover_windows_symbols.yml android_remote.yml "
+          keep=" architect_quality.yml bundle_fork.yml bundle_after_merge.yml sync_upstream.yml recover_windows_symbols.yml android_remote.yml "
           gh workflow list --repo "${GITHUB_REPOSITORY}" --limit 500 --json id,path,state \
             --jq '.[] | select(.state == "active") | "\(.id) \(.path)"' |
             while read -r id path; do
