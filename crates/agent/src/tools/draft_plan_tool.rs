@@ -59,20 +59,23 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 ///   true regardless of how the step is carried out.
 ///
 /// ### Existing files: `file_surface`
-/// Every step, including parents and nested children, MUST declare existing files
-/// it anticipates modifying, renaming, or deleting. Use project-relative paths:
+/// Every step, including parents and nested children, MUST declare file paths
+/// it anticipates creating, modifying, renaming, or deleting. Use project-relative paths:
 /// {"file_surface":["src/main.rs","README.md"]}. With one open root, paths are
-/// relative to that root. With multiple roots, an unprefixed path must identify
-/// an existing file in exactly one root; otherwise use "backend/src/main.rs",
-/// where backend is an actual open root name, not an absolute host path.
+/// relative to that root. With multiple roots, always qualify the root, such as
+/// "backend/src/main.rs", where backend is an actual open root name, not an
+/// absolute host path.
 /// Root-prefixed paths are accepted in either case. The saved plan and inspection
 /// use root/path identities so relative and prefixed aliases cannot hide overlap.
 /// This works the same for local and connected remote projects.
 /// Reading a file alone does not require declaring it. Use explicit [] when no
-/// existing files will be affected; omission and null are not accepted.
-/// Prefer '/' separators; './' and backslashes are normalized. Do not send
-/// directories, globs, absolute paths, '..', or duplicates. Keep actual case;
-/// comparisons are case-insensitive. A parent's effective surface includes descendants.
+/// file writes are anticipated; omission and null are not accepted.
+/// Prefer '/' separators; './' and Windows separators are normalized. On Unix
+/// hosts, use root/path for filenames containing literal backslashes. Special
+/// filename characters are literal, never wildcard-expanded. Files need not
+/// exist yet; surfaces declare scheduling intent, not filesystem validity.
+/// Do not send directories, glob patterns, absolute paths, '..', or duplicates.
+/// Keep actual case; comparisons are case-insensitive. A parent's effective surface includes descendants.
 /// Steps that may run concurrently must have disjoint effective surfaces. If
 /// they need the same existing file, serialize them instead of hiding the overlap.
 /// This is a planning declaration, not a write allowlist; it does not prohibit
@@ -84,7 +87,8 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 /// Newly exposed conflicts stop further dispatch while retaining completed
 /// results. Inspect, correct surfaces or serialize work, review/relock, then
 /// resume. This scheduling guard is not filesystem write enforcement.
-/// Ambiguous root selection and known directory entries are rejected before saving.
+/// Unavailable discovery records a warning and falls back to declared assignments.
+/// Ambiguous root selection is rejected before saving; no file-existence checks run.
 /// Other invalid or overlapping declarations are retained on the canvas with
 /// actionable problems, but the plan cannot run until corrected. Use targeted
 /// `edit_architect_plan` set_file_surface or connection edits to repair it.
@@ -217,19 +221,21 @@ pub(crate) fn resolve_file_surface(
     project: &Entity<project::Project>,
     cx: &App,
 ) -> Result<Vec<String>> {
+    let path_style = project.read(cx).path_style(cx);
     let roots: Vec<_> = project
         .read(cx)
         .visible_worktrees(cx)
         .filter(|worktree| !worktree.read(cx).is_single_file())
-        .map(|worktree| {
-            let snapshot = worktree.read(cx).snapshot();
-            (snapshot.root_name_str().to_string(), snapshot)
-        })
+        .map(|worktree| worktree.read(cx).snapshot().root_name_str().to_string())
         .collect();
     files
         .iter()
         .map(|file| {
-            let portable = file.replace('\\', "/");
+            let portable = if path_style.is_windows() {
+                file.replace('\\', "/")
+            } else {
+                file.clone()
+            };
             // Keep malformed declarations visible as graph problems, not silently
             // repair traversal or turn an absolute path into a relative one.
             if portable.starts_with('/')
@@ -242,48 +248,32 @@ pub(crate) fn resolve_file_surface(
                 .filter(|component| !component.is_empty() && *component != ".")
                 .collect::<Vec<_>>()
                 .join("/");
-            if util::paths::PathStyle::Windows.is_absolute(&relative) {
-                return Ok(file.clone());
-            }
+            anyhow::ensure!(
+                !path_style.is_absolute(&relative),
+                "Use a project-relative file assignment, not absolute host path {file:?}"
+            );
             let qualified: Vec<_> = roots
                 .iter()
-                .filter_map(|(name, snapshot)| {
+                .filter_map(|name| {
                     let (prefix, suffix) = relative.split_once('/')?;
                     if name.to_lowercase() == prefix.to_lowercase() {
-                        Some((name, snapshot, suffix))
+                        Some((name, suffix))
                     } else {
                         None
                     }
                 })
                 .collect();
             anyhow::ensure!(qualified.len() <= 1, "Project root names are ambiguous. Give the roots distinct names before declaring file_surface.");
-            if let Some((name, snapshot, relative)) = qualified.into_iter().next() {
-                let path = util::rel_path::RelPath::from_unix_str(relative)?;
-                anyhow::ensure!(
-                    snapshot.entry_for_path(path).is_none_or(|entry| !entry.is_dir()),
-                    "file_surface entry {file:?} is a directory. List the existing files individually, not the containing folder."
-                );
+            if let Some((name, relative)) = qualified.into_iter().next() {
                 return Ok(format!("{name}/{relative}"));
             }
-            if let [(name, snapshot)] = roots.as_slice() {
-                let path = util::rel_path::RelPath::from_unix_str(&relative)?;
-                anyhow::ensure!(
-                    snapshot.entry_for_path(path).is_none_or(|entry| !entry.is_dir()),
-                    "file_surface entry {file:?} is a directory. List the existing files individually, not the containing folder."
-                );
+            if let [name] = roots.as_slice() {
                 return Ok(format!("{name}/{relative}"));
             }
-            let path = util::rel_path::RelPath::from_unix_str(&relative)?;
-            let matching: Vec<_> = roots
-                .iter()
-                .filter(|(_, snapshot)| snapshot.entry_for_path(path).is_some_and(|entry| !entry.is_dir()))
-                .map(|(name, _)| format!("{name}/{relative}"))
-                .collect();
-            anyhow::ensure!(matching.len() == 1,
-                "Cannot resolve file_surface entry {file:?} to one project root. Use root/path, for example {}/{}. Available roots: {}. Paths are relative to the project, never the host filesystem.",
-                roots.first().map(|(name, _)| name.as_str()).unwrap_or("project"), relative,
-                roots.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(", "));
-            matching.into_iter().next().ok_or_else(|| anyhow::anyhow!("No project root contains {file:?}"))
+            anyhow::bail!(
+                "Use root/path for file_surface entry {file:?} when multiple project roots are open. Available roots: {}. Root selection does not depend on whether a file exists.",
+                roots.join(", ")
+            )
         })
         .collect()
 }
@@ -600,33 +590,56 @@ mod tests {
             super::super::architect_run_tool::architect_tool_test_session(cx).await;
         let project = thread.read_with(cx, |thread, _| thread.project().clone());
         cx.update(|cx| {
-            for input in [
-                "src/main.rs",
-                "./src/main.rs",
-                "src\\main.rs",
-                "a/src/main.rs",
-            ] {
+            for input in ["src/main.rs", "./src/main.rs", "a/src/main.rs"] {
                 assert_eq!(
                     resolve_file_surface(&[input.into()], &project, cx).expect("relative path"),
                     vec!["a/src/main.rs"]
+                );
+            }
+            let backslash = if project.read(cx).path_style(cx).is_windows() {
+                "a/src/main.rs"
+            } else {
+                "a/src\\main.rs"
+            };
+            assert_eq!(
+                resolve_file_surface(&["src\\main.rs".into()], &project, cx).unwrap(),
+                vec![backslash]
+            );
+            for file in [
+                "future/CON?.rs",
+                "future/archive:Zone.Identifier",
+                "future/file.",
+            ] {
+                assert_eq!(
+                    resolve_file_surface(&[file.into()], &project, cx).unwrap(),
+                    vec![format!("a/{file}")]
                 );
             }
             assert_eq!(
                 resolve_file_surface(&["README.md".into()], &project, cx).expect("root file"),
                 vec!["a/README.md"]
             );
-            for invalid in [
-                "../outside.rs",
-                "/a/main.rs",
-                "C:/project/main.rs",
-                "C:\\project\\main.rs",
-                "./C:/project/main.rs",
-            ] {
+            for invalid in ["../outside.rs", "/a/main.rs"] {
                 assert_eq!(
                     resolve_file_surface(&[invalid.into()], &project, cx)
                         .expect("retain invalid declaration"),
                     vec![invalid]
                 );
+            }
+            for input in [
+                "C:/project/main.rs",
+                "C:\\project\\main.rs",
+                "./C:/project/main.rs",
+            ] {
+                let resolved = resolve_file_surface(&[input.into()], &project, cx);
+                if project.read(cx).path_style(cx).is_windows() {
+                    assert!(resolved.is_err());
+                } else {
+                    assert_eq!(
+                        resolved.unwrap(),
+                        vec![format!("a/{}", input.trim_start_matches("./"))]
+                    );
+                }
             }
         });
         let fs = fs::FakeFs::new(cx.executor());
@@ -649,7 +662,8 @@ mod tests {
         .await;
         cx.update(|cx| {
             assert_eq!(
-                resolve_file_surface(&["src/server.rs".into()], &project, cx).expect("unique file"),
+                resolve_file_surface(&["backend/src/server.rs".into()], &project, cx)
+                    .expect("qualified file"),
                 vec!["backend/src/server.rs"]
             );
             assert_eq!(
@@ -661,9 +675,15 @@ mod tests {
                 .expect_err("ambiguous roots");
             assert!(error.to_string().contains("Use root/path"));
             assert!(resolve_file_surface(&["missing.rs".into()], &project, cx).is_err());
-            let error = resolve_file_surface(&["backend/src".into()], &project, cx)
-                .expect_err("directories cannot stand in for files");
-            assert!(error.to_string().contains("is a directory"));
+            assert!(resolve_file_surface(&["src/server.rs".into()], &project, cx).is_err());
+            assert_eq!(
+                resolve_file_surface(&["backend/src".into()], &project, cx).unwrap(),
+                vec!["backend/src"]
+            );
+            assert_eq!(
+                resolve_file_surface(&["backend/future/file.rs".into()], &project, cx).unwrap(),
+                vec!["backend/future/file.rs"]
+            );
         });
     }
 
@@ -704,9 +724,10 @@ mod tests {
                 );
             }
             for directory in ["src", "remote/src"] {
-                let error = resolve_file_surface(&[directory.into()], &project, cx)
-                    .expect_err("remote directory is not a file surface");
-                assert!(error.to_string().contains("is a directory"));
+                assert_eq!(
+                    resolve_file_surface(&[directory.into()], &project, cx).unwrap(),
+                    vec!["remote/src"]
+                );
             }
         });
     }

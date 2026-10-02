@@ -244,12 +244,14 @@ pub enum ArchitectPlanEditAction {
 /// exclusion for file-surface validation.
 /// File lists accept project-relative paths, for example
 /// {"kind":"set_file_surface","path":["step"],"file_surface":["src/main.rs","README.md"]}.
-/// With one project root, paths are relative to it. For multiple roots, a path
-/// must identify an existing file in exactly one root, or include its root name
-/// ("backend/src/main.rs"). Root-prefixed paths always work. Preview stores
+/// With one project root, paths are relative to it. For multiple roots, include
+/// the root name ("backend/src/main.rs"); root selection never probes existence.
+/// Root-prefixed paths always work. Preview stores
 /// root/path identities, so mixed spellings cannot bypass overlap checks.
 /// These rules are identical for local and connected remote projects. No absolute
-/// host paths, directories, globs, or '..'; './' and backslashes are normalized.
+/// host paths, directories, glob patterns, or '..'. Windows separators are
+/// normalized only for Windows hosts; Unix backslashes remain literal.
+/// Files need not exist, and OS filename restrictions are not scheduling checks.
 /// Include file_surface on inserted nodes and children. Surfaces are planning
 /// declarations, not write restrictions. Serialize work needing the same file
 /// rather than hiding overlaps. Native runtime discovery can widen reachable

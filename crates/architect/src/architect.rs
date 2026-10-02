@@ -131,10 +131,10 @@ pub struct ArchitectNode {
     /// The area of work this step owns.
     #[serde(default)]
     pub responsibility: String,
-    /// Existing files this step anticipates modifying. Tool inputs accept
+    /// File paths this step anticipates writing, including new files. Tool inputs accept
     /// project-relative paths such as ["src/main.rs", "README.md"], or root/path
     /// to disambiguate multiple roots. Stored graphs use root-qualified paths.
-    /// `None` is an unreviewed legacy declaration; `Some([])` anticipates no existing files.
+    /// `None` is an unreviewed legacy declaration; `Some([])` anticipates no file writes.
     #[serde(default)]
     pub file_surface: Option<Vec<String>>,
     /// What this step has to accomplish.
@@ -195,8 +195,8 @@ impl ArchitectNode {
 
     pub(crate) fn file_surface_description(&self) -> String {
         match &self.file_surface {
-            None => "MISSING — declare existing files before running".into(),
-            Some(files) if files.is_empty() => "[] — no existing files anticipated".into(),
+            None => "MISSING — declare file assignments before running".into(),
+            Some(files) if files.is_empty() => "[] — no file writes anticipated".into(),
             Some(files) => format!("{files:?}"),
         }
     }
@@ -603,7 +603,13 @@ fn routes_from(graph: &ArchitectGraph, id: &NodeId) -> Vec<Route> {
 // This is a lexical comparison spelling, not OS canonicalization. Filesystem
 // aliases (including symlinks and short names) need host-specific resolution.
 fn canonical_file_surface_path(path: &str) -> Result<String, String> {
-    let path = path.replace('\\', "/");
+    // Stored identities are root-qualified with '/'. A backslash inside one
+    // is a literal Unix filename character, not a client-side separator.
+    let path = if path.contains('/') {
+        path.to_string()
+    } else {
+        path.replace('\\', "/")
+    };
     if path.is_empty() || path.starts_with('/') || path.ends_with('/') {
         return Err(
             "use a relative file path qualified as worktree/path, not a directory or absolute path"
@@ -618,22 +624,9 @@ fn canonical_file_surface_path(path: &str) -> Result<String, String> {
         if component == ".." {
             return Err("parent traversal is ambiguous; spell the file directly as worktree/path without '..'".into());
         }
-        // Graph identities also describe remote files. Filename restrictions
-        // belong to the owning worktree, not the platform displaying the plan.
-        if component.contains(['\0', '*', '?']) {
-            return Err(
-                "use an individual file path without NUL characters or glob patterns".into(),
-            );
-        }
         components.push(component);
     }
-    if components.first().is_some_and(|root| {
-        root.len() == 2
-            && root.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-            && root.ends_with(':')
-    }) {
-        return Err("use a worktree-qualified path, not a Windows drive path".into());
-    }
+
     if components.len() < 2 {
         return Err(
             "include the worktree name and a file, for example worktree/src/main.rs".into(),
@@ -654,7 +647,8 @@ fn file_surface_declaration_identity(path: &str) -> Result<String, String> {
 
 impl ArchitectGraph {
     /// Conservative comparison identity for a worktree-qualified file path.
-    /// Normalizes separators, '.' components, and Unicode lowercase spelling.
+    /// Normalizes legacy all-backslash paths, '.' components, and Unicode
+    /// lowercase spelling. Canonical '/' paths retain literal filename characters.
     /// This is not full Unicode case folding, Unicode normalization, or OS
     /// canonicalization: symlinks, short names, and filesystem aliases are unresolved.
     pub fn normalize_file_surface_path(path: &str) -> Result<String, String> {
@@ -1993,12 +1987,12 @@ pub struct ProposedNode {
     /// The area of work this step owns, such as `Authentication` or `Tests`.
     #[serde(default)]
     pub responsibility: String,
-    /// Required existing-file surface. Example: ["src/main.rs", "README.md"].
+    /// Required file-assignment surface, including planned new files. Example: ["src/main.rs"].
     /// Paths are project-relative; use "backend/src/main.rs" to disambiguate
     /// multiple open roots. Root-prefixed paths also work in single-root projects.
     /// Local and connected remote projects use the same rules. No absolute paths,
-    /// directories, globs, or '..'. List modifications, renames, and deletions,
-    /// not read-only access. Use [] when no existing files will be affected.
+    /// directories, glob patterns, or '..'. List creations, modifications, renames,
+    /// and deletions, not read-only access. Use [] when no file writes are anticipated.
     /// Concurrent steps must have disjoint surfaces, including nested children.
     pub file_surface: Vec<String>,
     /// What this step has to accomplish.
@@ -2180,13 +2174,9 @@ mod tests {
             "",
             "file.rs",
             "/worktree/file.rs",
-            "C:\\worktree\\file.rs",
-            "./C:/worktree/file.rs",
             "//server/share/file.rs",
             "worktree/../file.rs",
             "worktree/src/",
-            "worktree/*.rs",
-            "worktree/file\0.rs",
         ] {
             assert!(
                 ArchitectGraph::normalize_file_surface_path(invalid).is_err(),
@@ -2229,6 +2219,11 @@ mod tests {
             "worktree/file.",
             "worktree/file ",
             "worktree/file\n.rs",
+            "worktree/literal\\name.rs",
+            "worktree/literal*.rs",
+            "worktree/literal?.rs",
+            "C:/literal-root.rs",
+            "C:\\literal-root/file.rs",
         ]
         .into_iter()
         .map(String::from)
@@ -2245,6 +2240,20 @@ mod tests {
             restored.node(&"after".into()).unwrap().file_surface,
             Some(expected)
         );
+    }
+
+    #[test]
+    fn literal_unix_names_do_not_alias_separators_or_expand_globs() {
+        for (literal, other) in [
+            ("worktree/src/name\\part.rs", "worktree/src/name/part.rs"),
+            ("worktree/src/*.rs", "worktree/src/main.rs"),
+            ("worktree/src/file?.rs", "worktree/src/file1.rs"),
+        ] {
+            assert_ne!(
+                ArchitectGraph::normalize_file_surface_path(literal).unwrap(),
+                ArchitectGraph::normalize_file_surface_path(other).unwrap()
+            );
+        }
     }
 
     #[test]

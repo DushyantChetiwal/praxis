@@ -357,7 +357,7 @@ class ProvenanceTests(unittest.TestCase):
             job["conclusion"] = "skipped"
         self.reject_receipt()
 
-    def test_each_of_six_jobs_must_actually_succeed(self):
+    def test_each_required_job_must_actually_succeed(self):
         for job in self.jobs:
             for conclusion in ("failure", "cancelled", "skipped"):
                 with self.subTest(job=job["name"], conclusion=conclusion):
@@ -538,7 +538,7 @@ class ProvenanceTests(unittest.TestCase):
                 with self.assertRaises(validation.Unverified):
                     self.validator.record(MERGE)
 
-    def test_record_requires_all_six_successful_jobs(self):
+    def test_record_requires_all_successful_jobs(self):
         self.set_execution_environment()
         self.jobs[-1]["conclusion"] = "skipped"
         with self.assertRaises(validation.Unverified):
@@ -921,11 +921,19 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", self.workflow)
         self.assertNotIn("group: architect-quality-${{ inputs.source_ref", self.workflow)
 
-    def test_pr_gate_never_reuses_and_all_six_jobs_use_pinned_source(self):
+    def test_pr_gate_never_reuses_and_all_job_groups_use_pinned_source(self):
         self.assertIn('if [ "$GITHUB_EVENT_NAME" = pull_request ]; then', self.workflow)
         self.assertEqual(self.workflow.count("SOURCE_REF: ${{ needs.prepare.outputs.source_sha }}"), 6)
         for name in validation.EXPECTED_JOBS:
             self.assertIn(f"name: {name}\n", self.workflow)
+
+    def test_native_path_matrix_is_required_on_all_three_client_platforms(self):
+        for platform, runner in [("Linux", "ubuntu-24.04"), ("Windows", "windows-2022"), ("macOS", "macos-15")]:
+            name = f"Architect graph tests ({platform})"
+            self.assertIn(name, validation.EXPECTED_JOBS)
+            self.assertIn(f"- name: {name}\n            runner: {runner}", self.workflow)
+        self.assertIn("run: cargo test --locked -p path --lib", self.workflow)
+        self.assertIn("fail-fast: false", self.workflow)
 
     def test_full_receipt_checks_every_job_and_reuse_has_explicit_aggregate(self):
         receipt = self.workflow.split("  full-receipt:\n", 1)[1].split("  source-validated:\n", 1)[0]
@@ -962,6 +970,181 @@ class WorkflowContractTests(unittest.TestCase):
         results["Formatting"]["result"] = "failure"
         with self.assertRaises(AssertionError):
             aggregate()
+
+
+class BundleAfterMergeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        workflows = SCRIPT.parent.parent / ".github/workflows"
+        cls.workflow = (workflows / "bundle_after_merge.yml").read_text(encoding="utf-8")
+        cls.bundle = (workflows / "bundle_fork.yml").read_text(encoding="utf-8")
+        cls.quality = (workflows / "architect_quality.yml").read_text(encoding="utf-8")
+        cls.sync = (workflows / "sync_upstream.yml").read_text(encoding="utf-8")
+        block = cls.workflow.split("          python - <<'PY'\n", 1)[1].split("          PY\n", 1)[0]
+        cls.code = textwrap.dedent(block)
+
+    def setUp(self):
+        self.calls = []
+        self.sequences = {}
+        self.main_path = f"{ROOT}/git/ref/heads/main"
+        self.pulls_path = f"{ROOT}/commits/{TARGET}/pulls?per_page=100"
+        self.bundles_path = f"{ROOT}/actions/workflows/bundle_fork.yml/runs?event=workflow_dispatch&per_page=100"
+        self.pull = {
+            "merged_at": "2026-10-02T11:46:00Z",
+            "merge_commit_sha": TARGET,
+            "base": {"ref": "main", "repo": {"full_name": REPOSITORY}},
+        }
+        self.responses = {
+            self.main_path: {"object": {"sha": TARGET}},
+            self.pulls_path: [[self.pull]],
+            self.bundles_path: [{"workflow_runs": []}],
+        }
+        self.title = f"Bundle Praxis {TARGET} (macOS=true, Windows=true, Linux=true, test=false)"
+
+    def execute(self, source=TARGET):
+        def run(command, **kwargs):
+            self.calls.append(command)
+            self.assertTrue(kwargs["check"])
+            self.assertGreater(kwargs["timeout"], 0)
+            if command[:2] == ["gh", "api"]:
+                sequence = self.sequences.get(command[2])
+                response = sequence.pop(0) if sequence else self.responses[command[2]]
+                if isinstance(response, Exception):
+                    raise response
+                if command[2] in (self.pulls_path, self.bundles_path):
+                    self.assertEqual(command[-2:], ["--paginate", "--slurp"])
+                return subprocess.CompletedProcess(command, 0, json.dumps(response), "")
+            self.assertEqual(command[:3], ["gh", "workflow", "run"])
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.dict(os.environ, {"GITHUB_REPOSITORY": REPOSITORY, "SOURCE_SHA": source}, clear=True):
+            with patch.object(subprocess, "run", side_effect=run), contextlib.redirect_stdout(io.StringIO()):
+                exec(self.code, {})
+
+    def dispatches(self):
+        return [command for command in self.calls if command[:3] == ["gh", "workflow", "run"]]
+
+    def test_validated_merge_dispatches_all_platforms_at_immutable_source(self):
+        self.execute()
+        self.assertEqual(self.dispatches(), [[
+            "gh", "workflow", "run", "bundle_fork.yml", "--repo", REPOSITORY, "--ref", "main",
+            "-f", f"source_ref={TARGET}", "-f", "build_macos=true", "-f", "build_windows=true",
+            "-f", "build_linux=true", "-f", "test_build=false",
+        ]])
+
+    def test_superseded_main_revision_never_dispatches(self):
+        self.responses[self.main_path]["object"]["sha"] = OTHER
+        self.execute()
+        self.assertFalse(self.dispatches())
+        self.assertEqual(len(self.calls), 1)
+
+    def test_main_advancing_during_history_lookup_does_not_replace_newer_build(self):
+        self.sequences[self.main_path] = [
+            {"object": {"sha": TARGET}},
+            {"object": {"sha": OTHER}},
+        ]
+        self.execute()
+        self.assertFalse(self.dispatches())
+        self.assertEqual(self.calls[-1][2], self.main_path)
+
+    def test_upstream_sync_or_unmerged_foreign_and_other_base_prs_do_not_dispatch(self):
+        candidates = [[], [dict(self.pull, merged_at=None)], [dict(self.pull, merge_commit_sha=OTHER)]]
+        for base in [
+            {"ref": "preview", "repo": {"full_name": REPOSITORY}},
+            {"ref": "main", "repo": {"full_name": "other/praxis"}},
+        ]:
+            candidates.append([dict(self.pull, base=base)])
+        for pulls in candidates:
+            with self.subTest(pulls=pulls):
+                self.calls.clear()
+                self.responses[self.pulls_path] = [pulls]
+                self.execute()
+                self.assertFalse(self.dispatches())
+
+    def test_existing_full_bundles_on_later_pages_prevent_duplicate_dispatch(self):
+        for status, conclusion in [
+            ("queued", None), ("pending", None), ("in_progress", None),
+            ("waiting", None), ("completed", "success"),
+        ]:
+            with self.subTest(status=status, conclusion=conclusion):
+                self.calls.clear()
+                self.responses[self.bundles_path] = [
+                    {"workflow_runs": []},
+                    {"workflow_runs": [{"display_title": self.title, "status": status, "conclusion": conclusion}]},
+                ]
+                self.execute()
+                self.assertFalse(self.dispatches())
+
+    def test_failed_full_bundles_can_be_dispatched_again(self):
+        for conclusion in ("failure", "cancelled", "timed_out"):
+            with self.subTest(conclusion=conclusion):
+                self.calls.clear()
+                self.responses[self.bundles_path] = [{"workflow_runs": [
+                    {"display_title": self.title, "status": "completed", "conclusion": conclusion},
+                ]}]
+                self.execute()
+                self.assertEqual(len(self.dispatches()), 1)
+
+    def test_partial_test_and_other_source_bundles_do_not_suppress_full_build(self):
+        for title in [
+            self.title.replace("test=false", "test=true"),
+            self.title.replace("macOS=true", "macOS=false"),
+            self.title.replace(TARGET, OTHER),
+        ]:
+            with self.subTest(title=title):
+                self.calls.clear()
+                self.responses[self.bundles_path] = [{"workflow_runs": [
+                    {"display_title": title, "status": "completed", "conclusion": "success"},
+                ]}]
+                self.execute()
+                self.assertEqual(len(self.dispatches()), 1)
+
+    def test_api_errors_and_non_sha_sources_fail_closed(self):
+        for endpoint in (self.main_path, self.pulls_path, self.bundles_path):
+            with self.subTest(endpoint=endpoint):
+                self.calls.clear()
+                original = self.responses[endpoint]
+                self.responses[endpoint] = subprocess.CalledProcessError(1, ["gh", "api", endpoint])
+                with self.assertRaises(subprocess.CalledProcessError):
+                    self.execute()
+                self.assertFalse(self.dispatches())
+                self.responses[endpoint] = original
+        for source in ("main", "", "x" * 40, "--help"):
+            with self.subTest(source=source):
+                self.calls.clear()
+                with self.assertRaises(ValueError):
+                    self.execute(source)
+                self.assertFalse(self.calls)
+
+    def test_workflow_accepts_only_successful_owned_main_push_validation(self):
+        for guard in [
+            "github.event.workflow_run.conclusion == 'success'",
+            "github.event.workflow_run.event == 'push'",
+            "github.event.workflow_run.head_branch == 'main'",
+            "github.event.workflow_run.path == '.github/workflows/architect_quality.yml'",
+            "github.event.workflow_run.head_repository.full_name == github.repository",
+        ]:
+            self.assertIn(guard, self.workflow)
+        self.assertIn("workflows: [Architect quality]", self.workflow)
+        self.assertIn("branches: [main]", self.workflow)
+        self.assertIn("types: [completed]", self.workflow)
+        self.assertIn("group: bundle-after-merge-${{ github.event.workflow_run.head_sha }}", self.workflow)
+        self.assertIn("cancel-in-progress: false", self.workflow)
+        self.assertIn("SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}", self.workflow)
+        self.assertNotIn("actions/checkout@", self.workflow)
+
+    def test_bundle_identity_formatting_and_sync_allowlist_stay_connected(self):
+        title = " ".join(line.strip() for line in self.bundle.split("run-name: >-\n", 1)[1].split("\n\n", 1)[0].splitlines())
+        for name, value in {
+            "source_ref": TARGET, "build_macos": "true", "build_windows": "true",
+            "build_linux": "true", "test_build": "false",
+        }.items():
+            title = title.replace("${{ inputs." + name + " }}", value)
+        self.assertEqual(title, self.title)
+        self.assertIn(".github/workflows/bundle_after_merge.yml", self.quality)
+        keep = self.sync.split('          keep="', 1)[1].split('"', 1)[0]
+        self.assertIn("bundle_after_merge.yml", keep.split())
+        self.assertIn("gh workflow run bundle_fork.yml", self.sync)
 
 
 if __name__ == "__main__":

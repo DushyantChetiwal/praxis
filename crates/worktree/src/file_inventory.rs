@@ -17,17 +17,11 @@ pub struct FileInventory {
 }
 
 impl Worktree {
-    /// Validates a canonical, slash-separated path relative to this worktree
-    /// using the owning host's path style, without accessing the filesystem.
-    pub fn validate_file_inventory_path(&self, path: &str) -> Result<()> {
-        validate_inventory_path(path, self.path_style())
-    }
-
     pub fn check_file_inventory_support(&self) -> Result<()> {
         match self {
             Self::Local(local) => anyhow::ensure!(
                 local.scanning_enabled,
-                "Project scanning is disabled. Enable project scanning before running the plan."
+                "Project scanning is disabled. Enable it to discover newly created files."
             ),
             Self::Remote(remote) => {
                 anyhow::ensure!(
@@ -38,7 +32,7 @@ impl Worktree {
                     Some(Ok(())) => {}
                     Some(Err(error)) => anyhow::bail!("{error}"),
                     None => anyhow::bail!(
-                        "Project file tracking support is still loading. Wait for the project to connect, then retry."
+                        "Project file tracking support is still loading. Automatic discovery is not ready yet."
                     ),
                 }
             }
@@ -75,7 +69,7 @@ impl Worktree {
             {
                 Ok(Ok(response)) if response.supports_file_inventory => Ok(()),
                 Ok(Ok(_)) => Err(
-                    "The project host does not support creation tracking. Update Praxis on the host and reconnect before running the plan."
+                    "The project host does not support creation tracking. Update Praxis on the host and reconnect to enable automatic discovery."
                         .to_string(),
                 ),
                 Ok(Err(error)) => Err(format!(
@@ -194,48 +188,18 @@ async fn with_worktree_connection<T>(
     }
 }
 
-fn validate_inventory_path(path: &str, path_style: PathStyle) -> Result<()> {
-    anyhow::ensure!(
-        !path.is_empty()
-            && !path_style.is_absolute(path)
-            && !path.contains(['\\', '\0'])
-            && path
-                .split('/')
-                .all(|component| !matches!(component, "" | "." | "..")),
-        "Invalid file inventory path {path:?}: use a canonical relative file path with '/' separators, without traversal, literal backslashes, or NUL"
-    );
-    if path_style == PathStyle::Windows {
-        for component in path.split('/') {
-            anyhow::ensure!(
-                !component
-                    .chars()
-                    .any(|character| character.is_control() || "<>:\"|?*".contains(character))
-                    && !component.ends_with([' ', '.']),
-                "Invalid file inventory path {path:?}: Windows paths cannot contain control or reserved characters, or components ending in spaces or dots"
-            );
-            let stem = component
-                .split('.')
-                .next()
-                .unwrap_or_default()
-                .to_ascii_uppercase();
-            anyhow::ensure!(
-                !matches!(
-                    stem.as_str(),
-                    "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-                ) && !stem
-                    .strip_prefix("COM")
-                    .or_else(|| stem.strip_prefix("LPT"))
-                    .is_some_and(|suffix| {
-                        matches!(
-                            suffix,
-                            "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
-                        )
-                    }),
-                "Invalid file inventory path {path:?}: Windows device names cannot name inventory files"
-            );
-        }
-    }
-    Ok(())
+fn inventory_alias_path(path: &str) -> Option<&RelPath> {
+    let relative = RelPath::from_unix_str(path).ok()?;
+    // Alias resolution is optional, but an untrusted declaration must never
+    // replace the root when joined on the filesystem-owning host.
+    (!relative.is_empty()
+        && relative.as_unix_str() == path
+        && !path.contains('\0')
+        && relative
+            .as_std_path()
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_))))
+    .then_some(relative)
 }
 
 fn inventory_relative_path(path: &Path) -> Result<String> {
@@ -244,12 +208,9 @@ fn inventory_relative_path(path: &Path) -> Result<String> {
         .map(|component| {
             let component = component
                 .to_str()
-                .context("A project file name is not valid UTF-8")?;
-            anyhow::ensure!(
-                !component.contains('\\'),
-                "A project file name contains a literal backslash: {}",
-                path.display()
-            );
+                .with_context(|| {
+                    format!("Cannot represent path {path:?} from filesystem inventory: the name is not valid UTF-8")
+                })?;
             Ok(component)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -323,13 +284,7 @@ async fn local_file_inventory(
         declared_paths.len() <= MAX_FILE_INVENTORY_ENTRIES,
         "Too many declared paths for project file inventory"
     );
-    let (fs, root, settings, initial_scan, path_style) = worktree.read_with(cx, |tree, _| {
-        // Validate all declarations before any join, even ignored or excluded
-        // paths: these may come from an untrusted peer.
-        for path in &declared_paths {
-            tree.validate_file_inventory_path(path)
-                .with_context(|| format!("Invalid declared file surface path {path:?}"))?;
-        }
+    let (fs, root, settings, initial_scan) = worktree.read_with(cx, |tree, _| {
         let local = tree
             .as_local()
             .context("The project backend changed during inventory")?;
@@ -338,7 +293,6 @@ async fn local_file_inventory(
             tree.abs_path().to_path_buf(),
             local.settings(),
             local.scan_complete(),
-            tree.path_style(),
         ))
     })?;
     initial_scan.await;
@@ -389,14 +343,21 @@ async fn local_file_inventory(
                         .with_context(|| format!("Cannot list {}", directory.display()));
                 }
             };
-            let relative = inventory_relative_path(entry.strip_prefix(&root)?)?;
-            let path = RelPath::from_unix_str(&relative)?;
-            // Bound excluded entries and in-flight refresh tasks as well as files.
+            // Count every entry, including names the protocol cannot represent.
             inventory.entry_count += 1;
             anyhow::ensure!(
                 inventory.entry_count <= MAX_FILE_INVENTORY_ENTRIES,
-                "Creation inventory exceeds {MAX_FILE_INVENTORY_ENTRIES} project entries. Exclude generated folders before resuming."
+                "Creation inventory exceeds {MAX_FILE_INVENTORY_ENTRIES} project entries"
             );
+            let relative = match inventory_relative_path(entry.strip_prefix(&root)?) {
+                Ok(relative) => relative,
+                Err(error) => {
+                    log::warn!("Skipping unrepresentable inventory entry {entry:?}: {error:#}");
+                    continue;
+                }
+            };
+            let path = RelPath::from_unix_str(&relative)?;
+
             let private = !include_private
                 && worktree.read_with(cx, |tree, _| {
                     tree.as_local()
@@ -458,16 +419,15 @@ async fn local_file_inventory(
                     inventory.skipped_paths.push(relative);
                 }
             } else {
-                validate_inventory_path(&relative, path_style).with_context(|| {
-                    format!("Invalid automatic file discovery path {relative:?}")
-                })?;
                 inventory.files.push(relative);
             }
         }
     }
     // Declarations participate only in alias checks, never discovery scope.
     for relative in declared_paths {
-        let path = RelPath::from_unix_str(&relative)?;
+        let Some(path) = inventory_alias_path(&relative) else {
+            continue;
+        };
         if !include_private
             && worktree.read_with(cx, |tree, _| {
                 tree.as_local()
@@ -477,28 +437,31 @@ async fn local_file_inventory(
             continue;
         }
         let absolute = root.join(path.as_std_path());
-        let Some(metadata) = fs
-            .metadata(&absolute)
-            .await
-            .with_context(|| format!("Cannot inspect declared file {relative}"))?
-        else {
-            continue;
+        let metadata = match fs.metadata(&absolute).await {
+            Ok(Some(metadata)) => metadata,
+            Ok(None) => continue,
+            Err(error) => {
+                log::warn!("Skipping optional alias lookup for {relative:?}: {error:#}");
+                continue;
+            }
         };
-        anyhow::ensure!(
-            !metadata.is_dir,
-            "Declared file surface path {relative:?} is a directory. List the existing files individually before running the plan."
-        );
-        let canonical = fs
-            .canonicalize(&absolute)
-            .await
-            .with_context(|| format!("Cannot resolve declared file {relative}"))?;
-        inventory.canonical_paths.insert(
-            relative,
-            canonical
-                .to_str()
-                .context("A canonical project path is not valid UTF-8")?
-                .to_owned(),
-        );
+        if metadata.is_dir {
+            continue;
+        }
+        let canonical = match fs.canonicalize(&absolute).await {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                log::warn!("Skipping optional alias resolution for {relative:?}: {error:#}");
+                continue;
+            }
+        };
+        if let Some(canonical) = canonical.to_str() {
+            inventory
+                .canonical_paths
+                .insert(relative, canonical.to_owned());
+        } else {
+            log::warn!("Skipping non-UTF-8 alias identity for {relative:?}: {canonical:?}");
+        }
     }
     worktree.read_with(cx, |tree, _| {
         tree.check_file_inventory_support()?;
@@ -516,7 +479,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inventory_paths_use_the_owning_filesystem_rules() {
+    fn alias_paths_do_not_validate_filename_characters_or_existence() {
         for path in [
             "api_downloads/archive.tar.gz:Zone.Identifier",
             "output/_bench/results (3:11:18, 5:53 PM).csv",
@@ -528,37 +491,38 @@ mod tests {
             "file\n.rs",
             "file?.rs",
             "file|name.rs",
+            "literal\\name.rs",
+            "literal*.rs",
         ] {
-            validate_inventory_path(path, PathStyle::Unix).unwrap();
-            let error = validate_inventory_path(path, PathStyle::Windows).unwrap_err();
-            assert!(error.to_string().contains(&format!("{path:?}")), "{error}");
+            assert!(inventory_alias_path(path).is_some(), "{path:?}");
         }
         for path in ["src/main.rs", "COM10.txt", "ordinary file.rs"] {
-            validate_inventory_path(path, PathStyle::Unix).unwrap();
-            validate_inventory_path(path, PathStyle::Windows).unwrap();
+            assert!(inventory_alias_path(path).is_some(), "{path:?}");
         }
     }
 
     #[test]
-    fn inventory_paths_reject_unsafe_wire_paths_before_joining() {
-        for path_style in [PathStyle::Unix, PathStyle::Windows] {
-            for path in [
-                "",
-                "/absolute.rs",
-                "../outside.rs",
-                "src/../outside.rs",
-                "src/./file.rs",
-                "src//file.rs",
-                "src/file.rs/",
-                "src\\file.rs",
-                "file\0.rs",
-            ] {
-                let error = validate_inventory_path(path, path_style).unwrap_err();
-                assert!(error.to_string().contains(&format!("{path:?}")), "{error}");
-            }
+    fn alias_lookup_skips_paths_that_cannot_be_joined_safely() {
+        for path in [
+            "",
+            "/absolute.rs",
+            "../outside.rs",
+            "src/../outside.rs",
+            "src/./file.rs",
+            "src//file.rs",
+            "src/file.rs/",
+            "file\0.rs",
+        ] {
+            assert!(inventory_alias_path(path).is_none(), "{path:?}");
         }
-        for path in ["C:/outside.rs", "C:outside.rs", "file.rs:stream"] {
-            assert!(validate_inventory_path(path, PathStyle::Windows).is_err());
+        if cfg!(windows) {
+            for path in [
+                "C:/outside.rs",
+                "C:outside.rs",
+                "\\\\server\\share\\file.rs",
+            ] {
+                assert!(inventory_alias_path(path).is_none(), "{path:?}");
+            }
         }
     }
 }

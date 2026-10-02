@@ -124,13 +124,23 @@ jobs:
           --check
 
   architect-tests:
-    name: Architect graph tests
+    name: ${{ matrix.name }}
     env:
       SOURCE_REF: ${{ needs.prepare.outputs.source_sha }}
     needs: prepare
     if: needs.prepare.outputs.validated != 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Architect graph tests (Linux)
+            runner: ubuntu-24.04
+          - name: Architect graph tests (Windows)
+            runner: windows-2022
+          - name: Architect graph tests (macOS)
+            runner: macos-15
     steps:
       - name: Check out the selected source
         uses: actions/checkout@v7
@@ -146,6 +156,9 @@ jobs:
 
       - name: Test the Architect graph and runner
         run: cargo test --locked -p architect --lib
+
+      - name: Test host-aware path primitives
+        run: cargo test --locked -p path --lib
 
   agent-tests:
     name: Agent and canvas integration tests
@@ -464,5 +477,5 @@ jobs:
               print("Source has a verified original full validation; no new receipt issued")
           else:
               assert all(job["result"] == "success" for job in results.values()), results
-              print("All six quality jobs executed successfully")
+              print("All required quality jobs executed successfully")
           PY

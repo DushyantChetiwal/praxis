@@ -220,7 +220,7 @@ mod tests {
             Some(vec!["worktree/src/plan.rs".into()]);
         let spec = compile_spec(&graph).expect("spec");
         assert!(spec.contains("Existing-file surface: [\"worktree/src/plan.rs\"]"));
-        assert!(spec.contains("[] — no existing files anticipated"));
+        assert!(spec.contains("[] — no file writes anticipated"));
         graph.node_mut(&"plan".into()).expect("plan").file_surface = None;
         assert!(compile_spec(&graph).is_err());
     }

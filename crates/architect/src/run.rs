@@ -1615,9 +1615,10 @@ pub fn step_prompt(
         node.file_surface_description()
     );
     prompt.push_str(
-        "This surface describes anticipated existing-file scope for advisory scheduling, \
+        "This surface describes anticipated file assignments for advisory scheduling, \
+         including paths of files to create. Files need not exist. It is \
          not an edit allowlist or a restriction on which files you may modify. [] means no \
-         existing files are anticipated. Report scope changes using worktree-qualified \
+         file writes are anticipated. Report scope changes using worktree-qualified \
          paths (worktree/path) to keep scheduling information current. Report every newly \
          created file by its worktree-qualified path so it can be added to downstream steps.\n",
     );
@@ -3372,7 +3373,9 @@ mod tests {
             Some(vec!["worktree/src/left.rs".into()]);
         let prompt = step_prompt(&graph, &path(&["left"]), 1, 1);
         assert!(prompt.contains("worktree/src/left.rs"));
-        assert!(prompt.contains("anticipated existing-file scope for advisory scheduling"));
+        assert!(prompt.contains("anticipated file assignments for advisory scheduling"));
+        assert!(prompt.contains("including paths of files to create"));
+        assert!(prompt.contains("Files need not exist"));
         assert!(prompt.contains("not an edit allowlist or a restriction"));
         assert!(!prompt.contains("Only touch existing files"));
         assert!(!prompt.contains("stop and request a surface correction"));
@@ -3380,7 +3383,7 @@ mod tests {
         let prompt = parallel_steps_prompt(&graph, &[path(&["left"])]);
         assert!(prompt.contains("worktree/src/left.rs"));
         assert!(
-            step_prompt(&graph, &path(&["right"]), 1, 1).contains("no existing files anticipated")
+            step_prompt(&graph, &path(&["right"]), 1, 1).contains("no file writes anticipated")
         );
         graph.node_mut(&id("right")).expect("right").file_surface = None;
         assert!(step_prompt(&graph, &path(&["right"]), 1, 1).contains("MISSING"));

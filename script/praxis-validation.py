@@ -24,7 +24,9 @@ RECEIPT = "receipt.json"
 ARTIFACT_PREFIX = "praxis-quality-full"
 EXPECTED_JOBS = {
     "Formatting": "Test validation reuse provenance",
-    "Architect graph tests": "Test the Architect graph and runner",
+    "Architect graph tests (Linux)": "Test the Architect graph and runner",
+    "Architect graph tests (Windows)": "Test the Architect graph and runner",
+    "Architect graph tests (macOS)": "Test the Architect graph and runner",
     "Agent and canvas integration tests": "Test Praxis Remote",
     "Auto-update integrity tests": "Test the updater",
     "Windows update helper tests": "Test the Windows update helper",
