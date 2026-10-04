@@ -184,7 +184,7 @@ private fun HostFolderDialog(ui: DeviceUi, vm: MainViewModel) {
                 Text(stringResource(R.string.folder_open_new_window))
             }
         },
-        dismissButton = { TextButton(onClick = vm::dismissFolderBrowser) { Text(stringResource(R.string.action_cancel)) } },
+        dismissButton = { TextButton(onClick = vm::dismissFolderBrowser) { Text(stringResource(if (browser.opening) R.string.action_close else R.string.action_cancel)) } },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(stringResource(R.string.folder_host_hint, ui.device?.name.orEmpty(), listing?.host.orEmpty()))

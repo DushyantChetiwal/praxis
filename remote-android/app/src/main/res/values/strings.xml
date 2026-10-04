@@ -58,7 +58,7 @@
 
     <!-- Pairing -->
     <string name="pair_title">Pair with %1$s</string>
-    <string name="pair_intro">Pairing lets this phone follow and control Praxis on %1$s. Everything they exchange is encrypted with a key only the two of them know.</string>
+    <string name="pair_intro">Pairing lets this phone follow and control Praxis on %1$s, browse and open folders, read files in open projects, and answer agent questions and permission requests. Everything they exchange is encrypted with a key only the two of them know.</string>
     <string name="pair_steps">Praxis on the computer will ask whether to allow this phone and show a 6-digit code. You’ll check that it matches the code shown here.</string>
     <string name="pair_phone_name">This phone will appear as “%1$s”.</string>
     <string name="pair_offline">%1$s %2$s. Praxis has to be running there to pair.</string>

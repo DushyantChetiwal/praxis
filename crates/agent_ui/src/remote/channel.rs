@@ -46,7 +46,7 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
 const REFRESH_GRACE: Duration = Duration::from_secs(60);
 const DEFAULT_WATCH_SECONDS: i64 = 300;
 const MAX_WATCH_SECONDS: i64 = 900;
-/// Requests sent while Praxis was not running are refused, not replayed.
+/// Bound how long an offline phone request remains actionable.
 const MAX_REQUEST_AGE_SECONDS: i64 = 300;
 const MAX_CLOCK_AHEAD_SECONDS: i64 = 120;
 const PAIRING_TIMEOUT_SECONDS: i64 = 300;
@@ -1100,9 +1100,10 @@ fn pairing_detail(code: &str) -> String {
     let code = crypto::display_code(code);
     format!(
         "Allow it only if the phone shows the code {code}.\n\n\
-         The phone will be able to see your Praxis windows and conversations, send messages \
-         to the agent, answer its permission requests, run and stop plans, and read files in \
-         your open projects. You can unpair it at any time from Praxis Remote."
+         The phone will be able to see your Praxis windows and conversations, browse folders \
+         on this computer and open them in new windows, read files in open projects, choose \
+         models, send or steer messages, answer questions and permission requests, and run \
+         or stop plans. You can unpair it at any time from Praxis Remote."
     )
 }
 

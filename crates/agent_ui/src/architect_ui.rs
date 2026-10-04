@@ -356,10 +356,7 @@ impl ArchitectPane {
         let subscription = cx.observe(&thread, |this, _, cx| {
             // A runner can still hold its control-state borrow while notifying
             // the owning thread. Read that state after the update unwinds.
-            cx.defer(|this, cx| {
-                this.run_statuses = Self::collect_run_statuses(this.thread.read(cx));
-                cx.notify();
-            });
+            Self::defer_run_status_refresh(cx);
             this.prune_bulk_selection(cx);
             this.refresh_inspector_if_source_changed(cx);
             cx.emit(workspace::item::ItemEvent::UpdateTab);
@@ -435,6 +432,18 @@ impl ArchitectPane {
             _workspace_subscription: workspace_subscription,
             plan_conversation_subscription: None,
         }
+    }
+
+    fn defer_run_status_refresh(cx: &mut Context<Self>) {
+        let pane = cx.weak_entity();
+        cx.defer(move |cx| {
+            if let Err(error) = pane.update(cx, |pane, cx| {
+                pane.run_statuses = Self::collect_run_statuses(pane.thread.read(cx));
+                cx.notify();
+            }) {
+                log::debug!("Architect pane closed before its status refresh: {error:#}");
+            }
+        });
     }
 
     fn collect_run_statuses(thread: &Thread) -> HashMap<NodePath, String> {
@@ -658,10 +667,7 @@ impl ArchitectPane {
         self.thread = thread.clone();
         self.run_statuses = Self::collect_run_statuses(thread.read(cx));
         self._thread_subscription = cx.observe(&thread, |this, _, cx| {
-            cx.defer(|this, cx| {
-                this.run_statuses = Self::collect_run_statuses(this.thread.read(cx));
-                cx.notify();
-            });
+            Self::defer_run_status_refresh(cx);
             this.prune_bulk_selection(cx);
             this.refresh_inspector_if_source_changed(cx);
             cx.emit(workspace::item::ItemEvent::UpdateTab);

@@ -123,13 +123,14 @@ jobs:
           .github/workflows/android_remote.yml
           --check
 
-      - name: Prepare Rust formatting corrections
+      - name: Prepare formatting corrections
         if: failure()
         run: |
           cargo fmt --all
+          ./script/prettier --write
           git --no-pager diff --binary > rust-format.patch
 
-      - name: Upload Rust formatting corrections
+      - name: Upload formatting corrections
         if: failure()
         uses: actions/upload-artifact@v7
         with:

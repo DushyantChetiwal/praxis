@@ -878,7 +878,9 @@ impl SubagentContext {
     fn restore_kind(&mut self, profile: &AgentProfileId) {
         // Legacy node chats have a dedicated profile; generic child ownership
         // alone cannot distinguish an old helper from an execution transcript.
-        if self.kind == ChildThreadKind::Legacy && profile.0.as_ref() == builtin_profiles::ARCHITECT_STEP {
+        if self.kind == ChildThreadKind::Legacy
+            && profile.0.as_ref() == builtin_profiles::ARCHITECT_STEP
+        {
             self.kind = ChildThreadKind::ArchitectChat;
             self.depth = self.depth.saturating_sub(1);
         }
@@ -6172,9 +6174,12 @@ impl Thread {
     }
 
     pub fn is_helper_subagent(&self) -> bool {
-        self.subagent_context
-            .as_ref()
-            .is_some_and(|context| matches!(context.kind, ChildThreadKind::Helper | ChildThreadKind::Legacy))
+        self.subagent_context.as_ref().is_some_and(|context| {
+            matches!(
+                context.kind,
+                ChildThreadKind::Helper | ChildThreadKind::Legacy
+            )
+        })
     }
 
     pub fn parent_thread_id(&self) -> Option<acp::SessionId> {
@@ -9064,7 +9069,8 @@ mod tests {
         let profile = AgentProfileId(builtin_profiles::ARCHITECT_STEP.into());
         let mut legacy: SubagentContext = serde_json::from_value(json!({
             "parent_thread_id": "parent", "depth": 1,
-        })).expect("legacy child context");
+        }))
+        .expect("legacy child context");
         assert_eq!(legacy.kind, ChildThreadKind::Legacy);
         legacy.restore_kind(&profile);
         assert_eq!(legacy.kind, ChildThreadKind::ArchitectChat);

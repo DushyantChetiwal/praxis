@@ -67,7 +67,7 @@ Implemented scheduler-owned container completion, retry invalidation, and cached
 - [ ] Ensure opening another window never unpairs the phone or disconnects existing sessions.
 - [ ] Test multiple windows and running conversations before, during, and after opening another folder.
 
-Concrete cause found: normal Dev launches bypassed the app single-instance guard, so the CLI could spawn another process publishing to the same remote gist. Removed that exception; added a standard-library OS file lock around remote ownership and destructive local operations. Android no longer deletes a pairing key or leaves the active device merely because remote metadata/refusal is inconsistent. Existing sessions are preserved while pairing is re-confirmed. Regression validation pending.
+Concrete defect found, consistent with the reported disconnect: normal Dev launches bypassed the app single-instance guard, so the CLI could spawn another process publishing to the same remote gist. The historical phone incident was not reproduced by restarting live sessions. Removed that exception; added a standard-library OS file lock around remote ownership and destructive local operations. Android no longer deletes a pairing key or leaves the active device merely because remote metadata/refusal is inconsistent. Existing sessions are preserved while pairing is re-confirmed. Regression validation pending.
 
 ### M2 — Open host folders from the phone
 
