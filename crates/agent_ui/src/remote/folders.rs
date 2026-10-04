@@ -19,7 +19,8 @@ fn host_path(path: &str) -> Result<PathBuf> {
 }
 
 pub(super) fn list(path: &str, offset: usize) -> Result<Value> {
-    let canonical = std::fs::canonicalize(host_path(path)?).context("Could not find that folder")?;
+    let canonical =
+        std::fs::canonicalize(host_path(path)?).context("Could not find that folder")?;
     let path = util::paths::SanitizedPath::new(&canonical).as_path();
     let mut folders = Vec::new();
     for entry in std::fs::read_dir(&path).context("Could not read that folder")? {
@@ -67,23 +68,29 @@ pub(super) fn open(path: &str, app_state: Arc<AppState>, cx: &mut App) -> Task<R
         Err(error) => return Task::ready(Err(error)),
     };
     cx.spawn(async move |cx| {
-        let metadata = app_state.fs.metadata(&path).await?.context("That folder no longer exists")?;
+        let metadata = app_state
+            .fs
+            .metadata(&path)
+            .await?
+            .context("That folder no longer exists")?;
         if !metadata.is_dir {
             bail!("Choose a folder, not a file");
         }
-        let opened = cx.update(|cx| {
-            workspace::open_paths(
-                &[path],
-                app_state,
-                OpenOptions {
-                    open_mode: OpenMode::NewWindow,
-                    workspace_matching: WorkspaceMatching::None,
-                    add_dirs_to_sidebar: false,
-                    ..OpenOptions::default()
-                },
-                cx,
-            )
-        }).await?;
+        let opened = cx
+            .update(|cx| {
+                workspace::open_paths(
+                    &[path],
+                    app_state,
+                    OpenOptions {
+                        open_mode: OpenMode::NewWindow,
+                        workspace_matching: WorkspaceMatching::None,
+                        add_dirs_to_sidebar: false,
+                        ..OpenOptions::default()
+                    },
+                    cx,
+                )
+            })
+            .await?;
         Ok(json!({ "opened": true, "window": opened.window.window_id().as_u64() }))
     })
 }
@@ -96,11 +103,16 @@ mod tests {
     fn folder_listing_pages_without_rewriting_host_paths() {
         let directory = tempfile::tempdir().expect("folder");
         for index in 0..103 {
-            std::fs::create_dir(directory.path().join(format!("folder {index:03}"))).expect("child");
+            std::fs::create_dir(directory.path().join(format!("folder {index:03}")))
+                .expect("child");
         }
         let path = directory.path().to_str().expect("path");
         let first = list(path, 0).expect("first page");
-        let second = list(path, first["next_offset"].as_u64().expect("cursor") as usize).expect("second page");
+        let second = list(
+            path,
+            first["next_offset"].as_u64().expect("cursor") as usize,
+        )
+        .expect("second page");
         assert_eq!(first["folders"].as_array().expect("folders").len(), 100);
         assert_eq!(second["folders"].as_array().expect("folders").len(), 3);
         assert_eq!(second["next_offset"], Value::Null);
@@ -126,13 +138,29 @@ mod tests {
             });
         });
         cx.update(|cx| cx.set_global(super::super::GlobalPraxisRemote(remote.clone())));
-        let first = cx.update(|cx| open(first_path.to_str().expect("first path"), app_state.clone(), cx)).await.expect("first window");
-        let second = cx.update(|cx| open(second_path.to_str().expect("second path"), app_state, cx)).await.expect("second window");
+        let first = cx
+            .update(|cx| {
+                open(
+                    first_path.to_str().expect("first path"),
+                    app_state.clone(),
+                    cx,
+                )
+            })
+            .await
+            .expect("first window");
+        let second = cx
+            .update(|cx| open(second_path.to_str().expect("second path"), app_state, cx))
+            .await
+            .expect("second window");
         assert_ne!(first["window"], second["window"]);
         cx.read(|cx| {
             let windows = super::super::workspace_windows(cx);
             for expected in [first["window"].as_u64(), second["window"].as_u64()] {
-                assert!(windows.iter().any(|window| Some(window.window_id().as_u64()) == expected));
+                assert!(
+                    windows
+                        .iter()
+                        .any(|window| Some(window.window_id().as_u64()) == expected)
+                );
             }
             let retained = super::super::PraxisRemote::global(cx).expect("same remote owner");
             assert_eq!(retained, remote);

@@ -1966,15 +1966,20 @@ mod tests {
         // out and carry on with the step after the one that contained it.
         assert_eq!(run.finish_step(&graph), Decision::Run(path(&["ship"])));
         assert_eq!(run.depth(), 1);
-        assert!(run.readiness(&graph).iter().any(|step| {
-            step.path == path(&["handlers"]) && step.status == "completed"
-        }));
-        let restored: PlanRun = serde_json::from_value(
-            serde_json::to_value(&run).expect("checkpoint"),
-        ).expect("restore checkpoint");
-        assert!(restored.readiness(&graph).iter().any(|step| {
-            step.path == path(&["handlers"]) && step.status == "completed"
-        }));
+        assert!(
+            run.readiness(&graph)
+                .iter()
+                .any(|step| { step.path == path(&["handlers"]) && step.status == "completed" })
+        );
+        let restored: PlanRun =
+            serde_json::from_value(serde_json::to_value(&run).expect("checkpoint"))
+                .expect("restore checkpoint");
+        assert!(
+            restored
+                .readiness(&graph)
+                .iter()
+                .any(|step| { step.path == path(&["handlers"]) && step.status == "completed" })
+        );
     }
 
     #[test]

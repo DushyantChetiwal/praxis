@@ -156,7 +156,10 @@ impl PraxisRemote {
         cx.notify();
         let http = cx.http_client();
         self._task = Some(cx.spawn(async move |this, cx| {
-            let _channel_lock = match cx.background_spawn(async { store::acquire_channel_lock() }).await {
+            let _channel_lock = match cx
+                .background_spawn(async { store::acquire_channel_lock() })
+                .await
+            {
                 Ok(lock) => lock,
                 Err(error) => {
                     this.update(cx, |this, cx| {
@@ -165,7 +168,8 @@ impl PraxisRemote {
                             sign_in: false,
                         };
                         cx.notify();
-                    }).log_err();
+                    })
+                    .log_err();
                     return;
                 }
             };
@@ -228,7 +232,8 @@ impl PraxisRemote {
                         sign_in: false,
                     };
                     cx.notify();
-                }).log_err();
+                })
+                .log_err();
             }
         }));
     }
@@ -346,7 +351,11 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
     let result = match op {
         "status" => Ok(status(device, cx)),
         "host_folders" => {
-            let path = args.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
+            let path = args
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
             let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
             return cx.background_spawn(async move { folders::list(&path, offset) });
         }

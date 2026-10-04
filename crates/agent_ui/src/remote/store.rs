@@ -55,7 +55,9 @@ pub(super) fn acquire_channel_lock() -> Result<std::fs::File> {
 }
 
 fn lock_channel_file(path: &std::path::Path) -> Result<std::fs::File> {
-    let parent = path.parent().context("Praxis Remote's lock has no folder")?;
+    let parent = path
+        .parent()
+        .context("Praxis Remote's lock has no folder")?;
     std::fs::create_dir_all(parent)?;
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -154,6 +156,9 @@ mod tests {
         let second = lock_channel_file(&path).expect("ownership released");
         assert!(lock_channel_file(&path).is_err());
         drop(second);
-        assert!(path.exists(), "never unlink a lock file while another process may open it");
+        assert!(
+            path.exists(),
+            "never unlink a lock file while another process may open it"
+        );
     }
 }

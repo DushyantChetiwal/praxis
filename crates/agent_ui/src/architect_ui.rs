@@ -443,7 +443,9 @@ impl ArchitectPane {
             .flatten()
             .filter_map(|step| {
                 let path = NodePath(
-                    step["path"].as_array()?.iter()
+                    step["path"]
+                        .as_array()?
+                        .iter()
                         .map(|part| part.as_str().map(NodeId::from))
                         .collect::<Option<Vec<_>>>()?,
                 );
@@ -453,7 +455,9 @@ impl ArchitectPane {
     }
 
     fn node_run_status(&self, id: &NodeId) -> Option<&str> {
-        self.run_statuses.get(&self.focus.child(id.clone())).map(String::as_str)
+        self.run_statuses
+            .get(&self.focus.child(id.clone()))
+            .map(String::as_str)
     }
 
     fn node_is_complete(&self, node: &ArchitectNode) -> bool {

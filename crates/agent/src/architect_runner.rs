@@ -1305,7 +1305,7 @@ pub fn architect_run_readiness(thread: &Thread) -> serde_json::Value {
                             "Nested work remains unfinished",
                         );
                     }
-                },
+                }
                 Decision::Ask(_) => apply(
                     &lane.run.current(),
                     "waiting",

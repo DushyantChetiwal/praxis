@@ -7146,9 +7146,8 @@ async fn test_subagent_thread_inherits_parent_thread_properties(cx: &mut TestApp
         assert_eq!(request.max_output_tokens, None);
     });
     let architect_chat = cx.new(|cx| Thread::new_architect_step(&parent_thread, "Plan".into(), cx));
-    let architect_execution = cx.new(|cx| {
-        Thread::new_architect_run_step(&parent_thread, "Build".into(), None, cx)
-    });
+    let architect_execution =
+        cx.new(|cx| Thread::new_architect_run_step(&parent_thread, "Build".into(), None, cx));
     for child in [&architect_chat, &architect_execution] {
         child.read_with(cx, |thread, cx| {
             assert!(thread.is_subagent(), "retain parent lifecycle ownership");
@@ -7236,7 +7235,10 @@ async fn test_subagent_thread_model_selection(cx: &mut TestAppContext) {
 
     let architect_chat = cx.new(|cx| Thread::new_architect_step(&parent_thread, "Plan".into(), cx));
     architect_chat.read_with(cx, |thread, _| {
-        assert_eq!(thread.model().map(|model| model.id()), Some(parent_model.id()));
+        assert_eq!(
+            thread.model().map(|model| model.id()),
+            Some(parent_model.id())
+        );
         assert!(!thread.is_helper_subagent());
     });
     let subagent_thread = cx.new(|cx| Thread::new_subagent(&parent_thread, None, cx));

@@ -3523,9 +3523,16 @@ mod tests {
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {
             let pane = view.pane.read(cx);
-            let parent = pane.graph(cx).expect("graph").node(&NodeId::from("parent")).expect("parent");
+            let parent = pane
+                .graph(cx)
+                .expect("graph")
+                .node(&NodeId::from("parent"))
+                .expect("parent");
             assert!(parent.result.is_none());
-            assert!(pane.node_is_complete(parent), "nested completion is independent of a summary");
+            assert!(
+                pane.node_is_complete(parent),
+                "nested completion is independent of a summary"
+            );
         });
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);

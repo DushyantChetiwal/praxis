@@ -165,7 +165,9 @@ pub(super) async fn remember_sign_in(
 
 /// Deletes the gist, as far as GitHub allows, and everything saved locally.
 pub(super) async fn forget_everything(http: Arc<dyn HttpClient>, cx: &mut AsyncApp) -> Result<()> {
-    let _channel_lock = cx.background_spawn(async { store::acquire_channel_lock() }).await?;
+    let _channel_lock = cx
+        .background_spawn(async { store::acquire_channel_lock() })
+        .await?;
     let state = cx
         .background_spawn(async { store::load_state() })
         .await
@@ -207,7 +209,9 @@ async fn delete_gist(http: Arc<dyn HttpClient>, mut tokens: Tokens, gist_id: &st
 /// Removes a phone from what the channel loads next time, for when it is not
 /// running to do it itself.
 pub(super) async fn forget_phone(phone_id: String, cx: &mut AsyncApp) -> Result<()> {
-    let _channel_lock = cx.background_spawn(async { store::acquire_channel_lock() }).await?;
+    let _channel_lock = cx
+        .background_spawn(async { store::acquire_channel_lock() })
+        .await?;
     let Some(mut state) = cx.background_spawn(async { store::load_state() }).await? else {
         return Ok(());
     };
