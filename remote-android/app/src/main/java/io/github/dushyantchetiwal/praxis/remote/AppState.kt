@@ -4,6 +4,11 @@ import androidx.compose.ui.graphics.ImageBitmap
 import io.github.dushyantchetiwal.praxis.remote.data.Device
 import io.github.dushyantchetiwal.praxis.remote.data.DirEntry
 import io.github.dushyantchetiwal.praxis.remote.data.FileContent
+import io.github.dushyantchetiwal.praxis.remote.data.ModelInfo
+import io.github.dushyantchetiwal.praxis.remote.data.HostFolders
+import io.github.dushyantchetiwal.praxis.remote.data.QueuedMessage
+import io.github.dushyantchetiwal.praxis.remote.data.QuestionHeader
+import io.github.dushyantchetiwal.praxis.remote.data.QuestionForm
 import io.github.dushyantchetiwal.praxis.remote.data.ONLINE_THRESHOLD_MS
 import io.github.dushyantchetiwal.praxis.remote.data.Permission
 import io.github.dushyantchetiwal.praxis.remote.data.Snapshot
@@ -74,7 +79,7 @@ data class AppState(
     val checkingUpdate: Boolean = false,
 )
 
-enum class OutboxState { Sending, Queued, Sent }
+enum class OutboxState { Sending, Queued, Sent, Unconfirmed }
 
 /** A message shown optimistically until it appears in the transcript. */
 data class OutboxItem(
@@ -84,6 +89,43 @@ data class OutboxItem(
     val doneAt: Long,
     val session: String?,
     val baseIndex: Int,
+    val queueId: String? = null,
+    val sendingNow: Boolean = false,
+    val steer: Boolean = false,
+    val fingerprint: String = io.github.dushyantchetiwal.praxis.remote.data.transcriptFingerprint(text),
+) {
+    fun canRestoreDraft(activeSession: String?, draft: String): Boolean =
+        state == OutboxState.Unconfirmed && session == activeSession && draft.isBlank()
+}
+
+internal fun reconcileOutbox(items: List<OutboxItem>, thread: ThreadView?, queued: Int, now: Long, expiryMillis: Long): List<OutboxItem> {
+    val matched = mutableSetOf<Int>()
+    return items.mapNotNull { item ->
+        if (item.doneAt == 0L || (item.session != null && item.session != thread?.sessionId)) return@mapNotNull item
+        if (item.state == OutboxState.Unconfirmed && item.session == null) return@mapNotNull item
+        val base = if (item.session == thread?.sessionId) item.baseIndex else -1
+        val candidates = thread?.entries.orEmpty().filter {
+            it.role == "user" && it.index > base &&
+                (if (it.fingerprint != null) it.fingerprint == item.fingerprint else it.text.trim() == item.text)
+        }
+        val delivered = candidates.firstOrNull { it.index !in matched }
+        if (delivered != null) {
+            matched += delivered.index
+            return@mapNotNull null
+        }
+        val consumed = candidates.filter { it.index in matched }.maxOfOrNull { it.index }
+        val retained = if (consumed == null) item else item.copy(session = thread?.sessionId, baseIndex = consumed)
+        val expired = item.state != OutboxState.Unconfirmed && now - item.doneAt > expiryMillis
+        retained.takeUnless { expired && (item.state != OutboxState.Queued || queued == 0) }
+    }
+}
+
+data class ModelsState(
+    val session: String? = null,
+    val loading: Boolean = false,
+    val changing: Boolean = false,
+    val info: ModelInfo? = null,
+    val error: String? = null,
 )
 
 /** A mode picked on the phone, shown until a snapshot confirms it. */
@@ -123,6 +165,43 @@ data class DownloadState(
     val fraction: Float? get() = size?.let { total -> if (total == 0L) 1f else (received.toFloat() / total).coerceIn(0f, 1f) }
 }
 
+data class QuestionState(
+    val header: QuestionHeader? = null,
+    val visible: Boolean = false,
+    val loading: Boolean = false,
+    val sending: Boolean = false,
+    val form: QuestionForm? = null,
+    val selected: Set<String> = emptySet(),
+    val freeform: String = "",
+    val error: String? = null,
+)
+
+data class QuestionListState(
+    val visible: Boolean = false,
+    val loading: Boolean = false,
+    val questions: List<QuestionHeader> = emptyList(),
+    val nextOffset: Int? = null,
+    val error: String? = null,
+)
+
+data class QueueState(
+    val session: String? = null,
+    val visible: Boolean = false,
+    val loading: Boolean = false,
+    val entries: List<QueuedMessage> = emptyList(),
+    val nextOffset: Int? = null,
+    val busy: Set<String> = emptySet(),
+    val error: String? = null,
+)
+
+data class FolderBrowserState(
+    val visible: Boolean = false,
+    val loading: Boolean = false,
+    val opening: Boolean = false,
+    val listing: HostFolders? = null,
+    val error: String? = null,
+)
+
 data class Banner(val text: String, val error: Boolean)
 
 /** Everything about the selected device, mirroring the web app's state. */
@@ -140,6 +219,12 @@ data class DeviceUi(
     val threadKnown: Boolean = false,
     val threadError: String? = null,
     val modeOverride: ModeOverride? = null,
+    val models: ModelsState = ModelsState(),
+    val folderBrowser: FolderBrowserState = FolderBrowserState(),
+    val queue: QueueState = QueueState(),
+    val question: QuestionState = QuestionState(),
+    val questionList: QuestionListState = QuestionListState(),
+    val answeredQuestions: Set<String> = emptySet(),
     val tab: Tab = Tab.Chat,
     val threads: ThreadsState = ThreadsState(),
     val files: FilesState = FilesState(),

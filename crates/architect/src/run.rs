@@ -1258,6 +1258,8 @@ impl PlanRun {
             if entries.is_empty() {
                 return;
             }
+            self.settled_readiness
+                .retain(|step| !step.path.as_slice().starts_with(path.as_slice()));
             self.push_frame(path.0, entries, graph);
             if self.is_finished() {
                 return;
@@ -1319,6 +1321,19 @@ impl PlanRun {
             })
             .collect();
         self.settled_readiness.extend(settled);
+        // A fork lane ends at its join, not at the end of its containing plan.
+        // Only a frame with an owned parent can complete that container.
+        if self.stack.len() > 1
+            && let Some(frame) = self.stack.last()
+        {
+            let path = frame.graph_path();
+            self.settled_readiness.retain(|step| step.path != path);
+            self.settled_readiness.push(StepReadiness {
+                path,
+                status: "completed".into(),
+                reason: "All selected nested work and routing completed".into(),
+            });
+        }
         self.stack.pop();
         if self.stack.is_empty() {
             return self.finish(RunOutcome::Completed);
@@ -1951,6 +1966,107 @@ mod tests {
         // out and carry on with the step after the one that contained it.
         assert_eq!(run.finish_step(&graph), Decision::Run(path(&["ship"])));
         assert_eq!(run.depth(), 1);
+        assert!(
+            run.readiness(&graph)
+                .iter()
+                .any(|step| { step.path == path(&["handlers"]) && step.status == "completed" })
+        );
+        let restored: PlanRun =
+            serde_json::from_value(serde_json::to_value(&run).expect("checkpoint"))
+                .expect("restore checkpoint");
+        assert!(
+            restored
+                .readiness(&graph)
+                .iter()
+                .any(|step| { step.path == path(&["handlers"]) && step.status == "completed" })
+        );
+    }
+
+    #[test]
+    fn reentering_a_container_clears_its_previous_completion() {
+        let mut graph = nested_graph();
+        let repeat = graph.connect("ship", "handlers");
+        graph
+            .edges
+            .iter_mut()
+            .find(|edge| edge.id == repeat)
+            .expect("repeat")
+            .max_repeats = Some(1);
+        let mut run = PlanRun::start(&graph).expect("nested loop");
+        run.finish_step(&graph);
+        run.finish_step(&graph);
+        run.finish_step(&graph);
+        assert!(
+            run.readiness(&graph)
+                .iter()
+                .any(|step| step.path == path(&["handlers"]) && step.status == "completed")
+        );
+        run.finish_step(&graph);
+        assert_eq!(run.current(), path(&["handlers", "parse"]));
+        assert!(
+            !run.readiness(&graph)
+                .iter()
+                .any(|step| step.path == path(&["handlers"]) && step.status == "completed")
+        );
+        run.cancel();
+        assert!(
+            !run.readiness(&graph)
+                .iter()
+                .any(|step| step.path == path(&["handlers"]) && step.status == "completed")
+        );
+    }
+
+    #[test]
+    fn fork_lanes_do_not_finish_containers_before_the_join() {
+        let mut inner = ArchitectGraph::default();
+        for id in ["start", "left", "right", "join"] {
+            inner.add_node(ArchitectNode::new(id, id));
+        }
+        inner.connect("start", "left");
+        inner.connect("start", "right");
+        inner.connect("left", "join");
+        inner.connect("right", "join");
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.subplan = Some(Box::new(inner));
+        let mut middle = ArchitectGraph::default();
+        middle.add_node(parent);
+        let mut outer = ArchitectNode::new("outer", "Outer");
+        outer.subplan = Some(Box::new(middle));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(outer);
+        graph.lock_all();
+        let mut run = PlanRun::start(&graph).expect("nested fork");
+        assert!(matches!(run.finish_step(&graph), Decision::Fork { .. }));
+        let mut lanes = run.fork_lanes(&graph);
+        assert_eq!(lanes.len(), 2);
+        for lane in &mut lanes {
+            assert_eq!(
+                lane.finish_step(&graph),
+                Decision::Done(RunOutcome::Completed)
+            );
+            assert!(
+                !lane
+                    .readiness(&graph)
+                    .iter()
+                    .any(|step| step.path == path(&["outer", "parent"])
+                        && step.status == "completed")
+            );
+        }
+        assert_eq!(
+            run.join(&graph),
+            Decision::Run(path(&["outer", "parent", "join"]))
+        );
+        assert_eq!(
+            run.finish_step(&graph),
+            Decision::Done(RunOutcome::Completed)
+        );
+        for container in [path(&["outer"]), path(&["outer", "parent"])] {
+            assert!(
+                run.readiness(&graph)
+                    .iter()
+                    .any(|step| step.path == container && step.status == "completed")
+            );
+        }
     }
 
     #[test]

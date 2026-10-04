@@ -233,10 +233,19 @@ fun Markdown(
     color: Color = LocalContentColor.current,
 ) {
     val blocks = remember(text) { parseMarkdown(text) }
-    val colors = mdColors()
     Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        for (block in blocks) {
-            when (block) {
+        for (block in blocks) MarkdownBlock(block, style, color)
+    }
+}
+
+@Composable
+fun MarkdownBlock(
+    block: MdBlock,
+    style: TextStyle = MaterialTheme.typography.bodyMedium,
+    color: Color = LocalContentColor.current,
+) {
+    val colors = mdColors()
+    when (block) {
                 is MdBlock.Paragraph -> Text(
                     remember(block, colors.link) { buildAnnotatedString { appendInline(block.text, colors) } },
                     style = style,
@@ -281,8 +290,6 @@ fun Markdown(
                 }
                 is MdBlock.Code -> CodeBlock(block.code, block.language)
                 MdBlock.Rule -> HorizontalDivider(Modifier.padding(vertical = 4.dp))
-            }
-        }
     }
 }
 

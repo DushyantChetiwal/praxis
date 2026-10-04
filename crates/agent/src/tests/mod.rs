@@ -72,6 +72,7 @@ pub(crate) fn release_dropped_entities(cx: &mut TestAppContext) {
 
 pub(crate) struct FakeTerminalHandle {
     killed: Arc<AtomicBool>,
+    panel_exposures: std::cell::Cell<usize>,
     stopped_by_user: Arc<AtomicBool>,
     exit_on_kill: bool,
     exit_sender: std::cell::RefCell<Option<futures::channel::oneshot::Sender<()>>>,
@@ -101,6 +102,7 @@ impl FakeTerminalHandle {
             exit_sender: std::cell::RefCell::new(Some(exit_sender)),
             wait_for_exit,
             exit_on_kill: true,
+            panel_exposures: std::cell::Cell::new(0),
             output: acp::TerminalOutputResponse::new("partial output".to_string(), false),
             id: acp::TerminalId::new("fake_terminal".to_string()),
         }
@@ -121,6 +123,7 @@ impl FakeTerminalHandle {
             exit_sender: std::cell::RefCell::new(Some(exit_sender)),
             wait_for_exit,
             exit_on_kill: true,
+            panel_exposures: std::cell::Cell::new(0),
             output: acp::TerminalOutputResponse::new("command output".to_string(), false),
             id: acp::TerminalId::new("fake_terminal".to_string()),
         }
@@ -129,6 +132,10 @@ impl FakeTerminalHandle {
     pub(crate) fn with_output(mut self, output: acp::TerminalOutputResponse) -> Self {
         self.output = output;
         self
+    }
+
+    pub(crate) fn panel_exposures(&self) -> usize {
+        self.panel_exposures.get()
     }
 
     pub(crate) fn was_killed(&self) -> bool {
@@ -147,6 +154,11 @@ impl FakeTerminalHandle {
 }
 
 impl crate::TerminalHandle for FakeTerminalHandle {
+    fn show_in_terminal_panel(&self, _cx: &AsyncApp) -> Result<()> {
+        self.panel_exposures.set(self.panel_exposures.get() + 1);
+        Ok(())
+    }
+
     fn id(&self, _cx: &AsyncApp) -> Result<acp::TerminalId> {
         Ok(self.id.clone())
     }
@@ -7137,9 +7149,34 @@ async fn test_subagent_thread_inherits_parent_thread_properties(cx: &mut TestApp
         )
     });
 
+    parent_thread.read_with(cx, |thread, cx| {
+        let request = thread
+            .build_completion_request(CompletionIntent::UserPrompt, cx)
+            .expect("main request");
+        assert!(!thread.is_helper_subagent());
+        assert_eq!(request.intent, Some(CompletionIntent::UserPrompt));
+        assert_eq!(request.max_output_tokens, None);
+    });
+    let architect_chat = cx.new(|cx| Thread::new_architect_step(&parent_thread, "Plan".into(), cx));
+    let architect_execution =
+        cx.new(|cx| Thread::new_architect_run_step(&parent_thread, "Build".into(), None, cx));
+    for child in [&architect_chat, &architect_execution] {
+        child.read_with(cx, |thread, cx| {
+            assert!(thread.is_subagent(), "retain parent lifecycle ownership");
+            assert!(!thread.is_helper_subagent());
+            assert_eq!(thread.depth(), 0, "node ownership is not helper recursion");
+            assert_eq!(thread.model().map(|model| model.id()), Some(model.id()));
+            let request = thread
+                .build_completion_request(CompletionIntent::UserPrompt, cx)
+                .expect("Architect request");
+            assert_eq!(request.intent, Some(CompletionIntent::UserPrompt));
+            assert_eq!(request.max_output_tokens, None);
+        });
+    }
     let subagent_thread = cx.new(|cx| Thread::new_subagent(&parent_thread, None, cx));
     subagent_thread.read_with(cx, |subagent_thread, cx| {
         assert!(subagent_thread.is_subagent());
+        assert!(subagent_thread.is_helper_subagent());
         assert_eq!(subagent_thread.depth(), 1);
         assert_eq!(
             subagent_thread.model().map(|model| model.id()),
@@ -7208,6 +7245,14 @@ async fn test_subagent_thread_model_selection(cx: &mut TestAppContext) {
         )
     });
 
+    let architect_chat = cx.new(|cx| Thread::new_architect_step(&parent_thread, "Plan".into(), cx));
+    architect_chat.read_with(cx, |thread, _| {
+        assert_eq!(
+            thread.model().map(|model| model.id()),
+            Some(parent_model.id())
+        );
+        assert!(!thread.is_helper_subagent());
+    });
     let subagent_thread = cx.new(|cx| Thread::new_subagent(&parent_thread, None, cx));
     let explicit_selection = LanguageModelSelection {
         provider: LanguageModelProviderSetting("fake-corp".to_string()),
@@ -7297,6 +7342,7 @@ async fn test_max_subagent_depth_prevents_tool_registration(cx: &mut TestAppCont
         thread.set_subagent_context(SubagentContext {
             parent_thread_id: acp::SessionId::new("parent-id"),
             depth: MAX_SUBAGENT_DEPTH - 1,
+            kind: crate::ChildThreadKind::Helper,
         });
         thread
     });

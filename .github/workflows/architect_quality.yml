@@ -123,6 +123,21 @@ jobs:
           .github/workflows/android_remote.yml
           --check
 
+      - name: Prepare formatting corrections
+        if: failure()
+        run: |
+          cargo fmt --all
+          ./script/prettier --write
+          git --no-pager diff --binary > rust-format.patch
+
+      - name: Upload formatting corrections
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-format
+          path: rust-format.patch
+          if-no-files-found: ignore
+
   architect-tests:
     name: ${{ matrix.name }}
     env:
@@ -184,6 +199,9 @@ jobs:
           shared-key: architect-agent-tests
           cache-on-failure: true
 
+      - name: Test background terminal tab inspection
+        run: cargo test --locked -p terminal_view --lib background_agent_terminals_
+
       - name: Test Plan-mode capability filtering
         run: "cargo test --locked -p agent --lib session_mode_tests::"
 
@@ -237,6 +255,9 @@ jobs:
 
       - name: Test Architect scheduling and durable history
         run: |
+          cargo test --locked -p agent --lib test_subagent_thread_
+          cargo test --locked -p agent --lib test_subagent_context_
+          cargo test --locked -p agent --lib legacy_node_chat_roles_
           cargo test --locked -p agent --lib architect_runner::checkpoint_tests::
 
           cargo test --locked -p agent --lib internal_tests::architect_persistence_tests::
@@ -299,7 +320,10 @@ jobs:
           cargo test --locked -p agent_ui --lib test_question_timeout_manual_text_and_choices_survive_blur
 
       - name: Test Praxis Remote
-        run: "cargo test --locked -p agent_ui --lib remote::"
+        run: |
+          cargo test --locked -p agent_ui --lib remote::
+          cargo test --locked -p agent_ui --lib test_remote_send_now_
+          cargo test --locked -p agent --lib tools::terminal_task_tool::tests::
 
   updater-tests:
     name: Auto-update integrity tests

@@ -390,8 +390,13 @@ pub(super) struct TerminalTask {
 }
 
 impl TerminalTask {
-    pub(super) fn background(&self) {
-        self.state.backgrounded.set(true);
+    pub(super) fn background(&self, cx: &AsyncApp) {
+        if !self.state.backgrounded.replace(true)
+            && !self.is_complete()
+            && let Some(terminal) = self.state.terminal.borrow().as_ref()
+        {
+            terminal.show_in_terminal_panel(cx).log_err();
+        }
     }
 
     pub(super) fn cancel(&self) {
@@ -623,6 +628,21 @@ mod tests {
                 &mut cx.to_async(),
             )
             .unwrap()
+    }
+
+    #[gpui::test]
+    async fn terminal_tasks_background_exposes_the_original_process_once(cx: &mut TestAppContext) {
+        let registry = Rc::new(TerminalTaskRegistry::default());
+        let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
+        let task = start(&registry, terminal.clone(), None, cx);
+        task.background(&cx.to_async());
+        task.background(&cx.to_async());
+        assert_eq!(terminal.panel_exposures(), 1);
+        assert!(!terminal.was_killed());
+        terminal.signal_exit();
+        task.completion.clone().await;
+        task.background(&cx.to_async());
+        assert_eq!(terminal.panel_exposures(), 1);
     }
 
     fn advance(cx: &mut TestAppContext, milliseconds: u64) {
@@ -1000,7 +1020,7 @@ mod tests {
         drop(stream);
         cx.run_until_parked();
         assert!(!terminal.was_killed());
-        task.background();
+        task.background(&cx.to_async());
         cancellation.send(true).unwrap();
         cx.run_until_parked();
         assert!(!terminal.was_killed());
@@ -1019,7 +1039,7 @@ mod tests {
         let registry = Rc::new(TerminalTaskRegistry::default());
         let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
         let task = start(&registry, terminal.clone(), None, cx);
-        task.background();
+        task.background(&cx.to_async());
         let (stream, _events, mut cancellation) = ToolCallEventStream::test_with_cancellation();
         let wait = cx.update(|cx| {
             Arc::new(TerminalWaitTool::new(&registry)).run(
@@ -1089,8 +1109,8 @@ mod tests {
         let grandchild_terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
         let child_task = start(&child, child_terminal.clone(), None, cx);
         let grandchild_task = start(&grandchild, grandchild_terminal.clone(), None, cx);
-        child_task.background();
-        grandchild_task.background();
+        child_task.background(&cx.to_async());
+        grandchild_task.background(&cx.to_async());
         parent.cancel_all();
         child_task.completion.await;
         grandchild_task.completion.await;

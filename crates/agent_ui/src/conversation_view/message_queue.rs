@@ -3,7 +3,13 @@ use std::collections::VecDeque;
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct QueueEntryId(usize);
+pub struct QueueEntryId(uuid::Uuid);
+
+impl std::fmt::Display for QueueEntryId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
 
 pub struct QueueEntry {
     pub id: QueueEntryId,
@@ -33,7 +39,6 @@ pub struct MessageQueue {
     entries: VecDeque<QueueEntry>,
     processing_state: ProcessingState,
     can_fast_track: bool,
-    next_id: usize,
 }
 
 impl Default for MessageQueue {
@@ -42,7 +47,6 @@ impl Default for MessageQueue {
             entries: VecDeque::new(),
             processing_state: ProcessingState::AutoProcess,
             can_fast_track: false,
-            next_id: 0,
         }
     }
 }
@@ -100,9 +104,15 @@ impl MessageQueue {
     /// because the editor event subscription must capture the ID before the
     /// `QueueEntry` (which owns that subscription) can be constructed.
     pub fn next_id(&mut self) -> QueueEntryId {
-        let id = QueueEntryId(self.next_id);
-        self.next_id += 1;
-        id
+        QueueEntryId(uuid::Uuid::new_v4())
+    }
+
+    pub fn set_steer(&mut self, id: QueueEntryId, steer: bool) -> bool {
+        let Some(entry) = self.entry_by_id_mut(id) else {
+            return false;
+        };
+        entry.steer = steer;
+        true
     }
 
     /// Queuing a message is active engagement, so it also resumes

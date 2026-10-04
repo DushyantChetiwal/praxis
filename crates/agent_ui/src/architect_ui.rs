@@ -14,7 +14,7 @@ mod rendering;
 mod run;
 
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -257,6 +257,7 @@ struct DockSnapshot {
 
 pub struct ArchitectPane {
     thread: Entity<Thread>,
+    run_statuses: HashMap<NodePath, String>,
     workspace: WeakEntity<Workspace>,
     window_handle: AnyWindowHandle,
     mode: ArchitectWorkspaceMode,
@@ -353,7 +354,9 @@ impl ArchitectPane {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscription = cx.observe(&thread, |this, _, cx| {
-            // The agent or a run may have removed selected steps.
+            // A runner can still hold its control-state borrow while notifying
+            // the owning thread. Read that state after the update unwinds.
+            Self::defer_run_status_refresh(cx);
             this.prune_bulk_selection(cx);
             this.refresh_inspector_if_source_changed(cx);
             cx.emit(workspace::item::ItemEvent::UpdateTab);
@@ -381,6 +384,7 @@ impl ArchitectPane {
             )
         });
         Self {
+            run_statuses: Self::collect_run_statuses(thread.read(cx)),
             thread,
             workspace,
             window_handle: window.window_handle(),
@@ -427,6 +431,58 @@ impl ArchitectPane {
             _search_subscription: search_subscription,
             _workspace_subscription: workspace_subscription,
             plan_conversation_subscription: None,
+        }
+    }
+
+    fn defer_run_status_refresh(cx: &mut Context<Self>) {
+        let pane = cx.weak_entity();
+        cx.defer(move |cx| {
+            if let Err(error) = pane.update(cx, |pane, cx| {
+                pane.run_statuses = Self::collect_run_statuses(pane.thread.read(cx));
+                cx.notify();
+            }) {
+                log::debug!("Architect pane closed before its status refresh: {error:#}");
+            }
+        });
+    }
+
+    fn collect_run_statuses(thread: &Thread) -> HashMap<NodePath, String> {
+        if thread.architect_run().is_none() {
+            return HashMap::new();
+        }
+        agent::architect_run_readiness(thread)["steps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|step| {
+                let path = NodePath(
+                    step["path"]
+                        .as_array()?
+                        .iter()
+                        .map(|part| part.as_str().map(NodeId::from))
+                        .collect::<Option<Vec<_>>>()?,
+                );
+                Some((
+                    path,
+                    step.get("display_status")
+                        .unwrap_or(&step["status"])
+                        .as_str()?
+                        .to_string(),
+                ))
+            })
+            .collect()
+    }
+
+    fn node_run_status(&self, id: &NodeId) -> Option<&str> {
+        self.run_statuses
+            .get(&self.focus.child(id.clone()))
+            .map(String::as_str)
+    }
+
+    fn node_is_complete(&self, node: &ArchitectNode) -> bool {
+        match self.node_run_status(&node.id) {
+            Some(status) => status == "completed",
+            None => node.result.is_some(),
         }
     }
 
@@ -609,7 +665,9 @@ impl ArchitectPane {
         }
 
         self.thread = thread.clone();
+        self.run_statuses = Self::collect_run_statuses(thread.read(cx));
         self._thread_subscription = cx.observe(&thread, |this, _, cx| {
+            Self::defer_run_status_refresh(cx);
             this.prune_bulk_selection(cx);
             this.refresh_inspector_if_source_changed(cx);
             cx.emit(workspace::item::ItemEvent::UpdateTab);

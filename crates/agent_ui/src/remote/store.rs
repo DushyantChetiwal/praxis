@@ -50,6 +50,32 @@ pub(super) fn state_path() -> PathBuf {
     paths::data_dir().join("remote").join("state.json")
 }
 
+pub(super) fn acquire_channel_lock() -> Result<std::fs::File> {
+    lock_channel_file(&state_path().with_extension("lock"))
+}
+
+fn lock_channel_file(path: &std::path::Path) -> Result<std::fs::File> {
+    let parent = path
+        .parent()
+        .context("Praxis Remote's lock has no folder")?;
+    std::fs::create_dir_all(parent)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+            "Another Praxis process owns this phone connection. Open the folder in that process; existing sessions are unchanged."
+        ),
+        Err(std::fs::TryLockError::Error(error)) => {
+            Err(error).with_context(|| format!("locking {}", path.display()))
+        }
+    }
+}
+
 /// The configuration file of the first version, which needed a repository.
 pub(super) fn legacy_config_path() -> PathBuf {
     paths::data_dir().join("remote").join("config.json")
@@ -114,4 +140,25 @@ pub(super) async fn delete_secrets(cx: &AsyncApp) -> Result<()> {
     let task = cx.update(|cx| cx.delete_credentials(KEYCHAIN_URL));
     task.await
         .context("removing Praxis Remote's sign-in from the system keychain")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_ownership_is_exclusive_and_released_on_drop() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("state.lock");
+        let first = lock_channel_file(&path).expect("first process owns channel");
+        assert!(lock_channel_file(&path).is_err());
+        drop(first);
+        let second = lock_channel_file(&path).expect("ownership released");
+        assert!(lock_channel_file(&path).is_err());
+        drop(second);
+        assert!(
+            path.exists(),
+            "never unlink a lock file while another process may open it"
+        );
+    }
 }

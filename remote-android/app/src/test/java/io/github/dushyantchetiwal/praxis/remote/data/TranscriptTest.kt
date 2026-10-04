@@ -1,12 +1,183 @@
 package io.github.dushyantchetiwal.praxis.remote.data
 
 import org.json.JSONObject
+import io.github.dushyantchetiwal.praxis.remote.OutboxItem
+import io.github.dushyantchetiwal.praxis.remote.OutboxState
+import io.github.dushyantchetiwal.praxis.remote.reconcileOutbox
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TranscriptTest {
+    @Test
+    fun unconfirmedMessagesStayRecoverableWithoutOverwritingOtherDrafts() {
+        val item = OutboxItem(1, "original", OutboxState.Unconfirmed, 1L, "root", -1)
+        assertTrue(item.canRestoreDraft("root", ""))
+        assertFalse(item.canRestoreDraft("other", ""))
+        assertFalse(item.canRestoreDraft("root", "new draft"))
+        assertFalse(item.copy(state = OutboxState.Queued).canRestoreDraft("root", ""))
+        val thread = ThreadView("root", null, "idle", 0, emptyList())
+        assertEquals(listOf(item), reconcileOutbox(listOf(item), thread, 0, 1_000_000L, 90_000L))
+        val delivered = Entry(0, "user", "original", null)
+        assertTrue(reconcileOutbox(listOf(item), thread.copy(total = 1, entries = listOf(delivered)), 0, 2L, 90_000L).isEmpty())
+        val unassigned = item.copy(session = null)
+        assertEquals(listOf(unassigned), reconcileOutbox(listOf(unassigned), thread.copy(total = 1, entries = listOf(delivered)), 0, 2L, 90_000L))
+    }
+
+    @Test
+    fun identicalQueuedMessagesDoNotReuseOneDeliveryAcrossPolls() {
+        val first = OutboxItem(1, "same", OutboxState.Queued, 1L, "root", -1)
+        val second = first.copy(id = 2)
+        val delivered = Entry(0, "user", "preview", null, detailsPending = true, fingerprint = transcriptFingerprint("same"))
+        val thread = ThreadView("root", null, "generating", 1, listOf(delivered))
+        val pending = reconcileOutbox(listOf(first, second), thread, 1, 2L, 90_000L)
+        assertEquals(listOf(2), pending.map { it.id })
+        assertEquals(0, pending.single().baseIndex)
+        assertEquals(pending, reconcileOutbox(pending, thread, 1, 3L, 90_000L))
+        assertTrue(reconcileOutbox(pending, thread.copy(total = 2, entries = listOf(delivered, delivered.copy(index = 1))), 0, 4L, 90_000L).isEmpty())
+        assertEquals(listOf(first), reconcileOutbox(listOf(first), thread.copy(sessionId = "other"), 0, 100_000L, 90_000L))
+    }
+
+    @Test
+    fun questionsPreserveChoiceValuesAndFreeformTakesPrecedence() {
+        val form = parseQuestionForm(JSONObject("""{
+            "question":"Which database?", "allow_multiple":true, "auto_answer_paused":true,
+            "options":[{"value":"postgres","label":"PostgreSQL","description":"Shared"},
+                       {"value":"sqlite","label":"SQLite"}]
+        }"""))!!
+        assertTrue(form.autoAnswerPaused)
+        assertEquals("Shared", form.options.first().description)
+        assertEquals(listOf("postgres", "sqlite"), questionAnswerContent(form, setOf("sqlite", "postgres"), "")!!.getJSONArray("answer").strings())
+        val freeform = questionAnswerContent(form, setOf("postgres"), "  Another choice  ")!!
+        assertEquals("Another choice", freeform.getString("freeform_answer"))
+        assertFalse(freeform.has("answer"))
+        assertEquals(null, questionAnswerContent(form, emptySet(), " "))
+        assertEquals(null, questionAnswerContent(form, setOf("unknown"), ""))
+        assertEquals(null, questionAnswerContent(form.copy(allowMultiple = false), setOf("postgres", "sqlite"), ""))
+        val plain = form.copy(options = emptyList(), allowMultiple = false)
+        assertEquals("Custom", questionAnswerContent(plain, emptySet(), "Custom")!!.getString("answer"))
+    }
+
+    @Test
+    fun questionsKeepSessionIdentitySeparateFromPermissionRequests() {
+        val page = parseQuestionPage(JSONObject("""{
+            "questions":[{"id":"request","session_id":"step-one","title":"Question", "session_title":"Build"},
+                         {"id":"request","session_id":"step-two","title":"Question"}], "next_offset":null
+        }"""))
+        assertEquals(2, page.questions.map { it.key }.toSet().size)
+        assertEquals("Build", page.questions.first().sessionTitle)
+        assertEquals(null, page.nextOffset)
+    }
+
+    @Test
+    fun messageFingerprintsIdentifyLongPromptsWithoutDownloadingTheirBodies() {
+        assertEquals("LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=", transcriptFingerprint("hello"))
+        assertEquals(transcriptFingerprint("hello"), transcriptFingerprint("  hello\n"))
+        assertFalse(transcriptFingerprint("same prefix, first") == transcriptFingerprint("same prefix, second"))
+    }
+
+    @Test
+    fun detailChunksReassembleUnicodeAndWhitespaceWithoutLoss() {
+        val texts = listOf("  First\\n\n", "🦀 café\t", "last line  \n")
+        val total = texts.sumOf { it.toByteArray(Charsets.UTF_8).size }.toLong()
+        var body = DetailBody()
+        for (text in texts) {
+            val next = body.nextOffset + text.toByteArray(Charsets.UTF_8).size
+            body = body.append(DetailChunk(body.nextOffset, next, total, "version", text))!!
+        }
+        assertTrue(body.complete)
+        assertEquals(texts.joinToString(""), body.chunks.joinToString("") { it.text })
+        assertEquals(total, body.nextOffset)
+    }
+
+    @Test
+    fun bodyChunksRejectGapsDuplicatesChangedVersionsAndNoProgress() {
+        val first = DetailChunk(0, 3, 6, "first", "abc")
+        val body = DetailBody().append(first)!!
+        for (chunk in listOf(
+            first,
+            DetailChunk(4, 6, 6, "first", "ef"),
+            DetailChunk(3, 6, 6, "changed", "def"),
+            DetailChunk(3, 6, 9, "first", "def"),
+            DetailChunk(3, 3, 6, "first", ""),
+            DetailChunk(3, 6, 6, "first", "🦀"),
+        )) assertEquals(null, body.append(chunk))
+        assertTrue(body.append(DetailChunk(3, 6, 6, "first", "def"))!!.complete)
+        assertTrue(DetailBody().append(DetailChunk(0, 0, 0, "empty", ""))!!.complete)
+    }
+
+    @Test
+    fun bodyOffsetsAreExactNonNegativeIntegers() {
+        val base = """{"offset":0,"next_offset":3,"total_bytes":3,"version":"v","text":"abc","done":true}"""
+        assertEquals(3L, parseDetailChunk(JSONObject(base))!!.totalBytes)
+        for (invalid in listOf(-1, 0.5, "0", true, "9223372036854775808")) {
+            assertEquals(null, parseDetailChunk(JSONObject(base).put("offset", invalid)))
+        }
+        assertEquals(null, parseDetailChunk(JSONObject(base).put("done", false)))
+        assertEquals(null, parseDetailChunk(JSONObject(base).put("text", 123)))
+        assertEquals(null, parseDetailChunk(JSONObject(base).put("version", 1)))
+    }
+
+    @Test
+    fun collapsedDetailsKeepTheirIdentityWithoutTransportingTheirText() {
+        val thread = parseThreadView(JSONObject("""{
+            "session_id":"step", "entries":[
+                {"index":4,"role":"tool","text":"Read file","status":"running","details_pending":true},
+                {"index":5,"role":"assistant","text":"Partial answer","parts":[
+                    {"index":2,"role":"reasoning","text":"","details_pending":true},
+                    {"index":3,"role":"assistant","text":"Partial answer"}
+                ]}
+            ]
+        }"""))
+        assertTrue(thread.entries.first().detailsPending)
+        assertEquals("Read file", thread.entries.first().text)
+        val parts = thread.entries.last().parts
+        assertEquals(listOf(2, 3), parts.map { it.index })
+        assertTrue(parts.first().detailsPending)
+        assertEquals("", parts.first().text)
+        assertEquals("Partial answer", parts.last().text)
+        assertFalse(parts.last().detailsPending)
+        val request = DetailRequest("step", 5, 2).arguments()
+        assertEquals("step", request.getString("session_id"))
+        assertEquals(5, request.getInt("entry_index"))
+        assertEquals(2, request.getInt("part_index"))
+        assertFalse(DetailRequest("root", 4).arguments().has("part_index"))
+    }
+
+    @Test
+    fun modelPagesPreserveOpaqueIdsDisabledChoicesAndSelection() {
+        val first = parseModels(JSONObject("""{
+            "current":"provider/model/one", "next_offset":1,
+            "available":[{"id":"provider/model/one","name":"First","group":"Provider","disabled":false}]
+        }"""))
+        val second = parseModels(JSONObject("""{
+            "current":"provider/model/two", "next_offset":null,
+            "available":[{"id":"provider/model/two","name":"Second","disabled":true}]
+        }"""))
+        val merged = first.append(second)
+        assertEquals("provider/model/two", merged.current)
+        assertEquals(listOf("provider/model/one", "provider/model/two"), merged.available.map { it.id })
+        assertEquals("Provider", merged.available.first().group)
+        assertTrue(merged.available.last().disabled)
+        assertEquals(null, merged.nextOffset)
+        assertEquals(merged, merged.append(second))
+    }
+
+    @Test
+    fun newControlsAreHiddenForOlderDesktops() {
+        fun summary(fields: String) = parseStatus(JSONObject("""{
+            "windows":[{"window":1,"thread":{"session_id":"root"$fields}}]
+        }""")).windows.single().thread!!
+        val legacy = summary("")
+        assertFalse(legacy.modelSelection)
+        assertFalse(legacy.sendNow)
+        val current = summary(""", "model_selection":true, "send_now":true, "model":"provider/model" """)
+        assertTrue(current.modelSelection)
+        assertTrue(current.sendNow)
+        assertEquals("provider/model", current.model)
+    }
+
     @Test
     fun executionVisitsCanExceedTheRootPlanStepCount() {
         val status = parseStatus(JSONObject("""{

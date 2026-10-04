@@ -1184,7 +1184,7 @@ async fn finish_terminal_tool(
             ));
         }
         let response = task.response(true, cx)?;
-        task.background();
+        task.background(cx);
         return Ok(response);
     }
 

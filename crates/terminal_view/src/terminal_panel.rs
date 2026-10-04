@@ -87,6 +87,7 @@ pub struct TerminalPanel {
     deferred_tasks: HashMap<TaskId, Task<()>>,
     assistant_enabled: bool,
     active: bool,
+    _project_subscription: gpui::Subscription,
 }
 
 impl TerminalPanel {
@@ -94,6 +95,19 @@ impl TerminalPanel {
         let project = workspace.project();
         let pane = new_terminal_pane(workspace.weak_handle(), project.clone(), false, window, cx);
         let center = PaneGroup::new(pane.clone());
+        let project_subscription = cx.subscribe_in(project, window, |_, _, event, window, cx| {
+            if let project::Event::BackgroundTerminal(terminal) = event {
+                let terminal = terminal.clone();
+                let panel = cx.weak_entity();
+                window.defer(cx, move |window, cx| {
+                    panel
+                        .update(cx, |panel, cx| {
+                            panel.attach_agent_terminal(terminal, window, cx)
+                        })
+                        .log_err();
+                });
+            }
+        });
         let terminal_panel = Self {
             center,
             active_pane: pane,
@@ -107,9 +121,59 @@ impl TerminalPanel {
             deferred_tasks: HashMap::default(),
             assistant_enabled: false,
             active: false,
+            _project_subscription: project_subscription,
         };
         terminal_panel.apply_tab_bar_buttons(&terminal_panel.active_pane, cx);
         terminal_panel
+    }
+
+    fn attach_agent_terminal(
+        &mut self,
+        terminal: Entity<Terminal>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.center.panes().iter().any(|pane| {
+            pane.read(cx)
+                .items()
+                .filter_map(|item| item.downcast::<TerminalView>())
+                .any(|view| view.read(cx).terminal() == &terminal)
+        }) {
+            return;
+        }
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let (workspace_id, project) = {
+            let workspace = workspace.read(cx);
+            (workspace.database_id(), workspace.project().downgrade())
+        };
+        let view = cx.new(|cx| {
+            TerminalView::new(
+                terminal,
+                self.workspace.clone(),
+                workspace_id,
+                project,
+                window,
+                cx,
+            )
+        });
+        // Inspection shares the original terminal. It neither spawns a shell,
+        // activates a tab, nor opens a dock (including while Architect owns it).
+        self.active_pane.update(cx, |pane, cx| {
+            pane.add_item_inner(Box::new(view), false, false, false, None, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn attach_saved_agent_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let terminals = workspace.read(cx).project().read(cx).background_terminals();
+        for terminal in terminals {
+            self.attach_agent_terminal(terminal, window, cx);
+        }
     }
 
     pub fn set_assistant_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -125,8 +189,10 @@ impl TerminalPanel {
         cx: &mut Context<Self>,
     ) {
         let assistant_enabled = self.assistant_enabled;
+        let agent_terminal_panel = cx.weak_entity();
         terminal_pane.update(cx, |pane, cx| {
             pane.set_render_tab_bar_buttons(cx, move |pane, window, cx| {
+                let agent_terminal_panel = agent_terminal_panel.clone();
                 let split_context = pane
                     .active_item()
                     .and_then(|item| item.downcast::<TerminalView>())
@@ -154,8 +220,21 @@ impl TerminalPanel {
                             .with_handle(pane.new_item_context_menu_handle.clone())
                             .menu(move |window, cx| {
                                 let focus_handle = focus_handle.clone();
+                                let agent_terminal_panel = agent_terminal_panel.clone();
                                 let menu = ContextMenu::build(window, cx, |menu, _, _| {
                                     menu.context(focus_handle.clone())
+                                        .entry("Show Agent Terminals", None, move |window, cx| {
+                                            let panel = agent_terminal_panel.clone();
+                                            window.defer(cx, move |window, cx| {
+                                                panel
+                                                    .update(cx, |panel, cx| {
+                                                        panel.attach_saved_agent_terminals(
+                                                            window, cx,
+                                                        )
+                                                    })
+                                                    .log_err();
+                                            });
+                                        })
                                         .action(
                                             "New Terminal",
                                             workspace::NewTerminal::default().boxed_clone(),
@@ -1904,6 +1983,120 @@ mod tests {
         assert_eq!(
             result.command_label, expected_shell,
             "We show the shell launch for empty commands"
+        );
+    }
+
+    #[gpui::test]
+    async fn background_agent_terminals_share_output_without_focus_or_duplicate_tabs(
+        cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        init_test(cx);
+        let (window_handle, panel) = init_workspace_with_panel(cx).await;
+        let workspace = window_handle
+            .read_with(cx, |multi, _| multi.workspace().clone())
+            .expect("workspace");
+        let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+        let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+        cx.run_until_parked();
+        let terminal = cx.new(|cx| {
+            terminal::TerminalBuilder::new_display_only(
+                terminal::terminal_settings::CursorShape::default(),
+                terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                util::paths::PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"before inspection\n", cx)
+        });
+        let focus = cx.update(|window, cx| window.focused(cx));
+        let dock_open = workspace.read_with(cx, |workspace, cx| {
+            workspace.bottom_dock().read(cx).is_open()
+        });
+        project.update(cx, |project, cx| {
+            project.reveal_background_terminal(terminal.clone(), cx);
+            project.reveal_background_terminal(terminal.clone(), cx);
+        });
+        cx.run_until_parked();
+        let view = panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.active_pane.read(cx).items_len(), 1);
+            panel
+                .active_pane
+                .read(cx)
+                .items()
+                .next()
+                .expect("tab")
+                .downcast::<TerminalView>()
+                .expect("terminal view")
+        });
+        view.read_with(cx, |view, _| assert_eq!(view.terminal(), &terminal));
+        cx.update(|window, cx| assert_eq!(window.focused(cx), focus));
+        assert_eq!(
+            workspace.read_with(cx, |workspace, cx| workspace
+                .bottom_dock()
+                .read(cx)
+                .is_open()),
+            dock_open
+        );
+        let second_terminal = cx.new(|cx| {
+            terminal::TerminalBuilder::new_display_only(
+                terminal::terminal_settings::CursorShape::default(),
+                terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                util::paths::PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        project.update(cx, |project, cx| {
+            project.reveal_background_terminal(second_terminal.clone(), cx);
+        });
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, cx| {
+            let pane = panel.active_pane.read(cx);
+            assert_eq!(pane.items_len(), 2);
+            assert_eq!(
+                pane.active_item().expect("active tab").item_id(),
+                view.entity_id()
+            );
+        });
+        cx.update(|window, cx| assert_eq!(window.focused(cx), focus));
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"after inspection\n", cx)
+        });
+        view.read_with(cx, |view, cx| {
+            let output = view.terminal().read(cx).get_content();
+            assert!(output.contains("before inspection"));
+            assert!(output.contains("after inspection"));
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            panel.active_pane.update(cx, |pane, cx| {
+                pane.remove_item(view.entity_id(), false, false, window, cx)
+            });
+            panel.attach_saved_agent_terminals(window, cx);
+        });
+        assert_eq!(
+            panel.read_with(cx, |panel, cx| panel.active_pane.read(cx).items_len()),
+            2
+        );
+        panel.read_with(cx, |panel, cx| {
+            let active = panel
+                .active_pane
+                .read(cx)
+                .active_item()
+                .expect("active tab");
+            let active = active.downcast::<TerminalView>().expect("terminal view");
+            assert_eq!(active.read(cx).terminal(), &second_terminal);
+        });
+        cx.update(|window, cx| assert_eq!(window.focused(cx), focus));
+        assert_eq!(
+            project.read_with(cx, |project, _| project.background_terminals()),
+            vec![terminal, second_terminal]
         );
     }
 

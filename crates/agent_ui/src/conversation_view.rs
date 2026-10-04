@@ -414,6 +414,10 @@ impl Conversation {
         Some((result_session_id, tool_id.clone(), options))
     }
 
+    pub(crate) fn threads(&self) -> impl Iterator<Item = &Entity<AcpThread>> {
+        self.threads.values()
+    }
+
     /// Every tool call in this conversation that is waiting for the user,
     /// with the thread it belongs to, in the order they asked.
     pub(crate) fn pending_tool_calls(&self) -> Vec<(Entity<AcpThread>, acp::ToolCallId)> {
@@ -4460,6 +4464,65 @@ pub(crate) mod tests {
             0,
             "No notification should fire when a queued message will be auto-sent on Stopped"
         );
+    }
+
+    #[gpui::test]
+    async fn test_remote_send_now_preserves_the_other_queued_messages(cx: &mut TestAppContext) {
+        init_test(cx);
+        let connection = StubAgentConnection::new();
+        let (conversation, cx) =
+            setup_conversation_view(StubAgentServer::new(connection), cx).await;
+        add_to_workspace(conversation.clone(), cx);
+        let view = active_thread(&conversation, cx);
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.send_text("first".into(), false, window, cx).is_none());
+        });
+        cx.run_until_parked();
+        let queued = view.update_in(cx, |view, window, cx| {
+            let queued = view
+                .send_text("wait".into(), false, window, cx)
+                .expect("queued message");
+            assert!(
+                view.send_text("interrupt".into(), true, window, cx)
+                    .is_none()
+            );
+            queued
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.message_queue.len(), 1);
+            assert_eq!(view.message_queue.first_id(), Some(queued));
+        });
+        view.update(cx, |view, _| {
+            assert!(view.message_queue.set_steer(queued, true));
+            assert!(view.message_queue.set_steer(queued, true));
+            assert!(
+                view.message_queue.front_wants_steer(),
+                "repeated requests must not toggle it off"
+            );
+            assert!(view.message_queue.set_steer(queued, false));
+            assert!(!view.message_queue.front_wants_steer());
+            let mut other_queue = super::message_queue::MessageQueue::default();
+            assert_ne!(
+                queued,
+                other_queue.next_id(),
+                "IDs cannot collide after reopening a view"
+            );
+        });
+        view.update_in(cx, |view, window, cx| {
+            view.send_queued_message_now(queued, window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.message_queue.is_empty());
+            let count = view.thread.read(cx).entries().len();
+            view.send_queued_message_now(queued, window, cx);
+            assert_eq!(
+                view.thread.read(cx).entries().len(),
+                count,
+                "never resend a delivered ID"
+            );
+        });
     }
 
     #[gpui::test]

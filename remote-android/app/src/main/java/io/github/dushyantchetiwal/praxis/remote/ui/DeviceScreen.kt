@@ -12,6 +12,9 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Chat
@@ -37,6 +40,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -44,6 +48,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -102,6 +107,13 @@ fun DeviceScreen(state: AppState, ui: DeviceUi, busy: Int, vm: MainViewModel, sn
                                 enabled = ui.currentWindow() != null && !ui.startingThread,
                                 onClick = { menu = false; vm.startNewThread() },
                             )
+                            if (ui.status?.openFolder == true) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.folder_open)) },
+                                    leadingIcon = { Icon(Icons.Outlined.Folder, contentDescription = null) },
+                                    onClick = { menu = false; vm.browseHostFolder() },
+                                )
+                            }
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.action_switch_device)) },
                                 leadingIcon = { Icon(Icons.Outlined.Computer, contentDescription = null) },
@@ -149,12 +161,57 @@ fun DeviceScreen(state: AppState, ui: DeviceUi, busy: Int, vm: MainViewModel, sn
         }
     }
 
+    if (ui.folderBrowser.visible) HostFolderDialog(ui, vm)
     if (confirmUnpair) {
         UnpairDialog(ui.device?.name.orEmpty(), onDismiss = { confirmUnpair = false }) {
             confirmUnpair = false
             vm.unpairCurrent()
         }
     }
+}
+
+@Composable
+private fun HostFolderDialog(ui: DeviceUi, vm: MainViewModel) {
+    val browser = ui.folderBrowser
+    val listing = browser.listing
+    var path by remember(ui.device?.channel) { mutableStateOf("") }
+    LaunchedEffect(listing?.path) { listing?.path?.let { path = it } }
+    AlertDialog(
+        onDismissRequest = vm::dismissFolderBrowser,
+        title = { Text(stringResource(R.string.folder_open)) },
+        confirmButton = {
+            TextButton(onClick = { vm.openHostFolder(path) }, enabled = path.isNotBlank() && !browser.loading && !browser.opening) {
+                Text(stringResource(R.string.folder_open_new_window))
+            }
+        },
+        dismissButton = { TextButton(onClick = vm::dismissFolderBrowser) { Text(stringResource(if (browser.opening) R.string.action_close else R.string.action_cancel)) } },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(stringResource(R.string.folder_host_hint, ui.device?.name.orEmpty(), listing?.host.orEmpty()))
+                OutlinedTextField(value = path, onValueChange = { path = it }, label = { Text(stringResource(R.string.folder_path)) }, singleLine = true)
+                Row {
+                    TextButton(onClick = { vm.browseHostFolder(path) }, enabled = !browser.loading && !browser.opening) { Text(stringResource(R.string.folder_browse)) }
+                    listing?.parent?.let { parent ->
+                        TextButton(onClick = { vm.browseHostFolder(parent) }, enabled = !browser.loading && !browser.opening) { Text(stringResource(R.string.folder_parent)) }
+                    }
+                }
+                browser.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                if (browser.loading || browser.opening) LoadingRow(stringResource(R.string.files_loading))
+                LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                    items(listing?.folders.orEmpty(), key = { it.path }) { folder ->
+                        TextButton(onClick = { vm.browseHostFolder(folder.path) }, enabled = !browser.loading && !browser.opening) {
+                            Icon(Icons.Outlined.Folder, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(folder.name)
+                        }
+                    }
+                    if (listing?.nextOffset != null) item {
+                        TextButton(onClick = { vm.browseHostFolder(listing.path, more = true) }, enabled = !browser.loading) { Text(stringResource(R.string.folder_more)) }
+                    }
+                }
+            }
+        },
+    )
 }
 
 @Composable

@@ -2430,6 +2430,9 @@ impl ArchitectPane {
                                     }),
                             )
                         })
+                        .when_some(self.node_run_status(&node.id), |this, status| {
+                            this.child(Label::new(format!("Execution: {status}")).size(LabelSize::Small))
+                        })
                         .when_some(node.result.clone(), |this, result| {
                             this.child(
                                 v_flex()

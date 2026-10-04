@@ -336,6 +336,7 @@ pub struct ToastLink {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
+    BackgroundTerminal(Entity<terminal::Terminal>),
     LanguageServerAdded(LanguageServerId, LanguageServerName, Option<WorktreeId>),
     SupplementaryLanguageServerAdded(LanguageServerId, LanguageServerName),
     LanguageServerRemoved(LanguageServerId),
@@ -1402,9 +1403,7 @@ impl Project {
 
                 buffers_needing_diff: Default::default(),
                 git_diff_debouncer: DebouncedDelay::new(),
-                terminals: Terminals {
-                    local_handles: Vec::new(),
-                },
+                terminals: Terminals::default(),
                 node: Some(node),
                 search_history: Self::new_search_history(),
                 environment,
@@ -1646,9 +1645,7 @@ impl Project {
                 remote_client: Some(remote.clone()),
                 buffers_needing_diff: Default::default(),
                 git_diff_debouncer: DebouncedDelay::new(),
-                terminals: Terminals {
-                    local_handles: Vec::new(),
-                },
+                terminals: Terminals::default(),
                 node: Some(node),
                 search_history: Self::new_search_history(),
                 environment,
@@ -1939,9 +1936,7 @@ impl Project {
                 agent_server_store,
                 buffers_needing_diff: Default::default(),
                 git_diff_debouncer: DebouncedDelay::new(),
-                terminals: Terminals {
-                    local_handles: Vec::new(),
-                },
+                terminals: Terminals::default(),
                 node: None,
                 search_history: Self::new_search_history(),
                 search_included_history: Self::new_search_history(),

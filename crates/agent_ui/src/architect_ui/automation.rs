@@ -52,6 +52,7 @@ impl ArchitectPane {
                             "pinned": node.pinned,
                             "nested_steps": node.subplan().map_or(0, |plan| plan.nodes.len()),
                             "has_result": node.result.is_some(),
+                            "execution_status": self.node_run_status(&node.id),
                             "rect": rect,
                         })
                     })

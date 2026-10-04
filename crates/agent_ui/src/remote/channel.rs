@@ -46,7 +46,7 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
 const REFRESH_GRACE: Duration = Duration::from_secs(60);
 const DEFAULT_WATCH_SECONDS: i64 = 300;
 const MAX_WATCH_SECONDS: i64 = 900;
-/// Requests sent while Praxis was not running are refused, not replayed.
+/// Bound how long an offline phone request remains actionable.
 const MAX_REQUEST_AGE_SECONDS: i64 = 300;
 const MAX_CLOCK_AHEAD_SECONDS: i64 = 120;
 const PAIRING_TIMEOUT_SECONDS: i64 = 300;
@@ -164,7 +164,10 @@ pub(super) async fn remember_sign_in(
 }
 
 /// Deletes the gist, as far as GitHub allows, and everything saved locally.
-pub(super) async fn forget_everything(http: Arc<dyn HttpClient>, cx: &mut AsyncApp) {
+pub(super) async fn forget_everything(http: Arc<dyn HttpClient>, cx: &mut AsyncApp) -> Result<()> {
+    let _channel_lock = cx
+        .background_spawn(async { store::acquire_channel_lock() })
+        .await?;
     let state = cx
         .background_spawn(async { store::load_state() })
         .await
@@ -180,11 +183,9 @@ pub(super) async fn forget_everything(http: Arc<dyn HttpClient>, cx: &mut AsyncA
         log::warn!("Praxis Remote could not delete its gist: {error:#}");
     }
     if had_secrets {
-        store::delete_secrets(cx).await.log_err();
+        store::delete_secrets(cx).await?;
     }
-    cx.background_spawn(async { store::delete_state() })
-        .await
-        .log_err();
+    cx.background_spawn(async { store::delete_state() }).await
 }
 
 async fn delete_gist(http: Arc<dyn HttpClient>, mut tokens: Tokens, gist_id: &str) -> Result<()> {
@@ -208,6 +209,9 @@ async fn delete_gist(http: Arc<dyn HttpClient>, mut tokens: Tokens, gist_id: &st
 /// Removes a phone from what the channel loads next time, for when it is not
 /// running to do it itself.
 pub(super) async fn forget_phone(phone_id: String, cx: &mut AsyncApp) -> Result<()> {
+    let _channel_lock = cx
+        .background_spawn(async { store::acquire_channel_lock() })
+        .await?;
     let Some(mut state) = cx.background_spawn(async { store::load_state() }).await? else {
         return Ok(());
     };
@@ -756,6 +760,8 @@ impl Channel {
                         .get("session_id")
                         .and_then(Value::as_str)
                         .map(str::to_string),
+                    include_details: args.get("include_details").and_then(Value::as_bool)
+                        != Some(false),
                     until: Utc::now() + chrono::Duration::seconds(seconds),
                 };
                 let until = watch.until.to_rfc3339();
@@ -1094,9 +1100,10 @@ fn pairing_detail(code: &str) -> String {
     let code = crypto::display_code(code);
     format!(
         "Allow it only if the phone shows the code {code}.\n\n\
-         The phone will be able to see your Praxis windows and conversations, send messages \
-         to the agent, answer its permission requests, run and stop plans, and read files in \
-         your open projects. You can unpair it at any time from Praxis Remote."
+         The phone will be able to see your Praxis windows and conversations, browse folders \
+         on this computer and open them in new windows, read files in open projects, choose \
+         models, send or steer messages, answer questions and permission requests, and run \
+         or stop plans. You can unpair it at any time from Praxis Remote."
     )
 }
 

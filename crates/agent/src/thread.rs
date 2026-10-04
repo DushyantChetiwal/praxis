@@ -513,6 +513,10 @@ impl RunStep {
         self.visit
     }
 
+    pub fn outcome(&self) -> Option<&ArchitectRunOutcome> {
+        self.outcome.as_ref()
+    }
+
     fn close(&mut self) {
         if self.is_running() {
             self.elapsed = Some(self.started_at.elapsed());
@@ -848,14 +852,39 @@ impl std::fmt::Display for NoModelConfiguredError {
 
 impl std::error::Error for NoModelConfiguredError {}
 
-/// Context passed to a subagent thread for lifecycle management
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildThreadKind {
+    #[default]
+    Legacy,
+    Helper,
+    ArchitectChat,
+    ArchitectExecution,
+}
+
+/// Parent ownership is independent of helper-agent execution policy.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SubagentContext {
     /// ID of the parent thread
     pub parent_thread_id: acp::SessionId,
 
-    /// Current depth level (0 = root agent, 1 = first-level subagent, etc.)
+    /// Explicit helper delegation depth; Architect ownership does not consume it.
     pub depth: u8,
+    #[serde(default)]
+    pub kind: ChildThreadKind,
+}
+
+impl SubagentContext {
+    fn restore_kind(&mut self, profile: &AgentProfileId) {
+        // Legacy node chats have a dedicated profile; generic child ownership
+        // alone cannot distinguish an old helper from an execution transcript.
+        if self.kind == ChildThreadKind::Legacy
+            && profile.0.as_ref() == builtin_profiles::ARCHITECT_STEP
+        {
+            self.kind = ChildThreadKind::ArchitectChat;
+            self.depth = self.depth.saturating_sub(1);
+        }
+    }
 }
 
 /// The ID of the user prompt that initiated a request.
@@ -1494,6 +1523,9 @@ pub trait TerminalHandle {
     fn wait_for_exit(&self, cx: &AsyncApp) -> Result<Shared<Task<acp::TerminalExitStatus>>>;
     fn kill(&self, cx: &AsyncApp) -> Result<()>;
     fn was_stopped_by_user(&self, cx: &AsyncApp) -> Result<bool>;
+    fn show_in_terminal_panel(&self, _cx: &AsyncApp) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub trait SubagentHandle {
@@ -2116,9 +2148,9 @@ impl Thread {
             .embedded_context(true)
     }
 
-    pub fn new_subagent(
+    fn new_child(
         parent_thread: &Entity<Thread>,
-        model_selection: Option<&LanguageModelSelection>,
+        kind: ChildThreadKind,
         cx: &mut Context<Self>,
     ) -> Self {
         let project = parent_thread.read(cx).project.clone();
@@ -2144,9 +2176,22 @@ impl Thread {
             .register_child(&thread.terminal_tasks);
         thread.subagent_context = Some(SubagentContext {
             parent_thread_id: parent_thread.read(cx).id().clone(),
-            depth: parent_thread.read(cx).depth() + 1,
+            depth: parent_thread
+                .read(cx)
+                .depth()
+                .saturating_add(u8::from(kind == ChildThreadKind::Helper)),
+            kind,
         });
         thread.inherit_parent_settings(parent_thread, cx);
+        thread
+    }
+
+    pub fn new_subagent(
+        parent_thread: &Entity<Thread>,
+        model_selection: Option<&LanguageModelSelection>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut thread = Self::new_child(parent_thread, ChildThreadKind::Helper, cx);
         let model_selection = model_selection
             .cloned()
             .or_else(|| AgentSettings::get_global(cx).subagent_model.clone());
@@ -2163,7 +2208,7 @@ impl Thread {
         model: Option<LanguageModel>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut thread = Self::new_subagent(parent_thread, None, cx);
+        let mut thread = Self::new_child(parent_thread, ChildThreadKind::ArchitectExecution, cx);
         // Execution inherits the coordinator's selection, including an unresolved
         // selection, never the unrelated subagent default. Pin it for this visit.
         thread.inherit_parent_settings(parent_thread, cx);
@@ -2199,7 +2244,7 @@ impl Thread {
         title: SharedString,
         cx: &mut Context<Self>,
     ) -> Self {
-        let mut thread = Self::new_subagent(parent_thread, None, cx);
+        let mut thread = Self::new_child(parent_thread, ChildThreadKind::ArchitectChat, cx);
         // Messages are shared by `Arc`, so inheriting the whole conversation
         // costs a refcount rather than a copy.
         thread.messages = parent_thread.read(cx).messages.clone();
@@ -2620,6 +2665,10 @@ impl Thread {
         let profile_id = db_thread
             .profile
             .unwrap_or_else(|| settings.default_profile.clone());
+        let mut subagent_context = db_thread.subagent_context;
+        if let Some(context) = &mut subagent_context {
+            context.restore_kind(&profile_id);
+        }
 
         let saved_selection = db_thread.model.map(|model| SelectedModel {
             provider: model.provider.into(),
@@ -2743,7 +2792,7 @@ impl Thread {
             updated_at: db_thread.updated_at,
             prompt_capabilities_tx,
             prompt_capabilities_rx,
-            subagent_context: db_thread.subagent_context,
+            subagent_context,
             draft_prompt: db_thread.draft_prompt,
             ui_scroll_position: db_thread.ui_scroll_position.map(|sp| gpui::ListOffset {
                 item_ix: sp.item_ix,
@@ -5860,7 +5909,7 @@ impl Thread {
         cx: &App,
     ) -> Result<LanguageModelRequest> {
         let completion_intent =
-            if self.is_subagent() && completion_intent == CompletionIntent::UserPrompt {
+            if self.is_helper_subagent() && completion_intent == CompletionIntent::UserPrompt {
                 CompletionIntent::Subagent
             } else {
                 completion_intent
@@ -6122,6 +6171,15 @@ impl Thread {
 
     pub fn is_subagent(&self) -> bool {
         self.subagent_context.is_some()
+    }
+
+    pub fn is_helper_subagent(&self) -> bool {
+        self.subagent_context.as_ref().is_some_and(|context| {
+            matches!(
+                context.kind,
+                ChildThreadKind::Helper | ChildThreadKind::Legacy
+            )
+        })
     }
 
     pub fn parent_thread_id(&self) -> Option<acp::SessionId> {
@@ -9005,6 +9063,29 @@ mod tests {
     use serde_json::json;
     use settings::LanguageModelProviderSetting;
     use std::sync::Arc;
+
+    #[test]
+    fn legacy_node_chat_roles_restore_without_reclassifying_explicit_helpers() {
+        let profile = AgentProfileId(builtin_profiles::ARCHITECT_STEP.into());
+        let mut legacy: SubagentContext = serde_json::from_value(json!({
+            "parent_thread_id": "parent", "depth": 1,
+        }))
+        .expect("legacy child context");
+        assert_eq!(legacy.kind, ChildThreadKind::Legacy);
+        legacy.restore_kind(&profile);
+        assert_eq!(legacy.kind, ChildThreadKind::ArchitectChat);
+        assert_eq!(legacy.depth, 0);
+        legacy.restore_kind(&profile);
+        assert_eq!(legacy.depth, 0);
+        let mut helper = SubagentContext {
+            parent_thread_id: acp::SessionId::new("parent"),
+            depth: 1,
+            kind: ChildThreadKind::Helper,
+        };
+        helper.restore_kind(&profile);
+        assert_eq!(helper.kind, ChildThreadKind::Helper);
+        assert_eq!(helper.depth, 1);
+    }
 
     fn text_message(role: Role, text: String) -> LanguageModelRequestMessage {
         LanguageModelRequestMessage {

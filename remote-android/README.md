@@ -13,7 +13,8 @@ on the network.
 - **Live state.** The computer publishes one AES-256-GCM encrypted snapshot per paired phone in the gist's
   `state.json`. While the app is in the foreground it reads the gist every 3 seconds with `If-None-Match` (a `304` is
   free) and sends a `watch` request so the computer publishes snapshots. It renews the watch about every 4 minutes and
-  stops in the background.
+  stops in the background. Ordinary changing snapshots are published at most once per 10 seconds, plus network and
+  polling time. Partial assistant text is included, but this is not a token-streaming connection.
 - **Requests.** Commands are encrypted `praxis-remote/v2 request` comments. Praxis edits each one into its encrypted
   answer. The app polls that comment every 1.5 seconds, then deletes it. Only one request is in flight at a time, and a
   request times out after 45 seconds.
@@ -26,6 +27,31 @@ on the network.
    the computer.
 
 There is no repository to create and nothing to install on GitHub.
+
+- **Models:** tap **Model** in Chat to load the active conversation's models from the computer. Search the loaded
+  choices or use **Load more models**. Unavailable models are disabled; selection errors stay visible in the picker.
+- **Queue controls:** normal sending queues a message while Praxis is working. **Steer** requests the next supported
+  turn boundary when that message reaches the front. **Send Now** interrupts the current turn. Tap the queued count
+  to inspect and control the desktop queue, including messages not created on this phone. Other queued messages
+  remain intact. Delivery still uses GitHub polling and is not instantaneous. An unconfirmed send remains in the
+  current window's outbox for review instead of replacing another draft. **Restore draft** only restores to the same
+  conversation with an empty composer; it does not resend. Check the conversation before retrying an uncertain send.
+- **Conversation headers:** messages, tools, and Thinking start collapsed. Expanding fetches that body's first chunk;
+  **Load more content** retrieves the rest without permanent remote truncation. Parsing runs off the UI thread and
+  body blocks render lazily. The loaded text is a snapshot; **Refresh details** includes newer output. Closed bodies
+  do not generate requests. Content already absent from desktop storage cannot be recovered.
+- **Questions:** pending questions appear above the conversation, including questions from running steps. **Answer on
+  phone** opens the complete question and pauses its automatic recommendation while you answer. Choose options,
+  select multiple where supported, or type a custom answer. **Submit answer** resumes the waiting question; **Skip
+  question** declines it. Closing the form alone does not answer it. Already-resolved questions cannot be answered twice.
+- **Folders:** use **Open folder on computer** from the device menu, browse or enter an absolute host path, and open
+  it in a new window. Other windows and agent sessions remain open. Windows users can enter accessible WSL UNC paths.
+  The phone preserves its pairing key if a transient or competing desktop snapshot fails to confirm it.
+
+Update both the desktop and Android app for these controls. Older desktops continue to show their existing transcript
+format and do not expose the new controls. Pairing keys and encryption are unchanged. If an older Android version
+already erased a pairing key, pairing again is still necessary. Restart normally after installing the updated desktop;
+do not leave an older Dev process publishing to the same remote channel alongside it.
 
 ## The GitHub App
 

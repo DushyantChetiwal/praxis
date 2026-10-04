@@ -97,7 +97,7 @@ impl AskQuestionTool {
         Self { acp_thread }
     }
 
-    fn validate_input(mut input: AskQuestionToolInput) -> Result<AskQuestionToolInput, String> {
+    pub fn validate_input(mut input: AskQuestionToolInput) -> Result<AskQuestionToolInput, String> {
         input.question = input.question.trim().to_string();
         if input.question.is_empty() {
             return Err("The question cannot be empty.".into());
@@ -225,6 +225,18 @@ impl AskQuestionTool {
                     ),
                 false,
             )
+        }
+    }
+
+    // Validate before resolving an elicitation: an invalid remote answer must
+    // not consume the pending question and leave the user unable to correct it.
+    pub fn validate_response(
+        input: &AskQuestionToolInput,
+        response: &acp::CreateElicitationResponse,
+    ) -> Result<(), String> {
+        match Self::response_output(input, response.clone()) {
+            AskQuestionToolOutput::Error { error } => Err(error),
+            _ => Ok(()),
         }
     }
 

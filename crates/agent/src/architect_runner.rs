@@ -1287,19 +1287,25 @@ pub fn architect_run_readiness(thread: &Thread) -> serde_json::Value {
         }
         for (index, lane) in state.lanes.iter().enumerate() {
             match &lane.next {
-                Decision::Run(path) => apply(
-                    path,
-                    if state.in_flight.iter().any(|(active, _)| *active == index) {
-                        "running"
-                    } else {
-                        "ready"
-                    },
-                    if lane.interrupted {
-                        "Interrupted attempt; prerequisites remain satisfied"
-                    } else {
-                        "The scheduler has admitted this step"
-                    },
-                ),
+                Decision::Run(path) => {
+                    let running = state.in_flight.iter().any(|(active, _)| *active == index);
+                    apply(
+                        path,
+                        if running { "running" } else { "ready" },
+                        if lane.interrupted {
+                            "Interrupted attempt; prerequisites remain satisfied"
+                        } else {
+                            "The scheduler has admitted this step"
+                        },
+                    );
+                    for depth in 1..path.depth() {
+                        apply(
+                            &NodePath(path.as_slice()[..depth].to_vec()),
+                            if running { "running" } else { "waiting" },
+                            "Nested work remains unfinished",
+                        );
+                    }
+                }
                 Decision::Ask(_) => apply(
                     &lane.run.current(),
                     "waiting",
@@ -1382,6 +1388,47 @@ pub fn architect_run_readiness(thread: &Thread) -> serde_json::Value {
                     "This is a read-only saved run, not an executable pending visit".into();
             }
         }
+    }
+    let mut latest_visits = std::collections::BTreeMap::new();
+    if let Some(run) = run {
+        for visit in run.history() {
+            latest_visits.insert(&visit.path, visit.outcome());
+        }
+    }
+    let mut execution_outcomes = std::collections::BTreeMap::new();
+    for (path, outcome) in latest_visits {
+        let status = match outcome {
+            Some(
+                ArchitectRunOutcome::Failed { .. }
+                | ArchitectRunOutcome::StepLimit { .. }
+                | ArchitectRunOutcome::NodeLimit { .. }
+                | ArchitectRunOutcome::DepthLimit { .. },
+            ) => "failed",
+            Some(ArchitectRunOutcome::Cancelled) => "cancelled",
+            Some(ArchitectRunOutcome::Interrupted) => "interrupted",
+            _ => continue,
+        };
+        for depth in 1..=path.depth() {
+            let ancestor = NodePath(path.as_slice()[..depth].to_vec());
+            let previous = execution_outcomes.entry(ancestor).or_insert(status);
+            if status == "failed" || (status == "cancelled" && *previous != "failed") {
+                *previous = status;
+            }
+        }
+    }
+    for (step, path) in steps.iter_mut().zip(graph_paths(graph)) {
+        let status = step["status"].as_str().unwrap_or("unknown").to_string();
+        let display = if matches!(status.as_str(), "completed" | "skipped" | "running") {
+            status.as_str()
+        } else {
+            execution_outcomes
+                .get(&path)
+                .copied()
+                .unwrap_or(status.as_str())
+        };
+        // Presentation includes the last execution outcome; scheduler readiness
+        // remains separate so a failed visit can still be eligible for retry.
+        step["display_status"] = serde_json::json!(display);
     }
     serde_json::json!({
         "steps": steps,
