@@ -99,7 +99,10 @@ import io.github.dushyantchetiwal.praxis.remote.data.Architect
 import io.github.dushyantchetiwal.praxis.remote.data.Entry
 import io.github.dushyantchetiwal.praxis.remote.data.ApiException
 import io.github.dushyantchetiwal.praxis.remote.data.DetailRequest
-import io.github.dushyantchetiwal.praxis.remote.data.EntryDetail
+import io.github.dushyantchetiwal.praxis.remote.data.DetailBody
+import io.github.dushyantchetiwal.praxis.remote.data.ErrorKind
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import io.github.dushyantchetiwal.praxis.remote.data.HistoryScrollAnchor
 import io.github.dushyantchetiwal.praxis.remote.data.HistoryScrollGate
 import io.github.dushyantchetiwal.praxis.remote.data.TranscriptHistory
@@ -121,7 +124,7 @@ fun ChatTab(ui: DeviceUi, vm: MainViewModel) {
     val generating = ui.isGenerating()
 
     Column(Modifier.fillMaxSize()) {
-        ThreadHeader(ui, generating)
+        ThreadHeader(ui, generating, vm)
         if (summary?.modelSelection == true) ModelPicker(ui, vm)
         summary?.mode?.takeIf { it.available.isNotEmpty() }?.let { mode ->
             ModeSelector(mode, ui.currentModeId(now), vm::setMode)
@@ -146,6 +149,7 @@ fun ChatTab(ui: DeviceUi, vm: MainViewModel) {
         }
         Composer(ui, vm, generating)
     }
+    if (ui.queue.visible) QueueDialog(ui, vm)
 }
 
 @Composable
@@ -215,7 +219,7 @@ private fun ModelPicker(ui: DeviceUi, vm: MainViewModel) {
 }
 
 @Composable
-private fun ThreadHeader(ui: DeviceUi, generating: Boolean) {
+private fun ThreadHeader(ui: DeviceUi, generating: Boolean, vm: MainViewModel) {
     val window = ui.currentWindow()
     val summary = window?.thread
     val title = when {
@@ -242,9 +246,59 @@ private fun ThreadHeader(ui: DeviceUi, generating: Boolean) {
         )
         if (status != null) {
             Spacer(Modifier.width(8.dp))
-            StatusChip(generating, summary?.queued ?: 0)
+            if (summary?.queueManagement == true && summary.queued > 0) {
+                TextButton(onClick = { vm.loadQueue() }) {
+                    Text(pluralStringResource(R.plurals.status_queued, summary.queued, summary.queued))
+                }
+            }
+            StatusChip(generating, if (summary?.queueManagement == true) 0 else summary?.queued ?: 0)
         }
     }
+}
+
+@Composable
+private fun QueueDialog(ui: DeviceUi, vm: MainViewModel) {
+    val queue = ui.queue
+    val session = queue.session ?: return
+    val expanded = remember(session) { mutableStateMapOf<String, Boolean>() }
+    AlertDialog(
+        onDismissRequest = vm::dismissQueue,
+        title = { Text(stringResource(R.string.queue_title)) },
+        confirmButton = { TextButton(onClick = vm::dismissQueue) { Text(stringResource(R.string.action_close)) } },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(stringResource(R.string.queue_help), style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = { vm.loadQueue() }, enabled = !queue.loading) { Text(stringResource(R.string.action_refresh)) }
+                if (queue.loading) LoadingRow(stringResource(R.string.queue_loading))
+                queue.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                if (!queue.loading && queue.entries.isEmpty() && queue.error == null) Text(stringResource(R.string.queue_empty))
+                LazyColumn(Modifier.heightIn(max = 380.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(queue.entries, key = { it.id }) { message ->
+                        Column {
+                            TextButton(onClick = { expanded[message.id] = expanded[message.id] != true }) {
+                                Text(message.text, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                Icon(if (expanded[message.id] == true) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                                    contentDescription = stringResource(if (expanded[message.id] == true) R.string.action_collapse else R.string.action_expand))
+                            }
+                            Row {
+                                if (ui.currentWindow()?.thread?.steering == true) TextButton(
+                                    onClick = { vm.queueAction(message.id, session, !message.steer) },
+                                    enabled = !queue.loading && message.id !in queue.busy,
+                                ) { Text(stringResource(if (message.steer) R.string.action_wait_turn else R.string.action_steer)) }
+                                TextButton(onClick = { vm.queueAction(message.id, session) }, enabled = !queue.loading && message.id !in queue.busy) {
+                                    Text(stringResource(R.string.action_send_now))
+                                }
+                            }
+                            if (expanded[message.id] == true) EntryDetails(message.text, true, DetailRequest(session, queueId = message.id), vm)
+                        }
+                    }
+                    if (queue.nextOffset != null) item {
+                        TextButton(onClick = { vm.loadQueue(more = true) }, enabled = !queue.loading) { Text(stringResource(R.string.queue_more)) }
+                    }
+                }
+            }
+        },
+    )
 }
 
 @Composable
@@ -523,7 +577,7 @@ private fun TranscriptContent(ui: DeviceUi, vm: MainViewModel) {
             }
         }
         items(ui.outbox, key = { "o-${it.id}" }) { item ->
-            OutboxBubble(item, ui.currentWindow()?.thread?.sendNow == true && item.session == ui.currentWindow()?.thread?.sessionId, vm)
+            OutboxBubble(item, ui.currentWindow()?.thread?.sendNow == true && item.session == ui.currentWindow()?.thread?.sessionId, ui.currentWindow()?.thread?.steering == true, vm)
         }
     }
 
@@ -620,7 +674,7 @@ private fun TranscriptEntry(entry: Entry, session: String?, expanded: MutableMap
             entry.parts.forEach { part ->
                 val partKey = "$entryKey:part:${part.index}"
                 EntryView(
-                    Entry(entry.index, part.role, part.text, entry.status),
+                    Entry(entry.index, part.role, part.text, entry.status, detailsPending = part.detailsPending),
                     expanded[partKey] == true,
                     { expanded[partKey] = expanded[partKey] != true },
                 ) {
@@ -637,11 +691,10 @@ private fun TranscriptEntry(entry: Entry, session: String?, expanded: MutableMap
 @Composable
 private fun EntryView(entry: Entry, expanded: Boolean, onToggle: () -> Unit, details: @Composable () -> Unit) {
     when (entry.role) {
-        "user" -> UserBubble(entry.text)
-        "assistant" -> SelectionContainer { Markdown(entry.text, Modifier.fillMaxWidth().padding(horizontal = 4.dp)) }
+        "user", "assistant" -> MessageRow(entry, expanded, onToggle, details)
         "tool" -> ToolRow(entry, expanded, onToggle, details)
         "reasoning" -> ThinkingRow(expanded, onToggle, details)
-        else -> Text(
+        else -> if (entry.detailsPending) MessageRow(entry, expanded, onToggle, details) else Text(
             entry.text,
             style = MaterialTheme.typography.bodySmall,
             fontStyle = FontStyle.Italic,
@@ -649,6 +702,30 @@ private fun EntryView(entry: Entry, expanded: Boolean, onToggle: () -> Unit, det
             textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         )
+    }
+}
+
+@Composable
+private fun MessageRow(entry: Entry, expanded: Boolean, onToggle: () -> Unit, details: @Composable () -> Unit) {
+    val preview = remember(entry.text) { firstLine(entry.text).take(160) }
+    Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+        Column {
+            TextButton(onClick = onToggle, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+                    Text(stringResource(when (entry.role) {
+                        "user" -> R.string.chat_user_header
+                        "assistant" -> R.string.chat_agent_header
+                        else -> R.string.chat_notice_header
+                    }))
+                    if (preview.isNotBlank()) Text(preview, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                }
+                Icon(
+                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = stringResource(if (expanded) R.string.action_collapse else R.string.action_expand),
+                )
+            }
+            if (expanded) Box(Modifier.padding(12.dp)) { details() }
+        }
     }
 }
 
@@ -680,7 +757,8 @@ private fun EntryDetails(text: String, pending: Boolean, request: DetailRequest?
         SelectionContainer { Markdown(text, style = MaterialTheme.typography.bodySmall) }
         return
     }
-    var detail by remember(request) { mutableStateOf<EntryDetail?>(null) }
+    var body by remember(request) { mutableStateOf(DetailBody()) }
+    var blocks by remember(request) { mutableStateOf<List<MdBlock>>(emptyList()) }
     var error by remember(request) { mutableStateOf<String?>(null) }
     var attempt by remember(request) { mutableStateOf(0) }
     var loading by remember(request) { mutableStateOf(true) }
@@ -689,22 +767,32 @@ private fun EntryDetails(text: String, pending: Boolean, request: DetailRequest?
         loading = true
         error = null
         try {
-            detail = vm.loadDetail(request)
+            val chunk = vm.loadDetail(request, body)
+            val next = body.append(chunk) ?: throw ApiException(ErrorKind.State, failure)
+            val parsed = withContext(Dispatchers.Default) { parseMarkdown(next.chunks.joinToString("") { it.text }) }
+            body = next
+            blocks = parsed
         } catch (exception: ApiException) {
             error = exception.message ?: failure
         } finally {
             loading = false
         }
     }
-    Column {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (loading) LoadingRow(stringResource(R.string.details_loading))
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        detail?.let {
-            SelectionContainer { Markdown(it.text, style = MaterialTheme.typography.bodySmall) }
-            if (it.truncated) Text(stringResource(R.string.chat_truncated), style = MaterialTheme.typography.labelSmall)
+        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            items(blocks) { block -> SelectionContainer { MarkdownBlock(block, style = MaterialTheme.typography.bodySmall) } }
         }
-        TextButton(onClick = { attempt++ }, enabled = !loading) {
-            Text(stringResource(if (error != null) R.string.action_retry else R.string.details_refresh))
+        body.totalBytes?.let { Text(stringResource(R.string.details_progress, body.nextOffset, it), style = MaterialTheme.typography.labelSmall) }
+        if (body.complete && blocks.isEmpty()) Text(stringResource(R.string.details_empty))
+        Row {
+            if (!body.complete) TextButton(onClick = { loading = true; attempt++ }, enabled = !loading) {
+                Text(stringResource(if (error != null) R.string.action_retry else R.string.details_more))
+            }
+            TextButton(onClick = { body = DetailBody(); blocks = emptyList(); loading = true; attempt++ }, enabled = !loading) {
+                Text(stringResource(R.string.details_refresh))
+            }
         }
     }
 }
@@ -736,19 +824,24 @@ private fun UserBubble(text: String, modifier: Modifier = Modifier, label: Strin
 }
 
 @Composable
-private fun OutboxBubble(item: OutboxItem, canSendNow: Boolean, vm: MainViewModel) {
+private fun OutboxBubble(item: OutboxItem, canSendNow: Boolean, canSteer: Boolean, vm: MainViewModel) {
     val label = stringResource(
         when (item.state) {
             OutboxState.Sending -> R.string.outbox_sending
-            OutboxState.Queued -> R.string.outbox_queued
+            OutboxState.Queued -> if (item.steer) R.string.outbox_steering else R.string.outbox_queued
             OutboxState.Sent -> R.string.outbox_sent
         },
     )
     Column(horizontalAlignment = Alignment.End, modifier = Modifier.fillMaxWidth()) {
         UserBubble(item.text, Modifier.alpha(0.7f), label)
         if (canSendNow && item.state == OutboxState.Queued && item.queueId != null) {
-            TextButton(onClick = { vm.sendQueuedNow(item) }, enabled = !item.sendingNow) {
-                Text(stringResource(if (item.sendingNow) R.string.outbox_sending else R.string.action_send_now))
+            Row {
+                if (canSteer) TextButton(onClick = { vm.steerQueuedMessage(item) }, enabled = !item.sendingNow) {
+                    Text(stringResource(if (item.steer) R.string.action_wait_turn else R.string.action_steer))
+                }
+                TextButton(onClick = { vm.sendQueuedNow(item) }, enabled = !item.sendingNow) {
+                    Text(stringResource(if (item.sendingNow) R.string.outbox_sending else R.string.action_send_now))
+                }
             }
         }
     }
@@ -820,8 +913,13 @@ private fun Composer(ui: DeviceUi, vm: MainViewModel, generating: Boolean) {
     Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
         Column {
             if (generating && ui.currentWindow()?.thread?.sendNow == true && vm.composer.isNotBlank()) {
-                TextButton(onClick = { vm.sendPrompt(sendNow = true) }, modifier = Modifier.align(Alignment.End)) {
-                    Text(stringResource(R.string.action_send_now))
+                Row(Modifier.align(Alignment.End)) {
+                    if (ui.currentWindow()?.thread?.steering == true) TextButton(onClick = { vm.sendPrompt(steer = true) }) {
+                        Text(stringResource(R.string.action_steer))
+                    }
+                    TextButton(onClick = { vm.sendPrompt(sendNow = true) }) {
+                        Text(stringResource(R.string.action_send_now))
+                    }
                 }
             }
             ComposerInput(ui, vm, generating)

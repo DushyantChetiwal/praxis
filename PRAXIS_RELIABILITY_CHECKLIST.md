@@ -47,6 +47,15 @@ Implementation in progress: separate persisted child roles now distinguish helpe
 
 Assessment: scheduler completion can advance out of a subplan while node rendering still requires a non-empty result summary. Reproduce and fix the authoritative-state mismatch; do not invent summaries to paint nodes complete.
 
+### D4 — Inspect background agent terminals in terminal tabs
+
+- [ ] Surface background agent terminals as labeled tabs in the owning workspace's terminal panel.
+- [ ] Attach to the original live terminal/output; never rerun a command to inspect it.
+- [ ] Preserve command/session ownership, output, exit status, and explicit stop controls.
+- [ ] Do not steal focus, open docks in Architect mode, or recreate terminals during workspace mode switches.
+- [ ] Cover main and node execution tasks, multiple simultaneous terminals, completed tasks, and view close/reopen behavior.
+- [ ] Add GPUI regression coverage for tab registration and command continuity.
+
 ## Mobile and remote operation
 
 ### M1 — Preserve sessions across additional windows
@@ -94,6 +103,15 @@ Assessment: current transcript entries are capped at 6,000 serialized bytes, and
 - [ ] Test all three actions while generating, after cancellation, and after navigation/reconnection.
 
 Assessment: desktop queue logic already supports steering and immediate dispatch. The existing uncommitted phone patch adds Send Now but not steering and is not deployed.
+
+### M6 — Answer blocking agent questions from the phone
+
+- [ ] Publish pending native question/elicitation prompts for the active root and its running steps.
+- [ ] Display the complete question, choice descriptions, multi-select/free-text controls, and recommendation/timeout state where applicable.
+- [ ] Submit answers through the existing desktop elicitation resolver, scoped to the exact session and request identity.
+- [ ] Reject stale, expired, cancelled, or already-answered requests without double submission or answering another question.
+- [ ] Keep permission approvals and ordinary questions distinct; do not treat a question answer as tool permission or plan-lock approval.
+- [ ] Test that a phone answer unblocks the waiting agent, including nested/parallel step questions and desktop/phone answer races.
 
 ### Existing mobile work to retain and review
 

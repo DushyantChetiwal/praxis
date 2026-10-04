@@ -26,6 +26,7 @@ mod folders;
 mod github;
 mod modal;
 mod store;
+mod transcript;
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -356,7 +357,10 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let offset = match transcript::index(args, "offset") {
+                Ok(offset) => offset.unwrap_or(0),
+                Err(error) => return Task::ready(Err(error)),
+            };
             return cx.background_spawn(async move { folders::list(&path, offset) });
         }
         "open_folder" => {
@@ -385,15 +389,89 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
             }
             let view = requested_root_view(workspace, args, cx)?;
             let send_now = args.get("send_now").and_then(Value::as_bool) == Some(true);
+            let steer = args.get("steer").and_then(Value::as_bool) == Some(true);
+            if steer && (send_now || view.read(cx).as_native_thread(cx).is_none()) {
+                bail!("Choose either supported steering or Send Now, not both");
+            }
             let session_id = view.read(cx).session_id.clone();
             let queue_id = view
-                .update(cx, |view, cx| view.send_text(text, send_now, window, cx))
+                .update(cx, |view, cx| {
+                    let id = view.send_text(text, send_now, window, cx);
+                    if let Some(id) = id && steer {
+                        view.message_queue.set_steer(id, true);
+                        view.sync_queue_flag_to_native_thread(cx);
+                        cx.notify();
+                    }
+                    id
+                })
                 .map(|id| id.to_string());
             Ok(json!({
                 "queued": queue_id.is_some(),
+                "steer": queue_id.is_some() && steer,
                 "queue_id": queue_id,
                 "session_id": session_id.0.as_ref(),
             }))
+        }),
+        "queue_content" => {
+            let text = with_workspace(window, cx, |workspace, _, cx| {
+                required(args, "session_id")?;
+                let view = requested_root_view(workspace, args, cx)?;
+                let id = required(args, "queue_id")?;
+                let entry = view.read(cx).message_queue.iter().find(|entry| entry.id.to_string() == id)
+                    .context("That message is no longer queued. Refresh the queue.")?;
+                entry.content.iter().map(|content| match content {
+                    acp::ContentBlock::Text(text) => Ok(text.text.clone()),
+                    content => serde_json::to_string_pretty(content).map_err(Into::into),
+                }).collect::<Result<Vec<_>>>().map(|parts| parts.join("\n\n"))
+            });
+            return match text {
+                Ok(text) => {
+                    let args = args.clone();
+                    cx.background_spawn(async move { transcript::body_chunk(&text, &args) })
+                }
+                Err(error) => Task::ready(Err(error)),
+            };
+        }
+        "queue" => with_workspace(window, cx, |workspace, _, cx| {
+            required(args, "session_id")?;
+            let view = requested_root_view(workspace, args, cx)?;
+            let offset = transcript::index(args, "offset")?.unwrap_or(0);
+            let view = view.read(cx);
+            let mut entries = Vec::new();
+            let mut remaining = FILE_JSON_BUDGET;
+            for entry in view.message_queue.iter().skip(offset).take(100) {
+                let preview = entry.content.iter().find_map(|content| match content {
+                    acp::ContentBlock::Text(text) => Some(truncate(&text.text, 160)),
+                    _ => None,
+                }).unwrap_or_else(|| "Message with attachments".into());
+                let value = json!({ "id": entry.id.to_string(), "text": preview, "steer": entry.steer });
+                let cost = value.to_string().len() + 1;
+                if cost > remaining { break; }
+                remaining -= cost;
+                entries.push(value);
+            }
+            let total = view.message_queue.len();
+            let next = offset.saturating_add(entries.len());
+            Ok(json!({ "entries": entries, "total": total, "next_offset": (next < total).then_some(next) }))
+        }),
+        "steer" => with_workspace(window, cx, |workspace, _, cx| {
+            required(args, "session_id")?;
+            let view = requested_root_view(workspace, args, cx)?;
+            if view.read(cx).as_native_thread(cx).is_none() {
+                bail!("This agent does not support steering at turn boundaries");
+            }
+            let queue_id = required(args, "queue_id")?;
+            let steer = args.get("steer").and_then(Value::as_bool).context("expected steer: true or false")?;
+            let id = view.read(cx).message_queue.iter().find(|entry| entry.id.to_string() == queue_id).map(|entry| entry.id);
+            let found = if let Some(id) = id {
+                view.update(cx, |view, cx| {
+                    let found = view.message_queue.set_steer(id, steer);
+                    view.sync_queue_flag_to_native_thread(cx);
+                    cx.notify();
+                    found
+                })
+            } else { false };
+            Ok(json!({ "found": found, "steer": steer }))
         }),
         "send_now" => with_workspace(window, cx, |workspace, window, cx| {
             required(args, "session_id")?;
@@ -721,6 +799,8 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
         "model_name": model_name,
         "model_selection": thread.connection().model_selector(thread.session_id()).is_some(),
         "send_now": true,
+        "steering": view.as_native_thread(cx).is_some(),
+        "queue_management": true,
         "pending": pending_permissions(conversation_view.read(cx), cx),
     }))
 }
@@ -1068,23 +1148,33 @@ fn transcript_detail(source: &[AgentThreadEntry], args: &Value, cx: &App) -> Res
         .context("That entry is no longer available. Refresh the conversation.")?;
     let text = match entry {
         AgentThreadEntry::ToolCall(call) => call.to_markdown(cx),
+        AgentThreadEntry::UserMessage(message) => snapshot_message_text(&message.content, cx),
         AgentThreadEntry::AssistantMessage(message) => {
-            let part = args
-                .get("part_index")
-                .and_then(Value::as_u64)
-                .and_then(|index| usize::try_from(index).ok())
-                .context("part_index must identify a thinking block")?;
-            match message.chunks.get(part) {
-                Some(acp_thread::AssistantMessageChunk::Thought { block, .. }) => {
-                    snapshot_message_text(block, cx)
+            if let Some(part) = args.get("part_index") {
+                let part = part.as_u64().and_then(|index| usize::try_from(index).ok())
+                    .context("part_index must be a non-negative integer")?;
+                match message.chunks.get(part) {
+                    Some(acp_thread::AssistantMessageChunk::Thought { block, .. }
+                        | acp_thread::AssistantMessageChunk::Message { block, .. }) => snapshot_message_text(block, cx),
+                    None => bail!("That message part is no longer available. Refresh the conversation."),
                 }
-                _ => {
-                    bail!("That thinking block is no longer available. Refresh the conversation.")
-                }
+            } else {
+                let has_thinking = message.chunks.iter().any(|chunk| matches!(chunk, acp_thread::AssistantMessageChunk::Thought { .. }));
+                message.chunks.iter().map(|chunk| {
+                    let (label, block) = match chunk {
+                        acp_thread::AssistantMessageChunk::Thought { block, .. } => ("Thinking", block),
+                        acp_thread::AssistantMessageChunk::Message { block, .. } => ("Assistant", block),
+                    };
+                    let text = snapshot_message_text(block, cx);
+                    if has_thinking { format!("## {label}\n\n{text}") } else { text }
+                }).collect::<Vec<_>>().join("\n\n")
             }
         }
-        _ => bail!("Only tool calls and thinking blocks have expandable details"),
+        entry => entry.to_markdown(cx),
     };
+    if args.get("chunked").and_then(Value::as_bool) == Some(true) {
+        return Ok(json!({ "text": text }));
+    }
     fit_transcript_entry(
         json!({ "text": text, "truncated": false }),
         FILE_JSON_BUDGET,
@@ -1094,6 +1184,29 @@ fn transcript_detail(source: &[AgentThreadEntry], args: &Value, cx: &App) -> Res
 }
 
 fn request_thread(
+    workspace: &Entity<Workspace>,
+    args: &Value,
+    cx: &mut App,
+) -> Task<Result<Value>> {
+    let chunked = args.get("chunked").and_then(Value::as_bool) == Some(true);
+    if chunked && args.get("entry_index").is_none() {
+        return Task::ready(Err(anyhow!("Chunked content needs entry_index")));
+    }
+    let source = request_thread_source(workspace, args, cx);
+    if !chunked {
+        return source;
+    }
+    let args = args.clone();
+    cx.spawn(async move |cx| {
+        let mut source = source.await?;
+        let Some(Value::String(text)) = source.as_object_mut().and_then(|source| source.remove("text")) else {
+            bail!("The requested content is unavailable");
+        };
+        cx.background_spawn(async move { transcript::body_chunk(&text, &args) }).await
+    })
+}
+
+fn request_thread_source(
     workspace: &Entity<Workspace>,
     args: &Value,
     cx: &mut App,
@@ -1326,15 +1439,24 @@ fn collect_transcript_page(
             next_before = index;
             continue;
         };
-        let Some(value) = fit_transcript_entry(value, ENTRY_LIMIT, "entry_limit") else {
+        let value = if include_details {
+            fit_transcript_entry(value, ENTRY_LIMIT, "entry_limit")
+        } else {
+            fit_transcript_header(value, ENTRY_LIMIT)
+        };
+        let Some(value) = value else {
             break;
         };
         let cost = value.to_string().len() + 1;
         if cost > budget {
+            let preview_value = if include_details {
+                fit_transcript_entry(value, budget.saturating_sub(1), "snapshot_budget")
+            } else {
+                fit_transcript_header(value, budget.saturating_sub(1))
+            };
             if preview
                 && entries.is_empty()
-                && let Some(value) =
-                    fit_transcript_entry(value, budget.saturating_sub(1), "snapshot_budget")
+                && let Some(value) = preview_value
             {
                 entries.push(value);
                 // This preview does not cover the entry. History must revisit it.
@@ -1378,9 +1500,11 @@ fn transcript_entry(
         "index": index, "role": role, "text": text.trim(), "status": status,
         "truncated": false,
     });
-    if !include_details && matches!(entry, AgentThreadEntry::ToolCall(_)) {
+    if !include_details {
         value["details_pending"] = json!(true);
-        return Some(value);
+        if let AgentThreadEntry::UserMessage(message) = entry {
+            value["fingerprint"] = json!(transcript::fingerprint(snapshot_message_text(&message.content, cx).trim()));
+        }
     }
     if let AgentThreadEntry::AssistantMessage(message) = entry
         && message
@@ -1401,9 +1525,10 @@ fn transcript_entry(
                         ("reasoning", block)
                     }
                 };
-                if role == "reasoning" && !include_details {
+                if !include_details {
+                    let preview = if role == "reasoning" { String::new() } else { message_preview(block) };
                     return Some(json!({
-                        "index": index, "role": role, "text": "", "details_pending": true,
+                        "index": index, "role": role, "text": preview, "details_pending": true,
                     }));
                 }
                 let text = snapshot_message_text(block, cx);
@@ -1416,10 +1541,31 @@ fn transcript_entry(
         }
         value["parts"] = json!(parts);
         update_legacy_text(&mut value);
-    } else if text.trim().is_empty() {
+    } else if include_details && text.trim().is_empty() {
         return None;
     }
     Some(value)
+}
+
+fn message_preview(content: &acp_thread::MessageContent) -> String {
+    content.source_blocks().iter().find_map(|block| match block {
+        acp::ContentBlock::Text(text) if !text.text.trim().is_empty() => Some(truncate(text.text.trim(), 160)),
+        _ => None,
+    }).unwrap_or_default()
+}
+
+fn fit_transcript_header(mut value: Value, limit: usize) -> Option<Value> {
+    if value.to_string().len() <= limit {
+        return Some(value);
+    }
+    // A single entry may contain many typed parts. Keep its aggregate body
+    // addressable instead of permanently dropping parts to fit a header page.
+    if let Some(object) = value.as_object_mut() {
+        object.remove("parts");
+    }
+    value["text"] = json!("");
+    value["details_pending"] = json!(true);
+    (value.to_string().len() <= limit).then_some(value)
 }
 
 fn update_legacy_text(value: &mut Value) {
@@ -1467,8 +1613,19 @@ fn describe_entry(
     cx: &App,
 ) -> (&'static str, String, Option<&'static str>) {
     match entry {
-        AgentThreadEntry::UserMessage(message) => ("user", message.content.to_markdown(cx), None),
+        AgentThreadEntry::UserMessage(message) => (
+            "user",
+            if include_details { message.content.to_markdown(cx) } else { message_preview(&message.content) },
+            None,
+        ),
         AgentThreadEntry::AssistantMessage(message) => {
+            if !include_details {
+                let preview = message.chunks.iter().find_map(|chunk| match chunk {
+                    acp_thread::AssistantMessageChunk::Message { block, .. } => Some(message_preview(block)),
+                    _ => None,
+                }).unwrap_or_default();
+                return ("assistant", preview, None);
+            }
             let text = message
                 .chunks
                 .iter()
@@ -1499,7 +1656,10 @@ fn describe_entry(
             };
             ("tool", text, Some(status))
         }
-        entry => ("notice", entry.to_markdown(cx), None),
+        entry => {
+            let text = entry.to_markdown(cx);
+            ("notice", if include_details { text } else { truncate(&text, 160) }, None)
+        },
     }
 }
 
@@ -1774,12 +1934,33 @@ mod tests {
         assert_eq!(detail["truncated"], false);
         for args in [
             json!({ "entry_index": -1, "part_index": 0 }),
-            json!({ "entry_index": 0, "part_index": 1 }),
+            json!({ "entry_index": 0, "part_index": 9 }),
             json!({ "entry_index": 2, "part_index": 0 }),
             json!({ "entry_index": 0, "part_index": "0" }),
         ] {
             assert!(transcript_detail(&source, &args, cx).is_err());
         }
+    }
+
+    #[gpui::test]
+    fn header_pages_keep_large_messages_retrievable_without_body_truncation(cx: &mut App) {
+        let text = format!("  {}  \n", "Long response 🦀 ".repeat(8_000));
+        let source = vec![assistant_entry(&[(false, &text)], cx)];
+        let (headers, next) = collect_transcript_page(&source, 1, 512, true, false, cx);
+        assert_eq!(next, 0);
+        assert_eq!(headers[0]["details_pending"], true);
+        assert_eq!(headers[0]["truncated"], false);
+        assert!(headers[0].to_string().len() < 512);
+        let full = transcript_detail(&source, &json!({ "entry_index": 0, "chunked": true }), cx)
+            .expect("untruncated source for chunking");
+        assert_eq!(full["text"], text);
+        let header = fit_transcript_header(json!({
+            "index": 4, "role": "assistant", "text": "preview", "truncated": false,
+            "parts": (0..300).map(|index| json!({ "index": index, "role": "reasoning", "text": "", "details_pending": true })).collect::<Vec<_>>(),
+        }), 200).expect("aggregate header");
+        assert!(header.get("parts").is_none());
+        assert_eq!(header["details_pending"], true);
+        assert_eq!(header["truncated"], false);
     }
 
     #[gpui::test]

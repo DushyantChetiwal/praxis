@@ -1292,7 +1292,7 @@ impl ArchitectPane {
                                         || self.in_bulk_selection(&node.id);
                                     let is_running = running.contains(&node.id);
                                     let is_failed = failed_node == Some(&node.id);
-                                    let is_complete = self.node_is_complete(node);
+                                    let is_complete = self.node_is_complete(&node);
                                     let (state, state_color) = if is_running {
                                         ("running", Color::Info)
                                     } else if is_failed {
@@ -3524,7 +3524,9 @@ mod tests {
         view.read_with(cx, |view, cx| {
             let pane = view.pane.read(cx);
             let parent = pane
-                .graph(cx)
+                .thread
+                .read(cx)
+                .architect_graph()
                 .expect("graph")
                 .node(&NodeId::from("parent"))
                 .expect("parent");

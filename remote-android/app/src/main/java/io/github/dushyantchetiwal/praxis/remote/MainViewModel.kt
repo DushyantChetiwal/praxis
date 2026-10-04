@@ -15,10 +15,13 @@ import io.github.dushyantchetiwal.praxis.remote.data.ApiException
 import io.github.dushyantchetiwal.praxis.remote.data.CryptoException
 import io.github.dushyantchetiwal.praxis.remote.data.Device
 import io.github.dushyantchetiwal.praxis.remote.data.DetailRequest
-import io.github.dushyantchetiwal.praxis.remote.data.EntryDetail
+import io.github.dushyantchetiwal.praxis.remote.data.DetailBody
+import io.github.dushyantchetiwal.praxis.remote.data.DetailChunk
+import io.github.dushyantchetiwal.praxis.remote.data.parseDetailChunk
 import io.github.dushyantchetiwal.praxis.remote.data.ModelOption
 import io.github.dushyantchetiwal.praxis.remote.data.parseModels
 import io.github.dushyantchetiwal.praxis.remote.data.parseHostFolders
+import io.github.dushyantchetiwal.praxis.remote.data.parseQueue
 import io.github.dushyantchetiwal.praxis.remote.data.DeviceFlow
 import io.github.dushyantchetiwal.praxis.remote.data.DirEntry
 import io.github.dushyantchetiwal.praxis.remote.data.DownloadException
@@ -138,6 +141,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Bumped whenever the selected device changes, to drop queued requests. */
     private var generation = 0
     private var viewRevision = 0L
+    private var folderRequest = 0L
+    private var queueRequest = 0L
     private var pollJob: Job? = null
     private var downloadJob: Job? = null
     private var historyJob: Job? = null
@@ -616,6 +621,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 modeOverride = null,
                 models = ModelsState(),
                 folderBrowser = FolderBrowserState(),
+                queue = QueueState(),
                 threads = ThreadsState(),
                 files = FilesState(),
                 outbox = emptyList(),
@@ -763,7 +769,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         edit { copy(status = status) }
         val currentThread = d.currentWindow()?.thread
         if (currentThread?.sessionId != previousThread?.sessionId) {
-            edit { copy(models = ModelsState()) }
+            edit { copy(models = ModelsState(), queue = QueueState()) }
         } else if (currentThread?.model != previousThread?.model && !d.models.changing) {
             edit { copy(models = models.copy(info = models.info?.copy(current = currentThread?.model))) }
         }
@@ -783,11 +789,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val entries = thread?.entries.orEmpty()
         val queued = d.currentWindow()?.thread?.queued ?: 0
         val now = now()
+        val matchedEntries = mutableSetOf<Int>()
         val kept = d.outbox.filter { item ->
             if (item.doneAt == 0L) return@filter true
             val base = if (item.session == thread?.sessionId) item.baseIndex else -1
-            val delivered = entries.any { it.role == "user" && it.index > base && it.text.trim() == item.text }
-            if (delivered) return@filter false
+            val delivered = entries.firstOrNull {
+                it.role == "user" && it.index > base && it.index !in matchedEntries &&
+                    (if (it.fingerprint != null) it.fingerprint == item.fingerprint else it.text.trim() == item.text)
+            }
+            if (delivered != null) {
+                matchedEntries += delivered.index
+                return@filter false
+            }
             val expired = now - item.doneAt > OUTBOX_FALLBACK_MS
             !(expired && (item.state != OutboxState.Queued || queued == 0))
         }
@@ -906,13 +919,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadActiveTabData(force = true)
     }
 
-    fun sendPrompt(sendNow: Boolean = false) {
+    fun sendPrompt(sendNow: Boolean = false, steer: Boolean = false) {
         val text = composer.trim()
         if (text.isEmpty() || d.device == null) return
         val scope = requestScope()
         val args = windowArgs {
             put("text", text)
             put("send_now", sendNow)
+            put("steer", steer)
             d.currentWindow()?.thread?.sessionId?.let { put("session_id", it) }
         }
         val item = OutboxItem(
@@ -937,6 +951,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             doneAt = now(),
                             session = result?.str("session_id") ?: it.session,
                             queueId = result?.str("queue_id"),
+                            steer = result?.optBoolean("steer") == true,
                         ) else it
                     })
                 }
@@ -952,35 +967,86 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendQueuedNow(item: OutboxItem) {
-        if (item.queueId == null || item.session == null || d.outbox.find { it.id == item.id }?.sendingNow != false) return
+        queueAction(item.queueId ?: return, item.session ?: return)
+    }
+
+    fun steerQueuedMessage(item: OutboxItem) {
+        queueAction(item.queueId ?: return, item.session ?: return, !item.steer)
+    }
+
+    fun queueAction(id: String, session: String, steer: Boolean? = null) {
+        if (id in d.queue.busy || d.currentWindow()?.thread?.sessionId != session) return
         val scope = requestScope()
-        val args = windowArgs { put("session_id", item.session); put("queue_id", item.queueId) }
-        edit { copy(outbox = outbox.map { if (it.id == item.id) it.copy(sendingNow = true) else it }) }
+        val args = windowArgs { put("session_id", session); put("queue_id", id); steer?.let { put("steer", it) } }
+        edit { copy(
+            queue = queue.copy(session = session, busy = queue.busy + id),
+            outbox = outbox.map { if (it.queueId == id) it.copy(sendingNow = true) else it },
+        ) }
         viewModelScope.launch {
             try {
-                val result = praxis("send_now", args, scope)
+                val result = praxis(if (steer == null) "send_now" else "steer", args, scope)
                     ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
-                if (scope != requestScope()) return@launch
-                if (result.optBoolean("sent")) {
-                    edit { copy(outbox = outbox.map {
-                        if (it.id == item.id) it.copy(sendingNow = false, state = OutboxState.Sent, doneAt = now()) else it
-                    }) }
-                } else {
-                    edit { copy(outbox = outbox.filterNot { it.id == item.id }) }
-                    message(str(R.string.toast_no_longer_queued))
-                }
+                if (scope != requestScope() || d.currentWindow()?.thread?.sessionId != session) return@launch
+                val found = result.optBoolean(if (steer == null) "sent" else "found")
+                edit { copy(
+                    queue = queue.copy(busy = queue.busy - id),
+                    outbox = if (!found) outbox.filterNot { it.queueId == id } else outbox.map {
+                        if (it.queueId == id) it.copy(
+                            sendingNow = false, steer = steer ?: it.steer,
+                            state = if (steer == null) OutboxState.Sent else it.state, doneAt = now(),
+                        ) else it
+                    },
+                ) }
+                if (!found) message(str(R.string.toast_no_longer_queued))
                 requestPoll()
+                if (d.queue.visible) loadQueue()
             } catch (error: ApiException) {
-                if (scope != requestScope()) return@launch
-                edit { copy(outbox = outbox.map { if (it.id == item.id) it.copy(sendingNow = false) else it }) }
+                if (scope != requestScope() || d.currentWindow()?.thread?.sessionId != session) return@launch
+                edit { copy(
+                    queue = queue.copy(busy = queue.busy - id, error = error.message ?: str(R.string.queue_failed)),
+                    outbox = outbox.map { if (it.queueId == id) it.copy(sendingNow = false) else it },
+                ) }
                 report(error, str(R.string.label_message_not_sent))
             }
         }
     }
 
+    fun loadQueue(more: Boolean = false) {
+        val session = d.currentWindow()?.thread?.sessionId ?: return
+        if (d.queue.loading) return
+        val request = ++queueRequest
+        val scope = requestScope()
+        val previous = d.queue.takeIf { more && it.session == session }
+        val offset = if (more) previous?.nextOffset ?: return else 0
+        val args = windowArgs { put("session_id", session); put("offset", offset) }
+        edit { copy(queue = QueueState(session, visible = true, loading = true, entries = previous?.entries.orEmpty(), busy = queue.busy)) }
+        viewModelScope.launch {
+            try {
+                val result = praxis("queue", args, scope)
+                    ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+                if (request != queueRequest || scope != requestScope() || d.currentWindow()?.thread?.sessionId != session) return@launch
+                val page = parseQueue(result)
+                edit { copy(queue = queue.copy(
+                    loading = false, entries = (previous?.entries.orEmpty() + page.entries).associateBy { it.id }.values.toList(),
+                    nextOffset = page.nextOffset,
+                )) }
+            } catch (error: ApiException) {
+                if (request == queueRequest && scope == requestScope() && d.currentWindow()?.thread?.sessionId == session) {
+                    edit { copy(queue = queue.copy(loading = false, error = error.message ?: str(R.string.queue_failed))) }
+                }
+            }
+        }
+    }
+
+    fun dismissQueue() {
+        queueRequest++
+        edit { copy(queue = queue.copy(visible = false, loading = false)) }
+    }
+
     fun browseHostFolder(path: String = "", more: Boolean = false) {
         if (d.folderBrowser.loading || d.folderBrowser.opening) return
         val scope = requestScope()
+        val request = ++folderRequest
         val previous = d.folderBrowser.listing.takeIf { more && it?.path == path }
         val offset = if (more) previous?.nextOffset ?: return else 0
         edit { copy(folderBrowser = FolderBrowserState(visible = true, loading = true, listing = previous)) }
@@ -988,12 +1054,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val result = praxis("host_folders", JSONObject().put("path", path).put("offset", offset), scope)
                     ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
-                if (scope != requestScope() || !d.folderBrowser.visible) return@launch
+                if (request != folderRequest || scope != requestScope() || !d.folderBrowser.visible) return@launch
                 val page = parseHostFolders(result)
                 val listing = if (previous == null) page else page.copy(folders = (previous.folders + page.folders).distinctBy { it.path })
                 edit { copy(folderBrowser = FolderBrowserState(visible = true, listing = listing)) }
             } catch (error: ApiException) {
-                if (scope == requestScope() && d.folderBrowser.visible) {
+                if (request == folderRequest && scope == requestScope() && d.folderBrowser.visible) {
                     edit { copy(folderBrowser = folderBrowser.copy(loading = false, error = error.message)) }
                 }
             }
@@ -1001,16 +1067,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun dismissFolderBrowser() {
+        folderRequest++
         edit { copy(folderBrowser = FolderBrowserState()) }
     }
 
     fun openHostFolder(path: String) {
         if (path.isBlank() || d.folderBrowser.loading || d.folderBrowser.opening) return
         val scope = requestScope()
+        val request = ++folderRequest
         edit { copy(folderBrowser = folderBrowser.copy(opening = true, error = null)) }
         viewModelScope.launch {
             val ok = act("open_folder", JSONObject().put("path", path), str(R.string.folder_open_failed), scope)
-            if (scope != requestScope()) return@launch
+            if (request != folderRequest || scope != requestScope()) return@launch
             edit { copy(folderBrowser = folderBrowser.copy(opening = false, visible = !ok)) }
             if (ok) message(str(R.string.folder_opened))
         }
@@ -1063,17 +1131,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    suspend fun loadDetail(request: DetailRequest): EntryDetail {
+    suspend fun loadDetail(request: DetailRequest, body: DetailBody): DetailChunk {
         val scope = requestScope()
-        val args = request.arguments()
+        val args = request.arguments().put("chunked", true).put("offset", body.nextOffset)
+        body.version?.let { args.put("version", it).put("total_bytes", body.totalBytes) }
         d.windowId?.let { args.put("window", it) }
-        if (!d.history.isShown(request.session)) throw CancellationException("Conversation changed")
-        val result = praxis("thread", args, scope)
+        fun targetVisible(): Boolean = if (request.queueId == null) d.history.isShown(request.session) else d.currentWindow()?.thread?.sessionId == request.session
+        if (!targetVisible()) throw CancellationException("Conversation changed")
+        val result = praxis(if (request.queueId == null) "thread" else "queue_content", args, scope)
             ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
-        if (scope != requestScope() || !d.history.isShown(request.session)) throw CancellationException("Conversation changed")
-        val text = result.str("text")
+        if (scope != requestScope() || !targetVisible()) throw CancellationException("Conversation changed")
+        if (!result.has("offset")) throw ApiException(ErrorKind.State, str(R.string.details_upgrade))
+        return parseDetailChunk(result)
             ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
-        return EntryDetail(text, result.optBoolean("truncated"))
     }
 
     fun stopGenerating() {

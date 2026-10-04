@@ -8,6 +8,53 @@ import org.junit.Test
 
 class TranscriptTest {
     @Test
+    fun messageFingerprintsIdentifyLongPromptsWithoutDownloadingTheirBodies() {
+        assertEquals("LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=", transcriptFingerprint("hello"))
+        assertEquals(transcriptFingerprint("hello"), transcriptFingerprint("  hello\n"))
+        assertFalse(transcriptFingerprint("same prefix, first") == transcriptFingerprint("same prefix, second"))
+    }
+
+    @Test
+    fun detailChunksReassembleUnicodeAndWhitespaceWithoutLoss() {
+        val texts = listOf("  First\\n\n", "🦀 café\t", "last line  \n")
+        val total = texts.sumOf { it.toByteArray(Charsets.UTF_8).size }.toLong()
+        var body = DetailBody()
+        for (text in texts) {
+            val next = body.nextOffset + text.toByteArray(Charsets.UTF_8).size
+            body = body.append(DetailChunk(body.nextOffset, next, total, "version", text))!!
+        }
+        assertTrue(body.complete)
+        assertEquals(texts.joinToString(""), body.chunks.joinToString("") { it.text })
+        assertEquals(total, body.nextOffset)
+    }
+
+    @Test
+    fun bodyChunksRejectGapsDuplicatesChangedVersionsAndNoProgress() {
+        val first = DetailChunk(0, 3, 6, "first", "abc")
+        val body = DetailBody().append(first)!!
+        for (chunk in listOf(
+            first,
+            DetailChunk(4, 6, 6, "first", "ef"),
+            DetailChunk(3, 6, 6, "changed", "def"),
+            DetailChunk(3, 6, 9, "first", "def"),
+            DetailChunk(3, 3, 6, "first", ""),
+            DetailChunk(3, 6, 6, "first", "🦀"),
+        )) assertEquals(null, body.append(chunk))
+        assertTrue(body.append(DetailChunk(3, 6, 6, "first", "def"))!!.complete)
+        assertTrue(DetailBody().append(DetailChunk(0, 0, 0, "empty", ""))!!.complete)
+    }
+
+    @Test
+    fun bodyOffsetsAreExactNonNegativeIntegers() {
+        val base = """{"offset":0,"next_offset":3,"total_bytes":3,"version":"v","text":"abc","done":true}"""
+        assertEquals(3L, parseDetailChunk(JSONObject(base))!!.totalBytes)
+        for (invalid in listOf(-1, 0.5, "0", true, "9223372036854775808")) {
+            assertEquals(null, parseDetailChunk(JSONObject(base).put("offset", invalid)))
+        }
+        assertEquals(null, parseDetailChunk(JSONObject(base).put("done", false)))
+    }
+
+    @Test
     fun collapsedDetailsKeepTheirIdentityWithoutTransportingTheirText() {
         val thread = parseThreadView(JSONObject("""{
             "session_id":"step", "entries":[

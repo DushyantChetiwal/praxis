@@ -131,13 +131,47 @@ fun parseModels(result: JSONObject): ModelInfo = ModelInfo(
     }.orEmpty(),
 )
 
-data class DetailRequest(val session: String, val entry: Int, val part: Int? = null) {
-    fun arguments(): JSONObject = JSONObject().put("session_id", session).put("entry_index", entry).also {
+data class DetailRequest(val session: String, val entry: Int = 0, val part: Int? = null, val queueId: String? = null) {
+    fun arguments(): JSONObject = JSONObject().put("session_id", session).also {
+        if (queueId != null) it.put("queue_id", queueId) else it.put("entry_index", entry)
         if (part != null) it.put("part_index", part)
     }
 }
 
-data class EntryDetail(val text: String, val truncated: Boolean)
+
+data class DetailChunk(val offset: Long, val nextOffset: Long, val totalBytes: Long, val version: String, val text: String)
+
+data class DetailBody(
+    val chunks: List<DetailChunk> = emptyList(),
+    val nextOffset: Long = 0,
+    val totalBytes: Long? = null,
+    val version: String? = null,
+) {
+    val complete: Boolean get() = version != null && nextOffset == totalBytes
+
+    fun append(chunk: DetailChunk): DetailBody? {
+        if (complete || chunk.offset != nextOffset || chunk.offset < 0 || chunk.nextOffset < chunk.offset ||
+            chunk.nextOffset > chunk.totalBytes || chunk.totalBytes < 0 || chunk.version.isBlank() || chunk.version.length > 128 ||
+            chunk.text.toByteArray(Charsets.UTF_8).size.toLong() != chunk.nextOffset - chunk.offset ||
+            (chunk.nextOffset == chunk.offset && chunk.nextOffset < chunk.totalBytes) ||
+            (version != null && (version != chunk.version || totalBytes != chunk.totalBytes))
+        ) return null
+        return DetailBody(chunks + chunk, chunk.nextOffset, chunk.totalBytes, chunk.version)
+    }
+}
+
+private fun JSONObject.byteOffset(key: String): Long? {
+    val value = opt(key) as? Number ?: return null
+    return value.toString().takeIf(INDEX_INTEGER::matches)?.toLongOrNull()
+}
+
+fun parseDetailChunk(result: JSONObject): DetailChunk? {
+    val offset = result.byteOffset("offset") ?: return null
+    val next = result.byteOffset("next_offset") ?: return null
+    val total = result.byteOffset("total_bytes") ?: return null
+    if (result.opt("done") != (next == total)) return null
+    return DetailChunk(offset, next, total, result.str("version") ?: return null, result.str("text") ?: return null)
+}
 
 data class PermissionOption(val id: String, val name: String, val kind: String?) {
     val isAllow: Boolean get() = kind?.startsWith("allow") == true
@@ -165,6 +199,8 @@ data class ThreadSummary(
     val modelName: String? = null,
     val modelSelection: Boolean = false,
     val sendNow: Boolean = false,
+    val steering: Boolean = false,
+    val queueManagement: Boolean = false,
 )
 
 data class Architect(
@@ -187,6 +223,18 @@ data class WindowInfo(
 }
 
 data class Status(val device: String?, val windows: List<WindowInfo>, val openFolder: Boolean = false)
+
+data class QueuedMessage(val id: String, val text: String, val steer: Boolean)
+data class QueuePage(val entries: List<QueuedMessage>, val nextOffset: Int?, val total: Int)
+
+fun parseQueue(result: JSONObject): QueuePage = QueuePage(
+    entries = result.arr("entries")?.objects()?.mapNotNull {
+        val id = it.str("id")?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+        QueuedMessage(id, it.str("text").orEmpty(), it.bool("steer"))
+    }.orEmpty(),
+    nextOffset = result.index("next_offset"),
+    total = result.index("total") ?: 0,
+)
 
 data class HostFolder(val name: String, val path: String)
 data class HostFolders(val host: String, val path: String, val parent: String?, val folders: List<HostFolder>, val nextOffset: Int?)
@@ -222,6 +270,10 @@ internal suspend fun viewScopedAction(
     }
 }
 
+fun transcriptFingerprint(text: String): String = java.util.Base64.getEncoder().encodeToString(
+    java.security.MessageDigest.getInstance("SHA-256").digest(text.trim().toByteArray(Charsets.UTF_8)),
+)
+
 data class EntryPart(val index: Int, val role: String, val text: String, val detailsPending: Boolean = false)
 
 data class Entry(
@@ -233,6 +285,7 @@ data class Entry(
     val truncated: Boolean = false,
     val truncation: String? = null,
     val detailsPending: Boolean = false,
+    val fingerprint: String? = null,
 ) {
     val snapshotPreview: Boolean get() = truncated && truncation == "snapshot_budget"
 }
@@ -333,6 +386,8 @@ private fun parseThreadSummary(o: JSONObject): ThreadSummary = ThreadSummary(
     modelName = o.str("model_name"),
     modelSelection = o.bool("model_selection"),
     sendNow = o.bool("send_now"),
+    steering = o.bool("steering"),
+    queueManagement = o.bool("queue_management"),
     mode = o.obj("mode")?.let { m ->
         ModeInfo(
             current = m.str("current"),
@@ -382,6 +437,7 @@ private fun parseThreadView(o: JSONObject, includeSteps: Boolean): ThreadView {
             truncated = e.bool("truncated"),
             truncation = e.str("truncation"),
             detailsPending = e.bool("details_pending"),
+            fingerprint = e.str("fingerprint"),
             parts = e.arr("parts")?.objects()?.mapIndexedNotNull { partOffset, part ->
                 val text = part.str("text").orEmpty()
                 val pending = part.bool("details_pending")

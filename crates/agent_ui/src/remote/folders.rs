@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
-use gpui::{App, AppContext as _, Task};
+use gpui::{App, Task};
 use serde_json::{Value, json};
 use workspace::{AppState, OpenMode, OpenOptions, WorkspaceMatching};
 
@@ -23,7 +23,7 @@ pub(super) fn list(path: &str, offset: usize) -> Result<Value> {
         std::fs::canonicalize(host_path(path)?).context("Could not find that folder")?;
     let path = util::paths::SanitizedPath::new(&canonical).as_path();
     let mut folders = Vec::new();
-    for entry in std::fs::read_dir(&path).context("Could not read that folder")? {
+    for entry in std::fs::read_dir(path).context("Could not read that folder")? {
         let entry = entry.context("Could not read a folder entry")?;
         let child = entry.path();
         if child.is_dir() {
@@ -125,8 +125,8 @@ mod tests {
         crate::conversation_view::tests::init_test(cx);
         let app_state = cx.update(AppState::test);
         let filesystem = app_state.fs.as_fake();
-        let first_path = PathBuf::from(util::paths::path!("/first"));
-        let second_path = PathBuf::from(util::paths::path!("/second"));
+        let first_path = PathBuf::from(util::path!("/first"));
+        let second_path = PathBuf::from(util::path!("/second"));
         filesystem.insert_tree(&first_path, json!({})).await;
         filesystem.insert_tree(&second_path, json!({})).await;
         let remote = cx.new(|_| super::super::PraxisRemote::new());

@@ -6,6 +6,7 @@ import io.github.dushyantchetiwal.praxis.remote.data.DirEntry
 import io.github.dushyantchetiwal.praxis.remote.data.FileContent
 import io.github.dushyantchetiwal.praxis.remote.data.ModelInfo
 import io.github.dushyantchetiwal.praxis.remote.data.HostFolders
+import io.github.dushyantchetiwal.praxis.remote.data.QueuedMessage
 import io.github.dushyantchetiwal.praxis.remote.data.ONLINE_THRESHOLD_MS
 import io.github.dushyantchetiwal.praxis.remote.data.Permission
 import io.github.dushyantchetiwal.praxis.remote.data.Snapshot
@@ -88,6 +89,8 @@ data class OutboxItem(
     val baseIndex: Int,
     val queueId: String? = null,
     val sendingNow: Boolean = false,
+    val steer: Boolean = false,
+    val fingerprint: String = io.github.dushyantchetiwal.praxis.remote.data.transcriptFingerprint(text),
 )
 
 data class ModelsState(
@@ -135,6 +138,16 @@ data class DownloadState(
     val fraction: Float? get() = size?.let { total -> if (total == 0L) 1f else (received.toFloat() / total).coerceIn(0f, 1f) }
 }
 
+data class QueueState(
+    val session: String? = null,
+    val visible: Boolean = false,
+    val loading: Boolean = false,
+    val entries: List<QueuedMessage> = emptyList(),
+    val nextOffset: Int? = null,
+    val busy: Set<String> = emptySet(),
+    val error: String? = null,
+)
+
 data class FolderBrowserState(
     val visible: Boolean = false,
     val loading: Boolean = false,
@@ -162,6 +175,7 @@ data class DeviceUi(
     val modeOverride: ModeOverride? = null,
     val models: ModelsState = ModelsState(),
     val folderBrowser: FolderBrowserState = FolderBrowserState(),
+    val queue: QueueState = QueueState(),
     val tab: Tab = Tab.Chat,
     val threads: ThreadsState = ThreadsState(),
     val files: FilesState = FilesState(),
