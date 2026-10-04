@@ -278,7 +278,10 @@ mod tests {
             "question_id": id.0.as_ref(),
             "content": { "answer": "parallel answer" },
         });
-        assert!(cx.update(|cx| answer(&parallel, &parallel_args, cx)).is_err());
+        assert!(
+            cx.update(|cx| answer(&parallel, &parallel_args, cx))
+                .is_err()
+        );
         parallel_args["question_id"] = json!(parallel_id.0.as_ref());
         cx.update(|cx| answer(&parallel, &parallel_args, cx))
             .expect("parallel answer");

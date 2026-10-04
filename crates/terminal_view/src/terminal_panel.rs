@@ -2085,7 +2085,11 @@ mod tests {
             2
         );
         panel.read_with(cx, |panel, cx| {
-            let active = panel.active_pane.read(cx).active_item().expect("active tab");
+            let active = panel
+                .active_pane
+                .read(cx)
+                .active_item()
+                .expect("active tab");
             let active = active.downcast::<TerminalView>().expect("terminal view");
             assert_eq!(active.read(cx).terminal(), &second_terminal);
         });
