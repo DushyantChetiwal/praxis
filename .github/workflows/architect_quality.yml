@@ -299,7 +299,9 @@ jobs:
           cargo test --locked -p agent_ui --lib test_question_timeout_manual_text_and_choices_survive_blur
 
       - name: Test Praxis Remote
-        run: "cargo test --locked -p agent_ui --lib remote::"
+        run: |
+          cargo test --locked -p agent_ui --lib remote::
+          cargo test --locked -p agent_ui --lib test_remote_send_now_
 
   updater-tests:
     name: Auto-update integrity tests

@@ -8,6 +8,65 @@ import org.junit.Test
 
 class TranscriptTest {
     @Test
+    fun collapsedDetailsKeepTheirIdentityWithoutTransportingTheirText() {
+        val thread = parseThreadView(JSONObject("""{
+            "session_id":"step", "entries":[
+                {"index":4,"role":"tool","text":"Read file","status":"running","details_pending":true},
+                {"index":5,"role":"assistant","text":"Partial answer","parts":[
+                    {"index":2,"role":"reasoning","text":"","details_pending":true},
+                    {"index":3,"role":"assistant","text":"Partial answer"}
+                ]}
+            ]
+        }"""))
+        assertTrue(thread.entries.first().detailsPending)
+        assertEquals("Read file", thread.entries.first().text)
+        val parts = thread.entries.last().parts
+        assertEquals(listOf(2, 3), parts.map { it.index })
+        assertTrue(parts.first().detailsPending)
+        assertEquals("", parts.first().text)
+        assertEquals("Partial answer", parts.last().text)
+        assertFalse(parts.last().detailsPending)
+        val request = DetailRequest("step", 5, 2).arguments()
+        assertEquals("step", request.getString("session_id"))
+        assertEquals(5, request.getInt("entry_index"))
+        assertEquals(2, request.getInt("part_index"))
+        assertFalse(DetailRequest("root", 4).arguments().has("part_index"))
+    }
+
+    @Test
+    fun modelPagesPreserveOpaqueIdsDisabledChoicesAndSelection() {
+        val first = parseModels(JSONObject("""{
+            "current":"provider/model/one", "next_offset":1,
+            "available":[{"id":"provider/model/one","name":"First","group":"Provider","disabled":false}]
+        }"""))
+        val second = parseModels(JSONObject("""{
+            "current":"provider/model/two", "next_offset":null,
+            "available":[{"id":"provider/model/two","name":"Second","disabled":true}]
+        }"""))
+        val merged = first.append(second)
+        assertEquals("provider/model/two", merged.current)
+        assertEquals(listOf("provider/model/one", "provider/model/two"), merged.available.map { it.id })
+        assertEquals("Provider", merged.available.first().group)
+        assertTrue(merged.available.last().disabled)
+        assertEquals(null, merged.nextOffset)
+        assertEquals(merged, merged.append(second))
+    }
+
+    @Test
+    fun newControlsAreHiddenForOlderDesktops() {
+        fun summary(fields: String) = parseStatus(JSONObject("""{
+            "windows":[{"window":1,"thread":{"session_id":"root"$fields}}]
+        }""")).windows.single().thread!!
+        val legacy = summary("")
+        assertFalse(legacy.modelSelection)
+        assertFalse(legacy.sendNow)
+        val current = summary(""", "model_selection":true, "send_now":true, "model":"provider/model" """)
+        assertTrue(current.modelSelection)
+        assertTrue(current.sendNow)
+        assertEquals("provider/model", current.model)
+    }
+
+    @Test
     fun executionVisitsCanExceedTheRootPlanStepCount() {
         val status = parseStatus(JSONObject("""{
             "windows":[{"window":1,"architect":{

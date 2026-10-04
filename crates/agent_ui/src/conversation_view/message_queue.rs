@@ -5,6 +5,12 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct QueueEntryId(usize);
 
+impl std::fmt::Display for QueueEntryId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
 pub struct QueueEntry {
     pub id: QueueEntryId,
     pub content: Vec<acp::ContentBlock>,

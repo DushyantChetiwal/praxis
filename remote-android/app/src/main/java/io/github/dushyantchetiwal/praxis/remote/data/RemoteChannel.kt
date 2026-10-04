@@ -117,6 +117,28 @@ data class ModeOption(val id: String, val name: String)
 
 data class ModeInfo(val current: String?, val available: List<ModeOption>)
 
+data class ModelOption(val id: String, val name: String, val group: String?, val disabled: Boolean)
+data class ModelInfo(val current: String?, val available: List<ModelOption>, val nextOffset: Int? = null) {
+    fun append(page: ModelInfo): ModelInfo = page.copy(available = (available + page.available).associateBy { it.id }.values.toList())
+}
+
+fun parseModels(result: JSONObject): ModelInfo = ModelInfo(
+    current = result.str("current"),
+    nextOffset = result.index("next_offset"),
+    available = result.arr("available")?.objects()?.mapNotNull { model ->
+        val id = model.str("id") ?: return@mapNotNull null
+        ModelOption(id, model.str("name") ?: id, model.str("group"), model.bool("disabled"))
+    }.orEmpty(),
+)
+
+data class DetailRequest(val session: String, val entry: Int, val part: Int? = null) {
+    fun arguments(): JSONObject = JSONObject().put("session_id", session).put("entry_index", entry).also {
+        if (part != null) it.put("part_index", part)
+    }
+}
+
+data class EntryDetail(val text: String, val truncated: Boolean)
+
 data class PermissionOption(val id: String, val name: String, val kind: String?) {
     val isAllow: Boolean get() = kind?.startsWith("allow") == true
     val isReject: Boolean get() = kind?.startsWith("reject") == true
@@ -139,6 +161,10 @@ data class ThreadSummary(
     val queued: Int,
     val mode: ModeInfo?,
     val pending: List<Permission>,
+    val model: String? = null,
+    val modelName: String? = null,
+    val modelSelection: Boolean = false,
+    val sendNow: Boolean = false,
 )
 
 data class Architect(
@@ -183,7 +209,7 @@ internal suspend fun viewScopedAction(
     }
 }
 
-data class EntryPart(val index: Int, val role: String, val text: String)
+data class EntryPart(val index: Int, val role: String, val text: String, val detailsPending: Boolean = false)
 
 data class Entry(
     val index: Int,
@@ -193,6 +219,7 @@ data class Entry(
     val parts: List<EntryPart> = emptyList(),
     val truncated: Boolean = false,
     val truncation: String? = null,
+    val detailsPending: Boolean = false,
 ) {
     val snapshotPreview: Boolean get() = truncated && truncation == "snapshot_budget"
 }
@@ -288,6 +315,10 @@ private fun parseThreadSummary(o: JSONObject): ThreadSummary = ThreadSummary(
     title = o.str("title"),
     status = o.str("status"),
     queued = o.int("queued") ?: 0,
+    model = o.str("model"),
+    modelName = o.str("model_name"),
+    modelSelection = o.bool("model_selection"),
+    sendNow = o.bool("send_now"),
     mode = o.obj("mode")?.let { m ->
         ModeInfo(
             current = m.str("current"),
@@ -336,10 +367,13 @@ private fun parseThreadView(o: JSONObject, includeSteps: Boolean): ThreadView {
             status = e.str("status"),
             truncated = e.bool("truncated"),
             truncation = e.str("truncation"),
+            detailsPending = e.bool("details_pending"),
             parts = e.arr("parts")?.objects()?.mapIndexedNotNull { partOffset, part ->
-                val text = part.str("text")?.takeIf { it.isNotBlank() } ?: return@mapIndexedNotNull null
+                val text = part.str("text").orEmpty()
+                val pending = part.bool("details_pending")
+                if (text.isBlank() && !pending) return@mapIndexedNotNull null
                 val partIndex = if (part.has("index")) index(part, "index") ?: -1 else partOffset
-                EntryPart(partIndex, part.str("role") ?: "notice", text)
+                EntryPart(partIndex, part.str("role") ?: "notice", text, pending)
             }.orEmpty(),
         )
     }.orEmpty()

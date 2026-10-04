@@ -14,6 +14,10 @@ import androidx.lifecycle.viewModelScope
 import io.github.dushyantchetiwal.praxis.remote.data.ApiException
 import io.github.dushyantchetiwal.praxis.remote.data.CryptoException
 import io.github.dushyantchetiwal.praxis.remote.data.Device
+import io.github.dushyantchetiwal.praxis.remote.data.DetailRequest
+import io.github.dushyantchetiwal.praxis.remote.data.EntryDetail
+import io.github.dushyantchetiwal.praxis.remote.data.ModelOption
+import io.github.dushyantchetiwal.praxis.remote.data.parseModels
 import io.github.dushyantchetiwal.praxis.remote.data.DeviceFlow
 import io.github.dushyantchetiwal.praxis.remote.data.DirEntry
 import io.github.dushyantchetiwal.praxis.remote.data.DownloadException
@@ -607,6 +611,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 threadKnown = false,
                 threadError = null,
                 modeOverride = null,
+                models = ModelsState(),
                 threads = ThreadsState(),
                 files = FilesState(),
                 outbox = emptyList(),
@@ -750,7 +755,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun applyStatus(status: Status, preferredWindow: Long?) {
+        val previousThread = d.currentWindow()?.thread
         edit { copy(status = status) }
+        val currentThread = d.currentWindow()?.thread
+        if (currentThread?.sessionId != previousThread?.sessionId) {
+            edit { copy(models = ModelsState()) }
+        } else if (currentThread?.model != previousThread?.model && !d.models.changing) {
+            edit { copy(models = models.copy(info = models.info?.copy(current = currentThread?.model))) }
+        }
         val windows = status.windows
         if (windows.none { it.id == d.windowId }) {
             val next = windows.find { it.id == preferredWindow } ?: windows.find { it.active } ?: windows.firstOrNull()
@@ -800,7 +812,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         watcher.inFlight = true
         viewModelScope.launch {
             try {
-                val args = JSONObject().put("seconds", WATCH_SECONDS)
+                val args = JSONObject().put("seconds", WATCH_SECONDS).put("include_details", false)
                 if (targetWindow != null) args.put("window", targetWindow)
                 if (targetSession != null) args.put("session_id", targetSession)
                 praxis("watch", args)
@@ -890,9 +902,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadActiveTabData(force = true)
     }
 
-    fun sendPrompt() {
+    fun sendPrompt(sendNow: Boolean = false) {
         val text = composer.trim()
         if (text.isEmpty() || d.device == null) return
+        val scope = requestScope()
+        val args = windowArgs {
+            put("text", text)
+            put("send_now", sendNow)
+            d.currentWindow()?.thread?.sessionId?.let { put("session_id", it) }
+        }
         val item = OutboxItem(
             id = ++outboxSeq,
             text = text,
@@ -905,21 +923,115 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         composer = ""
         viewModelScope.launch {
             try {
-                val result = praxis("prompt", windowArgs { put("text", text) })
+                val result = praxis("prompt", args, scope)
+                if (scope != requestScope()) return@launch
                 val queued = result?.optBoolean("queued") == true
                 edit {
                     copy(outbox = outbox.map {
-                        if (it.id == item.id) it.copy(state = if (queued) OutboxState.Queued else OutboxState.Sent, doneAt = now()) else it
+                        if (it.id == item.id) it.copy(
+                            state = if (queued) OutboxState.Queued else OutboxState.Sent,
+                            doneAt = now(),
+                            session = result?.str("session_id") ?: it.session,
+                            queueId = result?.str("queue_id"),
+                        ) else it
                     })
                 }
                 if (queued) message(str(R.string.toast_queued))
                 requestPoll()
             } catch (e: ApiException) {
+                if (scope != requestScope()) return@launch
                 edit { copy(outbox = outbox.filterNot { it.id == item.id }) }
                 if (composer.isBlank()) composer = text
                 report(e, str(R.string.label_message_not_sent))
             }
         }
+    }
+
+    fun sendQueuedNow(item: OutboxItem) {
+        if (item.queueId == null || item.session == null || d.outbox.find { it.id == item.id }?.sendingNow != false) return
+        val scope = requestScope()
+        val args = windowArgs { put("session_id", item.session); put("queue_id", item.queueId) }
+        edit { copy(outbox = outbox.map { if (it.id == item.id) it.copy(sendingNow = true) else it }) }
+        viewModelScope.launch {
+            try {
+                val result = praxis("send_now", args, scope)
+                    ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+                if (scope != requestScope()) return@launch
+                if (result.optBoolean("sent")) {
+                    edit { copy(outbox = outbox.map {
+                        if (it.id == item.id) it.copy(sendingNow = false, state = OutboxState.Sent, doneAt = now()) else it
+                    }) }
+                } else {
+                    edit { copy(outbox = outbox.filterNot { it.id == item.id }) }
+                    message(str(R.string.toast_no_longer_queued))
+                }
+                requestPoll()
+            } catch (error: ApiException) {
+                if (scope != requestScope()) return@launch
+                edit { copy(outbox = outbox.map { if (it.id == item.id) it.copy(sendingNow = false) else it }) }
+                report(error, str(R.string.label_message_not_sent))
+            }
+        }
+    }
+
+    fun loadModels(more: Boolean = false) {
+        val session = d.currentWindow()?.thread?.sessionId ?: return
+        if (d.models.loading || d.models.changing) return
+        val previous = d.models.info.takeIf { more && d.models.session == session }
+        val offset = if (more) previous?.nextOffset ?: return else 0
+        val scope = requestScope()
+        val args = windowArgs { put("session_id", session); put("offset", offset) }
+        edit { copy(models = ModelsState(session = session, loading = true, info = previous)) }
+        viewModelScope.launch {
+            try {
+                val result = praxis("models", args, scope)
+                    ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+                if (scope != requestScope() || d.currentWindow()?.thread?.sessionId != session) return@launch
+                val page = parseModels(result)
+                edit { copy(models = ModelsState(session = session, info = previous?.append(page) ?: page)) }
+            } catch (error: ApiException) {
+                if (scope == requestScope() && d.currentWindow()?.thread?.sessionId == session) {
+                    edit { copy(models = ModelsState(session = session, info = previous, error = error.message ?: str(R.string.error_unreadable_response))) }
+                }
+            }
+        }
+    }
+
+    fun setModel(model: ModelOption) {
+        val session = d.models.session ?: return
+        if (d.models.loading || d.models.changing || model.disabled || d.currentWindow()?.thread?.sessionId != session) return
+        if (d.models.info?.current == model.id) return
+        val previous = d.models.info
+        val scope = requestScope()
+        val args = windowArgs { put("session_id", session); put("model", model.id) }
+        edit { copy(models = models.copy(changing = true, error = null)) }
+        viewModelScope.launch {
+            try {
+                val result = praxis("model", args, scope)
+                    ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+                if (scope != requestScope() || d.currentWindow()?.thread?.sessionId != session) return@launch
+                val selected = parseModels(result)
+                edit { copy(models = ModelsState(session = session, info = previous?.copy(current = selected.current) ?: selected)) }
+                requestPoll()
+            } catch (error: ApiException) {
+                if (scope == requestScope() && d.currentWindow()?.thread?.sessionId == session) {
+                    edit { copy(models = models.copy(changing = false, error = error.message ?: str(R.string.error_unreadable_response))) }
+                }
+            }
+        }
+    }
+
+    suspend fun loadDetail(request: DetailRequest): EntryDetail {
+        val scope = requestScope()
+        val args = request.arguments()
+        d.windowId?.let { args.put("window", it) }
+        if (!d.history.isShown(request.session)) throw CancellationException("Conversation changed")
+        val result = praxis("thread", args, scope)
+            ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+        if (scope != requestScope() || !d.history.isShown(request.session)) throw CancellationException("Conversation changed")
+        val text = result.str("text")
+            ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+        return EntryDetail(text, result.optBoolean("truncated"))
     }
 
     fun stopGenerating() {
@@ -1015,6 +1127,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val args = windowArgs {
             put("session_id", session)
             put("before_index", request.before)
+            put("include_details", false)
         }
         edit { copy(history = history) }
         historyJob = viewModelScope.launch {

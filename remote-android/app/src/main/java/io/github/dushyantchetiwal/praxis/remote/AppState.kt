@@ -4,6 +4,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import io.github.dushyantchetiwal.praxis.remote.data.Device
 import io.github.dushyantchetiwal.praxis.remote.data.DirEntry
 import io.github.dushyantchetiwal.praxis.remote.data.FileContent
+import io.github.dushyantchetiwal.praxis.remote.data.ModelInfo
 import io.github.dushyantchetiwal.praxis.remote.data.ONLINE_THRESHOLD_MS
 import io.github.dushyantchetiwal.praxis.remote.data.Permission
 import io.github.dushyantchetiwal.praxis.remote.data.Snapshot
@@ -84,6 +85,16 @@ data class OutboxItem(
     val doneAt: Long,
     val session: String?,
     val baseIndex: Int,
+    val queueId: String? = null,
+    val sendingNow: Boolean = false,
+)
+
+data class ModelsState(
+    val session: String? = null,
+    val loading: Boolean = false,
+    val changing: Boolean = false,
+    val info: ModelInfo? = null,
+    val error: String? = null,
 )
 
 /** A mode picked on the phone, shown until a snapshot confirms it. */
@@ -140,6 +151,7 @@ data class DeviceUi(
     val threadKnown: Boolean = false,
     val threadError: String? = null,
     val modeOverride: ModeOverride? = null,
+    val models: ModelsState = ModelsState(),
     val tab: Tab = Tab.Chat,
     val threads: ThreadsState = ThreadsState(),
     val files: FilesState = FilesState(),

@@ -13,7 +13,8 @@ on the network.
 - **Live state.** The computer publishes one AES-256-GCM encrypted snapshot per paired phone in the gist's
   `state.json`. While the app is in the foreground it reads the gist every 3 seconds with `If-None-Match` (a `304` is
   free) and sends a `watch` request so the computer publishes snapshots. It renews the watch about every 4 minutes and
-  stops in the background.
+  stops in the background. Ordinary changing snapshots are published at most once per 10 seconds, plus network and
+  polling time. Partial assistant text is included, but this is not a token-streaming connection.
 - **Requests.** Commands are encrypted `praxis-remote/v2 request` comments. Praxis edits each one into its encrypted
   answer. The app polls that comment every 1.5 seconds, then deletes it. Only one request is in flight at a time, and a
   request times out after 45 seconds.
@@ -26,6 +27,18 @@ on the network.
    the computer.
 
 There is no repository to create and nothing to install on GitHub.
+
+- **Models:** tap **Model** in Chat to load the active conversation's models from the computer. Search the loaded
+  choices or use **Load more models**. Unavailable models are disabled; selection errors stay visible in the picker.
+- **Send Now:** normal sending queues a message while Praxis is working. **Send Now** interrupts the current turn,
+  matching the desktop action. It is available for a new message or a phone message already acknowledged as queued.
+  Other queued messages remain in the desktop queue. This still uses GitHub polling, so delivery is not instantaneous.
+- **Details:** tool summaries and Thinking arrows arrive without their bodies. Expanding one fetches only that tool
+  or thinking block; collapsing it removes the detail UI. Reopening or **Refresh details** fetches its current contents.
+  Closed details do not generate requests. Large details are explicitly marked as shortened.
+
+Update both the desktop and Android app for these controls. Older desktops continue to show their existing transcript
+format and do not expose model selection or Send Now. Pairing keys and encryption are unchanged.
 
 ## The GitHub App
 

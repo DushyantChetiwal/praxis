@@ -114,6 +114,27 @@ The computer refuses a request when the comment or its `sent_at` is more than fi
 
 Plain-text sizes are capped so that every comment fits GitHub's 65,536-character limit: 46,000 bytes for an answer. Larger answers become an error.
 
+### Model selection and Send Now
+
+`status.windows[].thread` advertises `model_selection`, `model` (the opaque current model ID), `model_name`, and `send_now`.
+Clients hide the new controls when these flags are absent. Model and Send Now requests require the active root's
+`session_id` and may include `window`; a different active root is rejected rather than silently targeted.
+
+- `models`: returns `current`, `available` (objects with opaque `id`, `name`, optional `group`, and `disabled`), and
+  `next_offset`. Pass a returned non-null cursor as `offset` to load another page. Each page holds at most 100 models
+  and fits a 40,000-byte array budget; IDs are never shortened or split into provider/model components.
+- `model`: accepts `model` from that list, validates availability, and awaits the session selector's result. Errors
+  are returned to the phone. Selection follows desktop behavior, including the native selector's saved default.
+  It does not replace models already assigned to running Architect steps.
+- `prompt`: optionally accepts `session_id` and `send_now: true`. Normal sending returns `queued`, optional
+  `queue_id`, and `session_id`. Send Now uses the desktop queue/cancellation state machine to interrupt the current
+  turn; other queue entries are preserved.
+- `send_now`: accepts the acknowledged `session_id` and `queue_id`. It sends that queue entry, not a copy of the
+  phone's text. A missing ID returns `sent: false` and never resends a delivered or removed message.
+
+These are additive version-2 extensions. They do not change pairing, encryption, replay protection, or transport
+cadence. Commands still traverse the serialized GitHub comment channel; Send Now is not a low-latency push channel.
+
 ### Conversation snapshots and thinking
 
 `thread` answers and the snapshot's `thread` object have `session_id`, `title`, `status`, `total`, and `entries`. Each entry keeps its original thread `index`, `role`, `text`, and optional tool `status`. `total` counts source entries, not message parts.
@@ -140,6 +161,27 @@ When watching a plan's owning root session, `thread.step_threads` contains bound
 The root and live step transcripts share the 36,000-byte budget, including JSON escaping, typed parts, and fallback text. Recent content is retained first; long content and older parts can be omitted. Part indices are not renumbered. The existing answer and encrypted snapshot size limits still apply. With many parallel steps, a step's smaller budget share can leave only its metadata and cursor; if even its metadata does not fit, that step is omitted from the snapshot. Android retains and displays previously loaded history for omitted steps as non-live sections. A metadata-only step remains pageable, using the independent per-request budget. These fields are additive extensions to version 2; no pairing or protocol migration is needed.
 
 `status.windows[].architect.steps` counts every node in the owning root graph recursively, including subplan containers, matching the desktop's deep step count. It does not count only the current canvas level. `step_number` remains the run's execution visit number, including retries and loops; it can exceed `steps`. Android displays **Visit 9 · 5 steps in plan**, not a progress fraction. These counts measure different things: the visit number is not a completed-step count, and the root total includes subplan containers.
+
+### On-demand tool and thinking details
+
+New clients send `include_details: false` with `watch` and paged `thread` requests. The default is `true` for older
+clients. Compact entries retain tool labels, statuses, source indices, and assistant text. Tool entries and reasoning
+parts carry `details_pending: true`; reasoning text is empty, without serializing the thinking body. Such parts must
+not be discarded just because their text is blank. Pending details are omitted before the transcript budget is
+applied, leaving more room for answers. Only actual ACP Thought chunks create Thinking placeholders.
+
+When the user expands an arrow, send `thread` with `session_id`, `entry_index`, optional `window`, and `part_index`
+for reasoning. The result is `{text, truncated}` rather than a thread page. Indices must be non-negative integers;
+non-thinking assistant parts cannot be requested through this endpoint. Tool details include the desktop's Markdown
+representation. Each detail is bounded to 40,000 escaped JSON bytes and marks truncation explicitly. Completed
+Architect steps use the same ownership-checked loader as history pages.
+
+Android only fetches and composes a detail body while expanded. It cancels on collapse and offers explicit refresh
+or retry; snapshots do not continuously re-fetch expanded bodies. Responses from an old device/window/root view
+are discarded. Legacy desktops ignore the opt-in and continue sending full bodies, which remain collapsed in the UI.
+
+Ordinary live snapshots still use a 10-second publication gap plus desktop and phone polling/network time. They
+include partial assistant text from its source, independent of desktop text animation; this is not token streaming.
 
 ### Paging older conversation entries
 

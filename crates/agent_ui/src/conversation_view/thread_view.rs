@@ -1693,20 +1693,26 @@ impl ThreadView {
     }
 
     /// Sends a message that did not come from the message editor, such as one
-    /// sent from Praxis Remote, as though it had been typed. While a turn is
-    /// running the message is queued, as a typed one would be, and `true` is
-    /// returned.
+    /// sent from Praxis Remote. Returns a queue ID when the message waits for
+    /// the current turn; an explicit send-now uses the same cancellation and
+    /// queue state machine as the desktop button.
     pub(crate) fn send_text(
         &mut self,
         text: String,
+        send_now: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> bool {
+    ) -> Option<QueueEntryId> {
         let content = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
         cx.emit(AcpThreadViewEvent::Interacted);
         if self.thread.read(cx).status() != ThreadStatus::Idle || self.is_loading_contents {
             self.add_to_queue(content, Vec::new(), window, cx);
-            return true;
+            let id = self.message_queue.last_id()?;
+            if send_now {
+                self.send_queued_message_now(id, window, cx);
+                return None;
+            }
+            return Some(id);
         }
         self.thread_error.take();
         self.thread_feedback.clear();
@@ -1718,7 +1724,7 @@ impl ThreadView {
             window,
             cx,
         );
-        false
+        None
     }
 
     pub fn send_content(

@@ -279,6 +279,7 @@ async fn resolve_device_name() -> String {
 struct Watch {
     window: Option<u64>,
     session_id: Option<String>,
+    include_details: bool,
     until: DateTime<Utc>,
 }
 
@@ -297,7 +298,10 @@ impl Watch {
 fn snapshot(status: &Value, watch: Option<&Watch>, cx: &mut App) -> Value {
     let (thread, thread_error) = match watch {
         Some(watch) => {
-            let args = json!({ "session_id": watch.session_id });
+            let args = json!({
+                "session_id": watch.session_id,
+                "include_details": watch.include_details,
+            });
             match with_workspace(watch.window, cx, |workspace, _, cx| {
                 thread(workspace, &args, cx)
             }) {
@@ -333,10 +337,59 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
             if text.trim().is_empty() {
                 bail!("the message is empty");
             }
-            let view = root_thread_view(workspace, cx)?;
-            let queued = view.update(cx, |view, cx| view.send_text(text, window, cx));
-            Ok(json!({ "queued": queued }))
+            let view = requested_root_view(workspace, args, cx)?;
+            let send_now = args.get("send_now").and_then(Value::as_bool) == Some(true);
+            let session_id = view.read(cx).session_id.clone();
+            let queue_id = view
+                .update(cx, |view, cx| view.send_text(text, send_now, window, cx))
+                .map(|id| id.to_string());
+            Ok(json!({
+                "queued": queue_id.is_some(),
+                "queue_id": queue_id,
+                "session_id": session_id.0.as_ref(),
+            }))
         }),
+        "send_now" => with_workspace(window, cx, |workspace, window, cx| {
+            required(args, "session_id")?;
+            let view = requested_root_view(workspace, args, cx)?;
+            let queue_id = required(args, "queue_id")?;
+            let id = view
+                .read(cx)
+                .message_queue
+                .iter()
+                .find(|entry| entry.id.to_string() == queue_id)
+                .map(|entry| entry.id);
+            if let Some(id) = id {
+                view.update(cx, |view, cx| view.send_queued_message_now(id, window, cx));
+            }
+            // A delivered or removed entry must never be resent from phone text.
+            Ok(json!({ "sent": id.is_some() }))
+        }),
+        "models" | "model" => {
+            return match with_workspace(window, cx, |workspace, _, cx| {
+                required(args, "session_id")?;
+                let view = requested_root_view(workspace, args, cx)?;
+                let thread = view.read(cx).thread.read(cx);
+                let selector = thread
+                    .connection()
+                    .model_selector(thread.session_id())
+                    .context("This agent does not support model selection")?;
+                let model = if op == "model" {
+                    Some(required(args, "model")?.to_string())
+                } else {
+                    None
+                };
+                let offset = args
+                    .get("offset")
+                    .and_then(Value::as_u64)
+                    .and_then(|offset| usize::try_from(offset).ok())
+                    .unwrap_or(0);
+                Ok(request_models(selector, model, offset, cx))
+            }) {
+                Ok(task) => task,
+                Err(error) => Task::ready(Err(error)),
+            };
+        }
         "stop" => with_workspace(window, cx, |workspace, _, cx| {
             let view = root_thread_view(workspace, cx)?;
             view.update(cx, |view, cx| view.cancel_generation(cx));
@@ -446,6 +499,91 @@ fn root_thread_view(workspace: &Entity<Workspace>, cx: &App) -> Result<Entity<Th
         .context("the conversation has not loaded yet")
 }
 
+fn requested_root_view(
+    workspace: &Entity<Workspace>,
+    args: &Value,
+    cx: &App,
+) -> Result<Entity<ThreadView>> {
+    let view = root_thread_view(workspace, cx)?;
+    if let Some(expected) = args.get("session_id").and_then(Value::as_str)
+        && view.read(cx).session_id.0.as_ref() != expected
+    {
+        bail!("The active conversation changed. Refresh and try again.");
+    }
+    Ok(view)
+}
+
+fn request_models(
+    selector: std::rc::Rc<dyn acp_thread::AgentModelSelector>,
+    requested: Option<String>,
+    offset: usize,
+    cx: &mut App,
+) -> Task<Result<Value>> {
+    let models = selector.list_models(cx);
+    cx.spawn(async move |cx| {
+        let models: Vec<(Option<String>, acp_thread::AgentModelInfo)> = match models.await? {
+            acp_thread::AgentModelList::Flat(models) => {
+                models.into_iter().map(|model| (None, model)).collect()
+            }
+            acp_thread::AgentModelList::Grouped(groups) => groups
+                .into_iter()
+                .flat_map(|(group, models)| {
+                    models
+                        .into_iter()
+                        .map(move |model| (Some(group.0.to_string()), model))
+                })
+                .collect(),
+        };
+        if let Some(requested) = requested {
+            let model = models
+                .iter()
+                .map(|(_, model)| model)
+                .find(|model| model.id.as_str() == requested)
+                .context("That model is no longer available. Refresh the model list.")?;
+            if model.disabled.is_some() {
+                bail!("That model is unavailable. Check its provider on the computer.");
+            }
+            cx.update(|cx| selector.select_model(model.id.clone(), cx))
+                .await?;
+        }
+        let selected = cx.update(|cx| selector.selected_model(cx)).await?;
+        model_page(models, selected.id.as_str(), offset)
+    })
+}
+
+fn model_page(
+    models: Vec<(Option<String>, acp_thread::AgentModelInfo)>,
+    selected: &str,
+    offset: usize,
+) -> Result<Value> {
+    let total = models.len();
+    let mut page = Vec::new();
+    let mut remaining = FILE_JSON_BUDGET;
+    for (group, model) in models.into_iter().skip(offset) {
+        let value = json!({
+            "id": model.id.as_str(),
+            "name": model.name.as_ref(),
+            "group": group,
+            "disabled": model.disabled.is_some(),
+        });
+        let cost = value.to_string().len() + 1;
+        if cost > remaining || page.len() == 100 {
+            break;
+        }
+        remaining -= cost;
+        page.push(value);
+    }
+    if page.is_empty() && offset < total {
+        bail!("A model description is too large to send. Select it on the computer.");
+    }
+    let next = offset.saturating_add(page.len());
+    Ok(json!({
+        "current": selected,
+        "available": page,
+        "next_offset": (next < total).then_some(next),
+    }))
+}
+
 fn status(device: &str, cx: &App) -> Value {
     let active = cx.active_window().map(|window| window.window_id());
     let windows: Vec<Value> = workspace_windows(cx)
@@ -520,6 +658,12 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
                 .collect();
             json!({ "current": modes.current_mode().0.as_ref(), "available": available })
         });
+    let model_name = view.model_selector.as_ref().and_then(|selector| {
+        selector
+            .read(cx)
+            .active_model(cx)
+            .map(|model| model.name.to_string())
+    });
     Some(json!({
         "session_id": thread.session_id().0.as_ref(),
         "title": thread.title().map(|title| title.to_string()),
@@ -527,6 +671,10 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
         "entries": thread.entries().len(),
         "queued": view.message_queue.len(),
         "mode": mode,
+        "model": view.current_model_id(cx),
+        "model_name": model_name,
+        "model_selection": thread.connection().model_selector(thread.session_id()).is_some(),
+        "send_now": true,
         "pending": pending_permissions(conversation_view.read(cx), cx),
     }))
 }
@@ -816,7 +964,9 @@ fn open_thread(
 /// A bounded page of conversation entries, newest last. Without a cursor,
 /// follows the live root and its active step conversations.
 fn thread(workspace: &Entity<Workspace>, args: &Value, cx: &App) -> Result<Value> {
-    let before = history_before_index(args)?;
+    if args.get("entry_index").is_some() {
+        required(args, "session_id")?;
+    }
     let conversation_view = conversation_view(workspace, cx)?;
     let conversation = conversation_view.read(cx);
     let owner = conversation.as_native_thread(cx);
@@ -834,17 +984,67 @@ fn thread(workspace: &Entity<Workspace>, args: &Value, cx: &App) -> Result<Value
             .map(|view| view.read(cx).thread.clone())
             .context("the conversation has not loaded yet")?,
     };
-    if let Some(before) = before {
+    requested_thread_snapshot(&thread, owner.as_ref(), args, cx)
+}
+
+fn requested_thread_snapshot(
+    thread: &Entity<acp_thread::AcpThread>,
+    owner: Option<&Entity<agent::Thread>>,
+    args: &Value,
+    cx: &App,
+) -> Result<Value> {
+    if args.get("entry_index").is_some() {
+        return transcript_detail(thread.read(cx).entries(), args, cx);
+    }
+    let include_details = args.get("include_details").and_then(Value::as_bool) != Some(false);
+    if let Some(before) = history_before_index(args)? {
         Ok(thread_page_snapshot(
             thread.read(cx),
             None,
             TRANSCRIPT_BUDGET,
             Some(before),
+            include_details,
             cx,
         ))
     } else {
-        Ok(watched_thread_snapshot(&thread, owner.as_ref(), cx))
+        Ok(watched_thread_snapshot(thread, owner, include_details, cx))
     }
+}
+
+fn transcript_detail(source: &[AgentThreadEntry], args: &Value, cx: &App) -> Result<Value> {
+    let index = args
+        .get("entry_index")
+        .and_then(Value::as_u64)
+        .and_then(|index| usize::try_from(index).ok())
+        .context("entry_index must be a non-negative integer")?;
+    let entry = source
+        .get(index)
+        .context("That entry is no longer available. Refresh the conversation.")?;
+    let text = match entry {
+        AgentThreadEntry::ToolCall(call) => call.to_markdown(cx),
+        AgentThreadEntry::AssistantMessage(message) => {
+            let part = args
+                .get("part_index")
+                .and_then(Value::as_u64)
+                .and_then(|index| usize::try_from(index).ok())
+                .context("part_index must identify a thinking block")?;
+            match message.chunks.get(part) {
+                Some(acp_thread::AssistantMessageChunk::Thought { block, .. }) => {
+                    snapshot_message_text(block, cx)
+                }
+                _ => {
+                    bail!("That thinking block is no longer available. Refresh the conversation.")
+                }
+            }
+        }
+        _ => bail!("Only tool calls and thinking blocks have expandable details"),
+    };
+    fit_transcript_entry(
+        json!({ "text": text, "truncated": false }),
+        FILE_JSON_BUDGET,
+        "detail_limit",
+    )
+    .context("Could not fit these details in a remote response")
 }
 
 fn request_thread(
@@ -858,7 +1058,9 @@ fn request_thread(
     };
     let load =
         (|| {
-            let before = history_before_index(args)?.context("history needs before_index")?;
+            if history_before_index(args)?.is_none() && args.get("entry_index").is_none() {
+                bail!("history needs before_index or entry_index");
+            }
             let session_id = acp::SessionId::new(required(args, "session_id")?.to_string());
             let conversation = conversation_view(workspace, cx)?;
             let owner = conversation.read(cx).as_native_thread(cx).context(
@@ -871,19 +1073,17 @@ fn request_thread(
                 return Err(error);
             }
             Ok((
-                before,
+                args.clone(),
                 load_owned_step_thread(owner, connection, session_id, cx),
             ))
         })();
-    let (before, load) = match load {
+    let (args, load) = match load {
         Ok(load) => load,
         Err(error) => return Task::ready(Err(error)),
     };
     cx.spawn(async move |cx| {
         let thread = load.await?;
-        Ok(cx.update(|cx| {
-            thread_page_snapshot(thread.read(cx), None, TRANSCRIPT_BUDGET, Some(before), cx)
-        }))
+        cx.update(|cx| requested_thread_snapshot(&thread, None, &args, cx))
     })
 }
 
@@ -952,6 +1152,7 @@ fn live_step_thread(
 fn watched_thread_snapshot(
     thread: &Entity<acp_thread::AcpThread>,
     owner: Option<&Entity<agent::Thread>>,
+    include_details: bool,
     cx: &App,
 ) -> Value {
     let thread = thread.read(cx);
@@ -982,11 +1183,12 @@ fn watched_thread_snapshot(
     }
     // Reserve the step_threads field and array separators, then share one budget.
     let budget = TRANSCRIPT_BUDGET.saturating_sub(32 + steps.len()) / (steps.len() + 1);
-    let mut snapshot = thread_snapshot(thread, None, budget, cx);
+    let mut snapshot = thread_snapshot(thread, None, budget, include_details, cx);
     let step_threads: Vec<Value> = steps
         .into_iter()
         .filter_map(|(title, thread)| {
-            let snapshot = thread_snapshot(thread.read(cx), Some(&title), budget, cx);
+            let snapshot =
+                thread_snapshot(thread.read(cx), Some(&title), budget, include_details, cx);
             (snapshot.to_string().len() <= budget).then_some(snapshot)
         })
         .collect();
@@ -998,9 +1200,10 @@ fn thread_snapshot(
     thread: &acp_thread::AcpThread,
     title: Option<&str>,
     budget: usize,
+    include_details: bool,
     cx: &App,
 ) -> Value {
-    thread_page_snapshot(thread, title, budget, None, cx)
+    thread_page_snapshot(thread, title, budget, None, include_details, cx)
 }
 
 fn thread_page_snapshot(
@@ -1008,6 +1211,7 @@ fn thread_page_snapshot(
     title: Option<&str>,
     budget: usize,
     before: Option<usize>,
+    include_details: bool,
     cx: &App,
 ) -> Value {
     let end = before
@@ -1025,8 +1229,14 @@ fn thread_page_snapshot(
         "entries": [],
     });
     let budget = budget.saturating_sub(snapshot.to_string().len());
-    let (entries, next_before) =
-        collect_transcript_page(thread.entries(), end, budget, before.is_none(), cx);
+    let (entries, next_before) = collect_transcript_page(
+        thread.entries(),
+        end,
+        budget,
+        before.is_none(),
+        include_details,
+        cx,
+    );
     snapshot["entries"] = json!(entries);
     snapshot["next_before"] = json!(next_before);
     snapshot["has_more"] = json!(next_before > 0);
@@ -1035,7 +1245,7 @@ fn thread_page_snapshot(
 
 #[cfg(test)]
 fn transcript_entries(source: &[AgentThreadEntry], budget: usize, cx: &App) -> Vec<Value> {
-    collect_transcript_page(source, source.len(), budget, true, cx).0
+    collect_transcript_page(source, source.len(), budget, true, true, cx).0
 }
 
 #[cfg(test)]
@@ -1045,7 +1255,7 @@ fn transcript_page(
     budget: usize,
     cx: &App,
 ) -> (Vec<Value>, usize) {
-    collect_transcript_page(source, before, budget, false, cx)
+    collect_transcript_page(source, before, budget, false, true, cx)
 }
 
 fn collect_transcript_page(
@@ -1053,6 +1263,7 @@ fn collect_transcript_page(
     before: usize,
     mut budget: usize,
     preview: bool,
+    include_details: bool,
     cx: &App,
 ) -> (Vec<Value>, usize) {
     let end = before.min(source.len());
@@ -1065,7 +1276,7 @@ fn collect_transcript_page(
         .rev()
         .take(HISTORY_PAGE_ENTRIES)
     {
-        let Some(value) = transcript_entry(index, entry, cx) else {
+        let Some(value) = transcript_entry(index, entry, include_details, cx) else {
             next_before = index;
             continue;
         };
@@ -1110,12 +1321,21 @@ fn snapshot_message_text(content: &acp_thread::MessageContent, cx: &App) -> Stri
     }
 }
 
-fn transcript_entry(index: usize, entry: &AgentThreadEntry, cx: &App) -> Option<Value> {
-    let (role, text, status) = describe_entry(entry, cx);
+fn transcript_entry(
+    index: usize,
+    entry: &AgentThreadEntry,
+    include_details: bool,
+    cx: &App,
+) -> Option<Value> {
+    let (role, text, status) = describe_entry(entry, include_details, cx);
     let mut value = json!({
         "index": index, "role": role, "text": text.trim(), "status": status,
         "truncated": false,
     });
+    if !include_details && matches!(entry, AgentThreadEntry::ToolCall(_)) {
+        value["details_pending"] = json!(true);
+        return Some(value);
+    }
     if let AgentThreadEntry::AssistantMessage(message) = entry
         && message
             .chunks
@@ -1135,6 +1355,11 @@ fn transcript_entry(index: usize, entry: &AgentThreadEntry, cx: &App) -> Option<
                         ("reasoning", block)
                     }
                 };
+                if role == "reasoning" && !include_details {
+                    return Some(json!({
+                        "index": index, "role": role, "text": "", "details_pending": true,
+                    }));
+                }
                 let text = snapshot_message_text(block, cx);
                 (!text.trim().is_empty())
                     .then(|| json!({ "index": index, "role": role, "text": text.trim() }))
@@ -1192,6 +1417,7 @@ fn shorten_transcript_text(text: &str) -> Option<String> {
 
 fn describe_entry(
     entry: &AgentThreadEntry,
+    include_details: bool,
     cx: &App,
 ) -> (&'static str, String, Option<&'static str>) {
     match entry {
@@ -1220,7 +1446,12 @@ fn describe_entry(
                 ToolCallStatus::Rejected => "rejected",
                 ToolCallStatus::Canceled => "canceled",
             };
-            ("tool", call.to_markdown(cx), Some(status))
+            let text = if include_details {
+                call.to_markdown(cx)
+            } else {
+                truncate(call.label.read(cx).source(), 256)
+            };
+            ("tool", text, Some(status))
         }
         entry => ("notice", entry.to_markdown(cx), None),
     }
@@ -1476,6 +1707,97 @@ mod tests {
         })
     }
 
+    #[gpui::test]
+    fn compact_snapshots_defer_thinking_without_truncating_the_answer(cx: &mut App) {
+        let thought = "provider thought ".repeat(2_000);
+        let source = vec![assistant_entry(
+            &[(true, &thought), (false, "Partial answer")],
+            cx,
+        )];
+        let (page, next) = collect_transcript_page(&source, 1, 512, true, false, cx);
+        assert_eq!(next, 0);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0]["text"], "Partial answer");
+        assert_eq!(page[0]["truncated"], false);
+        assert_eq!(page[0]["parts"][0]["details_pending"], true);
+        assert_eq!(page[0]["parts"][0]["text"], "");
+        assert!(!page[0].to_string().contains("provider thought"));
+        let detail = transcript_detail(&source, &json!({ "entry_index": 0, "part_index": 0 }), cx)
+            .expect("thinking details");
+        assert_eq!(detail["text"], thought);
+        assert_eq!(detail["truncated"], false);
+        for args in [
+            json!({ "entry_index": -1, "part_index": 0 }),
+            json!({ "entry_index": 0, "part_index": 1 }),
+            json!({ "entry_index": 2, "part_index": 0 }),
+            json!({ "entry_index": 0, "part_index": "0" }),
+        ] {
+            assert!(transcript_detail(&source, &args, cx).is_err());
+        }
+    }
+
+    #[gpui::test]
+    fn detail_responses_obey_the_escaped_byte_budget(cx: &mut App) {
+        let source = vec![assistant_entry(&[(true, &"🦀\\\"\n".repeat(20_000))], cx)];
+        let detail = transcript_detail(&source, &json!({ "entry_index": 0, "part_index": 0 }), cx)
+            .expect("bounded details");
+        assert_eq!(detail["truncated"], true);
+        assert!(detail.to_string().len() <= FILE_JSON_BUDGET);
+    }
+
+    #[gpui::test]
+    async fn remote_models_use_the_session_selector_and_reject_unknown_ids(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let selector = acp_thread::StubAgentConnection::new().model_selector_impl();
+        let listed = cx
+            .update(|cx| request_models(selector.clone(), None, 0, cx))
+            .await
+            .expect("model list");
+        assert_eq!(listed["current"], "visual-test-model");
+        let selected = cx
+            .update(|cx| {
+                request_models(selector.clone(), Some("visual-test-model".into()), 0, cx)
+            })
+            .await
+            .expect("select listed model");
+        assert_eq!(selected["current"], "visual-test-model");
+        assert!(
+            cx.update(|cx| request_models(selector, Some("unknown/model".into()), 0, cx))
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn model_lists_are_bounded_and_page_without_losing_ids() {
+        let models: Vec<_> = (0..201)
+            .map(|index| {
+                (
+                    Some("Provider".to_string()),
+                    acp_thread::AgentModelInfo {
+                        id: acp_thread::AgentModelId::new(format!("provider/model/{index}")),
+                        name: format!("Model {index}").into(),
+                        description: None,
+                        icon: None,
+                        is_latest: false,
+                        cost: None,
+                        disabled: None,
+                    },
+                )
+            })
+            .collect();
+        let first = model_page(models.clone(), "provider/model/0", 0).expect("first page");
+        assert_eq!(first["available"].as_array().expect("models").len(), 100);
+        assert_eq!(first["next_offset"], 100);
+        let second = model_page(models.clone(), "provider/model/0", 100).expect("second page");
+        assert_eq!(second["available"][0]["id"], "provider/model/100");
+        assert_eq!(second["next_offset"], 200);
+        let last = model_page(models, "provider/model/0", 200).expect("last page");
+        assert_eq!(last["available"].as_array().expect("models").len(), 1);
+        assert_eq!(last["next_offset"], Value::Null);
+    }
+
     #[test]
     fn history_cursor_requires_a_non_negative_integer() {
         assert_eq!(history_before_index(&json!({})).expect("no cursor"), None);
@@ -1532,7 +1854,7 @@ mod tests {
             assistant_entry(&[(false, &boundary)], cx),
             assistant_entry(&[(false, &newest)], cx),
         ];
-        let budget = transcript_entry(1, &source[1], cx)
+        let budget = transcript_entry(1, &source[1], true, cx)
             .expect("newest")
             .to_string()
             .len()
@@ -1558,7 +1880,7 @@ mod tests {
         assert_eq!(page[0]["truncated"], true);
         assert_eq!(page[0]["truncation"], "entry_limit");
         assert!(page[0].to_string().len() <= ENTRY_LIMIT);
-        let (preview, next) = collect_transcript_page(&source, 1, 256, true, cx);
+        let (preview, next) = collect_transcript_page(&source, 1, 256, true, true, cx);
         assert_eq!(preview.len(), 1);
         assert_eq!(preview[0]["truncation"], "snapshot_budget");
         assert_eq!(next, 1, "the preview does not consume the source entry");
@@ -1674,6 +1996,34 @@ mod tests {
         let owner = cx
             .update(|cx| connection.thread(&session_id, cx))
             .expect("root owner");
+        session.update(cx, |thread, cx| {
+            thread
+                .upsert_tool_call(
+                    acp::ToolCall::new("remote-tool", "Read a file")
+                        .raw_output(json!({ "output": "tool output body" })),
+                    cx,
+                )
+                .expect("tool entry");
+        });
+        cx.read(|cx| {
+            let snapshot = thread_snapshot(session.read(cx), None, TRANSCRIPT_BUDGET, false, cx);
+            let entry = &snapshot["entries"][0];
+            assert_eq!(entry["details_pending"], true);
+            assert!(entry["text"].as_str().expect("label").contains("Read a file"));
+            assert!(!snapshot.to_string().contains("tool output body"));
+            let detail = transcript_detail(
+                session.read(cx).entries(),
+                &json!({ "entry_index": 0 }),
+                cx,
+            )
+            .expect("tool details");
+            assert!(
+                detail["text"]
+                    .as_str()
+                    .expect("body")
+                    .contains("tool output body")
+            );
+        });
         let mut inner = ArchitectGraph::default();
         inner.add_node(ArchitectNode::new("leaf", "Leaf"));
         let mut child = ArchitectNode::new("child", "Child");
@@ -1734,7 +2084,7 @@ mod tests {
                     .len(),
                 2
             );
-            let snapshot = watched_thread_snapshot(&session, Some(&owner), cx);
+            let snapshot = watched_thread_snapshot(&session, Some(&owner), true, cx);
             assert_eq!(snapshot["session_id"], session_id.0.as_ref());
             assert_eq!(
                 snapshot["step_threads"]
@@ -1747,7 +2097,7 @@ mod tests {
             assert_eq!(thinking["role"], "reasoning");
             assert_eq!(thinking["text"], "Thinking in Leaf");
             assert!(snapshot.to_string().len() <= TRANSCRIPT_BUDGET);
-            let pinned = watched_thread_snapshot(&steps[0].1, Some(&owner), cx);
+            let pinned = watched_thread_snapshot(&steps[0].1, Some(&owner), true, cx);
             assert_eq!(pinned["step_threads"], json!([]));
             let step_session = steps[0].1.read(cx).session_id();
             assert_eq!(
@@ -1755,8 +2105,14 @@ mod tests {
                 Some(steps[0].1.clone())
             );
             assert!(live_step_thread(&owner, &acp::SessionId::new("unrelated"), cx).is_none());
-            let page =
-                thread_page_snapshot(steps[0].1.read(cx), None, TRANSCRIPT_BUDGET, Some(1), cx);
+            let page = thread_page_snapshot(
+                steps[0].1.read(cx),
+                None,
+                TRANSCRIPT_BUDGET,
+                Some(1),
+                true,
+                cx,
+            );
             assert_eq!(page["before_index"], 1);
             assert_eq!(page["next_before"], 0);
             assert_eq!(page["has_more"], false);
@@ -1768,7 +2124,7 @@ mod tests {
             thread.push_assistant_content_block(" — more provider text".into(), true, cx);
         });
         cx.read(|cx| {
-            let snapshot = watched_thread_snapshot(&session, Some(&owner), cx);
+            let snapshot = watched_thread_snapshot(&session, Some(&owner), true, cx);
             assert_eq!(
                 snapshot["step_threads"][0]["entries"][0]["parts"][0]["text"],
                 "Thinking in Leaf — more provider text"
@@ -1779,7 +2135,7 @@ mod tests {
             thread.push_assistant_content_block(" — more response text".into(), false, cx);
         });
         cx.read(|cx| {
-            let snapshot = watched_thread_snapshot(&session, Some(&owner), cx);
+            let snapshot = watched_thread_snapshot(&session, Some(&owner), true, cx);
             let entry = &snapshot["step_threads"][0]["entries"][0];
             assert_eq!(entry["text"], "Answer — more response text");
             assert_eq!(entry["parts"][1]["text"], entry["text"]);
@@ -1797,7 +2153,7 @@ mod tests {
         }
         cx.read(|cx| {
             assert_eq!(
-                watched_thread_snapshot(&session, Some(&owner), cx)["step_threads"],
+                watched_thread_snapshot(&session, Some(&owner), true, cx)["step_threads"],
                 json!([])
             );
         });

@@ -756,6 +756,8 @@ impl Channel {
                         .get("session_id")
                         .and_then(Value::as_str)
                         .map(str::to_string),
+                    include_details: args.get("include_details").and_then(Value::as_bool)
+                        != Some(false),
                     until: Utc::now() + chrono::Duration::seconds(seconds),
                 };
                 let until = watch.until.to_rfc3339();
