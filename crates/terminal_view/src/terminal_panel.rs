@@ -161,7 +161,7 @@ impl TerminalPanel {
         // Inspection shares the original terminal. It neither spawns a shell,
         // activates a tab, nor opens a dock (including while Architect owns it).
         self.active_pane.update(cx, |pane, cx| {
-            pane.add_item(Box::new(view), false, false, None, window, cx);
+            pane.add_item_inner(Box::new(view), false, false, false, None, window, cx);
         });
         cx.notify();
     }
@@ -1998,6 +1998,7 @@ mod tests {
             .expect("workspace");
         let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
         let cx = &mut VisualTestContext::from_window(window_handle.into(), cx);
+        cx.run_until_parked();
         let terminal = cx.new(|cx| {
             terminal::TerminalBuilder::new_display_only(
                 terminal::terminal_settings::CursorShape::default(),
@@ -2041,6 +2042,30 @@ mod tests {
                 .is_open()),
             dock_open
         );
+        let second_terminal = cx.new(|cx| {
+            terminal::TerminalBuilder::new_display_only(
+                terminal::terminal_settings::CursorShape::default(),
+                terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                util::paths::PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        project.update(cx, |project, cx| {
+            project.reveal_background_terminal(second_terminal.clone(), cx);
+        });
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, cx| {
+            let pane = panel.active_pane.read(cx);
+            assert_eq!(pane.items_len(), 2);
+            assert_eq!(
+                pane.active_item().expect("active tab").item_id(),
+                view.entity_id()
+            );
+        });
+        cx.update(|window, cx| assert_eq!(window.focused(cx), focus));
         terminal.update(cx, |terminal, cx| {
             terminal.write_output(b"after inspection\n", cx)
         });
@@ -2057,11 +2082,17 @@ mod tests {
         });
         assert_eq!(
             panel.read_with(cx, |panel, cx| panel.active_pane.read(cx).items_len()),
-            1
+            2
         );
+        panel.read_with(cx, |panel, cx| {
+            let active = panel.active_pane.read(cx).active_item().expect("active tab");
+            let active = active.downcast::<TerminalView>().expect("terminal view");
+            assert_eq!(active.read(cx).terminal(), &second_terminal);
+        });
+        cx.update(|window, cx| assert_eq!(window.focused(cx), focus));
         assert_eq!(
             project.read_with(cx, |project, _| project.background_terminals()),
-            vec![terminal]
+            vec![terminal, second_terminal]
         );
     }
 

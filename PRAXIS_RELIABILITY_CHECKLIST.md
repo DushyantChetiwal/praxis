@@ -25,7 +25,7 @@ Implementation boxes below describe code changes; unchecked regression and final
 
 - [x] Audit the reported approximately 28k work limit. No native task-wide 28k cap was found; distinguish provider per-response/context limits from application work policy and unsupported model claims.
 - [x] Ensure main conversations do not inherit limits intended only for explicitly spawned helper agents.
-- [ ] Preserve supported continuation/compaction, actual provider limits, permissions, and execution safeguards.
+- [x] Preserve supported continuation/compaction, actual provider limits, permissions, and execution safeguards.
 - [x] Add request-policy regression coverage for main conversations, node roles, and helper-only policy isolation; retain existing compaction coverage.
 
 Assessment: no hard-coded 28k task-wide limit was found. Main completion requests do not set an output-token override. The context-limit cancellation wrapper is in `NativeSubagentHandle::send`, not the coordinator or Architect runner. Added guidance against invented task-wide budgets and regression assertions that main/Architect requests do not receive helper completion intent or an artificial output override. CI validation pending.
@@ -36,7 +36,7 @@ Assessment: no hard-coded 28k task-wide limit was found. Main completion request
 - [x] Separate helper policy/defaults from node construction and restore legacy node-chat roles without rewriting saved model choices.
 - [x] Preserve the selected model's supported tools, project context, and context management for execution.
 - [x] Preserve intentional planning-mode and permission restrictions in deliberation chats.
-- [ ] Test main, node-chat, node-execution, and explicit-helper roles independently, including reload/resume.
+- [x] Test main, node-chat, node-execution, and explicit-helper roles independently, including reload/resume.
 
 Implemented: separate persisted child roles now distinguish helpers, Architect chats, and Architect execution without losing parent ownership. Node chats no longer inherit the helper model default; node ownership does not consume helper recursion depth. Main/node request classification and model inheritance have regression coverage awaiting CI.
 
@@ -45,7 +45,7 @@ Implemented: separate persisted child roles now distinguish helpers, Architect c
 - [x] Derive container completion from nested execution state, not the presence of a generated summary.
 - [x] Propagate status through all enclosing nodes and synchronize canvas, outline, inspector, checkpoints, and remote state.
 - [x] Preserve distinct failed, cancelled, skipped, pending, and completed outcomes.
-- [ ] Test deep nesting, parallel branches, retries, conditional skips, interruption, and resume.
+- [x] Test deep nesting, parallel branches, retries, conditional skips, interruption, and resume.
 
 Implemented scheduler-owned container completion, retry invalidation, and cached UI readiness. Canvas, outline, inspector, and automation use execution state independently of summary text. Failed/cancelled/interrupted presentation is separate from scheduler eligibility. Added nested-fork, replay, and GPUI regressions; final validation pending.
 
@@ -148,4 +148,5 @@ Implemented queue paging, UUID message identities, full queued-body inspection, 
 - Android validation of `164124d73e557da1ecbddf5a2f037f28fc6b19d2`: https://github.com/DushyantChetiwal/praxis/actions/runs/37202547844 — passed.
 - Desktop validation of that head: https://github.com/DushyantChetiwal/praxis/actions/runs/37202547798 — Clippy, updater checks, and native graph/path tests on all three operating systems passed. Native mode, capability, and live recovery/model integration steps passed. Remaining integration steps were still running; the CI-generated question-test formatting patch was reviewed and applied afterward.
 - Physical phone/desktop smoke testing and native macOS/Windows GPUI execution were not performed. The configured UI integration suite runs on Linux; core graph/path tests run on Windows, macOS, and Linux. No live app instance was restarted or closed.
-- Further fixes, final-head CI, readiness review, and merge remain pending.
+- The `164124d73e` integration run completed: native role/recovery/history, inventory, context/compaction, canvas, terminal lifecycle, question countdowns, remote questions/chunking/folders, and Send Now checks passed. The final terminal-panel regression failed its focus assertion. Attachment now uses the non-activating pane API, and the regression settles initial workspace focus and also checks two terminals plus reattachment. The terminal-panel check runs earlier for faster failure feedback.
+- Final-head CI, readiness review, and merge remain pending. Final CI and merge receipts will also be recorded in the PR description without creating an extra source commit solely to record its own hash.

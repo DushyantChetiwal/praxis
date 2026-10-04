@@ -199,6 +199,9 @@ jobs:
           shared-key: architect-agent-tests
           cache-on-failure: true
 
+      - name: Test background terminal tab inspection
+        run: cargo test --locked -p terminal_view --lib background_agent_terminals_
+
       - name: Test Plan-mode capability filtering
         run: "cargo test --locked -p agent --lib session_mode_tests::"
 
@@ -321,7 +324,6 @@ jobs:
           cargo test --locked -p agent_ui --lib remote::
           cargo test --locked -p agent_ui --lib test_remote_send_now_
           cargo test --locked -p agent --lib tools::terminal_task_tool::tests::
-          cargo test --locked -p terminal_view --lib background_agent_terminals_
 
   updater-tests:
     name: Auto-update integrity tests
