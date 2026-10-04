@@ -213,8 +213,8 @@ mod tests {
         let connection = Rc::new(acp_thread::StubAgentConnection::new());
         let thread = cx
             .update(|cx| {
-                connection.new_session(
-                    project,
+                connection.clone().new_session(
+                    project.clone(),
                     util::path_list::PathList::new(&[root.as_path()]),
                     cx,
                 )
@@ -240,6 +240,52 @@ mod tests {
                 )
                 .expect("question")
         });
+        let parallel = cx
+            .update(|cx| {
+                connection.new_session(
+                    project,
+                    util::path_list::PathList::new(&[root.as_path()]),
+                    cx,
+                )
+            })
+            .await
+            .expect("parallel session");
+        let (parallel_id, parallel_response) = parallel.update(cx, |thread, cx| {
+            thread
+                .request_elicitation_with_id(
+                    acp::CreateElicitationRequest::new(
+                        acp::ElicitationFormMode::new(
+                            acp::ElicitationSessionScope::new(thread.session_id().clone()),
+                            acp::ElicitationSchema::new().string("answer", true),
+                        ),
+                        "Parallel question",
+                    ),
+                    cx,
+                )
+                .expect("parallel question")
+        });
+        let parallel_session =
+            parallel.read_with(cx, |thread, _| thread.session_id().0.to_string());
+        let pending_headers = cx.read(|cx| headers(&[thread.clone(), parallel.clone()], cx));
+        assert_eq!(pending_headers.len(), 2);
+        assert!(
+            pending_headers
+                .iter()
+                .any(|header| header["session_id"] == parallel_session)
+        );
+        let mut parallel_args = json!({
+            "session_id": parallel_session,
+            "question_id": id.0.as_ref(),
+            "content": { "answer": "parallel answer" },
+        });
+        assert!(cx.update(|cx| answer(&parallel, &parallel_args, cx)).is_err());
+        parallel_args["question_id"] = json!(parallel_id.0.as_ref());
+        cx.update(|cx| answer(&parallel, &parallel_args, cx))
+            .expect("parallel answer");
+        assert!(matches!(
+            parallel_response.await.action,
+            acp::ElicitationAction::Accept(_)
+        ));
         let session = thread.read_with(cx, |thread, _| thread.session_id().0.to_string());
         let mut args = json!({ "session_id": session, "question_id": id.0.as_ref(), "content": { "answer": "" } });
         assert!(cx.update(|cx| answer(&thread, &args, cx)).is_err());

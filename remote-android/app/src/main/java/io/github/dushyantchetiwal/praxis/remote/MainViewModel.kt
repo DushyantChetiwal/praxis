@@ -1272,12 +1272,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         edit { copy(question = question.copy(sending = true, error = null)) }
         viewModelScope.launch {
             try {
-                praxis("question_answer", args, scope)
+                val result = praxis("question_answer", args, scope)
+                if (result?.optBoolean("answered") != true) throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
                 if (request != questionRequest || scope != requestScope()) return@launch
                 edit { copy(
                     question = QuestionState(), answeredQuestions = answeredQuestions + header.key,
                     questionList = questionList.copy(questions = questionList.questions.filterNot { it.key == header.key }),
                 ) }
+                if (d.questionList.visible) loadQuestions()
                 requestPoll()
             } catch (error: ApiException) {
                 if (request == questionRequest && scope == requestScope()) {
