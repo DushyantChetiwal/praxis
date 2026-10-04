@@ -7137,9 +7137,35 @@ async fn test_subagent_thread_inherits_parent_thread_properties(cx: &mut TestApp
         )
     });
 
+    parent_thread.read_with(cx, |thread, cx| {
+        let request = thread
+            .build_completion_request(CompletionIntent::UserPrompt, cx)
+            .expect("main request");
+        assert!(!thread.is_helper_subagent());
+        assert_eq!(request.intent, Some(CompletionIntent::UserPrompt));
+        assert_eq!(request.max_output_tokens, None);
+    });
+    let architect_chat = cx.new(|cx| Thread::new_architect_step(&parent_thread, "Plan".into(), cx));
+    let architect_execution = cx.new(|cx| {
+        Thread::new_architect_run_step(&parent_thread, "Build".into(), None, cx)
+    });
+    for child in [&architect_chat, &architect_execution] {
+        child.read_with(cx, |thread, cx| {
+            assert!(thread.is_subagent(), "retain parent lifecycle ownership");
+            assert!(!thread.is_helper_subagent());
+            assert_eq!(thread.depth(), 0, "node ownership is not helper recursion");
+            assert_eq!(thread.model().map(|model| model.id()), Some(model.id()));
+            let request = thread
+                .build_completion_request(CompletionIntent::UserPrompt, cx)
+                .expect("Architect request");
+            assert_eq!(request.intent, Some(CompletionIntent::UserPrompt));
+            assert_eq!(request.max_output_tokens, None);
+        });
+    }
     let subagent_thread = cx.new(|cx| Thread::new_subagent(&parent_thread, None, cx));
     subagent_thread.read_with(cx, |subagent_thread, cx| {
         assert!(subagent_thread.is_subagent());
+        assert!(subagent_thread.is_helper_subagent());
         assert_eq!(subagent_thread.depth(), 1);
         assert_eq!(
             subagent_thread.model().map(|model| model.id()),
@@ -7208,6 +7234,11 @@ async fn test_subagent_thread_model_selection(cx: &mut TestAppContext) {
         )
     });
 
+    let architect_chat = cx.new(|cx| Thread::new_architect_step(&parent_thread, "Plan".into(), cx));
+    architect_chat.read_with(cx, |thread, _| {
+        assert_eq!(thread.model().map(|model| model.id()), Some(parent_model.id()));
+        assert!(!thread.is_helper_subagent());
+    });
     let subagent_thread = cx.new(|cx| Thread::new_subagent(&parent_thread, None, cx));
     let explicit_selection = LanguageModelSelection {
         provider: LanguageModelProviderSetting("fake-corp".to_string()),
@@ -7297,6 +7328,7 @@ async fn test_max_subagent_depth_prevents_tool_registration(cx: &mut TestAppCont
         thread.set_subagent_context(SubagentContext {
             parent_thread_id: acp::SessionId::new("parent-id"),
             depth: MAX_SUBAGENT_DEPTH - 1,
+            kind: crate::ChildThreadKind::Helper,
         });
         thread
     });

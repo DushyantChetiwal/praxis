@@ -367,9 +367,9 @@ fn main() {
 
     let (open_listener, mut open_rx) = OpenListener::new();
 
-    let failed_single_instance_check = if *zed_env_vars::ZED_STATELESS
-        || *release_channel::RELEASE_CHANNEL == ReleaseChannel::Dev
-    {
+    // Dev is also a distributed Praxis build. Multiple processes would share
+    // its remote channel and replace each other's published window state.
+    let failed_single_instance_check = if *zed_env_vars::ZED_STATELESS {
         false
     } else {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -389,7 +389,7 @@ fn main() {
         }
     };
     if failed_single_instance_check {
-        println!("zed is already running");
+        println!("Praxis is already running");
         return;
     }
 

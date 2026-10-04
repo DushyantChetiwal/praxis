@@ -1287,19 +1287,25 @@ pub fn architect_run_readiness(thread: &Thread) -> serde_json::Value {
         }
         for (index, lane) in state.lanes.iter().enumerate() {
             match &lane.next {
-                Decision::Run(path) => apply(
-                    path,
-                    if state.in_flight.iter().any(|(active, _)| *active == index) {
-                        "running"
-                    } else {
-                        "ready"
-                    },
-                    if lane.interrupted {
-                        "Interrupted attempt; prerequisites remain satisfied"
-                    } else {
-                        "The scheduler has admitted this step"
-                    },
-                ),
+                Decision::Run(path) => {
+                    let running = state.in_flight.iter().any(|(active, _)| *active == index);
+                    apply(
+                        path,
+                        if running { "running" } else { "ready" },
+                        if lane.interrupted {
+                            "Interrupted attempt; prerequisites remain satisfied"
+                        } else {
+                            "The scheduler has admitted this step"
+                        },
+                    );
+                    for depth in 1..path.depth() {
+                        apply(
+                            &NodePath(path.as_slice()[..depth].to_vec()),
+                            if running { "running" } else { "waiting" },
+                            "Nested work remains unfinished",
+                        );
+                    }
+                },
                 Decision::Ask(_) => apply(
                     &lane.run.current(),
                     "waiting",

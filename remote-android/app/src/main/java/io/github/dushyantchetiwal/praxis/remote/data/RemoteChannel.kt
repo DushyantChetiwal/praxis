@@ -186,7 +186,20 @@ data class WindowInfo(
     val projectsLabel: String? get() = projects.filter { it.isNotBlank() }.joinToString(", ").ifEmpty { null }
 }
 
-data class Status(val device: String?, val windows: List<WindowInfo>)
+data class Status(val device: String?, val windows: List<WindowInfo>, val openFolder: Boolean = false)
+
+data class HostFolder(val name: String, val path: String)
+data class HostFolders(val host: String, val path: String, val parent: String?, val folders: List<HostFolder>, val nextOffset: Int?)
+
+fun parseHostFolders(result: JSONObject): HostFolders = HostFolders(
+    host = result.str("host").orEmpty(),
+    path = result.str("path").orEmpty(),
+    parent = result.str("parent"),
+    folders = result.arr("folders")?.objects()?.mapNotNull {
+        HostFolder(it.str("name") ?: return@mapNotNull null, it.str("path") ?: return@mapNotNull null)
+    }.orEmpty(),
+    nextOffset = result.index("next_offset"),
+)
 
 data class RemoteViewScope(val generation: Int, val viewKey: String, val revision: Long)
 
@@ -288,6 +301,7 @@ fun parseSnapshot(json: String?): Snapshot? {
 
 fun parseStatus(o: JSONObject): Status = Status(
     device = o.str("device"),
+    openFolder = o.obj("capabilities")?.bool("open_folder") == true,
     windows = o.arr("windows")?.objects()?.mapNotNull(::parseWindow).orEmpty(),
 )
 

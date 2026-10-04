@@ -4478,7 +4478,10 @@ pub(crate) mod tests {
             let queued = view
                 .send_text("wait".into(), false, window, cx)
                 .expect("queued message");
-            assert!(view.send_text("interrupt".into(), true, window, cx).is_none());
+            assert!(
+                view.send_text("interrupt".into(), true, window, cx)
+                    .is_none()
+            );
             queued
         });
         cx.run_until_parked();

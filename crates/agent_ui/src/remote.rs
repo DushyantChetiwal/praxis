@@ -22,6 +22,7 @@
 
 mod channel;
 mod crypto;
+mod folders;
 mod github;
 mod modal;
 mod store;
@@ -155,6 +156,19 @@ impl PraxisRemote {
         cx.notify();
         let http = cx.http_client();
         self._task = Some(cx.spawn(async move |this, cx| {
+            let _channel_lock = match cx.background_spawn(async { store::acquire_channel_lock() }).await {
+                Ok(lock) => lock,
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.status = RemoteStatus::Failed {
+                            reason: format!("{error:#}"),
+                            sign_in: false,
+                        };
+                        cx.notify();
+                    }).log_err();
+                    return;
+                }
+            };
             if sign_in {
                 if let Err(error) = sign_in_with_github(&this, &http, cx).await {
                     log::warn!("Praxis Remote could not sign in: {error:#}");
@@ -206,8 +220,16 @@ impl PraxisRemote {
         cx.notify();
         let http = cx.http_client();
         // Replacing the task stops the channel first.
-        self._task = Some(cx.spawn(async move |_, cx| {
-            channel::forget_everything(http, cx).await;
+        self._task = Some(cx.spawn(async move |this, cx| {
+            if let Err(error) = channel::forget_everything(http, cx).await {
+                this.update(cx, |this, cx| {
+                    this.status = RemoteStatus::Failed {
+                        reason: format!("Could not disconnect Praxis Remote: {error:#}"),
+                        sign_in: false,
+                    };
+                    cx.notify();
+                }).log_err();
+            }
         }));
     }
 
@@ -323,6 +345,21 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
     let window = args.get("window").and_then(Value::as_u64);
     let result = match op {
         "status" => Ok(status(device, cx)),
+        "host_folders" => {
+            let path = args.get("path").and_then(Value::as_str).unwrap_or_default().to_string();
+            let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+            return cx.background_spawn(async move { folders::list(&path, offset) });
+        }
+        "open_folder" => {
+            return match required(args, "path").and_then(|path| {
+                let app_state = workspace::AppState::try_global(cx)
+                    .context("Praxis is still starting. Retry opening the folder.")?;
+                Ok(folders::open(path, app_state, cx))
+            }) {
+                Ok(task) => task,
+                Err(error) => Task::ready(Err(error)),
+            };
+        }
         "threads" => with_workspace(window, cx, |workspace, _, cx| threads(workspace, cx)),
         "thread" => {
             return match with_workspace(window, cx, |workspace, _, cx| {
@@ -604,7 +641,7 @@ fn status(device: &str, cx: &App) -> Value {
             ))
         })
         .collect();
-    json!({ "device": device, "windows": windows })
+    json!({ "device": device, "windows": windows, "capabilities": { "open_folder": true } })
 }
 
 fn window_status(id: u64, active: bool, workspace: &Entity<Workspace>, cx: &App) -> Value {
@@ -1756,9 +1793,7 @@ mod tests {
             .expect("model list");
         assert_eq!(listed["current"], "visual-test-model");
         let selected = cx
-            .update(|cx| {
-                request_models(selector.clone(), Some("visual-test-model".into()), 0, cx)
-            })
+            .update(|cx| request_models(selector.clone(), Some("visual-test-model".into()), 0, cx))
             .await
             .expect("select listed model");
         assert_eq!(selected["current"], "visual-test-model");
@@ -2009,14 +2044,16 @@ mod tests {
             let snapshot = thread_snapshot(session.read(cx), None, TRANSCRIPT_BUDGET, false, cx);
             let entry = &snapshot["entries"][0];
             assert_eq!(entry["details_pending"], true);
-            assert!(entry["text"].as_str().expect("label").contains("Read a file"));
+            assert!(
+                entry["text"]
+                    .as_str()
+                    .expect("label")
+                    .contains("Read a file")
+            );
             assert!(!snapshot.to_string().contains("tool output body"));
-            let detail = transcript_detail(
-                session.read(cx).entries(),
-                &json!({ "entry_index": 0 }),
-                cx,
-            )
-            .expect("tool details");
+            let detail =
+                transcript_detail(session.read(cx).entries(), &json!({ "entry_index": 0 }), cx)
+                    .expect("tool details");
             assert!(
                 detail["text"]
                     .as_str()

@@ -1258,6 +1258,8 @@ impl PlanRun {
             if entries.is_empty() {
                 return;
             }
+            self.settled_readiness
+                .retain(|step| !step.path.as_slice().starts_with(path.as_slice()));
             self.push_frame(path.0, entries, graph);
             if self.is_finished() {
                 return;
@@ -1319,6 +1321,19 @@ impl PlanRun {
             })
             .collect();
         self.settled_readiness.extend(settled);
+        // A fork lane ends at its join, not at the end of its containing plan.
+        // Only a frame with an owned parent can complete that container.
+        if self.stack.len() > 1
+            && let Some(frame) = self.stack.last()
+        {
+            let path = frame.graph_path();
+            self.settled_readiness.retain(|step| step.path != path);
+            self.settled_readiness.push(StepReadiness {
+                path,
+                status: "completed".into(),
+                reason: "All selected nested work and routing completed".into(),
+            });
+        }
         self.stack.pop();
         if self.stack.is_empty() {
             return self.finish(RunOutcome::Completed);
@@ -1951,6 +1966,15 @@ mod tests {
         // out and carry on with the step after the one that contained it.
         assert_eq!(run.finish_step(&graph), Decision::Run(path(&["ship"])));
         assert_eq!(run.depth(), 1);
+        assert!(run.readiness(&graph).iter().any(|step| {
+            step.path == path(&["handlers"]) && step.status == "completed"
+        }));
+        let restored: PlanRun = serde_json::from_value(
+            serde_json::to_value(&run).expect("checkpoint"),
+        ).expect("restore checkpoint");
+        assert!(restored.readiness(&graph).iter().any(|step| {
+            step.path == path(&["handlers"]) && step.status == "completed"
+        }));
     }
 
     #[test]

@@ -1074,11 +1074,7 @@ impl ArchitectPane {
         let settled = all_ordered_nodes.iter().filter(|node| node.locked).count();
         let completed = all_ordered_nodes
             .iter()
-            .filter(|node| {
-                node.result
-                    .as_ref()
-                    .is_some_and(|result| !result.summary.trim().is_empty())
-            })
+            .filter(|node| self.node_is_complete(node))
             .count();
         let draft = all_ordered_nodes.len().saturating_sub(settled);
         let has_steps = !all_ordered_nodes.is_empty();
@@ -1296,16 +1292,15 @@ impl ArchitectPane {
                                         || self.in_bulk_selection(&node.id);
                                     let is_running = running.contains(&node.id);
                                     let is_failed = failed_node == Some(&node.id);
-                                    let is_complete = node
-                                        .result
-                                        .as_ref()
-                                        .is_some_and(|result| !result.summary.trim().is_empty());
+                                    let is_complete = self.node_is_complete(node);
                                     let (state, state_color) = if is_running {
                                         ("running", Color::Info)
                                     } else if is_failed {
                                         ("failed", Color::Error)
                                     } else if is_complete {
                                         ("completed", Color::Success)
+                                    } else if self.node_run_status(&node.id) == Some("skipped") {
+                                        ("skipped", Color::Muted)
                                     } else if node.locked {
                                         ("settled", Color::Success)
                                     } else if run_active {
@@ -1900,12 +1895,10 @@ impl ArchitectPane {
             let active = running.contains(&edge.to);
             let completed = graph
                 .node(&edge.from)
-                .and_then(|node| node.result.as_ref())
-                .is_some_and(|result| !result.summary.trim().is_empty())
+                .is_some_and(|node| self.node_is_complete(node))
                 && graph
                     .node(&edge.to)
-                    .and_then(|node| node.result.as_ref())
-                    .is_some_and(|result| !result.summary.trim().is_empty());
+                    .is_some_and(|node| self.node_is_complete(node));
             let color = if selected {
                 selected_color
             } else if active {
@@ -2457,14 +2450,17 @@ impl ArchitectPane {
         let expanded = self.expanded.contains(&node.id);
         // A step that has finished is worth reading as finished before anything
         // else about it, so it is marked in the title rather than in the chips.
-        let done = has_summary && !running;
-        let queued = run_active && !running && !done && !failed;
+        let done = self.node_is_complete(&node) && !running;
+        let skipped = self.node_run_status(&node.id) == Some("skipped");
+        let queued = run_active && !running && !done && !failed && !skipped;
         let status = if running {
             "running"
         } else if failed {
             "failed"
         } else if done {
             "completed"
+        } else if skipped {
+            "skipped"
         } else if queued {
             "queued"
         } else if node.locked {
@@ -3525,6 +3521,12 @@ mod tests {
         });
         view.update(cx, |_, cx| cx.notify());
         cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            let pane = view.pane.read(cx);
+            let parent = pane.graph(cx).expect("graph").node(&NodeId::from("parent")).expect("parent");
+            assert!(parent.result.is_none());
+            assert!(pane.node_is_complete(parent), "nested completion is independent of a summary");
+        });
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
             assert!(window.painted_quads().iter().any(|quad| {

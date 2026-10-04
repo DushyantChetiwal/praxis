@@ -14,7 +14,8 @@
 - [x] Verify the current branch and preserve the existing uncommitted mobile work.
 - [x] Verify the root README review notice is present.
 - [x] Confirm the branch and PR handling: reuse `fix-loading-thread-selections`; create one new PR as explicitly approved.
-- [ ] Review the target branch against current main without overwriting other work.
+- [x] Review the target branch against current main without overwriting other work. Merged `origin/main` into the existing branch after committing the previously uncommitted work.
+- Draft PR: https://github.com/DushyantChetiwal/praxis/pull/38
 
 ## Desktop
 
@@ -25,7 +26,7 @@
 - [ ] Preserve supported continuation/compaction, actual provider limits, permissions, and execution safeguards.
 - [ ] Add regression coverage for long main conversations and helper-only policy isolation.
 
-Assessment: no hard-coded 28k work limit has yet been confirmed in the inspected agent code. Do not remove unrelated byte or resource limits based on that number alone.
+Assessment: no hard-coded 28k task-wide limit was found. Main completion requests do not set an output-token override. The context-limit cancellation wrapper is in `NativeSubagentHandle::send`, not the coordinator or Architect runner. Added guidance against invented task-wide budgets and regression assertions that main/Architect requests do not receive helper completion intent or an artificial output override. CI validation pending.
 
 ### D2 — Node-chat and node-execution capabilities
 
@@ -35,7 +36,7 @@ Assessment: no hard-coded 28k work limit has yet been confirmed in the inspected
 - [ ] Preserve intentional planning-mode and permission restrictions in deliberation chats.
 - [ ] Test main, node-chat, node-execution, and explicit-helper roles independently, including reload/resume.
 
-Assessment: both Architect constructors reuse `Thread::new_subagent`; execution explicitly restores the coordinator's model. Classification and inherited policy require review rather than assuming this proves a numeric cap.
+Implementation in progress: separate persisted child roles now distinguish helpers, Architect chats, and Architect execution without losing parent ownership. Node chats no longer inherit the helper model default; node ownership does not consume helper recursion depth. Main/node request classification and model inheritance have regression coverage awaiting CI.
 
 ### D3 — Nested-plan completion
 
@@ -55,7 +56,7 @@ Assessment: scheduler completion can advance out of a subplan while node renderi
 - [ ] Ensure opening another window never unpairs the phone or disconnects existing sessions.
 - [ ] Test multiple windows and running conversations before, during, and after opening another folder.
 
-Assessment: the disconnect is reported, not yet reproduced. The previous launcher check established only desktop-process liveness, not mobile continuity. Android currently forgets pairing when received device metadata omits the phone; determine whether that path was involved.
+Concrete cause found: normal Dev launches bypassed the app single-instance guard, so the CLI could spawn another process publishing to the same remote gist. Removed that exception; added a standard-library OS file lock around remote ownership and destructive local operations. Android no longer deletes a pairing key or leaves the active device merely because remote metadata/refusal is inconsistent. Existing sessions are preserved while pairing is re-confirmed. Regression validation pending.
 
 ### M2 — Open host folders from the phone
 
@@ -118,4 +119,8 @@ Assessment: desktop queue logic already supports steering and immediate dispatch
 
 ## Delivery evidence
 
-Pending: target PR confirmation, implementation, CI validation, and merge.
+- PR: https://github.com/DushyantChetiwal/praxis/pull/38 (draft, same branch).
+- Initial pushed head: `8c2cfc802306b9b1b8ad33a7e732c0f8744e5287`.
+- Initial Android validation: https://github.com/DushyantChetiwal/praxis/actions/runs/37195385984 — passed; this is not the final implementation.
+- Initial desktop validation: https://github.com/DushyantChetiwal/praxis/actions/runs/37195385972 — formatting failures identified and addressed; integration validation still running when inspected.
+- Further fixes, final-head CI, readiness review, and merge remain pending.

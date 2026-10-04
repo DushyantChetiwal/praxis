@@ -123,6 +123,20 @@ jobs:
           .github/workflows/android_remote.yml
           --check
 
+      - name: Prepare Rust formatting corrections
+        if: failure()
+        run: |
+          cargo fmt --all
+          git --no-pager diff --binary > rust-format.patch
+
+      - name: Upload Rust formatting corrections
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-format
+          path: rust-format.patch
+          if-no-files-found: ignore
+
   architect-tests:
     name: ${{ matrix.name }}
     env:
@@ -237,6 +251,8 @@ jobs:
 
       - name: Test Architect scheduling and durable history
         run: |
+          cargo test --locked -p agent --lib test_subagent_thread_
+          cargo test --locked -p agent --lib test_subagent_context_
           cargo test --locked -p agent --lib architect_runner::checkpoint_tests::
 
           cargo test --locked -p agent --lib internal_tests::architect_persistence_tests::

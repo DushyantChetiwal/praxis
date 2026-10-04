@@ -5,6 +5,7 @@ import io.github.dushyantchetiwal.praxis.remote.data.Device
 import io.github.dushyantchetiwal.praxis.remote.data.DirEntry
 import io.github.dushyantchetiwal.praxis.remote.data.FileContent
 import io.github.dushyantchetiwal.praxis.remote.data.ModelInfo
+import io.github.dushyantchetiwal.praxis.remote.data.HostFolders
 import io.github.dushyantchetiwal.praxis.remote.data.ONLINE_THRESHOLD_MS
 import io.github.dushyantchetiwal.praxis.remote.data.Permission
 import io.github.dushyantchetiwal.praxis.remote.data.Snapshot
@@ -134,6 +135,14 @@ data class DownloadState(
     val fraction: Float? get() = size?.let { total -> if (total == 0L) 1f else (received.toFloat() / total).coerceIn(0f, 1f) }
 }
 
+data class FolderBrowserState(
+    val visible: Boolean = false,
+    val loading: Boolean = false,
+    val opening: Boolean = false,
+    val listing: HostFolders? = null,
+    val error: String? = null,
+)
+
 data class Banner(val text: String, val error: Boolean)
 
 /** Everything about the selected device, mirroring the web app's state. */
@@ -152,6 +161,7 @@ data class DeviceUi(
     val threadError: String? = null,
     val modeOverride: ModeOverride? = null,
     val models: ModelsState = ModelsState(),
+    val folderBrowser: FolderBrowserState = FolderBrowserState(),
     val tab: Tab = Tab.Chat,
     val threads: ThreadsState = ThreadsState(),
     val files: FilesState = FilesState(),

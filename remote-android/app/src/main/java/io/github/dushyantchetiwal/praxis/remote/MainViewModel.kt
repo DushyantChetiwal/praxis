@@ -18,6 +18,7 @@ import io.github.dushyantchetiwal.praxis.remote.data.DetailRequest
 import io.github.dushyantchetiwal.praxis.remote.data.EntryDetail
 import io.github.dushyantchetiwal.praxis.remote.data.ModelOption
 import io.github.dushyantchetiwal.praxis.remote.data.parseModels
+import io.github.dushyantchetiwal.praxis.remote.data.parseHostFolders
 import io.github.dushyantchetiwal.praxis.remote.data.DeviceFlow
 import io.github.dushyantchetiwal.praxis.remote.data.DirEntry
 import io.github.dushyantchetiwal.praxis.remote.data.DownloadException
@@ -416,24 +417,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun withinPairingGrace(channel: String): Boolean =
         now() - (store.pairedAt(channel) ?: 0L) < PAIR_GRACE_MS
 
-    /**
-     * Drops the key for a computer that no longer lists this phone (it was
-     * unpaired there); returns whether the phone is still paired.
-     */
+    /** A stale or competing publisher must not erase the only key that can reconnect. */
     private fun checkPairing(device: Device): Boolean {
         if (store.keyFor(device.channel) == null) return false
-        if (isPaired(device)) return true
-        onUnpaired(device, str(R.string.unpaired_by_computer, device.name))
+        if (isPaired(device)) {
+            setBanner("pairing", null)
+            setDevices { copy(paired = paired + device.channel, unpairedByComputer = unpairedByComputer - device.channel) }
+            return true
+        }
+        setBanner("pairing", str(R.string.banner_pairing_unconfirmed, device.name), error = true)
         return false
     }
 
-    /** Forgets the pairing with [device] after the computer removed or refused this phone. */
+    /** Refusal disables commands, but only explicit unpair/sign-out destroys the local key. */
     private fun onUnpaired(device: Device, text: String) {
-        store.forgetPairing(device.channel)
         setDevices {
             copy(paired = paired - device.channel, unpairedByComputer = unpairedByComputer + device.channel)
         }
-        if (d.device?.channel == device.channel) leaveDevice()
+        if (d.device?.channel == device.channel) {
+            setBanner("pairing", str(R.string.banner_pairing_unconfirmed, device.name), error = true)
+        }
         message(text)
     }
 
@@ -612,6 +615,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 threadError = null,
                 modeOverride = null,
                 models = ModelsState(),
+                folderBrowser = FolderBrowserState(),
                 threads = ThreadsState(),
                 files = FilesState(),
                 outbox = emptyList(),
@@ -971,6 +975,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 edit { copy(outbox = outbox.map { if (it.id == item.id) it.copy(sendingNow = false) else it }) }
                 report(error, str(R.string.label_message_not_sent))
             }
+        }
+    }
+
+    fun browseHostFolder(path: String = "", more: Boolean = false) {
+        if (d.folderBrowser.loading || d.folderBrowser.opening) return
+        val scope = requestScope()
+        val previous = d.folderBrowser.listing.takeIf { more && it?.path == path }
+        val offset = if (more) previous?.nextOffset ?: return else 0
+        edit { copy(folderBrowser = FolderBrowserState(visible = true, loading = true, listing = previous)) }
+        viewModelScope.launch {
+            try {
+                val result = praxis("host_folders", JSONObject().put("path", path).put("offset", offset), scope)
+                    ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+                if (scope != requestScope() || !d.folderBrowser.visible) return@launch
+                val page = parseHostFolders(result)
+                val listing = if (previous == null) page else page.copy(folders = (previous.folders + page.folders).distinctBy { it.path })
+                edit { copy(folderBrowser = FolderBrowserState(visible = true, listing = listing)) }
+            } catch (error: ApiException) {
+                if (scope == requestScope() && d.folderBrowser.visible) {
+                    edit { copy(folderBrowser = folderBrowser.copy(loading = false, error = error.message)) }
+                }
+            }
+        }
+    }
+
+    fun dismissFolderBrowser() {
+        edit { copy(folderBrowser = FolderBrowserState()) }
+    }
+
+    fun openHostFolder(path: String) {
+        if (path.isBlank() || d.folderBrowser.loading || d.folderBrowser.opening) return
+        val scope = requestScope()
+        edit { copy(folderBrowser = folderBrowser.copy(opening = true, error = null)) }
+        viewModelScope.launch {
+            val ok = act("open_folder", JSONObject().put("path", path), str(R.string.folder_open_failed), scope)
+            if (scope != requestScope()) return@launch
+            edit { copy(folderBrowser = folderBrowser.copy(opening = false, visible = !ok)) }
+            if (ok) message(str(R.string.folder_opened))
         }
     }
 
