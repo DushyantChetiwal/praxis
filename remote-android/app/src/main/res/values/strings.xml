@@ -207,6 +207,9 @@
     <string name="outbox_sending">Sending…</string>
     <string name="outbox_queued">Queued</string>
     <string name="outbox_sent">Sent</string>
+    <string name="outbox_unconfirmed">Delivery unconfirmed — check before retrying</string>
+    <string name="action_restore_draft">Restore draft</string>
+    <string name="label_message_unconfirmed">Couldn’t confirm delivery; message retained for review</string>
     <string name="composer_placeholder">Message Praxis…</string>
     <string name="toast_queued">Queued — Praxis will pick it up after the current turn.</string>
     <string name="toast_no_longer_queued">That message is no longer queued. Refreshing the conversation.</string>

@@ -170,7 +170,9 @@ fun parseDetailChunk(result: JSONObject): DetailChunk? {
     val next = result.byteOffset("next_offset") ?: return null
     val total = result.byteOffset("total_bytes") ?: return null
     if (result.opt("done") != (next == total)) return null
-    return DetailChunk(offset, next, total, result.str("version") ?: return null, result.str("text") ?: return null)
+    val version = result.opt("version") as? String ?: return null
+    val text = result.opt("text") as? String ?: return null
+    return DetailChunk(offset, next, total, version, text)
 }
 
 data class QuestionHeader(val id: String, val sessionId: String, val title: String, val sessionTitle: String? = null) {

@@ -33,7 +33,9 @@ There is no repository to create and nothing to install on GitHub.
 - **Queue controls:** normal sending queues a message while Praxis is working. **Steer** requests the next supported
   turn boundary when that message reaches the front. **Send Now** interrupts the current turn. Tap the queued count
   to inspect and control the desktop queue, including messages not created on this phone. Other queued messages
-  remain intact. Delivery still uses GitHub polling and is not instantaneous.
+  remain intact. Delivery still uses GitHub polling and is not instantaneous. An unconfirmed send remains in the
+  current window's outbox for review instead of replacing another draft. **Restore draft** only restores to the same
+  conversation with an empty composer; it does not resend. Check the conversation before retrying an uncertain send.
 - **Conversation headers:** messages, tools, and Thinking start collapsed. Expanding fetches that body's first chunk;
   **Load more content** retrieves the rest without permanent remote truncation. Parsing runs off the UI thread and
   body blocks render lazily. The loaded text is a snapshot; **Refresh details** includes newer output. Closed bodies

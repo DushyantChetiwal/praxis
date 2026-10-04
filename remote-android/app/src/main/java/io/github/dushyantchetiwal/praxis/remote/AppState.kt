@@ -79,7 +79,7 @@ data class AppState(
     val checkingUpdate: Boolean = false,
 )
 
-enum class OutboxState { Sending, Queued, Sent }
+enum class OutboxState { Sending, Queued, Sent, Unconfirmed }
 
 /** A message shown optimistically until it appears in the transcript. */
 data class OutboxItem(
@@ -93,12 +93,16 @@ data class OutboxItem(
     val sendingNow: Boolean = false,
     val steer: Boolean = false,
     val fingerprint: String = io.github.dushyantchetiwal.praxis.remote.data.transcriptFingerprint(text),
-)
+) {
+    fun canRestoreDraft(activeSession: String?, draft: String): Boolean =
+        state == OutboxState.Unconfirmed && session == activeSession && draft.isBlank()
+}
 
 internal fun reconcileOutbox(items: List<OutboxItem>, thread: ThreadView?, queued: Int, now: Long, expiryMillis: Long): List<OutboxItem> {
     val matched = mutableSetOf<Int>()
     return items.mapNotNull { item ->
         if (item.doneAt == 0L || (item.session != null && item.session != thread?.sessionId)) return@mapNotNull item
+        if (item.state == OutboxState.Unconfirmed && item.session == null) return@mapNotNull item
         val base = if (item.session == thread?.sessionId) item.baseIndex else -1
         val candidates = thread?.entries.orEmpty().filter {
             it.role == "user" && it.index > base &&
@@ -111,7 +115,7 @@ internal fun reconcileOutbox(items: List<OutboxItem>, thread: ThreadView?, queue
         }
         val consumed = candidates.filter { it.index in matched }.maxOfOrNull { it.index }
         val retained = if (consumed == null) item else item.copy(session = thread?.sessionId, baseIndex = consumed)
-        val expired = now - item.doneAt > expiryMillis
+        val expired = item.state != OutboxState.Unconfirmed && now - item.doneAt > expiryMillis
         retained.takeUnless { expired && (item.state != OutboxState.Queued || queued == 0) }
     }
 }

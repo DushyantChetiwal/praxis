@@ -835,10 +835,16 @@ private fun OutboxBubble(item: OutboxItem, canSendNow: Boolean, canSteer: Boolea
             OutboxState.Sending -> R.string.outbox_sending
             OutboxState.Queued -> if (item.steer) R.string.outbox_steering else R.string.outbox_queued
             OutboxState.Sent -> R.string.outbox_sent
+            OutboxState.Unconfirmed -> R.string.outbox_unconfirmed
         },
     )
     Column(horizontalAlignment = Alignment.End, modifier = Modifier.fillMaxWidth()) {
         UserBubble(item.text, Modifier.alpha(0.7f), label)
+        if (item.state == OutboxState.Unconfirmed) {
+            TextButton(onClick = { vm.restorePromptDraft(item) }, enabled = vm.canRestorePromptDraft(item)) {
+                Text(stringResource(R.string.action_restore_draft))
+            }
+        }
         if (canSendNow && item.state == OutboxState.Queued && item.queueId != null) {
             Row {
                 if (canSteer) TextButton(onClick = { vm.steerQueuedMessage(item) }, enabled = !item.sendingNow) {

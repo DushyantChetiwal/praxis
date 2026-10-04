@@ -918,35 +918,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val text = composer.trim()
         if (text.isEmpty() || d.device == null) return
         val scope = requestScope()
+        val session = d.currentWindow()?.thread?.sessionId
         val args = windowArgs {
             put("text", text)
             put("send_now", sendNow)
             put("steer", steer)
-            d.currentWindow()?.thread?.sessionId?.let { put("session_id", it) }
+            session?.let { put("session_id", it) }
         }
         val item = OutboxItem(
             id = ++outboxSeq,
             text = text,
             state = OutboxState.Sending,
             doneAt = 0L,
-            session = d.thread?.sessionId,
-            baseIndex = d.thread?.entries?.maxOfOrNull { it.index } ?: -1,
+            session = session,
+            baseIndex = d.thread?.takeIf { it.sessionId == session }?.entries?.maxOfOrNull { it.index } ?: -1,
         )
         edit { copy(outbox = outbox + item) }
         composer = ""
         viewModelScope.launch {
             try {
                 val result = praxis("prompt", args, scope)
+                    ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
                 if (scope != requestScope()) return@launch
-                val queued = result?.optBoolean("queued") == true
+                val queued = result.optBoolean("queued")
                 edit {
                     copy(outbox = outbox.map {
                         if (it.id == item.id) it.copy(
                             state = if (queued) OutboxState.Queued else OutboxState.Sent,
                             doneAt = now(),
-                            session = result?.str("session_id") ?: it.session,
-                            queueId = result?.str("queue_id"),
-                            steer = result?.optBoolean("steer") == true,
+                            session = result.str("session_id") ?: it.session,
+                            queueId = result.str("queue_id"),
+                            steer = result.optBoolean("steer"),
                         ) else it
                     })
                 }
@@ -954,11 +956,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 requestPoll()
             } catch (e: ApiException) {
                 if (scope != requestScope()) return@launch
-                edit { copy(outbox = outbox.filterNot { it.id == item.id }) }
-                if (composer.isBlank()) composer = text
-                report(e, str(R.string.label_message_not_sent))
+                edit { copy(outbox = outbox.map {
+                    if (it.id == item.id) it.copy(state = OutboxState.Unconfirmed, doneAt = now()) else it
+                }) }
+                report(e, str(R.string.label_message_unconfirmed))
             }
         }
+    }
+
+    fun canRestorePromptDraft(item: OutboxItem): Boolean = d.outbox.any {
+        it.id == item.id && it.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)
+    }
+
+    fun restorePromptDraft(item: OutboxItem) {
+        val retained = d.outbox.firstOrNull { it.id == item.id } ?: return
+        if (!retained.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)) return
+        composer = retained.text
+        edit { copy(outbox = outbox.filterNot { it.id == retained.id }) }
     }
 
     fun sendQueuedNow(item: OutboxItem) {
@@ -1206,8 +1220,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     body = body.append(chunk)
                         ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
                 }
-                val form = withContext(Dispatchers.Default) { parseQuestionForm(JSONObject(body.chunks.joinToString("") { it.text })) }
-                    ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+                val form = withContext(Dispatchers.Default) {
+                    try {
+                        parseQuestionForm(JSONObject(body.chunks.joinToString("") { it.text }))
+                    } catch (_: org.json.JSONException) {
+                        null
+                    }
+                } ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
                 if (request == questionRequest && scope == requestScope()) edit { copy(question = question.copy(loading = false, form = form)) }
             } catch (error: ApiException) {
                 if (request == questionRequest && scope == requestScope()) {
@@ -1242,7 +1261,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val header = state.header ?: return
         val form = state.form ?: return
         if (state.sending || state.loading) return
-        val content = if (decline) null else questionAnswerContent(form, state.selected, state.freeform) ?: return
+        val content = questionAnswerContent(form, state.selected, state.freeform)
+        if (!decline && content == null) return
         val request = questionRequest
         val scope = requestScope()
         val args = windowArgs {

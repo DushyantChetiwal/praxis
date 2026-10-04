@@ -278,27 +278,51 @@ mod tests {
             )
         });
         let (cancelled_id, cancelled_response) = thread.update(cx, |thread, cx| {
-            thread.request_elicitation_with_id(request.clone(), cx).expect("cancelled question")
+            thread
+                .request_elicitation_with_id(request.clone(), cx)
+                .expect("cancelled question")
         });
-        thread.update(cx, |thread, cx| thread.cancel_elicitation(&cancelled_id, cx));
+        thread.update(cx, |thread, cx| {
+            thread.cancel_elicitation(&cancelled_id, cx)
+        });
         args["question_id"] = json!(cancelled_id.0.as_ref());
         assert!(cx.update(|cx| answer(&thread, &args, cx)).is_err());
-        assert!(matches!(cancelled_response.await.action, acp::ElicitationAction::Cancel));
+        assert!(matches!(
+            cancelled_response.await.action,
+            acp::ElicitationAction::Cancel
+        ));
 
         let recommendation = acp::CreateElicitationResponse::new(acp::ElicitationAction::Accept(
-            acp::ElicitationAcceptAction::new().content(std::collections::BTreeMap::from([
-                ("answer".into(), acp::ElicitationContentValue::String("default".into())),
-            ])),
+            acp::ElicitationAcceptAction::new().content(std::collections::BTreeMap::from([(
+                "answer".into(),
+                acp::ElicitationContentValue::String("default".into()),
+            )])),
         ));
         let (timed_id, timed_response) = thread.update(cx, |thread, cx| {
-            thread.request_question_with_timeout(request, recommendation, "default".into(), || false, cx).expect("timed question")
+            thread
+                .request_question_with_timeout(
+                    request,
+                    recommendation,
+                    "default".into(),
+                    || false,
+                    cx,
+                )
+                .expect("timed question")
         });
         args["question_id"] = json!(timed_id.0.as_ref());
-        let content = cx.update(|cx| content(&thread, &args, cx)).expect("phone form");
+        let content = cx
+            .update(|cx| content(&thread, &args, cx))
+            .expect("phone form");
         let form: Value = serde_json::from_str(&content).expect("question form JSON");
         assert_eq!(form["auto_answer_paused"], true);
-        assert!(thread.read_with(cx, |thread, _| thread.question_interaction_flag(&timed_id).expect("interaction flag").get()));
-        cx.update(|cx| answer(&thread, &args, cx)).expect("manual answer wins");
+        assert!(thread.read_with(cx, |thread, _| {
+            thread
+                .question_interaction_flag(&timed_id)
+                .expect("interaction flag")
+                .get()
+        }));
+        cx.update(|cx| answer(&thread, &args, cx))
+            .expect("manual answer wins");
         let (_, timed_out) = timed_response.await;
         assert!(!timed_out);
     }

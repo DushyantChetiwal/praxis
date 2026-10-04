@@ -11,6 +11,21 @@ import org.junit.Test
 
 class TranscriptTest {
     @Test
+    fun unconfirmedMessagesStayRecoverableWithoutOverwritingOtherDrafts() {
+        val item = OutboxItem(1, "original", OutboxState.Unconfirmed, 1L, "root", -1)
+        assertTrue(item.canRestoreDraft("root", ""))
+        assertFalse(item.canRestoreDraft("other", ""))
+        assertFalse(item.canRestoreDraft("root", "new draft"))
+        assertFalse(item.copy(state = OutboxState.Queued).canRestoreDraft("root", ""))
+        val thread = ThreadView("root", null, "idle", 0, emptyList())
+        assertEquals(listOf(item), reconcileOutbox(listOf(item), thread, 0, 1_000_000L, 90_000L))
+        val delivered = Entry(0, "user", "original", null)
+        assertTrue(reconcileOutbox(listOf(item), thread.copy(total = 1, entries = listOf(delivered)), 0, 2L, 90_000L).isEmpty())
+        val unassigned = item.copy(session = null)
+        assertEquals(listOf(unassigned), reconcileOutbox(listOf(unassigned), thread.copy(total = 1, entries = listOf(delivered)), 0, 2L, 90_000L))
+    }
+
+    @Test
     fun identicalQueuedMessagesDoNotReuseOneDeliveryAcrossPolls() {
         val first = OutboxItem(1, "same", OutboxState.Queued, 1L, "root", -1)
         val second = first.copy(id = 2)
@@ -100,6 +115,8 @@ class TranscriptTest {
             assertEquals(null, parseDetailChunk(JSONObject(base).put("offset", invalid)))
         }
         assertEquals(null, parseDetailChunk(JSONObject(base).put("done", false)))
+        assertEquals(null, parseDetailChunk(JSONObject(base).put("text", 123)))
+        assertEquals(null, parseDetailChunk(JSONObject(base).put("version", 1)))
     }
 
     @Test
