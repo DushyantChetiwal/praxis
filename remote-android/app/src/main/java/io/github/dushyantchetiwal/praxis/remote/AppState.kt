@@ -95,6 +95,27 @@ data class OutboxItem(
     val fingerprint: String = io.github.dushyantchetiwal.praxis.remote.data.transcriptFingerprint(text),
 )
 
+internal fun reconcileOutbox(items: List<OutboxItem>, thread: ThreadView?, queued: Int, now: Long, expiryMillis: Long): List<OutboxItem> {
+    val matched = mutableSetOf<Int>()
+    return items.mapNotNull { item ->
+        if (item.doneAt == 0L || (item.session != null && item.session != thread?.sessionId)) return@mapNotNull item
+        val base = if (item.session == thread?.sessionId) item.baseIndex else -1
+        val candidates = thread?.entries.orEmpty().filter {
+            it.role == "user" && it.index > base &&
+                (if (it.fingerprint != null) it.fingerprint == item.fingerprint else it.text.trim() == item.text)
+        }
+        val delivered = candidates.firstOrNull { it.index !in matched }
+        if (delivered != null) {
+            matched += delivered.index
+            return@mapNotNull null
+        }
+        val consumed = candidates.filter { it.index in matched }.maxOfOrNull { it.index }
+        val retained = if (consumed == null) item else item.copy(session = thread?.sessionId, baseIndex = consumed)
+        val expired = now - item.doneAt > expiryMillis
+        retained.takeUnless { expired && (item.state != OutboxState.Queued || queued == 0) }
+    }
+}
+
 data class ModelsState(
     val session: String? = null,
     val loading: Boolean = false,

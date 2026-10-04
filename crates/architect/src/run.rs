@@ -1983,6 +1983,57 @@ mod tests {
     }
 
     #[test]
+    fn reentering_a_container_clears_its_previous_completion() {
+        let mut graph = nested_graph();
+        let repeat = graph.connect("ship", "handlers");
+        graph.edges.iter_mut().find(|edge| edge.id == repeat).expect("repeat").max_repeats = Some(1);
+        let mut run = PlanRun::start(&graph).expect("nested loop");
+        run.finish_step(&graph);
+        run.finish_step(&graph);
+        run.finish_step(&graph);
+        assert!(run.readiness(&graph).iter().any(|step| step.path == path(&["handlers"]) && step.status == "completed"));
+        run.finish_step(&graph);
+        assert_eq!(run.current(), path(&["handlers", "parse"]));
+        assert!(!run.readiness(&graph).iter().any(|step| step.path == path(&["handlers"]) && step.status == "completed"));
+        run.cancel();
+        assert!(!run.readiness(&graph).iter().any(|step| step.path == path(&["handlers"]) && step.status == "completed"));
+    }
+
+    #[test]
+    fn fork_lanes_do_not_finish_containers_before_the_join() {
+        let mut inner = ArchitectGraph::default();
+        for id in ["start", "left", "right", "join"] {
+            inner.add_node(ArchitectNode::new(id, id));
+        }
+        inner.connect("start", "left");
+        inner.connect("start", "right");
+        inner.connect("left", "join");
+        inner.connect("right", "join");
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.subplan = Some(Box::new(inner));
+        let mut middle = ArchitectGraph::default();
+        middle.add_node(parent);
+        let mut outer = ArchitectNode::new("outer", "Outer");
+        outer.subplan = Some(Box::new(middle));
+        let mut graph = ArchitectGraph::default();
+        graph.add_node(outer);
+        graph.lock_all();
+        let mut run = PlanRun::start(&graph).expect("nested fork");
+        assert!(matches!(run.finish_step(&graph), Decision::Fork { .. }));
+        let mut lanes = run.fork_lanes(&graph);
+        assert_eq!(lanes.len(), 2);
+        for lane in &mut lanes {
+            assert_eq!(lane.finish_step(&graph), Decision::Done(RunOutcome::Completed));
+            assert!(!lane.readiness(&graph).iter().any(|step| step.path == path(&["outer", "parent"]) && step.status == "completed"));
+        }
+        assert_eq!(run.join(&graph), Decision::Run(path(&["outer", "parent", "join"])));
+        assert_eq!(run.finish_step(&graph), Decision::Done(RunOutcome::Completed));
+        for container in [path(&["outer"]), path(&["outer", "parent"])] {
+            assert!(run.readiness(&graph).iter().any(|step| step.path == container && step.status == "completed"));
+        }
+    }
+
+    #[test]
     fn the_breadcrumb_shows_every_level_in_progress() {
         let graph = nested_graph();
         let mut run = PlanRun::start(&graph).unwrap();

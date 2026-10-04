@@ -114,9 +114,9 @@ The computer refuses a request when the comment or its `sent_at` is more than fi
 
 Plain-text sizes are capped so that every comment fits GitHub's 65,536-character limit: 46,000 bytes for an answer. Larger answers become an error.
 
-### Model selection and Send Now
+### Model selection and queued messages
 
-`status.windows[].thread` advertises `model_selection`, `model` (the opaque current model ID), `model_name`, and `send_now`.
+`status.windows[].thread` advertises `model_selection`, `model` (the opaque current model ID), `model_name`, `send_now`, `queue_management`, and `steering`.
 Clients hide the new controls when these flags are absent. Model and Send Now requests require the active root's
 `session_id` and may include `window`; a different active root is rejected rather than silently targeted.
 
@@ -126,11 +126,18 @@ Clients hide the new controls when these flags are absent. Model and Send Now re
 - `model`: accepts `model` from that list, validates availability, and awaits the session selector's result. Errors
   are returned to the phone. Selection follows desktop behavior, including the native selector's saved default.
   It does not replace models already assigned to running Architect steps.
-- `prompt`: optionally accepts `session_id` and `send_now: true`. Normal sending returns `queued`, optional
-  `queue_id`, and `session_id`. Send Now uses the desktop queue/cancellation state machine to interrupt the current
-  turn; other queue entries are preserved.
+- `prompt`: optionally accepts `session_id` and either `send_now: true` or `steer: true`, never both. Normal sending
+  returns `queued`, `steer`, optional `queue_id`, and `session_id`. Send Now uses the desktop queue/cancellation state
+  machine to interrupt the current turn; other queue entries are preserved.
 - `send_now`: accepts the acknowledged `session_id` and `queue_id`. It sends that queue entry, not a copy of the
   phone's text. A missing ID returns `sent: false` and never resends a delivered or removed message.
+- `queue`: requires the root `session_id` and returns bounded pages of `entries` (`id`, text preview, `steer`),
+  `total`, and `next_offset`. Queue IDs are opaque UUIDs, not row indices or counters reused after reopening a view.
+- `steer`: sets the identified entry's `steer` boolean explicitly and reports `found`. It does not toggle blindly
+  or reorder the queue. Only the front message's flag controls the next supported turn boundary. This operation is
+  exposed only for agents with native steering support.
+- `queue_content`: retrieves the full queued content by `session_id` and `queue_id`, using the body-chunk contract
+  below. A removed message cannot be fetched or recreated by an old action.
 
 These are additive version-2 extensions. They do not change pairing, encryption, replay protection, or transport
 cadence. Commands still traverse the serialized GitHub comment channel; Send Now is not a low-latency push channel.
@@ -162,26 +169,74 @@ The root and live step transcripts share the 36,000-byte budget, including JSON 
 
 `status.windows[].architect.steps` counts every node in the owning root graph recursively, including subplan containers, matching the desktop's deep step count. It does not count only the current canvas level. `step_number` remains the run's execution visit number, including retries and loops; it can exceed `steps`. Android displays **Visit 9 · 5 steps in plan**, not a progress fraction. These counts measure different things: the visit number is not a completed-step count, and the root total includes subplan containers.
 
-### On-demand tool and thinking details
+### Header pages and lossless body chunks
 
-New clients send `include_details: false` with `watch` and paged `thread` requests. The default is `true` for older
-clients. Compact entries retain tool labels, statuses, source indices, and assistant text. Tool entries and reasoning
-parts carry `details_pending: true`; reasoning text is empty, without serializing the thinking body. Such parts must
-not be discarded just because their text is blank. Pending details are omitted before the transcript budget is
-applied, leaving more room for answers. Only actual ACP Thought chunks create Thinking placeholders.
+New clients send `include_details: false` with `watch` and paged `thread` requests. The default remains `true` for
+older clients. Compact entries carry labels/previews, statuses, source indices, and `details_pending: true`, not
+full message bodies. This applies to user messages, assistant responses, tools, and provider-supplied thinking.
+Thinking placeholders may have empty text and must not be discarded. Only actual ACP Thought chunks create them.
+If one entry has too many part headers for a page, an aggregate header keeps its entire ordered body addressable;
+the body is not shortened to fit the header. User headers include an optional SHA-256/base64 `fingerprint` of their
+trimmed text so the phone can reconcile its outbox without downloading that text again.
 
-When the user expands an arrow, send `thread` with `session_id`, `entry_index`, optional `window`, and `part_index`
-for reasoning. The result is `{text, truncated}` rather than a thread page. Indices must be non-negative integers;
-non-thinking assistant parts cannot be requested through this endpoint. Tool details include the desktop's Markdown
-representation. Each detail is bounded to 40,000 escaped JSON bytes and marks truncation explicitly. Completed
-Architect steps use the same ownership-checked loader as history pages.
+On expansion, send `thread` with `session_id`, `entry_index`, `chunked: true`, `offset: 0`, optional `window`, and
+optional `part_index` for an individual assistant or thinking part. Without a part index, the whole entry is
+retrievable, including ordered thinking/response sections in an aggregate entry. Completed Architect steps use
+the same ownership-checked loader as history pages.
 
-Android only fetches and composes a detail body while expanded. It cancels on collapse and offers explicit refresh
-or retry; snapshots do not continuously re-fetch expanded bodies. Responses from an old device/window/root view
-are discarded. Legacy desktops ignore the opt-in and continue sending full bodies, which remain collapsed in the UI.
+The result contains `offset`, `next_offset`, `total_bytes`, `version`, `text`, and `done`. Offsets count UTF-8 bytes,
+not characters, and must be non-negative integers at character boundaries. Continue with the returned
+`next_offset`, `total_bytes`, and opaque `version`. Each chunk's JSON-escaped text fits 32,000 bytes, leaving room
+for the response envelope; this is a request-size bound, not a body-length limit. Reassembly preserves the full
+stored text, including whitespace, Unicode, and control characters.
 
-Ordinary live snapshots still use a 10-second publication gap plus desktop and phone polling/network time. They
-include partial assistant text from its source, independent of desktop text animation; this is not token streaming.
+The first chunk selects a content snapshot. Appending live output does not invalidate its original prefix;
+rewriting or shortening that prefix causes an explicit refresh error rather than mixing revisions. Refresh starts
+a new snapshot to include later output. Clients reject duplicate, non-advancing, inconsistent, and out-of-order
+chunks. Content already discarded by a provider, tool capture, or desktop scrollback cannot be reconstructed.
+
+Android fetches only expanded bodies, offers **Load more content** and refresh/retry, parses assembled Markdown
+on a worker dispatcher, and renders its blocks lazily. Collapsing cancels the fetch. Old-view responses are
+ignored. Legacy desktops continue to send their existing bodies; upgrading the desktop is required for complete
+chunk retrieval. The old non-chunked detail response remains bounded and explicitly marks truncation for older
+clients; the new client does not mistake it for a complete body.
+
+Ordinary snapshots still use a 10-second publication gap plus desktop and phone polling/network time. Content is
+read from source text independently of desktop reveal animation. This protocol does not provide token streaming.
+
+### Blocking questions
+
+Thread summaries expose `question_count` and up to eight question headers (`id`, `session_id`, `title`,
+`session_title`). They include the root, related conversations, and live Architect steps. `questions` pages the
+pending headers with `offset` and `next_offset`; it never answers them.
+
+`question_content` requires `session_id` and `question_id` and uses the body-chunk contract to return a JSON
+question form: `question`, `options` (value, label, description), `allow_multiple`, and `auto_answer_paused`.
+Explicitly opening the phone answer form marks manual interaction through the existing desktop question state,
+pausing its recommendation timer before paging or typing. Closing the form without answering leaves it pending.
+Supported forms match the native question tool's answer/freeform schema; unrelated ACP forms and URL flows
+remain desktop operations.
+
+`question_answer` accepts the same identity and either `content` or `decline: true`. Content contains `answer`
+(a string or a string array), or `freeform_answer` for an explicit custom answer when choices exist. Freeform text
+takes precedence. The native question validator runs before the existing elicitation resolver consumes the
+pending request. Empty/invalid choices, another session, cancelled waiters, and already-resolved IDs are rejected.
+A question response is never a tool permission grant or plan-lock approval.
+
+### Opening folders without replacing sessions
+
+`status.capabilities.open_folder` advertises the host folder browser. `host_folders` takes an absolute native-host
+`path` (empty starts at the computer's home) and an optional `offset`. It returns `host`, canonical `path`, `parent`,
+`folders` (name/path), and `next_offset`. Pages contain at most 100 folders and respect the response-size budget.
+Paths are interpreted by the computer, never by Android or a foreign client's filename rules. Windows UNC paths,
+including accessible WSL paths, retain their host semantics.
+
+`open_folder` validates the selected folder and calls the existing workspace opening API in the current desktop
+process with `NewWindow`, no workspace matching, and no sidebar reuse. It returns `opened` and the new `window`.
+Existing windows, conversations, and phone identity are left intact; it does not launch another executable.
+Normal Dev launches also use the app single-instance guard, and a standard-library OS file lock prevents two
+participating processes from owning the same remote state. A transient metadata mismatch/refusal does not erase
+the phone's local pairing key; explicit unpair or sign-out still can.
 
 ### Paging older conversation entries
 
@@ -202,7 +257,7 @@ The response uses the same thread shape, plus:
 
 `before_index` must be a non-negative integer. Zero returns an empty terminal page. A cursor beyond the current source length is clamped for reading, while the requested value is echoed. Every returned entry has its original index strictly below the requested cursor. `total` remains the whole source-entry count, not the page size.
 
-Each page scans at most 100 source entries and fits the 36,000-byte transcript budget, including metadata, JSON escaping, reasoning parts, and fallback text. Empty source entries advance the cursor even when no rows are returned. Entries are serialized against their own 6,000-byte limit before fitting a page. A boundary entry that cannot fit the remaining page budget is deferred intact, and the cursor does not advance past it. Entries that exceed the per-entry limit have `truncated: true` and `truncation: "entry_limit"`; that accepted per-entry truncation remains in history. Only a live snapshot's newest entry may be clipped further to its smaller shared budget, with `truncation: "snapshot_budget"`. That preview does not consume the entry's cursor, so a history request can retrieve its canonical version, still subject to the 6,000-byte per-entry limit. Paging does not recover content omitted by `entry_limit` truncation. Android labels shortened entries rather than presenting them as complete. A paged response contains only the requested conversation, without `step_threads`. Live snapshots also expose the cursor fields and use the same source-entry cap.
+Each page scans at most 100 source entries and fits the 36,000-byte transcript budget. In header mode, these are previews with separately retrievable bodies as described above. The following truncation rules describe the legacy full-body mode, including metadata, JSON escaping, reasoning parts, and fallback text. Empty source entries advance the cursor even when no rows are returned. Entries are serialized against their own 6,000-byte limit before fitting a page. A boundary entry that cannot fit the remaining page budget is deferred intact, and the cursor does not advance past it. Entries that exceed the per-entry limit have `truncated: true` and `truncation: "entry_limit"`; that accepted per-entry truncation remains in history. Only a live snapshot's newest entry may be clipped further to its smaller shared budget, with `truncation: "snapshot_budget"`. That preview does not consume the entry's cursor, so a history request can retrieve its canonical version, still subject to the 6,000-byte per-entry limit. Paging does not recover content omitted by `entry_limit` truncation. Android labels shortened entries rather than presenting them as complete. A paged response contains only the requested conversation, without `step_threads`. Live snapshots also expose the cursor fields and use the same source-entry cap.
 
 The target may be the coordinator/root conversation, an open child conversation, or a live Architect step session, even if that step has no open desktop chat view. Completed steps recorded in the owning root's native run history can also be resolved through the native session loader. Ownership is checked before and after loading; this does not open arbitrary archived sessions. Once a step is no longer available, requests can fail; already loaded pages stay cached on Android until the device, window, or root session changes.
 

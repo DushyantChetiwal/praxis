@@ -3940,9 +3940,13 @@ impl Drop for AcpTerminalHandle {
 impl TerminalHandle for AcpTerminalHandle {
     fn show_in_terminal_panel(&self, cx: &AsyncApp) -> Result<()> {
         cx.update(|cx| {
-            let project = self.acp_thread.read_with(cx, |thread, _| thread.project().clone())?;
+            let project = self
+                .acp_thread
+                .read_with(cx, |thread, _| thread.project().clone())?;
             let terminal = self.terminal.read(cx).inner().clone();
-            project.update(cx, |project, cx| project.reveal_background_terminal(terminal, cx));
+            project.update(cx, |project, cx| {
+                project.reveal_background_terminal(terminal, cx)
+            });
             Ok(())
         })
     }

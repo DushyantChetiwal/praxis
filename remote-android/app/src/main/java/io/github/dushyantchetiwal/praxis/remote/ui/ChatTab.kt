@@ -578,7 +578,7 @@ private fun TranscriptContent(ui: DeviceUi, vm: MainViewModel) {
                 TranscriptEntry(entry, step.sessionId, expanded, vm)
             }
         }
-        items(ui.outbox, key = { "o-${it.id}" }) { item ->
+        items(ui.outbox.filter { it.session == null || it.session == session }, key = { "o-${it.id}" }) { item ->
             OutboxBubble(item, ui.currentWindow()?.thread?.sendNow == true && item.session == ui.currentWindow()?.thread?.sessionId, ui.currentWindow()?.thread?.steering == true, vm)
         }
     }
@@ -786,7 +786,10 @@ private fun EntryDetails(text: String, pending: Boolean, request: DetailRequest?
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             items(blocks) { block -> SelectionContainer { MarkdownBlock(block, style = MaterialTheme.typography.bodySmall) } }
         }
-        body.totalBytes?.let { Text(stringResource(R.string.details_progress, body.nextOffset, it), style = MaterialTheme.typography.labelSmall) }
+        body.totalBytes?.let {
+            Text(stringResource(R.string.details_progress, body.nextOffset, it), style = MaterialTheme.typography.labelSmall)
+            Text(stringResource(R.string.details_snapshot), style = MaterialTheme.typography.labelSmall)
+        }
         if (body.complete && blocks.isEmpty()) Text(stringResource(R.string.details_empty))
         Row {
             if (!body.complete) TextButton(onClick = { loading = true; attempt++ }, enabled = !loading) {

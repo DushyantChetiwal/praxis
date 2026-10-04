@@ -30,15 +30,26 @@ There is no repository to create and nothing to install on GitHub.
 
 - **Models:** tap **Model** in Chat to load the active conversation's models from the computer. Search the loaded
   choices or use **Load more models**. Unavailable models are disabled; selection errors stay visible in the picker.
-- **Send Now:** normal sending queues a message while Praxis is working. **Send Now** interrupts the current turn,
-  matching the desktop action. It is available for a new message or a phone message already acknowledged as queued.
-  Other queued messages remain in the desktop queue. This still uses GitHub polling, so delivery is not instantaneous.
-- **Details:** tool summaries and Thinking arrows arrive without their bodies. Expanding one fetches only that tool
-  or thinking block; collapsing it removes the detail UI. Reopening or **Refresh details** fetches its current contents.
-  Closed details do not generate requests. Large details are explicitly marked as shortened.
+- **Queue controls:** normal sending queues a message while Praxis is working. **Steer** requests the next supported
+  turn boundary when that message reaches the front. **Send Now** interrupts the current turn. Tap the queued count
+  to inspect and control the desktop queue, including messages not created on this phone. Other queued messages
+  remain intact. Delivery still uses GitHub polling and is not instantaneous.
+- **Conversation headers:** messages, tools, and Thinking start collapsed. Expanding fetches that body's first chunk;
+  **Load more content** retrieves the rest without permanent remote truncation. Parsing runs off the UI thread and
+  body blocks render lazily. The loaded text is a snapshot; **Refresh details** includes newer output. Closed bodies
+  do not generate requests. Content already absent from desktop storage cannot be recovered.
+- **Questions:** pending questions appear above the conversation, including questions from running steps. **Answer on
+  phone** opens the complete question and pauses its automatic recommendation while you answer. Choose options,
+  select multiple where supported, or type a custom answer. **Submit answer** resumes the waiting question; **Skip
+  question** declines it. Closing the form alone does not answer it. Already-resolved questions cannot be answered twice.
+- **Folders:** use **Open folder on computer** from the device menu, browse or enter an absolute host path, and open
+  it in a new window. Other windows and agent sessions remain open. Windows users can enter accessible WSL UNC paths.
+  The phone preserves its pairing key if a transient or competing desktop snapshot fails to confirm it.
 
 Update both the desktop and Android app for these controls. Older desktops continue to show their existing transcript
-format and do not expose model selection or Send Now. Pairing keys and encryption are unchanged.
+format and do not expose the new controls. Pairing keys and encryption are unchanged. If an older Android version
+already erased a pairing key, pairing again is still necessary. Restart normally after installing the updated desktop;
+do not leave an older Dev process publishing to the same remote channel alongside it.
 
 ## The GitHub App
 

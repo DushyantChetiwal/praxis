@@ -391,7 +391,8 @@ pub(super) struct TerminalTask {
 
 impl TerminalTask {
     pub(super) fn background(&self, cx: &AsyncApp) {
-        if !self.state.backgrounded.replace(true) && !self.is_complete()
+        if !self.state.backgrounded.replace(true)
+            && !self.is_complete()
             && let Some(terminal) = self.state.terminal.borrow().as_ref()
         {
             terminal.show_in_terminal_panel(cx).log_err();

@@ -32,17 +32,32 @@ pub struct Terminals {
 
 impl Project {
     pub fn register_agent_terminal(&mut self, terminal: &Entity<Terminal>) {
-        self.terminals.background_handles.retain(WeakEntity::is_upgradable);
-        if !self.terminals.background_handles.iter().any(|handle| handle.upgrade().as_ref() == Some(terminal)) {
+        self.terminals
+            .background_handles
+            .retain(|terminal| terminal.upgrade().is_some());
+        if !self
+            .terminals
+            .background_handles
+            .iter()
+            .any(|handle| handle.upgrade().as_ref() == Some(terminal))
+        {
             self.terminals.background_handles.push(terminal.downgrade());
         }
     }
 
     pub fn background_terminals(&self) -> Vec<Entity<Terminal>> {
-        self.terminals.background_handles.iter().filter_map(WeakEntity::upgrade).collect()
+        self.terminals
+            .background_handles
+            .iter()
+            .filter_map(WeakEntity::upgrade)
+            .collect()
     }
 
-    pub fn reveal_background_terminal(&mut self, terminal: Entity<Terminal>, cx: &mut Context<Self>) {
+    pub fn reveal_background_terminal(
+        &mut self,
+        terminal: Entity<Terminal>,
+        cx: &mut Context<Self>,
+    ) {
         self.register_agent_terminal(&terminal);
         cx.emit(crate::Event::BackgroundTerminal(terminal));
     }

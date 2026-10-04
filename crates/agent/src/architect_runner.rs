@@ -1392,13 +1392,18 @@ pub fn architect_run_readiness(thread: &Thread) -> serde_json::Value {
     let mut latest_visits = std::collections::BTreeMap::new();
     if let Some(run) = run {
         for visit in run.history() {
-            latest_visits.insert(&visit.path, visit.outcome.as_ref());
+            latest_visits.insert(&visit.path, visit.outcome());
         }
     }
     let mut execution_outcomes = std::collections::BTreeMap::new();
     for (path, outcome) in latest_visits {
         let status = match outcome {
-            Some(ArchitectRunOutcome::Failed { .. } | ArchitectRunOutcome::StepLimit { .. } | ArchitectRunOutcome::NodeLimit { .. } | ArchitectRunOutcome::DepthLimit { .. }) => "failed",
+            Some(
+                ArchitectRunOutcome::Failed { .. }
+                | ArchitectRunOutcome::StepLimit { .. }
+                | ArchitectRunOutcome::NodeLimit { .. }
+                | ArchitectRunOutcome::DepthLimit { .. },
+            ) => "failed",
             Some(ArchitectRunOutcome::Cancelled) => "cancelled",
             Some(ArchitectRunOutcome::Interrupted) => "interrupted",
             _ => continue,
@@ -1416,7 +1421,10 @@ pub fn architect_run_readiness(thread: &Thread) -> serde_json::Value {
         let display = if matches!(status.as_str(), "completed" | "skipped" | "running") {
             status.as_str()
         } else {
-            execution_outcomes.get(&path).copied().unwrap_or(status.as_str())
+            execution_outcomes
+                .get(&path)
+                .copied()
+                .unwrap_or(status.as_str())
         };
         // Presentation includes the last execution outcome; scheduler readiness
         // remains separate so a failed visit can still be eligible for retry.

@@ -1,12 +1,29 @@
 package io.github.dushyantchetiwal.praxis.remote.data
 
 import org.json.JSONObject
+import io.github.dushyantchetiwal.praxis.remote.OutboxItem
+import io.github.dushyantchetiwal.praxis.remote.OutboxState
+import io.github.dushyantchetiwal.praxis.remote.reconcileOutbox
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TranscriptTest {
+    @Test
+    fun identicalQueuedMessagesDoNotReuseOneDeliveryAcrossPolls() {
+        val first = OutboxItem(1, "same", OutboxState.Queued, 1L, "root", -1)
+        val second = first.copy(id = 2)
+        val delivered = Entry(0, "user", "preview", null, detailsPending = true, fingerprint = transcriptFingerprint("same"))
+        val thread = ThreadView("root", null, "generating", 1, listOf(delivered))
+        val pending = reconcileOutbox(listOf(first, second), thread, 1, 2L, 90_000L)
+        assertEquals(listOf(2), pending.map { it.id })
+        assertEquals(0, pending.single().baseIndex)
+        assertEquals(pending, reconcileOutbox(pending, thread, 1, 3L, 90_000L))
+        assertTrue(reconcileOutbox(pending, thread.copy(total = 2, entries = listOf(delivered, delivered.copy(index = 1))), 0, 4L, 90_000L).isEmpty())
+        assertEquals(listOf(first), reconcileOutbox(listOf(first), thread.copy(sessionId = "other"), 0, 100_000L, 90_000L))
+    }
+
     @Test
     fun questionsPreserveChoiceValuesAndFreeformTakesPrecedence() {
         val form = parseQuestionForm(JSONObject("""{

@@ -567,7 +567,9 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
             let total = headers.len();
             let entries: Vec<_> = headers.into_iter().skip(offset).take(20).collect();
             let next = offset.saturating_add(entries.len());
-            Ok(json!({ "questions": entries, "total": total, "next_offset": (next < total).then_some(next) }))
+            Ok(
+                json!({ "questions": entries, "total": total, "next_offset": (next < total).then_some(next) }),
+            )
         }),
         "question_content" => {
             let content = with_workspace(window, cx, |workspace, _, cx| {
@@ -948,23 +950,36 @@ fn permission_choices(
 }
 
 fn question_threads(view: &ConversationView, cx: &App) -> Vec<Entity<acp_thread::AcpThread>> {
-    let mut threads: Vec<_> = view.conversation()
+    let mut threads: Vec<_> = view
+        .conversation()
         .map(|conversation| conversation.read(cx).threads().cloned().collect())
         .unwrap_or_default();
     if let Some(owner) = view.as_native_thread(cx)
         && let Some(run) = owner.read(cx).architect_run()
     {
-        for thread in run.running_steps().iter().filter_map(|step| step.step_thread()).chain(run.step_thread()) {
-            if !threads.contains(&thread) { threads.push(thread); }
+        for thread in run
+            .running_steps()
+            .iter()
+            .filter_map(|step| step.step_thread())
+            .chain(run.step_thread())
+        {
+            if !threads.contains(&thread) {
+                threads.push(thread);
+            }
         }
     }
     threads
 }
 
-fn question_thread(workspace: &Entity<Workspace>, args: &Value, cx: &App) -> Result<Entity<acp_thread::AcpThread>> {
+fn question_thread(
+    workspace: &Entity<Workspace>,
+    args: &Value,
+    cx: &App,
+) -> Result<Entity<acp_thread::AcpThread>> {
     let session = required(args, "session_id")?;
     let view = conversation_view(workspace, cx)?;
-    question_threads(view.read(cx), cx).into_iter()
+    question_threads(view.read(cx), cx)
+        .into_iter()
         .find(|thread| thread.read(cx).session_id().0.as_ref() == session)
         .context("That question's conversation is no longer open in this window")
 }

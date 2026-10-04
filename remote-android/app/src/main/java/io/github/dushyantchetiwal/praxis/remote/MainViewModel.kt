@@ -798,26 +798,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Drops optimistic messages once they show up in the transcript, or after a while. */
     private fun pruneOutbox() {
         if (d.outbox.isEmpty()) return
-        val thread = d.thread
-        val entries = thread?.entries.orEmpty()
-        val queued = d.currentWindow()?.thread?.queued ?: 0
-        val now = now()
-        val matchedEntries = mutableSetOf<Int>()
-        val kept = d.outbox.filter { item ->
-            if (item.doneAt == 0L) return@filter true
-            val base = if (item.session == thread?.sessionId) item.baseIndex else -1
-            val delivered = entries.firstOrNull {
-                it.role == "user" && it.index > base && it.index !in matchedEntries &&
-                    (if (it.fingerprint != null) it.fingerprint == item.fingerprint else it.text.trim() == item.text)
-            }
-            if (delivered != null) {
-                matchedEntries += delivered.index
-                return@filter false
-            }
-            val expired = now - item.doneAt > OUTBOX_FALLBACK_MS
-            !(expired && (item.state != OutboxState.Queued || queued == 0))
-        }
-        if (kept.size != d.outbox.size) edit { copy(outbox = kept) }
+        val kept = reconcileOutbox(d.outbox, d.thread, d.currentWindow()?.thread?.queued ?: 0, now(), OUTBOX_FALLBACK_MS)
+        if (kept != d.outbox) edit { copy(outbox = kept) }
     }
 
     // -----------------------------------------------------------------------

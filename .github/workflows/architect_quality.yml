@@ -253,6 +253,7 @@ jobs:
         run: |
           cargo test --locked -p agent --lib test_subagent_thread_
           cargo test --locked -p agent --lib test_subagent_context_
+          cargo test --locked -p agent --lib legacy_node_chat_roles_
           cargo test --locked -p agent --lib architect_runner::checkpoint_tests::
 
           cargo test --locked -p agent --lib internal_tests::architect_persistence_tests::

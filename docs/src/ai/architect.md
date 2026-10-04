@@ -2,7 +2,7 @@
 
 Architect is a mode for planning a task as a flowchart before any of it is carried out, and then running that flowchart one step at a time.
 
-The difference from simply asking an agent to "make a plan" is where the plan lives. A plan written into a chat message is a suggestion the model may drift away from. An Architect plan is a graph the agent is driven through: Zed holds the position in it, tells the agent about one step at a time, and decides every branch itself.
+The difference from simply asking an agent to "make a plan" is where the plan lives. A plan written into a chat message is a suggestion the model may drift away from. An Architect plan is a graph the agent is driven through: Praxis holds the position in it, tells the agent about one step at a time, and decides every branch itself.
 
 ## Plan, Build and Architect modes
 
@@ -14,7 +14,7 @@ The agent works in one of three modes, shown next to the message editor:
 | **Plan**            | **No**                  | Working out what to do, then asking to go ahead.  |
 | **Architect**       | **No**                  | Drawing a plan on the canvas to run step by step. |
 
-**Plan** works like Zed's Plan mode. The agent reads and researches, then presents its plan for approval. Choosing **Start Building** switches the conversation to Build so it can carry the plan out; **Keep Planning** keeps it in Plan to refine it.
+**Plan** works like Praxis's Plan mode. The agent reads and researches, then presents its plan for approval. Choosing **Start Building** switches the conversation to Build so it can carry the plan out; **Keep Planning** keeps it in Plan to refine it.
 
 You do not have to switch to Architect yourself. When the agent decides a task is worth drawing as a flowchart, it draws a plan, and drawing a plan is what puts the thread into Architect mode. Pressing **Run** puts it back into Build.
 
@@ -69,6 +69,8 @@ The canvas shows each declaration; its tooltip and the step's **Details** inspec
 
 A step can contain a plan of its own, for work that is one step at this level but several once you look closely. Running such a step runs the plan inside it, and the step is done when that plan is.
 
+Container completion comes from the scheduler, not from whether the container has its own written summary. Parallel lanes do not complete the container until its join finishes. Re-entering a container clears its previous completion for that visit. Canvas, outline, and inspector distinguish completion, skipped work, failures, cancellation, and interruption; scheduler eligibility for a retry remains separate from the last execution outcome.
+
 - **Double-click a step** on the canvas to open its plan, or use **Break Into Steps** in the inspector. If the step has no plan yet, an empty one is created.
 - A breadcrumb along the top names the trail back out. **Escape** backs out one layer at a time: first the selection, then the plan you are looking at, then the canvas itself.
 - **Locking** a step that contains a plan locks every step inside it too. Unlocking it reopens only that step.
@@ -96,6 +98,14 @@ Every step can be argued about in a conversation of its own. Select a step and o
 That conversation appears **beside the step, on the canvas**. The Agent Panel stays on the conversation that owns the plan, so arguing about one step never costs you your place in the main one.
 
 The step's thread starts knowing what the main conversation knows, then diverges, so settling one step does not crowd out the context the next step will be settled in. It can read the project and rewrite its own step through the `refine_step` tool, but cannot change the project or any other step.
+
+Node chats and node execution have distinct persisted roles from helpers created by `spawn_agent`. New node chats inherit the coordinator's model rather than the helper-model default; execution uses the plan or explicit step model. Existing saved model choices are preserved. Node ownership does not consume helper recursion depth or apply helper-only request classification. Provider context/output limits, normal compaction settings, tool permissions, and run safety limits still apply; a request or transport byte limit is not a total-work budget.
+
+## Background agent terminals
+
+Native terminal commands that yield to the background appear as tabs in the owning workspace's terminal panel. The tab shares the original terminal and output; inspecting it does not rerun the command. It does not steal focus or open a dock in Architect mode. Switch to **Code** and open **Terminal** to inspect it.
+
+Use **Show Agent Terminals** in the terminal tab bar's **New…** menu to reattach views for retained client-created agent terminals. Closing an inspection view does not transfer command ownership. Existing terminal task status/wait/stop controls remain attached to the original task. Agent task tabs do not offer a rerun action that could repeat a command outside its original lifecycle. Available output remains subject to the terminal's retained scrollback and capture settings.
 
 ## Per-step models
 

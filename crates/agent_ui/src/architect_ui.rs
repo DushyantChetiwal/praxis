@@ -453,7 +453,13 @@ impl ArchitectPane {
                         .map(|part| part.as_str().map(NodeId::from))
                         .collect::<Option<Vec<_>>>()?,
                 );
-                Some((path, step.get("display_status").unwrap_or(&step["status"]).as_str()?.to_string()))
+                Some((
+                    path,
+                    step.get("display_status")
+                        .unwrap_or(&step["status"])
+                        .as_str()?
+                        .to_string(),
+                ))
             })
             .collect()
     }
