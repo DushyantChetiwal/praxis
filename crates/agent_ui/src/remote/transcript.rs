@@ -8,7 +8,9 @@ pub(super) fn index(args: &Value, key: &str) -> Result<Option<usize>> {
     args.get(key)
         .filter(|value| !value.is_null())
         .map(|value| {
-            value.as_u64().and_then(|value| usize::try_from(value).ok())
+            value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
                 .with_context(|| format!("{key} must be a non-negative integer"))
         })
         .transpose()
@@ -21,11 +23,14 @@ pub(super) fn fingerprint(text: &str) -> String {
 pub(super) fn body_chunk(text: &str, args: &Value) -> Result<Value> {
     let offset = index(args, "offset")?.unwrap_or(0);
     let expected_total = index(args, "total_bytes")?;
-    let expected_version = args.get("version")
+    let expected_version = args
+        .get("version")
         .filter(|value| !value.is_null())
         .map(|value| value.as_str().context("version must be a string"))
         .transpose()?;
-    if expected_total.is_some() != expected_version.is_some() || (offset > 0 && expected_version.is_none()) {
+    if expected_total.is_some() != expected_version.is_some()
+        || (offset > 0 && expected_version.is_none())
+    {
         bail!("Continue with the version and total_bytes returned by the first chunk");
     }
     // Preserve a snapshot prefix while a live message appends more text. Any

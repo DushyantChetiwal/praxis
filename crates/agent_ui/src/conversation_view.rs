@@ -4492,11 +4492,18 @@ pub(crate) mod tests {
         view.update(cx, |view, _| {
             assert!(view.message_queue.set_steer(queued, true));
             assert!(view.message_queue.set_steer(queued, true));
-            assert!(view.message_queue.front_wants_steer(), "repeated requests must not toggle it off");
+            assert!(
+                view.message_queue.front_wants_steer(),
+                "repeated requests must not toggle it off"
+            );
             assert!(view.message_queue.set_steer(queued, false));
             assert!(!view.message_queue.front_wants_steer());
             let mut other_queue = super::message_queue::MessageQueue::default();
-            assert_ne!(queued, other_queue.next_id(), "IDs cannot collide after reopening a view");
+            assert_ne!(
+                queued,
+                other_queue.next_id(),
+                "IDs cannot collide after reopening a view"
+            );
         });
         view.update_in(cx, |view, window, cx| {
             view.send_queued_message_now(queued, window, cx);

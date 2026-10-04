@@ -397,7 +397,9 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
             let queue_id = view
                 .update(cx, |view, cx| {
                     let id = view.send_text(text, send_now, window, cx);
-                    if let Some(id) = id && steer {
+                    if let Some(id) = id
+                        && steer
+                    {
                         view.message_queue.set_steer(id, true);
                         view.sync_queue_flag_to_native_thread(cx);
                         cx.notify();
@@ -417,12 +419,21 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
                 required(args, "session_id")?;
                 let view = requested_root_view(workspace, args, cx)?;
                 let id = required(args, "queue_id")?;
-                let entry = view.read(cx).message_queue.iter().find(|entry| entry.id.to_string() == id)
+                let entry = view
+                    .read(cx)
+                    .message_queue
+                    .iter()
+                    .find(|entry| entry.id.to_string() == id)
                     .context("That message is no longer queued. Refresh the queue.")?;
-                entry.content.iter().map(|content| match content {
-                    acp::ContentBlock::Text(text) => Ok(text.text.clone()),
-                    content => serde_json::to_string_pretty(content).map_err(Into::into),
-                }).collect::<Result<Vec<_>>>().map(|parts| parts.join("\n\n"))
+                entry
+                    .content
+                    .iter()
+                    .map(|content| match content {
+                        acp::ContentBlock::Text(text) => Ok(text.text.clone()),
+                        content => serde_json::to_string_pretty(content).map_err(Into::into),
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .map(|parts| parts.join("\n\n"))
             });
             return match text {
                 Ok(text) => {
@@ -440,19 +451,28 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
             let mut entries = Vec::new();
             let mut remaining = FILE_JSON_BUDGET;
             for entry in view.message_queue.iter().skip(offset).take(100) {
-                let preview = entry.content.iter().find_map(|content| match content {
-                    acp::ContentBlock::Text(text) => Some(truncate(&text.text, 160)),
-                    _ => None,
-                }).unwrap_or_else(|| "Message with attachments".into());
-                let value = json!({ "id": entry.id.to_string(), "text": preview, "steer": entry.steer });
+                let preview = entry
+                    .content
+                    .iter()
+                    .find_map(|content| match content {
+                        acp::ContentBlock::Text(text) => Some(truncate(&text.text, 160)),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "Message with attachments".into());
+                let value =
+                    json!({ "id": entry.id.to_string(), "text": preview, "steer": entry.steer });
                 let cost = value.to_string().len() + 1;
-                if cost > remaining { break; }
+                if cost > remaining {
+                    break;
+                }
                 remaining -= cost;
                 entries.push(value);
             }
             let total = view.message_queue.len();
             let next = offset.saturating_add(entries.len());
-            Ok(json!({ "entries": entries, "total": total, "next_offset": (next < total).then_some(next) }))
+            Ok(
+                json!({ "entries": entries, "total": total, "next_offset": (next < total).then_some(next) }),
+            )
         }),
         "steer" => with_workspace(window, cx, |workspace, _, cx| {
             required(args, "session_id")?;
@@ -461,8 +481,16 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
                 bail!("This agent does not support steering at turn boundaries");
             }
             let queue_id = required(args, "queue_id")?;
-            let steer = args.get("steer").and_then(Value::as_bool).context("expected steer: true or false")?;
-            let id = view.read(cx).message_queue.iter().find(|entry| entry.id.to_string() == queue_id).map(|entry| entry.id);
+            let steer = args
+                .get("steer")
+                .and_then(Value::as_bool)
+                .context("expected steer: true or false")?;
+            let id = view
+                .read(cx)
+                .message_queue
+                .iter()
+                .find(|entry| entry.id.to_string() == queue_id)
+                .map(|entry| entry.id);
             let found = if let Some(id) = id {
                 view.update(cx, |view, cx| {
                     let found = view.message_queue.set_steer(id, steer);
@@ -470,7 +498,9 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
                     cx.notify();
                     found
                 })
-            } else { false };
+            } else {
+                false
+            };
             Ok(json!({ "found": found, "steer": steer }))
         }),
         "send_now" => with_workspace(window, cx, |workspace, window, cx| {
@@ -1151,23 +1181,44 @@ fn transcript_detail(source: &[AgentThreadEntry], args: &Value, cx: &App) -> Res
         AgentThreadEntry::UserMessage(message) => snapshot_message_text(&message.content, cx),
         AgentThreadEntry::AssistantMessage(message) => {
             if let Some(part) = args.get("part_index") {
-                let part = part.as_u64().and_then(|index| usize::try_from(index).ok())
+                let part = part
+                    .as_u64()
+                    .and_then(|index| usize::try_from(index).ok())
                     .context("part_index must be a non-negative integer")?;
                 match message.chunks.get(part) {
-                    Some(acp_thread::AssistantMessageChunk::Thought { block, .. }
-                        | acp_thread::AssistantMessageChunk::Message { block, .. }) => snapshot_message_text(block, cx),
-                    None => bail!("That message part is no longer available. Refresh the conversation."),
+                    Some(
+                        acp_thread::AssistantMessageChunk::Thought { block, .. }
+                        | acp_thread::AssistantMessageChunk::Message { block, .. },
+                    ) => snapshot_message_text(block, cx),
+                    None => {
+                        bail!("That message part is no longer available. Refresh the conversation.")
+                    }
                 }
             } else {
-                let has_thinking = message.chunks.iter().any(|chunk| matches!(chunk, acp_thread::AssistantMessageChunk::Thought { .. }));
-                message.chunks.iter().map(|chunk| {
-                    let (label, block) = match chunk {
-                        acp_thread::AssistantMessageChunk::Thought { block, .. } => ("Thinking", block),
-                        acp_thread::AssistantMessageChunk::Message { block, .. } => ("Assistant", block),
-                    };
-                    let text = snapshot_message_text(block, cx);
-                    if has_thinking { format!("## {label}\n\n{text}") } else { text }
-                }).collect::<Vec<_>>().join("\n\n")
+                let has_thinking = message.chunks.iter().any(|chunk| {
+                    matches!(chunk, acp_thread::AssistantMessageChunk::Thought { .. })
+                });
+                message
+                    .chunks
+                    .iter()
+                    .map(|chunk| {
+                        let (label, block) = match chunk {
+                            acp_thread::AssistantMessageChunk::Thought { block, .. } => {
+                                ("Thinking", block)
+                            }
+                            acp_thread::AssistantMessageChunk::Message { block, .. } => {
+                                ("Assistant", block)
+                            }
+                        };
+                        let text = snapshot_message_text(block, cx);
+                        if has_thinking {
+                            format!("## {label}\n\n{text}")
+                        } else {
+                            text
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
             }
         }
         entry => entry.to_markdown(cx),
@@ -1199,10 +1250,14 @@ fn request_thread(
     let args = args.clone();
     cx.spawn(async move |cx| {
         let mut source = source.await?;
-        let Some(Value::String(text)) = source.as_object_mut().and_then(|source| source.remove("text")) else {
+        let Some(Value::String(text)) = source
+            .as_object_mut()
+            .and_then(|source| source.remove("text"))
+        else {
             bail!("The requested content is unavailable");
         };
-        cx.background_spawn(async move { transcript::body_chunk(&text, &args) }).await
+        cx.background_spawn(async move { transcript::body_chunk(&text, &args) })
+            .await
     })
 }
 
@@ -1503,7 +1558,9 @@ fn transcript_entry(
     if !include_details {
         value["details_pending"] = json!(true);
         if let AgentThreadEntry::UserMessage(message) = entry {
-            value["fingerprint"] = json!(transcript::fingerprint(snapshot_message_text(&message.content, cx).trim()));
+            value["fingerprint"] = json!(transcript::fingerprint(
+                snapshot_message_text(&message.content, cx).trim()
+            ));
         }
     }
     if let AgentThreadEntry::AssistantMessage(message) = entry
@@ -1526,7 +1583,11 @@ fn transcript_entry(
                     }
                 };
                 if !include_details {
-                    let preview = if role == "reasoning" { String::new() } else { message_preview(block) };
+                    let preview = if role == "reasoning" {
+                        String::new()
+                    } else {
+                        message_preview(block)
+                    };
                     return Some(json!({
                         "index": index, "role": role, "text": preview, "details_pending": true,
                     }));
@@ -1548,10 +1609,16 @@ fn transcript_entry(
 }
 
 fn message_preview(content: &acp_thread::MessageContent) -> String {
-    content.source_blocks().iter().find_map(|block| match block {
-        acp::ContentBlock::Text(text) if !text.text.trim().is_empty() => Some(truncate(text.text.trim(), 160)),
-        _ => None,
-    }).unwrap_or_default()
+    content
+        .source_blocks()
+        .iter()
+        .find_map(|block| match block {
+            acp::ContentBlock::Text(text) if !text.text.trim().is_empty() => {
+                Some(truncate(text.text.trim(), 160))
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 fn fit_transcript_header(mut value: Value, limit: usize) -> Option<Value> {
@@ -1615,15 +1682,25 @@ fn describe_entry(
     match entry {
         AgentThreadEntry::UserMessage(message) => (
             "user",
-            if include_details { message.content.to_markdown(cx) } else { message_preview(&message.content) },
+            if include_details {
+                message.content.to_markdown(cx)
+            } else {
+                message_preview(&message.content)
+            },
             None,
         ),
         AgentThreadEntry::AssistantMessage(message) => {
             if !include_details {
-                let preview = message.chunks.iter().find_map(|chunk| match chunk {
-                    acp_thread::AssistantMessageChunk::Message { block, .. } => Some(message_preview(block)),
-                    _ => None,
-                }).unwrap_or_default();
+                let preview = message
+                    .chunks
+                    .iter()
+                    .find_map(|chunk| match chunk {
+                        acp_thread::AssistantMessageChunk::Message { block, .. } => {
+                            Some(message_preview(block))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
                 return ("assistant", preview, None);
             }
             let text = message
@@ -1658,8 +1735,16 @@ fn describe_entry(
         }
         entry => {
             let text = entry.to_markdown(cx);
-            ("notice", if include_details { text } else { truncate(&text, 160) }, None)
-        },
+            (
+                "notice",
+                if include_details {
+                    text
+                } else {
+                    truncate(&text, 160)
+                },
+                None,
+            )
+        }
     }
 }
 

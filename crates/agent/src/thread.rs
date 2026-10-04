@@ -2155,7 +2155,10 @@ impl Thread {
             .register_child(&thread.terminal_tasks);
         thread.subagent_context = Some(SubagentContext {
             parent_thread_id: parent_thread.read(cx).id().clone(),
-            depth: parent_thread.read(cx).depth().saturating_add(u8::from(kind == ChildThreadKind::Helper)),
+            depth: parent_thread
+                .read(cx)
+                .depth()
+                .saturating_add(u8::from(kind == ChildThreadKind::Helper)),
             kind,
         });
         thread.inherit_parent_settings(parent_thread, cx);
