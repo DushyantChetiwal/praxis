@@ -414,6 +414,10 @@ impl Conversation {
         Some((result_session_id, tool_id.clone(), options))
     }
 
+    pub(crate) fn threads(&self) -> impl Iterator<Item = &Entity<AcpThread>> {
+        self.threads.values()
+    }
+
     /// Every tool call in this conversation that is waiting for the user,
     /// with the thread it belongs to, in the order they asked.
     pub(crate) fn pending_tool_calls(&self) -> Vec<(Entity<AcpThread>, acp::ToolCallId)> {

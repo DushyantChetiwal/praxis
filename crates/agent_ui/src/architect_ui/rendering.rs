@@ -1291,7 +1291,7 @@ impl ArchitectPane {
                                     let is_selected = selected == Some(&node.id)
                                         || self.in_bulk_selection(&node.id);
                                     let is_running = running.contains(&node.id);
-                                    let is_failed = failed_node == Some(&node.id);
+                                    let is_failed = failed_node == Some(&node.id) || self.node_run_status(&node.id) == Some("failed");
                                     let is_complete = self.node_is_complete(&node);
                                     let (state, state_color) = if is_running {
                                         ("running", Color::Info)
@@ -1301,6 +1301,10 @@ impl ArchitectPane {
                                         ("completed", Color::Success)
                                     } else if self.node_run_status(&node.id) == Some("skipped") {
                                         ("skipped", Color::Muted)
+                                    } else if self.node_run_status(&node.id) == Some("cancelled") {
+                                        ("cancelled", Color::Muted)
+                                    } else if self.node_run_status(&node.id) == Some("interrupted") {
+                                        ("interrupted", Color::Warning)
                                     } else if node.locked {
                                         ("settled", Color::Success)
                                     } else if run_active {
@@ -2384,7 +2388,7 @@ impl ArchitectPane {
         let running = self.running_nodes(cx).contains(&node.id);
         let run = self.thread.read(cx).architect_run();
         let run_active = run.is_some_and(agent::ArchitectRun::is_running);
-        let failed =
+        let failed = self.node_run_status(&node.id) == Some("failed") ||
             run.and_then(|run| run.outcome.as_ref())
                 .is_some_and(|outcome| match outcome {
                     RunOutcome::NodeLimit { node: failed, .. }
@@ -2461,6 +2465,10 @@ impl ArchitectPane {
             "completed"
         } else if skipped {
             "skipped"
+        } else if self.node_run_status(&node.id) == Some("cancelled") {
+            "cancelled"
+        } else if self.node_run_status(&node.id) == Some("interrupted") {
+            "interrupted"
         } else if queued {
             "queued"
         } else if node.locked {

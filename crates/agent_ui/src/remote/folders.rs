@@ -98,6 +98,7 @@ pub(super) fn open(path: &str, app_state: Arc<AppState>, cx: &mut App) -> Task<R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::AppContext as _;
 
     #[test]
     fn folder_listing_pages_without_rewriting_host_paths() {

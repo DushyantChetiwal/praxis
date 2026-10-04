@@ -24,11 +24,29 @@ use util::{
 
 use crate::{Project, ProjectPath};
 
+#[derive(Default)]
 pub struct Terminals {
     pub(crate) local_handles: Vec<WeakEntity<terminal::Terminal>>,
+    background_handles: Vec<WeakEntity<terminal::Terminal>>,
 }
 
 impl Project {
+    pub fn register_agent_terminal(&mut self, terminal: &Entity<Terminal>) {
+        self.terminals.background_handles.retain(WeakEntity::is_upgradable);
+        if !self.terminals.background_handles.iter().any(|handle| handle.upgrade().as_ref() == Some(terminal)) {
+            self.terminals.background_handles.push(terminal.downgrade());
+        }
+    }
+
+    pub fn background_terminals(&self) -> Vec<Entity<Terminal>> {
+        self.terminals.background_handles.iter().filter_map(WeakEntity::upgrade).collect()
+    }
+
+    pub fn reveal_background_terminal(&mut self, terminal: Entity<Terminal>, cx: &mut Context<Self>) {
+        self.register_agent_terminal(&terminal);
+        cx.emit(crate::Event::BackgroundTerminal(terminal));
+    }
+
     pub fn active_entry_directory(&self, cx: &App) -> Option<PathBuf> {
         let entry_id = self.active_entry()?;
         let worktree = self.worktree_for_entry(entry_id, cx)?;

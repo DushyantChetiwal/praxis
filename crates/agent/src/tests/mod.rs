@@ -72,6 +72,7 @@ pub(crate) fn release_dropped_entities(cx: &mut TestAppContext) {
 
 pub(crate) struct FakeTerminalHandle {
     killed: Arc<AtomicBool>,
+    panel_exposures: std::cell::Cell<usize>,
     stopped_by_user: Arc<AtomicBool>,
     exit_on_kill: bool,
     exit_sender: std::cell::RefCell<Option<futures::channel::oneshot::Sender<()>>>,
@@ -101,6 +102,7 @@ impl FakeTerminalHandle {
             exit_sender: std::cell::RefCell::new(Some(exit_sender)),
             wait_for_exit,
             exit_on_kill: true,
+            panel_exposures: std::cell::Cell::new(0),
             output: acp::TerminalOutputResponse::new("partial output".to_string(), false),
             id: acp::TerminalId::new("fake_terminal".to_string()),
         }
@@ -121,6 +123,7 @@ impl FakeTerminalHandle {
             exit_sender: std::cell::RefCell::new(Some(exit_sender)),
             wait_for_exit,
             exit_on_kill: true,
+            panel_exposures: std::cell::Cell::new(0),
             output: acp::TerminalOutputResponse::new("command output".to_string(), false),
             id: acp::TerminalId::new("fake_terminal".to_string()),
         }
@@ -129,6 +132,10 @@ impl FakeTerminalHandle {
     pub(crate) fn with_output(mut self, output: acp::TerminalOutputResponse) -> Self {
         self.output = output;
         self
+    }
+
+    pub(crate) fn panel_exposures(&self) -> usize {
+        self.panel_exposures.get()
     }
 
     pub(crate) fn was_killed(&self) -> bool {
@@ -147,6 +154,11 @@ impl FakeTerminalHandle {
 }
 
 impl crate::TerminalHandle for FakeTerminalHandle {
+    fn show_in_terminal_panel(&self, _cx: &AsyncApp) -> Result<()> {
+        self.panel_exposures.set(self.panel_exposures.get() + 1);
+        Ok(())
+    }
+
     fn id(&self, _cx: &AsyncApp) -> Result<acp::TerminalId> {
         Ok(self.id.clone())
     }

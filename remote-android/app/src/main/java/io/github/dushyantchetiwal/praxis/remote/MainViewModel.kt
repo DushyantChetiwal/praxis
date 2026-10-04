@@ -22,6 +22,10 @@ import io.github.dushyantchetiwal.praxis.remote.data.ModelOption
 import io.github.dushyantchetiwal.praxis.remote.data.parseModels
 import io.github.dushyantchetiwal.praxis.remote.data.parseHostFolders
 import io.github.dushyantchetiwal.praxis.remote.data.parseQueue
+import io.github.dushyantchetiwal.praxis.remote.data.QuestionHeader
+import io.github.dushyantchetiwal.praxis.remote.data.parseQuestionPage
+import io.github.dushyantchetiwal.praxis.remote.data.parseQuestionForm
+import io.github.dushyantchetiwal.praxis.remote.data.questionAnswerContent
 import io.github.dushyantchetiwal.praxis.remote.data.DeviceFlow
 import io.github.dushyantchetiwal.praxis.remote.data.DirEntry
 import io.github.dushyantchetiwal.praxis.remote.data.DownloadException
@@ -143,6 +147,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var viewRevision = 0L
     private var folderRequest = 0L
     private var queueRequest = 0L
+    private var questionRequest = 0L
+    private var questionListRequest = 0L
+    private var questionReadJob: Job? = null
     private var pollJob: Job? = null
     private var downloadJob: Job? = null
     private var historyJob: Job? = null
@@ -581,6 +588,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun stopDevice() {
+        invalidateQuestionRequests()
         viewRevision++
         cancelHistoryRequest()
         pollJob?.cancel()
@@ -610,6 +618,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun resetWindowView() {
+        invalidateQuestionRequests()
         viewRevision++
         cancelHistoryRequest()
         edit {
@@ -622,6 +631,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 models = ModelsState(),
                 folderBrowser = FolderBrowserState(),
                 queue = QueueState(),
+                question = QuestionState(),
+                questionList = QuestionListState(),
+                answeredQuestions = emptySet(),
                 threads = ThreadsState(),
                 files = FilesState(),
                 outbox = emptyList(),
@@ -769,7 +781,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         edit { copy(status = status) }
         val currentThread = d.currentWindow()?.thread
         if (currentThread?.sessionId != previousThread?.sessionId) {
-            edit { copy(models = ModelsState(), queue = QueueState()) }
+            invalidateQuestionRequests()
+            edit { copy(models = ModelsState(), queue = QueueState(), question = QuestionState(), questionList = QuestionListState(), answeredQuestions = emptySet()) }
         } else if (currentThread?.model != previousThread?.model && !d.models.changing) {
             edit { copy(models = models.copy(info = models.info?.copy(current = currentThread?.model))) }
         }
@@ -1181,6 +1194,124 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val ok = act("mode", windowArgs { put("mode", modeId) }, str(R.string.label_could_not_change_mode))
             if (!ok && d.modeOverride == override) edit { copy(modeOverride = null) }
         }
+    }
+
+    private fun invalidateQuestionRequests() {
+        questionRequest++
+        questionListRequest++
+        questionReadJob?.cancel()
+        questionReadJob = null
+    }
+
+    fun openQuestion(header: QuestionHeader) {
+        questionReadJob?.cancel()
+        val request = ++questionRequest
+        val scope = requestScope()
+        val args = windowArgs { put("session_id", header.sessionId); put("question_id", header.id) }
+        val previous = d.question.takeIf { it.header?.key == header.key }
+        edit { copy(question = (previous ?: QuestionState(header = header)).copy(visible = true, loading = true, sending = false, error = null)) }
+        questionReadJob = viewModelScope.launch {
+            try {
+                var body = DetailBody()
+                while (!body.complete) {
+                    if (request != questionRequest || scope != requestScope()) return@launch
+                    args.put("offset", body.nextOffset)
+                    body.version?.let { args.put("version", it).put("total_bytes", body.totalBytes) }
+                    val result = praxis("question_content", args, scope)
+                        ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+                    val chunk = parseDetailChunk(result)
+                        ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+                    body = body.append(chunk)
+                        ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+                }
+                val form = withContext(Dispatchers.Default) { parseQuestionForm(JSONObject(body.chunks.joinToString("") { it.text })) }
+                    ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+                if (request == questionRequest && scope == requestScope()) edit { copy(question = question.copy(loading = false, form = form)) }
+            } catch (error: ApiException) {
+                if (request == questionRequest && scope == requestScope()) {
+                    edit { copy(question = question.copy(loading = false, error = error.message ?: str(R.string.question_failed))) }
+                    requestPoll()
+                }
+            }
+        }
+    }
+
+    fun dismissQuestion() {
+        questionRequest++
+        questionReadJob?.cancel()
+        questionReadJob = null
+        edit { copy(question = question.copy(visible = false, loading = false, sending = false)) }
+    }
+
+    fun selectQuestionOption(value: String) {
+        val form = d.question.form ?: return
+        if (d.question.sending || form.options.none { it.value == value }) return
+        edit { copy(question = question.copy(selected = if (!form.allowMultiple) setOf(value) else {
+            if (value in question.selected) question.selected - value else question.selected + value
+        })) }
+    }
+
+    fun editQuestionAnswer(text: String) {
+        if (!d.question.sending) edit { copy(question = question.copy(freeform = text)) }
+    }
+
+    fun submitQuestion(decline: Boolean = false) {
+        val state = d.question
+        val header = state.header ?: return
+        val form = state.form ?: return
+        if (state.sending || state.loading) return
+        val content = if (decline) null else questionAnswerContent(form, state.selected, state.freeform) ?: return
+        val request = questionRequest
+        val scope = requestScope()
+        val args = windowArgs {
+            put("session_id", header.sessionId); put("question_id", header.id)
+            if (decline) put("decline", true) else put("content", content)
+        }
+        edit { copy(question = question.copy(sending = true, error = null)) }
+        viewModelScope.launch {
+            try {
+                praxis("question_answer", args, scope)
+                if (request != questionRequest || scope != requestScope()) return@launch
+                edit { copy(
+                    question = QuestionState(), answeredQuestions = answeredQuestions + header.key,
+                    questionList = questionList.copy(questions = questionList.questions.filterNot { it.key == header.key }),
+                ) }
+                requestPoll()
+            } catch (error: ApiException) {
+                if (request == questionRequest && scope == requestScope()) {
+                    edit { copy(question = question.copy(sending = false, error = error.message ?: str(R.string.question_failed))) }
+                    requestPoll()
+                }
+            }
+        }
+    }
+
+    fun loadQuestions(more: Boolean = false) {
+        if (d.questionList.loading) return
+        val previous = d.questionList.takeIf { more }
+        val offset = if (more) previous?.nextOffset ?: return else 0
+        val request = ++questionListRequest
+        val scope = requestScope()
+        val args = windowArgs { put("offset", offset) }
+        edit { copy(questionList = QuestionListState(visible = true, loading = true, questions = previous?.questions.orEmpty())) }
+        viewModelScope.launch {
+            try {
+                val result = praxis("questions", args, scope)
+                    ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+                if (request != questionListRequest || scope != requestScope()) return@launch
+                val page = parseQuestionPage(result)
+                edit { copy(questionList = questionList.copy(
+                    loading = false, questions = (previous?.questions.orEmpty() + page.questions).distinctBy { it.key }, nextOffset = page.nextOffset,
+                )) }
+            } catch (error: ApiException) {
+                if (request == questionListRequest && scope == requestScope()) edit { copy(questionList = questionList.copy(loading = false, error = error.message ?: str(R.string.question_failed))) }
+            }
+        }
+    }
+
+    fun dismissQuestionList() {
+        questionListRequest++
+        edit { copy(questionList = questionList.copy(visible = false, loading = false)) }
     }
 
     fun answerPermission(permission: Permission, option: PermissionOption) {

@@ -354,8 +354,12 @@ impl ArchitectPane {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscription = cx.observe(&thread, |this, _, cx| {
-            // The agent or a run may have removed selected steps.
-            this.run_statuses = Self::collect_run_statuses(this.thread.read(cx));
+            // A runner can still hold its control-state borrow while notifying
+            // the owning thread. Read that state after the update unwinds.
+            cx.defer(|this, cx| {
+                this.run_statuses = Self::collect_run_statuses(this.thread.read(cx));
+                cx.notify();
+            });
             this.prune_bulk_selection(cx);
             this.refresh_inspector_if_source_changed(cx);
             cx.emit(workspace::item::ItemEvent::UpdateTab);
@@ -449,7 +453,7 @@ impl ArchitectPane {
                         .map(|part| part.as_str().map(NodeId::from))
                         .collect::<Option<Vec<_>>>()?,
                 );
-                Some((path, step["status"].as_str()?.to_string()))
+                Some((path, step.get("display_status").unwrap_or(&step["status"]).as_str()?.to_string()))
             })
             .collect()
     }
@@ -648,7 +652,10 @@ impl ArchitectPane {
         self.thread = thread.clone();
         self.run_statuses = Self::collect_run_statuses(thread.read(cx));
         self._thread_subscription = cx.observe(&thread, |this, _, cx| {
-            this.run_statuses = Self::collect_run_statuses(this.thread.read(cx));
+            cx.defer(|this, cx| {
+                this.run_statuses = Self::collect_run_statuses(this.thread.read(cx));
+                cx.notify();
+            });
             this.prune_bulk_selection(cx);
             this.refresh_inspector_if_source_changed(cx);
             cx.emit(workspace::item::ItemEvent::UpdateTab);

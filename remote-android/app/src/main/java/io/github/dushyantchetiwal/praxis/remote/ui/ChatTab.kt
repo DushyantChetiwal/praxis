@@ -131,7 +131,7 @@ fun ChatTab(ui: DeviceUi, vm: MainViewModel) {
         }
         window?.architect?.takeIf { it.steps > 0 }?.let { ArchitectCard(it, vm) }
         val permissions = ui.visiblePermissions()
-        if (permissions.isNotEmpty()) {
+        if (permissions.isNotEmpty() || (summary?.questionCount ?: 0) > 0) {
             Column(
                 Modifier
                     .heightIn(max = 340.dp)
@@ -139,6 +139,7 @@ fun ChatTab(ui: DeviceUi, vm: MainViewModel) {
                     .padding(horizontal = 12.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                QuestionCards(ui, vm)
                 permissions.forEach { permission ->
                     PermissionCard(permission, busy = permission.key in ui.busyPermissions, vm = vm)
                 }
@@ -150,6 +151,7 @@ fun ChatTab(ui: DeviceUi, vm: MainViewModel) {
         Composer(ui, vm, generating)
     }
     if (ui.queue.visible) QueueDialog(ui, vm)
+    QuestionDialogs(ui, vm)
 }
 
 @Composable

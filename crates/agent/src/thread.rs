@@ -1505,6 +1505,9 @@ pub trait TerminalHandle {
     fn wait_for_exit(&self, cx: &AsyncApp) -> Result<Shared<Task<acp::TerminalExitStatus>>>;
     fn kill(&self, cx: &AsyncApp) -> Result<()>;
     fn was_stopped_by_user(&self, cx: &AsyncApp) -> Result<bool>;
+    fn show_in_terminal_panel(&self, _cx: &AsyncApp) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub trait SubagentHandle {

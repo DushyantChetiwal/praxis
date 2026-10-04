@@ -173,6 +173,38 @@ fun parseDetailChunk(result: JSONObject): DetailChunk? {
     return DetailChunk(offset, next, total, result.str("version") ?: return null, result.str("text") ?: return null)
 }
 
+data class QuestionHeader(val id: String, val sessionId: String, val title: String, val sessionTitle: String? = null) {
+    val key: String get() = "$sessionId:$id"
+}
+data class QuestionOption(val value: String, val label: String, val description: String?)
+data class QuestionForm(val question: String, val options: List<QuestionOption>, val allowMultiple: Boolean, val autoAnswerPaused: Boolean)
+data class QuestionPage(val questions: List<QuestionHeader>, val nextOffset: Int?)
+
+private fun parseQuestionHeaders(array: JSONArray?): List<QuestionHeader> = array?.objects()?.mapNotNull {
+    QuestionHeader(it.str("id") ?: return@mapNotNull null, it.str("session_id") ?: return@mapNotNull null, it.str("title").orEmpty(), it.str("session_title"))
+}.orEmpty()
+
+fun parseQuestionPage(result: JSONObject): QuestionPage = QuestionPage(parseQuestionHeaders(result.arr("questions")), result.index("next_offset"))
+
+fun parseQuestionForm(result: JSONObject): QuestionForm? {
+    val question = result.str("question")?.takeIf(String::isNotBlank) ?: return null
+    val options = result.arr("options")?.objects()?.map {
+        QuestionOption(it.str("value") ?: return null, it.str("label") ?: return null, it.str("description"))
+    }.orEmpty()
+    if (options.any { it.value.isBlank() || it.label.isBlank() } || options.map { it.value }.toSet().size != options.size) return null
+    val multiple = result.bool("allow_multiple")
+    if (multiple && options.isEmpty()) return null
+    return QuestionForm(question, options, multiple, result.bool("auto_answer_paused"))
+}
+
+fun questionAnswerContent(form: QuestionForm, selected: Set<String>, freeform: String): JSONObject? {
+    val text = freeform.trim()
+    if (text.isNotEmpty()) return JSONObject().put(if (form.options.isEmpty()) "answer" else "freeform_answer", text)
+    if (selected.isEmpty() || (!form.allowMultiple && selected.size != 1) || selected.any { value -> form.options.none { it.value == value } }) return null
+    val values = form.options.filter { it.value in selected }.map { it.value }
+    return JSONObject().put("answer", if (form.allowMultiple) JSONArray(values) else values.single())
+}
+
 data class PermissionOption(val id: String, val name: String, val kind: String?) {
     val isAllow: Boolean get() = kind?.startsWith("allow") == true
     val isReject: Boolean get() = kind?.startsWith("reject") == true
@@ -201,6 +233,8 @@ data class ThreadSummary(
     val sendNow: Boolean = false,
     val steering: Boolean = false,
     val queueManagement: Boolean = false,
+    val questions: List<QuestionHeader> = emptyList(),
+    val questionCount: Int = 0,
 )
 
 data class Architect(
@@ -388,6 +422,8 @@ private fun parseThreadSummary(o: JSONObject): ThreadSummary = ThreadSummary(
     sendNow = o.bool("send_now"),
     steering = o.bool("steering"),
     queueManagement = o.bool("queue_management"),
+    questions = parseQuestionHeaders(o.arr("questions")),
+    questionCount = o.index("question_count") ?: 0,
     mode = o.obj("mode")?.let { m ->
         ModeInfo(
             current = m.str("current"),

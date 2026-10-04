@@ -318,6 +318,8 @@ jobs:
         run: |
           cargo test --locked -p agent_ui --lib remote::
           cargo test --locked -p agent_ui --lib test_remote_send_now_
+          cargo test --locked -p agent --lib tools::terminal_task_tool::tests::
+          cargo test --locked -p terminal_view --lib background_agent_terminals_
 
   updater-tests:
     name: Auto-update integrity tests

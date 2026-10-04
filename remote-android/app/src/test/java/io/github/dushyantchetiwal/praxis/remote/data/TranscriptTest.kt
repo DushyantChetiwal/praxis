@@ -8,6 +8,37 @@ import org.junit.Test
 
 class TranscriptTest {
     @Test
+    fun questionsPreserveChoiceValuesAndFreeformTakesPrecedence() {
+        val form = parseQuestionForm(JSONObject("""{
+            "question":"Which database?", "allow_multiple":true, "auto_answer_paused":true,
+            "options":[{"value":"postgres","label":"PostgreSQL","description":"Shared"},
+                       {"value":"sqlite","label":"SQLite"}]
+        }"""))!!
+        assertTrue(form.autoAnswerPaused)
+        assertEquals("Shared", form.options.first().description)
+        assertEquals(listOf("postgres", "sqlite"), questionAnswerContent(form, setOf("sqlite", "postgres"), "")!!.getJSONArray("answer").strings())
+        val freeform = questionAnswerContent(form, setOf("postgres"), "  Another choice  ")!!
+        assertEquals("Another choice", freeform.getString("freeform_answer"))
+        assertFalse(freeform.has("answer"))
+        assertEquals(null, questionAnswerContent(form, emptySet(), " "))
+        assertEquals(null, questionAnswerContent(form, setOf("unknown"), ""))
+        assertEquals(null, questionAnswerContent(form.copy(allowMultiple = false), setOf("postgres", "sqlite"), ""))
+        val plain = form.copy(options = emptyList(), allowMultiple = false)
+        assertEquals("Custom", questionAnswerContent(plain, emptySet(), "Custom")!!.getString("answer"))
+    }
+
+    @Test
+    fun questionsKeepSessionIdentitySeparateFromPermissionRequests() {
+        val page = parseQuestionPage(JSONObject("""{
+            "questions":[{"id":"request","session_id":"step-one","title":"Question", "session_title":"Build"},
+                         {"id":"request","session_id":"step-two","title":"Question"}], "next_offset":null
+        }"""))
+        assertEquals(2, page.questions.map { it.key }.toSet().size)
+        assertEquals("Build", page.questions.first().sessionTitle)
+        assertEquals(null, page.nextOffset)
+    }
+
+    @Test
     fun messageFingerprintsIdentifyLongPromptsWithoutDownloadingTheirBodies() {
         assertEquals("LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=", transcriptFingerprint("hello"))
         assertEquals(transcriptFingerprint("hello"), transcriptFingerprint("  hello\n"))

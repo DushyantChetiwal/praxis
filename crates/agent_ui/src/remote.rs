@@ -25,6 +25,7 @@ mod crypto;
 mod folders;
 mod github;
 mod modal;
+mod questions;
 mod store;
 mod transcript;
 
@@ -559,6 +560,32 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
         "open_thread" => with_workspace(window, cx, |workspace, window, cx| {
             open_thread(workspace, required(args, "session_id")?, window, cx)
         }),
+        "questions" => with_workspace(window, cx, |workspace, _, cx| {
+            let view = conversation_view(workspace, cx)?;
+            let headers = questions::headers(&question_threads(view.read(cx), cx), cx);
+            let offset = transcript::index(args, "offset")?.unwrap_or(0);
+            let total = headers.len();
+            let entries: Vec<_> = headers.into_iter().skip(offset).take(20).collect();
+            let next = offset.saturating_add(entries.len());
+            Ok(json!({ "questions": entries, "total": total, "next_offset": (next < total).then_some(next) }))
+        }),
+        "question_content" => {
+            let content = with_workspace(window, cx, |workspace, _, cx| {
+                let thread = question_thread(workspace, args, cx)?;
+                questions::content(&thread, args, cx)
+            });
+            return match content {
+                Ok(text) => {
+                    let args = args.clone();
+                    cx.background_spawn(async move { transcript::body_chunk(&text, &args) })
+                }
+                Err(error) => Task::ready(Err(error)),
+            };
+        }
+        "question_answer" => with_workspace(window, cx, |workspace, _, cx| {
+            let thread = question_thread(workspace, args, cx)?;
+            questions::answer(&thread, args, cx)
+        }),
         "permission" => with_workspace(window, cx, |workspace, _, cx| {
             answer_permission(workspace, args, cx)
         }),
@@ -812,6 +839,9 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
                 .collect();
             json!({ "current": modes.current_mode().0.as_ref(), "available": available })
         });
+    let questions = questions::headers(&question_threads(conversation_view.read(cx), cx), cx);
+    let question_count = questions.len();
+    let questions: Vec<_> = questions.into_iter().take(8).collect();
     let model_name = view.model_selector.as_ref().and_then(|selector| {
         selector
             .read(cx)
@@ -831,6 +861,8 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
         "send_now": true,
         "steering": view.as_native_thread(cx).is_some(),
         "queue_management": true,
+        "questions": questions,
+        "question_count": question_count,
         "pending": pending_permissions(conversation_view.read(cx), cx),
     }))
 }
@@ -913,6 +945,28 @@ fn permission_choices(
         }
     }
     choices
+}
+
+fn question_threads(view: &ConversationView, cx: &App) -> Vec<Entity<acp_thread::AcpThread>> {
+    let mut threads: Vec<_> = view.conversation()
+        .map(|conversation| conversation.read(cx).threads().cloned().collect())
+        .unwrap_or_default();
+    if let Some(owner) = view.as_native_thread(cx)
+        && let Some(run) = owner.read(cx).architect_run()
+    {
+        for thread in run.running_steps().iter().filter_map(|step| step.step_thread()).chain(run.step_thread()) {
+            if !threads.contains(&thread) { threads.push(thread); }
+        }
+    }
+    threads
+}
+
+fn question_thread(workspace: &Entity<Workspace>, args: &Value, cx: &App) -> Result<Entity<acp_thread::AcpThread>> {
+    let session = required(args, "session_id")?;
+    let view = conversation_view(workspace, cx)?;
+    question_threads(view.read(cx), cx).into_iter()
+        .find(|thread| thread.read(cx).session_id().0.as_ref() == session)
+        .context("That question's conversation is no longer open in this window")
 }
 
 fn pending_permissions(view: &ConversationView, cx: &App) -> Vec<Value> {

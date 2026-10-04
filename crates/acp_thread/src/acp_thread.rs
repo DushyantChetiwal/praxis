@@ -5587,6 +5587,13 @@ impl AcpThread {
                     .update(cx, |project, cx| {
                         project.create_terminal_task(
                             task::SpawnInTerminal {
+                                id: task::TaskId(terminal_id.0.to_string()),
+                                label: format!("Agent: {command}"),
+                                full_label: format!("Praxis Agent: {command}"),
+                                command_label: format!("{} {}", command, args.join(" ")),
+                                show_rerun: false,
+                                reveal: task::RevealStrategy::Never,
+                                hide: task::HideStrategy::Never,
                                 command: Some(task_command),
                                 args: task_args,
                                 cwd: spawn_cwd,
@@ -5598,6 +5605,7 @@ impl AcpThread {
                     })
                     .await?;
 
+                project.update(cx, |project, _| project.register_agent_terminal(&terminal));
                 anyhow::Ok(cx.new(|cx| {
                     Terminal::new(
                         terminal_id,
