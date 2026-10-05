@@ -417,7 +417,9 @@ impl Api {
         let reset = header("x-ratelimit-reset");
         if let (Some(limit), Some(remaining), Some(reset)) = (
             limit.as_deref().and_then(|value| value.parse::<u64>().ok()),
-            remaining.as_deref().and_then(|value| value.parse::<u64>().ok()),
+            remaining
+                .as_deref()
+                .and_then(|value| value.parse::<u64>().ok()),
             reset.as_deref().and_then(|value| value.parse::<i64>().ok()),
         ) {
             let mut budget = self.rate_budget.lock();
