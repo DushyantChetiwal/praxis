@@ -317,15 +317,48 @@ pub(super) struct Reply {
     pub body: Value,
 }
 
+#[derive(Clone, Copy)]
+struct RateBudget {
+    limit: u64,
+    remaining: u64,
+    reset: i64,
+}
+
+impl RateBudget {
+    fn publish_interval(self, normal: Duration, now: i64) -> Duration {
+        if self.reset <= now || self.limit == 0 {
+            return normal;
+        }
+        if self.remaining.saturating_mul(10) < self.limit {
+            normal.max(Duration::from_secs(60))
+        } else if self.remaining.saturating_mul(5) < self.limit {
+            normal.max(Duration::from_secs(30))
+        } else {
+            normal
+        }
+    }
+}
+
 /// The REST API, signed in as the user.
 pub(super) struct Api {
     http: Arc<dyn HttpClient>,
     pub tokens: Tokens,
+    rate_budget: parking_lot::Mutex<Option<RateBudget>>,
 }
 
 impl Api {
     pub(super) fn new(http: Arc<dyn HttpClient>, tokens: Tokens) -> Self {
-        Self { http, tokens }
+        Self {
+            http,
+            tokens,
+            rate_budget: parking_lot::Mutex::new(None),
+        }
+    }
+
+    pub(super) fn passive_publish_interval(&self, normal: Duration) -> Duration {
+        self.rate_budget.lock().map_or(normal, |budget| {
+            budget.publish_interval(normal, Utc::now().timestamp())
+        })
     }
 
     pub(super) fn http(&self) -> &Arc<dyn HttpClient> {
@@ -379,8 +412,33 @@ impl Api {
         let etag = header("etag");
         let last_page = header("link").and_then(|link| last_page(&link));
         let retry_after_header = header("retry-after");
+        let limit = header("x-ratelimit-limit");
         let remaining = header("x-ratelimit-remaining");
         let reset = header("x-ratelimit-reset");
+        if let (Some(limit), Some(remaining), Some(reset)) = (
+            limit.as_deref().and_then(|value| value.parse::<u64>().ok()),
+            remaining.as_deref().and_then(|value| value.parse::<u64>().ok()),
+            reset.as_deref().and_then(|value| value.parse::<i64>().ok()),
+        ) {
+            let mut budget = self.rate_budget.lock();
+            match *budget {
+                Some(previous) if previous.reset > reset => {}
+                Some(previous) if previous.reset == reset => {
+                    *budget = Some(RateBudget {
+                        limit,
+                        remaining: previous.remaining.min(remaining),
+                        reset,
+                    });
+                }
+                _ => {
+                    *budget = Some(RateBudget {
+                        limit,
+                        remaining,
+                        reset,
+                    });
+                }
+            }
+        }
         let mut bytes = Vec::new();
         response
             .body_mut()
@@ -464,6 +522,29 @@ fn last_page(link: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn passive_snapshots_slow_down_before_exhausting_the_shared_quota() {
+        let normal = Duration::from_secs(10);
+        for (remaining, seconds) in [(4000, 10), (900, 30), (400, 60), (0, 60)] {
+            let budget = RateBudget {
+                limit: 5000,
+                remaining,
+                reset: 3600,
+            };
+            assert_eq!(
+                budget.publish_interval(normal, 100),
+                Duration::from_secs(seconds)
+            );
+            assert_eq!(budget.publish_interval(normal, 3600), normal);
+        }
+        let unknown = RateBudget {
+            limit: 0,
+            remaining: 0,
+            reset: 3600,
+        };
+        assert_eq!(unknown.publish_interval(normal, 100), normal);
+    }
 
     #[test]
     fn recovery_preserves_server_rate_limits_and_retry_after() {

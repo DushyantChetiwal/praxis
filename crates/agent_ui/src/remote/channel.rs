@@ -941,7 +941,9 @@ impl Channel {
         let gap = if settled {
             SETTLE_DELAY
         } else {
-            WATCHED_PUBLISH_INTERVAL
+            // Passive updates share GitHub's quota with command replies and
+            // the phone's reads. Preserve headroom before the quota is empty.
+            self.api.passive_publish_interval(WATCHED_PUBLISH_INTERVAL)
         };
         let due = self.publish_now
             || heartbeat_due

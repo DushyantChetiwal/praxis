@@ -57,7 +57,9 @@ Request polling has a bounded deadline, including a stalled HTTP read. Temporary
 reads of the same request, not by reposting a message. Network cleanup runs separately so a timed-out or cancelled
 request cannot hold the message queue while deleting its GitHub comment. Persistent GitHub connection errors are
 reported separately from a desktop that has not answered; neither case erases pairing keys. The desktop uses a
-short, capped recovery backoff for transient failures and observes GitHub rate-limit delays.
+short, capped recovery backoff for transient failures and observes GitHub rate-limit delays. Passive snapshot
+updates slow to 30 or 60 seconds when GitHub quota is low, while explicit requests and their replies retain priority.
+GitHub quota is shared with other activity, so exhausting it can still delay the connection until the reset time.
 
 Update both the desktop and Android app for these controls. Older desktops continue to show their existing transcript
 format and do not expose the new controls. Pairing keys and encryption are unchanged. If an older Android version
