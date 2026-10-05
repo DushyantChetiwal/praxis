@@ -1273,13 +1273,7 @@
       // 0 is not a valid threshold.
       "threshold": "70%",
     },
-    "loop_guard": {
-      // Whether to interrupt a model that has started repeating itself, either
-      // within a single response or by taking the same turn over and over.
-      // A looping model would otherwise keep generating until it fills the
-      // context window.
-      "enabled": true,
-    },
+
     // When enabled, show voting thumbs for feedback on agent edits.
     "enable_feedback": true,
     // Build mode runs under "build". Which tools a thread may use is decided by

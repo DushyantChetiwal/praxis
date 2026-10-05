@@ -1006,12 +1006,9 @@ impl Message {
             }
             Message::Agent(message) => message.to_request(),
             Message::Compaction(info) => info.to_request(),
-            Message::LoopGuard(info) => vec![LanguageModelRequestMessage {
-                role: Role::User,
-                content: vec![info.instruction.clone().into()],
-                cache: false,
-                reasoning_details: None,
-            }],
+            // Historical notices remain readable, but must not reintroduce
+            // retired automatic instructions into a resumed conversation.
+            Message::LoopGuard(_) => vec![],
             Message::Resume => vec![LanguageModelRequestMessage {
                 role: Role::User,
                 content: vec!["Continue where you left off".into()],
@@ -2068,17 +2065,7 @@ pub struct Thread {
     /// message mid-task; by default queued messages wait for the turn to finish.
     end_turn_at_next_boundary: bool,
     pending_message: Option<AgentMessage>,
-    /// The normalized text of the most recently completed agent message, used
-    /// to detect live text repetition as the next message streams in.
-    last_completed_text: Option<String>,
-    /// Set when the loop guard catches the streaming message repeating itself.
-    /// Holds the repeated phrase, which the turn loop uses to steer the model.
-    repetition_interrupt: Option<String>,
-    /// Words streamed into the message being assembled, and the count at which
-    /// the loop guard last ran. Scanning on a stride keeps the guard off the
-    /// per-chunk hot path.
-    streamed_word_count: usize,
-    last_repetition_scan_word_count: usize,
+
     pub(crate) tools: BTreeMap<SharedString, Arc<dyn AnyAgentTool>>,
     request_token_usage: HashMap<ClientUserMessageId, language_model::TokenUsage>,
     cumulative_token_usage: TokenUsage,
@@ -2317,10 +2304,6 @@ impl Thread {
             running_turn: None,
             end_turn_at_next_boundary: false,
             pending_message: None,
-            last_completed_text: None,
-            repetition_interrupt: None,
-            streamed_word_count: 0,
-            last_repetition_scan_word_count: 0,
             tools: BTreeMap::default(),
             request_token_usage: HashMap::default(),
             cumulative_token_usage: TokenUsage::default(),
@@ -2767,10 +2750,6 @@ impl Thread {
             running_turn: None,
             end_turn_at_next_boundary: false,
             pending_message: None,
-            last_completed_text: None,
-            repetition_interrupt: None,
-            streamed_word_count: 0,
-            last_repetition_scan_word_count: 0,
             tools: BTreeMap::default(),
             request_token_usage: db_thread.request_token_usage.clone(),
             cumulative_token_usage: db_thread.cumulative_token_usage,
@@ -4339,7 +4318,7 @@ impl Thread {
         cx: &mut AsyncApp,
     ) -> Result<()> {
         let mut attempt = 0;
-        let mut repetition_steers = 0;
+
         // Whether this turn has already compacted because a request overflowed
         // the context window, so a turn that overflows again gives up.
         let mut compacted_for_overflow = false;
@@ -4424,11 +4403,6 @@ impl Thread {
                 }
             }
 
-            // Loop guard: detect when the agent is repeating the same tool
-            // call and inject a corrective instruction so it stops looping.
-            this.update(cx, |this, cx| {
-                this.inject_loop_guard_if_repeating(event_stream, cx)
-            })?;
 
             // Re-read the model and refresh tools on each iteration so that
             // mid-turn changes (e.g. the user switches model, toggles tools,
@@ -4550,8 +4524,7 @@ impl Thread {
                     }
 
                     cx.notify();
-                    let repeating = this.repetition_interrupt.is_some();
-                    (batch_tool_results, batch_error, repeating)
+                    (batch_tool_results, batch_error)
                 })?;
 
                 tool_results.extend(batch_result.0);
@@ -4567,11 +4540,7 @@ impl Thread {
                     error = Some(err.downcast()?);
                     break;
                 }
-                // The loop guard caught this message repeating itself. Stop
-                // reading the stream; dropping it below ends the generation.
-                if batch_result.2 {
-                    break;
-                }
+
             }
 
             // Drop the stream to release the rate limit permit before tool execution.
@@ -4670,35 +4639,6 @@ impl Thread {
                 return Ok(());
             }
 
-            // The loop guard stopped the stream part way through. Tell the model
-            // what happened and give it one chance to take a different approach;
-            // if it loops again, end the turn rather than pay for a third try.
-            if let Some(repeated) = this.update(cx, |this, _cx| this.repetition_interrupt.take())? {
-                if repetition_steers >= MAX_REPETITION_STEERS {
-                    log::warn!("Loop guard: still repeating after being steered; ending turn");
-                    return Ok(());
-                }
-                repetition_steers += 1;
-                this.update(cx, |this, cx| {
-                    this.inject_loop_guard_message(
-                        acp_thread::LoopGuardKind::WithinTurn,
-                        repeated.clone().into(),
-                        format!(
-                            "Your previous response was cut off because it had started repeating \
-                             the phrase \"{repeated}\" over and over. Do not continue that \
-                             response and do not repeat it. Something about the current approach \
-                             is not working. Say briefly what you were trying to do, then either \
-                             take a different approach or, if the task is already finished, say \
-                             so and stop."
-                        ),
-                        event_stream,
-                        cx,
-                    );
-                })?;
-                intent = CompletionIntent::UserPrompt;
-                continue;
-            }
-
             if let Some(error) = error {
                 // The history outgrew the model partway through the turn, as a
                 // large tool result can make it. Compact and carry on rather
@@ -4778,96 +4718,6 @@ impl Thread {
                 attempt = 0;
             }
         }
-    }
-
-    /// Detects an agent that keeps taking the same turn over and over, and
-    /// appends a corrective instruction so it changes approach.
-    ///
-    /// Whole turns are compared, not individual pieces of them. A model that
-    /// issues several identical tool calls in one message is running them in
-    /// parallel, which is normal and useful; a model that issues the same turn
-    /// again after seeing its result is stuck.
-    fn inject_loop_guard_if_repeating(
-        &mut self,
-        event_stream: &ThreadEventStream,
-        cx: &mut Context<Self>,
-    ) {
-        if !AgentSettings::get_global(cx).loop_guard.enabled {
-            return;
-        }
-
-        let recent_turns: Vec<AgentTurnSignature> = self
-            .messages
-            .iter()
-            .rev()
-            .filter_map(|message| match message.as_ref() {
-                Message::Agent(agent_message) => Some(agent_turn_signature(agent_message)),
-                _ => None,
-            })
-            .take(LOOP_GUARD_TURN_THRESHOLD)
-            .collect();
-
-        if recent_turns.len() < LOOP_GUARD_TURN_THRESHOLD {
-            return;
-        }
-
-        let latest = &recent_turns[0];
-        if latest.is_empty() || recent_turns.iter().any(|turn| turn != latest) {
-            return;
-        }
-
-        let (description, instruction) = match latest {
-            AgentTurnSignature::ToolCalls(calls) => (
-                calls.join(", "),
-                "Do not make that tool call again. Something about this approach is not working: \
-                 either take a different one, or if the task is already complete, say so and stop.",
-            ),
-            AgentTurnSignature::Text(text) => (
-                text.clone(),
-                "Do not send that message again. Either make concrete progress toward the goal, \
-                 or if the task is already complete, say so and stop.",
-            ),
-            AgentTurnSignature::Empty => return,
-        };
-
-        log::warn!(
-            "Loop guard: {LOOP_GUARD_TURN_THRESHOLD} identical consecutive turns ({description:?}); \
-             injecting corrective instruction"
-        );
-        self.inject_loop_guard_message(
-            acp_thread::LoopGuardKind::RepeatedTurn,
-            description.clone().into(),
-            format!(
-                "Your last {LOOP_GUARD_TURN_THRESHOLD} turns have been identical: {description}. \
-                 {instruction}"
-            ),
-            event_stream,
-            cx,
-        );
-    }
-
-    /// Records a correction for the model and announces it to the UI.
-    ///
-    /// The notice is emitted on the event stream as well as stored. Storing it
-    /// alone would only surface it once the thread is replayed from the
-    /// database, leaving the running UI to show a turn that stops for no
-    /// visible reason.
-    fn inject_loop_guard_message(
-        &mut self,
-        kind: acp_thread::LoopGuardKind,
-        repeated: SharedString,
-        instruction: String,
-        event_stream: &ThreadEventStream,
-        cx: &mut Context<Self>,
-    ) {
-        event_stream.send_loop_guard_notice(kind, repeated.clone());
-        self.messages
-            .push(Arc::new(Message::LoopGuard(LoopGuardInfo {
-                kind,
-                repeated,
-                instruction,
-            })));
-        cx.notify();
     }
 
     /// Computes the retry status for a failed completion, notifies listeners,
@@ -5159,7 +5009,7 @@ impl Thread {
                 self.flush_pending_message(cx);
                 self.pending_message = Some(AgentMessage::default());
             }
-            Text(new_text) => self.handle_text_event(new_text, event_stream, cx),
+            Text(new_text) => self.handle_text_event(new_text, event_stream),
             Thinking { text, signature } => {
                 self.handle_thinking_event(text, signature, event_stream)
             }
@@ -5225,75 +5075,13 @@ impl Thread {
         Ok(None)
     }
 
-    fn handle_text_event(
-        &mut self,
-        new_text: String,
-        event_stream: &ThreadEventStream,
-        cx: &Context<Self>,
-    ) {
+    fn handle_text_event(&mut self, new_text: String, event_stream: &ThreadEventStream) {
         event_stream.send_text(&new_text);
-        let new_word_count = new_text.split_whitespace().count();
-
-        // Capture the current accumulated text into an owned value so the
-        // mutable borrow of `self` (via pending_message) can end before we read
-        // `self.last_completed_text`.
-        let current_text = {
-            let last_message = self.pending_message();
-            if let Some(AgentMessageContent::Text(text)) = last_message.content.last_mut() {
-                text.push_str(&new_text);
-                text.clone()
-            } else {
-                let t = new_text.clone();
-                last_message
-                    .content
-                    .push(AgentMessageContent::Text(new_text));
-                t
-            }
-        };
-
-        // The turn is already unwinding; keep accumulating text for the UI but
-        // don't scan again.
-        if self.repetition_interrupt.is_some() {
-            return;
-        }
-
-        // Scanning every chunk would re-read the whole message for each of the
-        // hundreds of chunks in a long reply. Waiting for a stride of new words
-        // bounds that to a scan per `REPETITION_SCAN_STRIDE` words, which still
-        // catches a loop within a sentence or two of it starting.
-        self.streamed_word_count += new_word_count;
-        if self.streamed_word_count < self.last_repetition_scan_word_count + REPETITION_SCAN_STRIDE
-        {
-            return;
-        }
-        self.last_repetition_scan_word_count = self.streamed_word_count;
-
-        // Read once per stride rather than once per chunk, so a long reply does
-        // not pay for a settings lookup on every fragment of text.
-        if !AgentSettings::get_global(cx).loop_guard.enabled {
-            return;
-        }
-
-        // Two distinct failure modes are caught here, both while the message is
-        // still streaming, so the turn stops before it spends the context window
-        // on output nobody will read:
-        //   1. Within-turn: the tail of this message is the same phrase over and
-        //      over.
-        //   2. Cross-turn: this message is reproducing the previous one verbatim.
-        if let Some(repeated) = detect_within_turn_repetition(&current_text) {
-            log::warn!("Loop guard: within-turn repetition of {repeated:?}; interrupting turn");
-            self.repetition_interrupt = Some(repeated);
-            return;
-        }
-
-        if let Some(previous_text) = self.last_completed_text.as_ref() {
-            let current = normalize_text(&current_text);
-            if !current.is_empty() && &current == previous_text {
-                log::warn!(
-                    "Loop guard: this message reproduces the previous one verbatim; interrupting turn"
-                );
-                self.repetition_interrupt = Some(current);
-            }
+        let message = self.pending_message();
+        if let Some(AgentMessageContent::Text(text)) = message.content.last_mut() {
+            text.push_str(&new_text);
+        } else {
+            message.content.push(AgentMessageContent::Text(new_text));
         }
     }
 
@@ -5857,10 +5645,6 @@ impl Thread {
     }
 
     fn flush_pending_message(&mut self, cx: &mut Context<Self>) {
-        // The loop guard measures a single message, so its counters restart
-        // whenever one is completed or abandoned.
-        self.streamed_word_count = 0;
-        self.last_repetition_scan_word_count = 0;
 
         let Some(mut message) = self.pending_message.take() else {
             return;
@@ -5891,12 +5675,7 @@ impl Thread {
             }
         }
 
-        // Record the normalized text of this completed message for live
-        // repetition detection on the next message.
-        self.last_completed_text = message.content.iter().find_map(|c| match c {
-            AgentMessageContent::Text(t) => Some(normalize_text(t)),
-            _ => None,
-        });
+
         self.messages.push(Arc::new(Message::Agent(message)));
         self.updated_at = Utc::now();
         self.clear_summary();
@@ -10513,155 +10292,103 @@ mod tests {
         );
     }
 
-    /// The guard has to act on a message that is still streaming rather than
-    /// waiting for it to finish, and it has to tell the model what happened so
-    /// the retry takes a different path. The model never ends the stream here,
-    /// exactly as it would not when stuck in a loop.
-    #[gpui::test]
-    async fn test_streaming_repetition_interrupts_and_steers_turn(cx: &mut TestAppContext) {
-        let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
-        let model = fake.model("fake");
-
-        cx.update(|cx| {
-            thread.update(cx, |thread, cx| thread.set_model(model.clone(), cx));
+    #[test]
+    fn test_repetition_legacy_notices_do_not_reinject_instructions() {
+        let message = Message::LoopGuard(LoopGuardInfo {
+            kind: acp_thread::LoopGuardKind::RepeatedTurn,
+            repeated: "terminal_wait".into(),
+            instruction: "Do not make that tool call again".into(),
         });
-
-        let mut events = cx
-            .update(|cx| {
-                thread.update(cx, |thread, cx| {
-                    thread.send(ClientUserMessageId::new(), vec!["go"], cx)
-                })
-            })
-            .unwrap();
-        cx.run_until_parked();
-
-        let request = fake.pending_completions().pop().expect("initial request");
-        for _ in 0..8 {
-            fake.send_text(
-                &model,
-                &request,
-                "The build failed because of a missing module. ",
-            );
-        }
-        cx.run_until_parked();
-
-        let steered = fake
-            .pending_completions()
-            .pop()
-            .expect("the guard should start a new completion after interrupting the stream");
-        let prompt = steered
-            .messages
-            .last()
-            .expect("steered request has messages")
-            .string_contents();
-        assert!(
-            prompt.contains("started repeating"),
-            "the model should be told why it was cut off, got: {prompt}"
-        );
-        assert!(
-            prompt
-                .to_lowercase()
-                .contains("the build failed because of a missing module."),
-            "the corrective prompt should name the repeated phrase, got: {prompt}"
-        );
-
-        // The UI renders from this stream, so a correction that is only pushed
-        // onto `messages` stays invisible until the thread is reloaded.
-        let mut notices = Vec::new();
-        while let Some(Ok(event)) = events.next().now_or_never().flatten() {
-            if let ThreadEvent::LoopGuardNotice(notice) = event {
-                notices.push(notice);
-            }
-        }
-        let notice = notices
-            .pop()
-            .expect("the guard should announce itself to the UI while the turn is running");
-        assert_eq!(notice.kind, acp_thread::LoopGuardKind::WithinTurn);
-        assert!(
-            notice
-                .repeated
-                .to_lowercase()
-                .contains("the build failed because of a missing module."),
-            "the notice should name the repeated phrase, got: {:?}",
-            notice.repeated
-        );
-
-        // The correction still has to reach the model, and it must not look
-        // like something the user typed.
-        let stored_kinds = thread.read_with(cx, |thread, _| {
-            thread
-                .messages
-                .iter()
-                .map(|message| match message.as_ref() {
-                    Message::User(_) => "user",
-                    Message::Agent(_) => "agent",
-                    Message::LoopGuard(_) => "loop-guard",
-                    Message::Resume => "resume",
-                    Message::Compaction(_) => "compaction",
-                })
-                .collect::<Vec<_>>()
-        });
-        assert!(
-            stored_kinds.contains(&"loop-guard"),
-            "the correction should be stored as a loop guard message, got: {stored_kinds:?}"
-        );
+        assert!(message.to_request().is_empty());
+        assert!(message.to_markdown().contains("terminal_wait"));
     }
 
-    /// Turning the guard off has to leave the model completely alone, including
-    /// on text that would otherwise trip it.
     #[gpui::test]
-    async fn test_disabled_loop_guard_leaves_repetition_alone(cx: &mut TestAppContext) {
+    async fn test_repetition_streams_to_completion_across_user_turns(cx: &mut TestAppContext) {
         let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
         let model = fake.model("fake");
-
-        cx.update(|cx| {
-            let mut settings = AgentSettings::get_global(cx).clone();
-            settings.loop_guard = agent_settings::LoopGuardSettings { enabled: false };
-            AgentSettings::override_global(settings, cx);
-            thread.update(cx, |thread, cx| thread.set_model(model.clone(), cx));
+        thread.update(cx, |thread, cx| {
+            thread.set_model(model.clone(), cx);
+            thread.title = Some("Repetition regression".into());
         });
-
-        let mut events = cx
-            .update(|cx| {
-                thread.update(cx, |thread, cx| {
-                    thread.send(ClientUserMessageId::new(), vec!["go"], cx)
+        let phrase = "The build failed because of a missing module. ";
+        for _ in 0..2 {
+            let events = thread
+                .update(cx, |thread, cx| {
+                    thread.send(ClientUserMessageId::new(), vec!["Repeat the output"], cx)
                 })
-            })
-            .unwrap();
-        cx.run_until_parked();
-
-        let request = fake.pending_completions().pop().expect("initial request");
-        for _ in 0..8 {
-            fake.send_text(
-                &model,
-                &request,
-                "The build failed because of a missing module. ",
-            );
-        }
-        cx.run_until_parked();
-
-        let notices = {
-            let mut notices = 0;
-            while let Some(Ok(event)) = events.next().now_or_never().flatten() {
-                if matches!(event, ThreadEvent::LoopGuardNotice(_)) {
-                    notices += 1;
-                }
+                .expect("send");
+            cx.run_until_parked();
+            let request = fake.pending_completions_for(&model).pop().expect("request");
+            for _ in 0..8 {
+                fake.send_text(&model, &request, phrase);
+                cx.run_until_parked();
             }
-            notices
-        };
-        assert_eq!(notices, 0, "a disabled guard should announce nothing");
+            assert_eq!(fake.pending_completions_for(&model).len(), 1);
+            fake.end_stream(&model, &request);
+            cx.run_until_parked();
+            let events = events.collect::<Vec<_>>().await;
+            assert!(events.iter().all(Result::is_ok));
+            assert!(!events.iter().any(|event| matches!(event, Ok(ThreadEvent::LoopGuardNotice(_)))));
+            thread.read_with(cx, |thread, _| {
+                assert!(thread.running_turn.is_none());
+                let message = thread.messages.iter().rev().find_map(|message| match message.as_ref() {
+                    Message::Agent(message) => Some(message),
+                    _ => None,
+                }).expect("completed message");
+                assert!(matches!(message.content.first(), Some(AgentMessageContent::Text(text)) if text == &phrase.repeat(8)));
+                assert!(!thread.messages.iter().any(|message| matches!(message.as_ref(), Message::LoopGuard(_))));
+            });
+        }
+    }
 
-        let stored_guards = thread.read_with(cx, |thread, _| {
-            thread
-                .messages
-                .iter()
-                .filter(|message| matches!(message.as_ref(), Message::LoopGuard(_)))
-                .count()
+    #[gpui::test]
+    async fn test_repetition_tool_rounds_continue_without_corrective_prompts(cx: &mut TestAppContext) {
+        let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
+        let model = fake.model("fake");
+        thread.update(cx, |thread, cx| {
+            thread.set_model(model.clone(), cx);
+            thread.title = Some("Repeated tool regression".into());
+            thread.add_tool(Arc::new(ReplayImageTool));
         });
-        assert_eq!(
-            stored_guards, 0,
-            "a disabled guard should not correct the model"
-        );
+        let events = thread.update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), vec!["Poll until finished"], cx)
+        }).expect("send");
+        cx.run_until_parked();
+        for index in 0..6 {
+            let request = fake.pending_completions_for(&model).pop().expect("next tool round");
+            fake.send_event(&model, &request, LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+                id: LanguageModelToolUseId::from(format!("poll-{index}")),
+                name: ReplayImageTool::NAME.into(),
+                raw_input: "null".into(),
+                input: language_model::LanguageModelToolUseInput::Json(serde_json::Value::Null),
+                is_input_complete: true,
+                thought_signature: None,
+            }));
+            fake.end_stream(&model, &request);
+            cx.run_until_parked();
+            thread.read_with(cx, |thread, _| {
+                assert!(!thread.messages.iter().any(|message| matches!(message.as_ref(), Message::LoopGuard(_))));
+            });
+        }
+        let request = fake.pending_completions_for(&model).pop().expect("completion after repeated tools");
+        fake.send_text(&model, &request, "Finished");
+        fake.end_stream(&model, &request);
+        cx.run_until_parked();
+        let events = events.collect::<Vec<_>>().await;
+        assert!(events.iter().all(Result::is_ok));
+        assert!(!events.iter().any(|event| matches!(event, Ok(ThreadEvent::LoopGuardNotice(_)))));
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.running_turn.is_none());
+            let results: usize = thread.messages.iter().filter_map(|message| match message.as_ref() {
+                Message::Agent(message) => {
+                    assert!(message.tool_results.values().all(|result| !result.is_error));
+                    Some(message.tool_results.len())
+                }
+                _ => None,
+            }).sum();
+            assert_eq!(results, 6);
+        });
     }
 
     /// A summary describes what the agent did; it cannot reproduce what the
@@ -11688,232 +11415,6 @@ mod tests {
     }
 }
 
-/// Normalizes text for repetition comparison: collapses whitespace and
-/// lowercases, so minor formatting differences don't count as new output.
-fn normalize_text(text: &str) -> String {
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
-/// Words of new output between loop-guard scans.
-const REPETITION_SCAN_STRIDE: usize = 24;
-/// Words of recent output the guard examines.
-const REPETITION_WINDOW_WORDS: usize = 400;
-/// Longest repeating unit considered, in words.
-const MAX_REPEAT_UNIT_WORDS: usize = 40;
-/// Consecutive identical blocks before a tail counts as a loop.
-const REPEAT_THRESHOLD: usize = 3;
-/// Characters the repeated run must span. A couple of duplicated words is a
-/// normal thing to write; a few hundred characters of it is not.
-const MIN_REPEATED_RUN_CHARS: usize = 160;
-/// Words containing letters that a repeating unit must have to count.
-const MIN_REPEAT_UNIT_ALPHA_WORDS: usize = 2;
-/// How many times a single turn may be steered out of a loop before it is ended.
-const MAX_REPETITION_STEERS: usize = 1;
-/// Identical consecutive agent turns before the loop guard intervenes.
-const LOOP_GUARD_TURN_THRESHOLD: usize = 3;
-
-/// What an agent turn amounts to, for deciding whether the model is repeating
-/// itself across turns.
-#[derive(PartialEq, Eq)]
-enum AgentTurnSignature {
-    /// The turn's tool calls, as `name:input`, in the order they were issued.
-    /// Several calls in one turn are a parallel batch, not a repetition.
-    ToolCalls(Vec<String>),
-    /// The turn produced no tool calls, so it is identified by its text.
-    Text(String),
-    Empty,
-}
-
-impl AgentTurnSignature {
-    fn is_empty(&self) -> bool {
-        matches!(self, Self::Empty)
-    }
-}
-
-fn agent_turn_signature(message: &AgentMessage) -> AgentTurnSignature {
-    let tool_calls: Vec<String> = message
-        .content
-        .iter()
-        .filter_map(|content| match content {
-            AgentMessageContent::ToolUse(tool_use) => {
-                let input = tool_use
-                    .input
-                    .clone()
-                    .into_json()
-                    .map(|input| input.to_string())
-                    .unwrap_or_default();
-                Some(format!("{}:{}", tool_use.name, input))
-            }
-            _ => None,
-        })
-        .collect();
-
-    if !tool_calls.is_empty() {
-        return AgentTurnSignature::ToolCalls(tool_calls);
-    }
-
-    let text = message
-        .content
-        .iter()
-        .filter_map(|content| match content {
-            AgentMessageContent::Text(text) => Some(normalize_text(text)),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    if text.trim().is_empty() {
-        AgentTurnSignature::Empty
-    } else {
-        AgentTurnSignature::Text(text)
-    }
-}
-
-/// Detects a model that has started repeating itself in the message it is
-/// currently streaming, returning the repeated phrase.
-///
-/// Only the tail of the output is considered. A model in a loop is repeating
-/// *right now*, at the end of the stream, so the guard checks whether the last
-/// words form several identical consecutive blocks. Anchoring at the end also
-/// means a phrase that recurred earlier and was recovered from is not treated as
-/// a loop, and it bounds the work per scan to the size of the window.
-///
-/// A run has to clear two bars before it counts. It must span
-/// `MIN_REPEATED_RUN_CHARS`, so ordinary duplicated words are ignored, and its
-/// repeating unit must contain real words. Runs of numbers or punctuation
-/// (`0, 0, 0,` in an array literal, the dashes in a Markdown table) are exactly
-/// the shape this looks for but are perfectly normal in code, and flagging them
-/// would kill legitimate turns.
-fn detect_within_turn_repetition(text: &str) -> Option<String> {
-    // `SplitWhitespace` is double-ended, so taking the tail does not walk the
-    // whole message.
-    let mut window: Vec<String> = text
-        .split_whitespace()
-        .rev()
-        .take(REPETITION_WINDOW_WORDS)
-        .map(str::to_lowercase)
-        .collect();
-    window.reverse();
-
-    let longest_unit = MAX_REPEAT_UNIT_WORDS.min(window.len() / REPEAT_THRESHOLD);
-    for unit_len in 1..=longest_unit {
-        let unit = &window[window.len() - unit_len..];
-        if !is_plausible_repeat_unit(unit) {
-            continue;
-        }
-
-        // Count identical blocks running backwards from the end of the window.
-        let mut repeats = 1;
-        while (repeats + 1) * unit_len <= window.len() {
-            let block_end = window.len() - repeats * unit_len;
-            if &window[block_end - unit_len..block_end] != unit {
-                break;
-            }
-            repeats += 1;
-        }
-
-        if repeats < REPEAT_THRESHOLD {
-            continue;
-        }
-
-        // +1 per word to account for the separating whitespace.
-        let unit_chars: usize = unit.iter().map(|word| word.len() + 1).sum();
-        if unit_chars * repeats >= MIN_REPEATED_RUN_CHARS {
-            return Some(unit.join(" "));
-        }
-    }
-
-    None
-}
-
-/// Whether a repeating unit contains enough real words to be evidence of a loop
-/// rather than a legitimately repetitive stretch of code or data.
-fn is_plausible_repeat_unit(unit: &[String]) -> bool {
-    let alpha_words = unit
-        .iter()
-        .filter(|word| word.chars().any(char::is_alphabetic))
-        .count();
-
-    alpha_words >= MIN_REPEAT_UNIT_ALPHA_WORDS && !unit.iter().all(|word| is_stopword(word))
-}
-
-/// Returns true if `word` is a common English stopword that should not by
-/// itself count as evidence of repetition.
-fn is_stopword(word: &str) -> bool {
-    matches!(
-        word,
-        "the"
-            | "a"
-            | "an"
-            | "and"
-            | "or"
-            | "but"
-            | "of"
-            | "to"
-            | "in"
-            | "on"
-            | "for"
-            | "with"
-            | "at"
-            | "by"
-            | "from"
-            | "as"
-            | "is"
-            | "are"
-            | "was"
-            | "were"
-            | "be"
-            | "been"
-            | "being"
-            | "it"
-            | "this"
-            | "that"
-            | "these"
-            | "those"
-            | "i"
-            | "you"
-            | "he"
-            | "she"
-            | "we"
-            | "they"
-            | "my"
-            | "your"
-            | "his"
-            | "her"
-            | "our"
-            | "their"
-            | "not"
-            | "no"
-            | "so"
-            | "if"
-            | "then"
-            | "will"
-            | "would"
-            | "can"
-            | "could"
-            | "should"
-            | "do"
-            | "does"
-            | "did"
-            | "have"
-            | "has"
-            | "had"
-            | "there"
-            | "here"
-            | "what"
-            | "which"
-            | "who"
-            | "whom"
-            | "when"
-            | "where"
-            | "why"
-            | "how"
-    )
-}
-
 #[cfg(test)]
 mod session_mode_tests {
     use super::{SessionMode, ToolCapability};
@@ -11987,90 +11488,5 @@ mod session_mode_tests {
     #[test]
     fn a_thread_builds_unless_it_is_told_otherwise() {
         assert_eq!(SessionMode::default(), SessionMode::Build);
-    }
-}
-
-#[cfg(test)]
-mod repetition_tests {
-    use super::detect_within_turn_repetition;
-
-    const SENTENCE: &str = "The build failed because of a missing module. ";
-
-    #[test]
-    fn detects_a_sentence_repeating_at_the_tail() {
-        let text = SENTENCE.repeat(4);
-        assert_eq!(
-            detect_within_turn_repetition(&text).as_deref(),
-            Some("the build failed because of a missing module."),
-            "a sentence repeating to the end of the stream is a loop"
-        );
-    }
-
-    #[test]
-    fn detects_repetition_regardless_of_line_breaks() {
-        let text = "The build failed because of a missing module.\n\n".repeat(4);
-        assert!(
-            detect_within_turn_repetition(&text).is_some(),
-            "detection must not depend on how the repetition is formatted"
-        );
-    }
-
-    #[test]
-    fn ignores_a_run_too_short_to_be_a_loop() {
-        // Three repeats, but only ~138 characters of them. Saying something
-        // twice over is a thing people write on purpose.
-        let text = SENTENCE.repeat(3);
-        assert!(detect_within_turn_repetition(&text).is_none());
-    }
-
-    #[test]
-    fn does_not_flag_normal_prose() {
-        let text = "The quick brown fox jumps over the lazy dog. It was a sunny day and \
-            the birds were singing. We walked to the park together and enjoyed the fresh air.";
-        assert!(detect_within_turn_repetition(text).is_none());
-    }
-
-    #[test]
-    fn does_not_flag_scattered_repetition() {
-        // The same sentence appears repeatedly but never back to back, which is
-        // just a phrase the author keeps coming back to.
-        let text = "First we set up the project. The build failed because of a missing module. \
-            Let me check the logs. Then we install dependencies. The build failed because of a missing module. \
-            Let me verify the config. Finally we run the tests. The build failed because of a missing module.";
-        assert!(detect_within_turn_repetition(text).is_none());
-    }
-
-    #[test]
-    fn ignores_repetition_the_model_recovered_from() {
-        // The stream looped, then moved on. Only what the model is writing now
-        // matters, so this must not end the turn.
-        let text = format!("{}I will try a different approach now.", SENTENCE.repeat(6));
-        assert!(detect_within_turn_repetition(&text).is_none());
-    }
-
-    #[test]
-    fn does_not_flag_repeated_numbers_in_code() {
-        // An array literal is periodic by nature. Killing the turn here would
-        // stop the agent from writing perfectly ordinary code.
-        let text = format!("let grid = [{}];", "0, 0, 0, 0, ".repeat(40));
-        assert!(detect_within_turn_repetition(&text).is_none());
-    }
-
-    #[test]
-    fn does_not_flag_markdown_table_rules() {
-        let text = format!("| Setting | Value |\n|{}", " --- |".repeat(40));
-        assert!(detect_within_turn_repetition(&text).is_none());
-    }
-
-    #[test]
-    fn only_examines_the_most_recent_output() {
-        // Repetition far enough back falls outside the window entirely. The
-        // filler has to be free of repetition itself, or it is the loop.
-        let filler = (0..super::REPETITION_WINDOW_WORDS + 50)
-            .map(|word| format!("word{word}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let text = format!("{}{filler}", SENTENCE.repeat(6));
-        assert!(detect_within_turn_repetition(&text).is_none());
     }
 }
