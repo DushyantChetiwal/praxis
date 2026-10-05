@@ -4403,7 +4403,6 @@ impl Thread {
                 }
             }
 
-
             // Re-read the model and refresh tools on each iteration so that
             // mid-turn changes (e.g. the user switches model, toggles tools,
             // or changes profile) take effect between tool-call rounds.
@@ -4540,7 +4539,6 @@ impl Thread {
                     error = Some(err.downcast()?);
                     break;
                 }
-
             }
 
             // Drop the stream to release the rate limit permit before tool execution.
@@ -5645,7 +5643,6 @@ impl Thread {
     }
 
     fn flush_pending_message(&mut self, cx: &mut Context<Self>) {
-
         let Some(mut message) = self.pending_message.take() else {
             return;
         };
@@ -5674,7 +5671,6 @@ impl Thread {
                 );
             }
         }
-
 
         self.messages.push(Arc::new(Message::Agent(message)));
         self.updated_at = Utc::now();
@@ -10329,7 +10325,11 @@ mod tests {
             cx.run_until_parked();
             let events = events.collect::<Vec<_>>().await;
             assert!(events.iter().all(Result::is_ok));
-            assert!(!events.iter().any(|event| matches!(event, Ok(ThreadEvent::LoopGuardNotice(_)))));
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Ok(ThreadEvent::LoopGuardNotice(_))))
+            );
             thread.read_with(cx, |thread, _| {
                 assert!(thread.running_turn.is_none());
                 let message = thread.messages.iter().rev().find_map(|message| match message.as_ref() {
@@ -10343,50 +10343,77 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_repetition_tool_rounds_continue_without_corrective_prompts(cx: &mut TestAppContext) {
+    async fn test_repetition_tool_rounds_continue_without_corrective_prompts(
+        cx: &mut TestAppContext,
+    ) {
         let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
         let model = fake.model("fake");
         thread.update(cx, |thread, cx| {
             thread.set_model(model.clone(), cx);
             thread.title = Some("Repeated tool regression".into());
-            thread.add_tool(Arc::new(ReplayImageTool));
+            thread.add_tool(ReplayImageTool);
         });
-        let events = thread.update(cx, |thread, cx| {
-            thread.send(ClientUserMessageId::new(), vec!["Poll until finished"], cx)
-        }).expect("send");
+        let events = thread
+            .update(cx, |thread, cx| {
+                thread.send(ClientUserMessageId::new(), vec!["Poll until finished"], cx)
+            })
+            .expect("send");
         cx.run_until_parked();
         for index in 0..6 {
-            let request = fake.pending_completions_for(&model).pop().expect("next tool round");
-            fake.send_event(&model, &request, LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
-                id: LanguageModelToolUseId::from(format!("poll-{index}")),
-                name: ReplayImageTool::NAME.into(),
-                raw_input: "null".into(),
-                input: language_model::LanguageModelToolUseInput::Json(serde_json::Value::Null),
-                is_input_complete: true,
-                thought_signature: None,
-            }));
+            let request = fake
+                .pending_completions_for(&model)
+                .pop()
+                .expect("next tool round");
+            fake.send_event(
+                &model,
+                &request,
+                LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+                    id: LanguageModelToolUseId::from(format!("poll-{index}")),
+                    name: ReplayImageTool::NAME.into(),
+                    raw_input: "null".into(),
+                    input: language_model::LanguageModelToolUseInput::Json(serde_json::Value::Null),
+                    is_input_complete: true,
+                    thought_signature: None,
+                }),
+            );
             fake.end_stream(&model, &request);
             cx.run_until_parked();
             thread.read_with(cx, |thread, _| {
-                assert!(!thread.messages.iter().any(|message| matches!(message.as_ref(), Message::LoopGuard(_))));
+                assert!(
+                    !thread
+                        .messages
+                        .iter()
+                        .any(|message| matches!(message.as_ref(), Message::LoopGuard(_)))
+                );
             });
         }
-        let request = fake.pending_completions_for(&model).pop().expect("completion after repeated tools");
+        let request = fake
+            .pending_completions_for(&model)
+            .pop()
+            .expect("completion after repeated tools");
         fake.send_text(&model, &request, "Finished");
         fake.end_stream(&model, &request);
         cx.run_until_parked();
         let events = events.collect::<Vec<_>>().await;
         assert!(events.iter().all(Result::is_ok));
-        assert!(!events.iter().any(|event| matches!(event, Ok(ThreadEvent::LoopGuardNotice(_)))));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(ThreadEvent::LoopGuardNotice(_))))
+        );
         thread.read_with(cx, |thread, _| {
             assert!(thread.running_turn.is_none());
-            let results: usize = thread.messages.iter().filter_map(|message| match message.as_ref() {
-                Message::Agent(message) => {
-                    assert!(message.tool_results.values().all(|result| !result.is_error));
-                    Some(message.tool_results.len())
-                }
-                _ => None,
-            }).sum();
+            let results: usize = thread
+                .messages
+                .iter()
+                .filter_map(|message| match message.as_ref() {
+                    Message::Agent(message) => {
+                        assert!(message.tool_results.values().all(|result| !result.is_error));
+                        Some(message.tool_results.len())
+                    }
+                    _ => None,
+                })
+                .sum();
             assert_eq!(results, 6);
         });
     }

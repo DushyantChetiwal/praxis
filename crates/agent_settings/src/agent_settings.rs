@@ -183,7 +183,6 @@ pub struct AutoCompactSettings {
     pub threshold: AutoCompactThreshold,
 }
 
-
 fn parse_auto_compact_threshold(raw: &str) -> anyhow::Result<AutoCompactThreshold> {
     let trimmed = raw.trim();
     if let Some(percent) = trimmed.strip_suffix('%') {

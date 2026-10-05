@@ -73,8 +73,7 @@ fn recovery_delay(error: &anyhow::Error, failures: u32) -> Duration {
     }
     // A brief network failure should recover inside the phone's response
     // window, not force every pending request through a minute-long blackout.
-    (POLL_INTERVAL * (1 << failures.saturating_sub(1).min(4)))
-        .min(MAX_TRANSIENT_BACKOFF)
+    (POLL_INTERVAL * (1 << failures.saturating_sub(1).min(4))).min(MAX_TRANSIENT_BACKOFF)
 }
 
 /// What the rest of Praxis asks of a running channel.

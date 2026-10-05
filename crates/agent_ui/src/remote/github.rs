@@ -262,7 +262,9 @@ pub(super) fn github_status(error: &anyhow::Error) -> Option<StatusCode> {
 }
 
 pub(super) fn retry_after(error: &anyhow::Error) -> Option<Duration> {
-    error.downcast_ref::<GitHubError>().and_then(|error| error.retry_after)
+    error
+        .downcast_ref::<GitHubError>()
+        .and_then(|error| error.retry_after)
 }
 
 fn retry_delay_from_headers(
@@ -275,16 +277,16 @@ fn retry_delay_from_headers(
 ) -> Option<Duration> {
     let seconds = retry_after.and_then(|value| {
         value.parse::<u64>().ok().or_else(|| {
-            chrono::DateTime::parse_from_rfc2822(value).ok().map(|date| {
-                date.timestamp().saturating_sub(now).max(0) as u64
-            })
+            chrono::DateTime::parse_from_rfc2822(value)
+                .ok()
+                .map(|date| date.timestamp().saturating_sub(now).max(0) as u64)
         })
     });
     let seconds = seconds.or_else(|| {
         if remaining == Some("0") {
-            reset.and_then(|value| value.parse::<i64>().ok()).map(|reset| {
-                reset.saturating_sub(now).max(0) as u64
-            })
+            reset
+                .and_then(|value| value.parse::<i64>().ok())
+                .map(|reset| reset.saturating_sub(now).max(0) as u64)
         } else {
             None
         }
@@ -292,10 +294,12 @@ fn retry_delay_from_headers(
     let rate_limited = status == StatusCode::TOO_MANY_REQUESTS
         || (status == StatusCode::FORBIDDEN
             && (remaining == Some("0") || message.to_ascii_lowercase().contains("rate limit")));
-    seconds.or_else(|| rate_limited.then_some(60)).map(|seconds| {
-        // A malformed server delay must not overflow the executor's clock.
-        Duration::from_secs(seconds.min(24 * 60 * 60))
-    })
+    seconds
+        .or_else(|| rate_limited.then_some(60))
+        .map(|seconds| {
+            // A malformed server delay must not overflow the executor's clock.
+            Duration::from_secs(seconds.min(24 * 60 * 60))
+        })
 }
 
 pub(super) fn is_gone(error: &anyhow::Error) -> bool {
@@ -463,13 +467,76 @@ mod tests {
 
     #[test]
     fn recovery_preserves_server_rate_limits_and_retry_after() {
-        assert_eq!(retry_delay_from_headers(StatusCode::TOO_MANY_REQUESTS, "", Some("120"), None, None, 100), Some(Duration::from_secs(120)));
-        assert_eq!(retry_delay_from_headers(StatusCode::FORBIDDEN, "rate limit", None, Some("0"), Some("3700"), 100), Some(Duration::from_secs(3600)));
-        assert_eq!(retry_delay_from_headers(StatusCode::FORBIDDEN, "secondary rate limit", None, None, None, 100), Some(Duration::from_secs(60)));
-        assert_eq!(retry_delay_from_headers(StatusCode::SERVICE_UNAVAILABLE, "", Some("Thu, 01 Jan 1970 00:02:00 GMT"), None, None, 100), Some(Duration::from_secs(20)));
-        assert_eq!(retry_delay_from_headers(StatusCode::BAD_GATEWAY, "temporary failure", None, None, None, 100), None);
-        assert_eq!(retry_delay_from_headers(StatusCode::FORBIDDEN, "forbidden", None, None, None, 100), None);
-        assert_eq!(retry_delay_from_headers(StatusCode::TOO_MANY_REQUESTS, "", Some("18446744073709551615"), None, None, 100), Some(Duration::from_secs(86400)));
+        assert_eq!(
+            retry_delay_from_headers(
+                StatusCode::TOO_MANY_REQUESTS,
+                "",
+                Some("120"),
+                None,
+                None,
+                100
+            ),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            retry_delay_from_headers(
+                StatusCode::FORBIDDEN,
+                "rate limit",
+                None,
+                Some("0"),
+                Some("3700"),
+                100
+            ),
+            Some(Duration::from_secs(3600))
+        );
+        assert_eq!(
+            retry_delay_from_headers(
+                StatusCode::FORBIDDEN,
+                "secondary rate limit",
+                None,
+                None,
+                None,
+                100
+            ),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            retry_delay_from_headers(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "",
+                Some("Thu, 01 Jan 1970 00:02:00 GMT"),
+                None,
+                None,
+                100
+            ),
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(
+            retry_delay_from_headers(
+                StatusCode::BAD_GATEWAY,
+                "temporary failure",
+                None,
+                None,
+                None,
+                100
+            ),
+            None
+        );
+        assert_eq!(
+            retry_delay_from_headers(StatusCode::FORBIDDEN, "forbidden", None, None, None, 100),
+            None
+        );
+        assert_eq!(
+            retry_delay_from_headers(
+                StatusCode::TOO_MANY_REQUESTS,
+                "",
+                Some("18446744073709551615"),
+                None,
+                None,
+                100
+            ),
+            Some(Duration::from_secs(86400))
+        );
     }
 
     #[test]
