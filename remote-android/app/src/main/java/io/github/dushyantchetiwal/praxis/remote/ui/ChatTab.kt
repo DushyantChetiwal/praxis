@@ -158,6 +158,11 @@ internal fun ConversationControls(ui: DeviceUi, vm: MainViewModel, onOpenQueue: 
     val summary = window?.thread
     val now = rememberNow(5_000L)
     ThreadHeader(ui, ui.isGenerating(), onOpenQueue)
+    if (ui.isGenerating() && window?.architect?.running == true) {
+        TextButton(onClick = vm::stopGenerating, enabled = !ui.stopping, modifier = Modifier.padding(horizontal = 8.dp)) {
+            Text(stringResource(R.string.action_stop_agent))
+        }
+    }
     if (summary?.modelSelection == true) ModelPicker(ui, vm)
     summary?.mode?.takeIf { it.available.isNotEmpty() }?.let { mode ->
         Text(stringResource(R.string.agent_mode), style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 12.dp))

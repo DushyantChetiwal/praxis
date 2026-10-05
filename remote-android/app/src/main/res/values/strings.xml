@@ -94,6 +94,7 @@
     <string name="current_project">Project: %1$s</string>
     <string name="architect_running">Plan running</string>
     <string name="action_stop_plan">Stop plan</string>
+    <string name="action_stop_agent">Stop agent</string>
     <string name="tab_chat">Chat</string>
     <string name="tab_threads">Threads</string>
     <string name="tab_files">Files</string>
@@ -292,7 +293,7 @@
     <string name="error_not_found">Not found on GitHub (404).</string>
     <string name="error_http">GitHub error %1$d%2$s</string>
     <string name="error_no_comment">GitHub didn’t return the new comment.</string>
-    <string name="error_not_responding">Praxis on %1$s is not responding.</string>
+    <string name="error_not_responding">No reply from Praxis on %1$s yet. The request may still be processing; check before resending. Your pairing is unchanged.</string>
     <string name="error_request_removed">The request was removed before Praxis answered.</string>
     <string name="error_unreadable_response">Praxis sent a response that couldn’t be read.</string>
     <string name="error_wrong_response">Praxis answered a different request.</string>

@@ -53,6 +53,12 @@ There is no repository to create and nothing to install on GitHub.
   Select windows in **Conversation controls**. The phone preserves its pairing key if a transient or competing desktop
   snapshot fails to confirm it.
 
+Request polling has a bounded deadline, including a stalled HTTP read. Temporary network failures are retried as
+reads of the same request, not by reposting a message. Network cleanup runs separately so a timed-out or cancelled
+request cannot hold the message queue while deleting its GitHub comment. Persistent GitHub connection errors are
+reported separately from a desktop that has not answered; neither case erases pairing keys. The desktop uses a
+short, capped recovery backoff for transient failures and observes GitHub rate-limit delays.
+
 Update both the desktop and Android app for these controls. Older desktops continue to show their existing transcript
 format and do not expose the new controls. Pairing keys and encryption are unchanged. If an older Android version
 already erased a pairing key, pairing again is still necessary. Restart normally after installing the updated desktop;

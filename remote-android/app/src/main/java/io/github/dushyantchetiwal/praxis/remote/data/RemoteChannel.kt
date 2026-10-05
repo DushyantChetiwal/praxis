@@ -1,7 +1,7 @@
 package io.github.dushyantchetiwal.praxis.remote.data
 
 import android.content.Context
-import android.os.SystemClock
+
 import io.github.dushyantchetiwal.praxis.remote.R
 import java.security.SecureRandom
 import java.time.Instant
@@ -9,7 +9,7 @@ import java.time.OffsetDateTime
 import java.time.temporal.ChronoUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
+
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -40,6 +41,34 @@ const val COMMENT_POLL_MS = 1_500L
 private const val REQUEST_TIMEOUT_MS = 45_000L
 private const val GIST_PAGES = 3
 private const val GIST_PAGE_SIZE = 100
+
+internal suspend fun <T : Any> awaitRemoteReply(
+    timeoutMillis: Long = REQUEST_TIMEOUT_MS,
+    pollIntervalMillis: Long = COMMENT_POLL_MS,
+    poll: suspend () -> T?,
+): T? {
+    var lastFailure: ApiException? = null
+    val answer = withTimeoutOrNull(timeoutMillis) {
+        var reply: T? = null
+        while (reply == null) {
+            delay(pollIntervalMillis)
+            try {
+                reply = poll()
+                lastFailure = null
+            } catch (error: ApiException) {
+                if (error.kind == ErrorKind.Network || (error.kind == ErrorKind.Http && error.status >= 500)) {
+                    lastFailure = error
+                } else {
+                    throw error
+                }
+            }
+        }
+        reply
+    }
+    // A failed GitHub connection is not evidence that the paired PC disconnected.
+    if (answer == null) lastFailure?.let { throw it }
+    return answer
+}
 
 // ---------------------------------------------------------------------------
 // JSON helpers (org.json turns JSON null into a "null" string if asked)
@@ -663,26 +692,22 @@ class RemoteChannel(
             ?: throw ApiException(ErrorKind.Http, context.getString(R.string.error_no_comment))
 
         val path = "/gists/${link.gistId}/comments/$commentId"
-        val deadline = SystemClock.elapsedRealtime() + REQUEST_TIMEOUT_MS
-        var finished = false
+        var removed = false
         try {
-            while (SystemClock.elapsedRealtime() < deadline) {
-                delay(COMMENT_POLL_MS)
-                val answer = try {
+            val answer = awaitRemoteReply {
+                try {
                     pollComment(path, link.phoneId)
-                } catch (e: ApiException) {
-                    finished = e.status == 404 // Nothing left to delete.
-                    throw e
-                }
-                if (answer != null) {
-                    finished = true
-                    background.launch { deleteQuietly(path) }
-                    return readAnswer(answer, link, id)
+                } catch (error: ApiException) {
+                    removed = error.status == 404
+                    throw error
                 }
             }
+            if (answer != null) return readAnswer(answer, link, id)
         } finally {
             gh.forget(path)
-            if (!finished) withContext(NonCancellable) { deleteQuietly(path) }
+            // Cleanup must not hold the serialized request queue or delay cancellation.
+            // The desktop also removes expired comments if this best-effort delete fails.
+            if (!removed) background.launch { deleteQuietly(path) }
         }
         throw ApiException(ErrorKind.Timeout, context.getString(R.string.error_not_responding, link.deviceName))
     }
@@ -699,7 +724,7 @@ class RemoteChannel(
             when {
                 e.kind == ErrorKind.NotFound ->
                     throw ApiException(ErrorKind.Praxis, context.getString(R.string.error_request_removed), 404)
-                e.kind == ErrorKind.Network || (e.kind == ErrorKind.Http && e.status >= 500) -> null
+
                 else -> throw e
             }
         }

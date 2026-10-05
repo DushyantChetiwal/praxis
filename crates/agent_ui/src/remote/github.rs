@@ -28,6 +28,7 @@ const API_PREFIX: &str = "https://api.github.com/";
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const MAX_RESPONSE_BYTES: u64 = 8_000_000;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Tokens are refreshed this long before GitHub says they expire.
 const REFRESH_MARGIN_SECONDS: i64 = 300;
 
@@ -218,6 +219,7 @@ async fn post_form(http: &Arc<dyn HttpClient>, url: &str, form: &[(&str, &str)])
         .header("Accept", "application/json")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("User-Agent", "Praxis")
+        .timeout(REQUEST_TIMEOUT)
         .follow_redirects(http_client::RedirectPolicy::NoFollow)
         .body(AsyncBody::from(body.into_bytes()))?;
     let mut response = http.send(request).await?;
@@ -242,6 +244,7 @@ async fn post_form(http: &Arc<dyn HttpClient>, url: &str, form: &[(&str, &str)])
 pub(super) struct GitHubError {
     pub status: StatusCode,
     message: String,
+    retry_after: Option<Duration>,
 }
 
 impl std::fmt::Display for GitHubError {
@@ -256,6 +259,43 @@ pub(super) fn github_status(error: &anyhow::Error) -> Option<StatusCode> {
     error
         .downcast_ref::<GitHubError>()
         .map(|error| error.status)
+}
+
+pub(super) fn retry_after(error: &anyhow::Error) -> Option<Duration> {
+    error.downcast_ref::<GitHubError>().and_then(|error| error.retry_after)
+}
+
+fn retry_delay_from_headers(
+    status: StatusCode,
+    message: &str,
+    retry_after: Option<&str>,
+    remaining: Option<&str>,
+    reset: Option<&str>,
+    now: i64,
+) -> Option<Duration> {
+    let seconds = retry_after.and_then(|value| {
+        value.parse::<u64>().ok().or_else(|| {
+            chrono::DateTime::parse_from_rfc2822(value).ok().map(|date| {
+                date.timestamp().saturating_sub(now).max(0) as u64
+            })
+        })
+    });
+    let seconds = seconds.or_else(|| {
+        if remaining == Some("0") {
+            reset.and_then(|value| value.parse::<i64>().ok()).map(|reset| {
+                reset.saturating_sub(now).max(0) as u64
+            })
+        } else {
+            None
+        }
+    });
+    let rate_limited = status == StatusCode::TOO_MANY_REQUESTS
+        || (status == StatusCode::FORBIDDEN
+            && (remaining == Some("0") || message.to_ascii_lowercase().contains("rate limit")));
+    seconds.or_else(|| rate_limited.then_some(60)).map(|seconds| {
+        // A malformed server delay must not overflow the executor's clock.
+        Duration::from_secs(seconds.min(24 * 60 * 60))
+    })
 }
 
 pub(super) fn is_gone(error: &anyhow::Error) -> bool {
@@ -311,6 +351,7 @@ impl Api {
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", "Praxis")
             .header("Authorization", authorization)
+            .timeout(REQUEST_TIMEOUT)
             .follow_redirects(http_client::RedirectPolicy::NoFollow);
         if let Some(etag) = etag {
             request = request.header("If-None-Match", etag);
@@ -333,6 +374,9 @@ impl Api {
         };
         let etag = header("etag");
         let last_page = header("link").and_then(|link| last_page(&link));
+        let retry_after_header = header("retry-after");
+        let remaining = header("x-ratelimit-remaining");
+        let reset = header("x-ratelimit-reset");
         let mut bytes = Vec::new();
         response
             .body_mut()
@@ -359,6 +403,14 @@ impl Api {
                 .unwrap_or_default();
             return Err(GitHubError {
                 status,
+                retry_after: retry_delay_from_headers(
+                    status,
+                    &message,
+                    retry_after_header.as_deref(),
+                    remaining.as_deref(),
+                    reset.as_deref(),
+                    Utc::now().timestamp(),
+                ),
                 message: format!(
                     "GitHub answered {} to {method} {path}: {message}",
                     status.as_u16()
@@ -408,6 +460,17 @@ fn last_page(link: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn recovery_preserves_server_rate_limits_and_retry_after() {
+        assert_eq!(retry_delay_from_headers(StatusCode::TOO_MANY_REQUESTS, "", Some("120"), None, None, 100), Some(Duration::from_secs(120)));
+        assert_eq!(retry_delay_from_headers(StatusCode::FORBIDDEN, "rate limit", None, Some("0"), Some("3700"), 100), Some(Duration::from_secs(3600)));
+        assert_eq!(retry_delay_from_headers(StatusCode::FORBIDDEN, "secondary rate limit", None, None, None, 100), Some(Duration::from_secs(60)));
+        assert_eq!(retry_delay_from_headers(StatusCode::SERVICE_UNAVAILABLE, "", Some("Thu, 01 Jan 1970 00:02:00 GMT"), None, None, 100), Some(Duration::from_secs(20)));
+        assert_eq!(retry_delay_from_headers(StatusCode::BAD_GATEWAY, "temporary failure", None, None, None, 100), None);
+        assert_eq!(retry_delay_from_headers(StatusCode::FORBIDDEN, "forbidden", None, None, None, 100), None);
+        assert_eq!(retry_delay_from_headers(StatusCode::TOO_MANY_REQUESTS, "", Some("18446744073709551615"), None, None, 100), Some(Duration::from_secs(86400)));
+    }
 
     #[test]
     fn a_link_header_gives_the_last_page_only_if_it_is_githubs() {
