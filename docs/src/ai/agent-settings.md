@@ -86,28 +86,11 @@ You can compact a Zed Agent thread manually at any time by typing `/compact` in 
 
 ## Loop Guard {#loop-guard}
 
-A model that gets stuck can start repeating itself, and left alone it will keep generating until it has filled the context window. The loop guard watches for this and interrupts it.
+Praxis no longer interrupts responses or injects corrective instructions merely because text or tool calls repeat. Repeated polling, retries, and intentionally repetitive output can continue until the model finishes or you stop it.
 
-It catches two kinds of repetition:
+The legacy `agent.loop_guard` setting is accepted but ignored. Historical loop-guard notices remain visible in saved conversations, but their generated instructions are not sent to the model when a conversation resumes.
 
-- **Within a response**, where a phrase starts repeating as the response streams in. The response is cut off part way through.
-- **Across turns**, where the agent takes the same turn several times in a row. Several identical tool calls in a single turn are a parallel batch and are not treated as repetition; issuing the same turn again after seeing its result is.
-
-When the guard fires, the model is told what it was repeating and asked to take a different approach. If it loops again, the turn ends rather than being steered a second time. The transcript records the point where this happened, so a response that stops part way through does not appear to do so for no reason.
-
-The loop guard is enabled by default. To turn it off:
-
-```json [settings]
-{
-  "agent": {
-    "loop_guard": {
-      "enabled": false
-    }
-  }
-}
-```
-
-This is separate from the limits that stop a looping [Architect](./architect.md#stopping-a-run) plan, which bound how many steps a run may take.
+Explicit Stop actions, permission checks, provider limits, context compaction, and the step/visit limits on [Architect](./architect.md#stopping-a-run) plans remain in effect.
 
 ## Compaction Model {#compaction-model}
 

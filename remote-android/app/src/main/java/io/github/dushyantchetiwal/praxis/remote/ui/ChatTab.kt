@@ -61,6 +61,10 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.PlainTooltip
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.material3.rememberTooltipState
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -95,6 +99,7 @@ import io.github.dushyantchetiwal.praxis.remote.OutboxItem
 import io.github.dushyantchetiwal.praxis.remote.OutboxState
 import io.github.dushyantchetiwal.praxis.remote.R
 import io.github.dushyantchetiwal.praxis.remote.Tab
+import io.github.dushyantchetiwal.praxis.remote.StopTarget
 import io.github.dushyantchetiwal.praxis.remote.data.Architect
 import io.github.dushyantchetiwal.praxis.remote.data.Entry
 import io.github.dushyantchetiwal.praxis.remote.data.ApiException
@@ -120,16 +125,9 @@ import io.github.dushyantchetiwal.praxis.remote.ui.theme.OnlineGreen
 fun ChatTab(ui: DeviceUi, vm: MainViewModel) {
     val window = ui.currentWindow()
     val summary = window?.thread
-    val now = rememberNow(5_000L)
     val generating = ui.isGenerating()
 
     Column(Modifier.fillMaxSize()) {
-        ThreadHeader(ui, generating, vm)
-        if (summary?.modelSelection == true) ModelPicker(ui, vm)
-        summary?.mode?.takeIf { it.available.isNotEmpty() }?.let { mode ->
-            ModeSelector(mode, ui.currentModeId(now), vm::setMode)
-        }
-        window?.architect?.takeIf { it.steps > 0 }?.let { ArchitectCard(it, vm) }
         val permissions = ui.visiblePermissions()
         if (permissions.isNotEmpty() || (summary?.questionCount ?: 0) > 0) {
             Column(
@@ -152,6 +150,25 @@ fun ChatTab(ui: DeviceUi, vm: MainViewModel) {
     }
     if (ui.queue.visible) QueueDialog(ui, vm)
     QuestionDialogs(ui, vm)
+}
+
+@Composable
+internal fun ConversationControls(ui: DeviceUi, vm: MainViewModel, onOpenQueue: () -> Unit) {
+    val window = ui.currentWindow()
+    val summary = window?.thread
+    val now = rememberNow(5_000L)
+    ThreadHeader(ui, ui.isGenerating(), onOpenQueue)
+    if (ui.isGenerating() && window?.architect?.running == true) {
+        TextButton(onClick = vm::stopGenerating, enabled = !ui.stopping, modifier = Modifier.padding(horizontal = 8.dp)) {
+            Text(stringResource(R.string.action_stop_agent))
+        }
+    }
+    if (summary?.modelSelection == true) ModelPicker(ui, vm)
+    summary?.mode?.takeIf { it.available.isNotEmpty() }?.let { mode ->
+        Text(stringResource(R.string.agent_mode), style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(horizontal = 12.dp))
+        ModeSelector(mode, ui.currentModeId(now), vm::setMode)
+    }
+    window?.architect?.takeIf { it.steps > 0 }?.let { ArchitectCard(it, vm) }
 }
 
 @Composable
@@ -221,17 +238,18 @@ private fun ModelPicker(ui: DeviceUi, vm: MainViewModel) {
 }
 
 @Composable
-private fun ThreadHeader(ui: DeviceUi, generating: Boolean, vm: MainViewModel) {
-    val window = ui.currentWindow()
-    val summary = window?.thread
-    val title = when {
-        ui.device == null -> stringResource(R.string.chat_no_device)
-        ui.status == null -> stringResource(R.string.chat_connecting)
-        window == null -> stringResource(R.string.chat_no_window)
-        else -> ui.thread?.title?.takeIf { it.isNotBlank() }
-            ?: summary?.title?.takeIf { it.isNotBlank() }
-            ?: stringResource(if (summary != null) R.string.chat_untitled else R.string.chat_no_thread)
-    }
+internal fun chatTitle(ui: DeviceUi): String = when {
+    ui.device == null -> stringResource(R.string.chat_no_device)
+    ui.status == null -> stringResource(R.string.chat_connecting)
+    ui.currentWindow() == null -> stringResource(R.string.chat_no_window)
+    else -> ui.conversationTitle()
+        ?: stringResource(if (ui.currentWindow()?.thread != null) R.string.chat_untitled else R.string.chat_no_thread)
+}
+
+@Composable
+private fun ThreadHeader(ui: DeviceUi, generating: Boolean, onOpenQueue: () -> Unit) {
+    val summary = ui.currentWindow()?.thread
+    val title = chatTitle(ui)
     val status = ui.thread?.status ?: summary?.status
     Row(
         Modifier
@@ -249,7 +267,7 @@ private fun ThreadHeader(ui: DeviceUi, generating: Boolean, vm: MainViewModel) {
         if (status != null) {
             Spacer(Modifier.width(8.dp))
             if (summary?.queueManagement == true && summary.queued > 0) {
-                TextButton(onClick = { vm.loadQueue() }) {
+                TextButton(onClick = onOpenQueue) {
                     Text(pluralStringResource(R.plurals.status_queued, summary.queued, summary.queued))
                 }
             }
@@ -938,8 +956,10 @@ private fun Composer(ui: DeviceUi, vm: MainViewModel, generating: Boolean) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ComposerInput(ui: DeviceUi, vm: MainViewModel, generating: Boolean) {
+    val stopTarget = ui.stopTarget()
     Row(
         Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.Bottom,
@@ -953,18 +973,25 @@ private fun ComposerInput(ui: DeviceUi, vm: MainViewModel, generating: Boolean) 
             shape = RoundedCornerShape(24.dp),
             modifier = Modifier.weight(1f),
         )
-        if (generating) {
+        if (stopTarget != null) {
             Spacer(Modifier.width(6.dp))
-            FilledTonalIconButton(
-                onClick = vm::stopGenerating,
-                enabled = !ui.stopping,
-                colors = IconButtonDefaults.filledTonalIconButtonColors(
-                    containerColor = MaterialTheme.colorScheme.errorContainer,
-                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                ),
-                modifier = Modifier.size(52.dp),
+            val stopLabel = stringResource(if (stopTarget == StopTarget.Plan) R.string.action_stop_plan else R.string.action_stop)
+            TooltipBox(
+                positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                tooltip = { PlainTooltip { Text(stopLabel) } },
+                state = rememberTooltipState(),
             ) {
-                Icon(Icons.Filled.Stop, contentDescription = stringResource(R.string.action_stop))
+                FilledTonalIconButton(
+                    onClick = { if (stopTarget == StopTarget.Plan) vm.architectAction(run = false) else vm.stopGenerating() },
+                    enabled = stopTarget == StopTarget.Plan || !ui.stopping,
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    ),
+                    modifier = Modifier.size(52.dp),
+                ) {
+                    Icon(Icons.Filled.Stop, contentDescription = stopLabel)
+                }
             }
         }
         Spacer(Modifier.width(6.dp))

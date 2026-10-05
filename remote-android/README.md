@@ -28,12 +28,16 @@ on the network.
 
 There is no repository to create and nothing to install on GitHub.
 
-- **Models:** tap **Model** in Chat to load the active conversation's models from the computer. Search the loaded
-  choices or use **Load more models**. Unavailable models are disabled; selection errors stay visible in the picker.
+- **Chat-first layout:** the default screen keeps one compact conversation header and the composer. The controls
+  icon in the header opens **Conversation controls** for model selection, agent mode, project/window switching,
+  queue inspection, and Architect plan details. **Threads** and **Files** are in **More options**; Back returns to Chat.
+  Questions, permissions, connection warnings, and the active Stop control remain visible without opening a menu.
+- **Models:** open **Conversation controls**, then **Model**, to load the active conversation's models from the computer.
+  Search the loaded choices or use **Load more models**. Unavailable models are disabled; selection errors stay visible.
 - **Queue controls:** normal sending queues a message while Praxis is working. **Steer** requests the next supported
   turn boundary when that message reaches the front. **Send Now** interrupts the current turn. Tap the queued count
-  to inspect and control the desktop queue, including messages not created on this phone. Other queued messages
-  remain intact. Delivery still uses GitHub polling and is not instantaneous. An unconfirmed send remains in the
+  in **Conversation controls** to inspect and control the desktop queue, including messages not created on this phone.
+  Other queued messages remain intact. Delivery still uses GitHub polling and is not instantaneous. An unconfirmed send remains in the
   current window's outbox for review instead of replacing another draft. **Restore draft** only restores to the same
   conversation with an empty composer; it does not resend. Check the conversation before retrying an uncertain send.
 - **Conversation headers:** messages, tools, and Thinking start collapsed. Expanding fetches that body's first chunk;
@@ -46,7 +50,16 @@ There is no repository to create and nothing to install on GitHub.
   question** declines it. Closing the form alone does not answer it. Already-resolved questions cannot be answered twice.
 - **Folders:** use **Open folder on computer** from the device menu, browse or enter an absolute host path, and open
   it in a new window. Other windows and agent sessions remain open. Windows users can enter accessible WSL UNC paths.
-  The phone preserves its pairing key if a transient or competing desktop snapshot fails to confirm it.
+  Select windows in **Conversation controls**. The phone preserves its pairing key if a transient or competing desktop
+  snapshot fails to confirm it.
+
+Request polling has a bounded deadline, including a stalled HTTP read. Temporary network failures are retried as
+reads of the same request, not by reposting a message. Network cleanup runs separately so a timed-out or cancelled
+request cannot hold the message queue while deleting its GitHub comment. Persistent GitHub connection errors are
+reported separately from a desktop that has not answered; neither case erases pairing keys. The desktop uses a
+short, capped recovery backoff for transient failures and observes GitHub rate-limit delays. Passive snapshot
+updates slow to 30 or 60 seconds when GitHub quota is low, while explicit requests and their replies retain priority.
+GitHub quota is shared with other activity, so exhausting it can still delay the connection until the reset time.
 
 Update both the desktop and Android app for these controls. Older desktops continue to show their existing transcript
 format and do not expose the new controls. Pairing keys and encryption are unchanged. If an older Android version

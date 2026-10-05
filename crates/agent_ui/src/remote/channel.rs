@@ -38,6 +38,7 @@ const WATCHED_PUBLISH_INTERVAL: Duration = Duration::from_secs(10);
 /// sees the effect of what it asked for quickly.
 const SETTLE_DELAY: Duration = Duration::from_secs(3);
 const ERROR_BACKOFF: Duration = Duration::from_secs(60);
+const MAX_TRANSIENT_BACKOFF: Duration = Duration::from_secs(30);
 /// Old comments are only noticed on a full read of the list, so one is made
 /// this often even while the list looks unchanged.
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(300);
@@ -62,6 +63,18 @@ const COMMENTS_PER_PAGE: usize = 100;
 const GISTS_PER_PAGE: usize = 100;
 const GIST_PAGES: usize = 3;
 const REFUSED_SIGN_IN: &str = "GitHub no longer accepts this computer's sign-in; sign in again";
+
+fn recovery_delay(error: &anyhow::Error, failures: u32) -> Duration {
+    if let Some(delay) = github::retry_after(error) {
+        return delay.max(POLL_INTERVAL);
+    }
+    if github::github_status(error) == Some(StatusCode::FORBIDDEN) {
+        return ERROR_BACKOFF;
+    }
+    // A brief network failure should recover inside the phone's response
+    // window, not force every pending request through a minute-long blackout.
+    (POLL_INTERVAL * (1 << failures.saturating_sub(1).min(4))).min(MAX_TRANSIENT_BACKOFF)
+}
 
 /// What the rest of Praxis asks of a running channel.
 #[derive(Debug)]
@@ -320,6 +333,7 @@ impl Channel {
     }
 
     async fn run(&mut self, cx: &mut AsyncApp) -> Result<()> {
+        let mut failures = 0u32;
         loop {
             self.apply_commands(cx)?;
             let mut result = self.step(cx).await;
@@ -331,6 +345,7 @@ impl Channel {
             }
             match result {
                 Ok(()) => {
+                    failures = 0;
                     if self.failing {
                         log::info!("Praxis Remote reached GitHub again");
                         self.failing = false;
@@ -349,9 +364,11 @@ impl Channel {
                         log::warn!("Praxis Remote could not reach GitHub: {error:#}");
                         self.failing = true;
                     }
+                    failures = failures.saturating_add(1);
+                    let delay = recovery_delay(&error, failures);
                     let status = RemoteStatus::Offline(format!("{error:#}"));
                     self.report_status(status, cx)?;
-                    self.wait(ERROR_BACKOFF, cx).await;
+                    self.wait(delay, cx).await;
                 }
             }
         }
@@ -924,7 +941,9 @@ impl Channel {
         let gap = if settled {
             SETTLE_DELAY
         } else {
-            WATCHED_PUBLISH_INTERVAL
+            // Passive updates share GitHub's quota with command replies and
+            // the phone's reads. Preserve headroom before the quota is empty.
+            self.api.passive_publish_interval(WATCHED_PUBLISH_INTERVAL)
         };
         let due = self.publish_now
             || heartbeat_due
@@ -2089,6 +2108,16 @@ mod tests {
         assert!(delete("me", &finished, 11));
         assert!(!delete("me", &unfinished, 60));
         assert!(!delete("me", &request, 60));
+    }
+
+    #[test]
+    fn transient_recovery_uses_a_short_bounded_backoff() {
+        let error = anyhow!("temporary connection failure");
+        assert_eq!(recovery_delay(&error, 1), Duration::from_secs(3));
+        assert_eq!(recovery_delay(&error, 2), Duration::from_secs(6));
+        assert_eq!(recovery_delay(&error, 3), Duration::from_secs(12));
+        assert_eq!(recovery_delay(&error, 4), Duration::from_secs(24));
+        assert_eq!(recovery_delay(&error, u32::MAX), MAX_TRANSIENT_BACKOFF);
     }
 
     #[test]
