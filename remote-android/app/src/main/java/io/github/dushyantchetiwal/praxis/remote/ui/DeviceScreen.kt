@@ -13,11 +13,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.outlined.Chat
+
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.MoreVert
@@ -28,6 +30,7 @@ import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Web
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -38,8 +41,12 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.PlainTooltip
+import androidx.compose.material3.TooltipBox
+import androidx.compose.material3.TooltipDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.rememberTooltipState
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -70,25 +77,30 @@ import io.github.dushyantchetiwal.praxis.remote.data.WindowInfo
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DeviceScreen(state: AppState, ui: DeviceUi, busy: Int, vm: MainViewModel, snackbar: SnackbarHostState) {
-    var menu by remember { mutableStateOf(false) }
-    var confirmUnpair by remember { mutableStateOf(false) }
+    var menu by remember(ui.device?.channel, ui.windowId, ui.tab) { mutableStateOf(false) }
+    var controls by remember(ui.device?.channel, ui.windowId, ui.currentWindow()?.thread?.sessionId) { mutableStateOf(false) }
+    var confirmUnpair by remember(ui.device?.channel) { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
                 navigationIcon = {
-                    IconButton(onClick = vm::leaveDevice) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.devices_title))
+                    IconButton(onClick = { vm.back() }) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(if (ui.parentTab() == null) R.string.devices_title else R.string.tab_chat))
                     }
                 },
                 title = { DeviceTitle(ui) },
                 actions = {
-                    Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                        if (busy > 0) {
-                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                        } else {
-                            IconButton(onClick = vm::refresh) {
-                                Icon(Icons.Filled.Refresh, contentDescription = stringResource(R.string.action_refresh))
-                            }
+                    Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                        if (busy > 0) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    }
+                    val controlsLabel = stringResource(R.string.chat_controls)
+                    TooltipBox(
+                        positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                        tooltip = { PlainTooltip { Text(controlsLabel) } },
+                        state = rememberTooltipState(),
+                    ) {
+                        IconButton(onClick = { controls = true }, enabled = ui.currentWindow() != null) {
+                            Icon(Icons.Outlined.Tune, contentDescription = controlsLabel)
                         }
                     }
                     Box {
@@ -96,6 +108,17 @@ fun DeviceScreen(state: AppState, ui: DeviceUi, busy: Int, vm: MainViewModel, sn
                             Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.action_more))
                         }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+
+                            if (ui.tab != Tab.Threads) DropdownMenuItem(
+                                text = { Text(stringResource(R.string.tab_threads)) },
+                                leadingIcon = { Icon(Icons.Outlined.History, contentDescription = null) },
+                                onClick = { menu = false; vm.switchTab(Tab.Threads) },
+                            )
+                            if (ui.tab != Tab.Files) DropdownMenuItem(
+                                text = { Text(stringResource(R.string.tab_files)) },
+                                leadingIcon = { Icon(Icons.Outlined.Folder, contentDescription = null) },
+                                onClick = { menu = false; vm.switchTab(Tab.Files) },
+                            )
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.action_refresh)) },
                                 leadingIcon = { Icon(Icons.Filled.Refresh, contentDescription = null) },
@@ -114,7 +137,7 @@ fun DeviceScreen(state: AppState, ui: DeviceUi, busy: Int, vm: MainViewModel, sn
                                     onClick = { menu = false; vm.browseHostFolder() },
                                 )
                             }
-                            DropdownMenuItem(
+                            if (ui.parentTab() != null) DropdownMenuItem(
                                 text = { Text(stringResource(R.string.action_switch_device)) },
                                 leadingIcon = { Icon(Icons.Outlined.Computer, contentDescription = null) },
                                 onClick = { menu = false; vm.leaveDevice() },
@@ -133,13 +156,6 @@ fun DeviceScreen(state: AppState, ui: DeviceUi, busy: Int, vm: MainViewModel, sn
                     }
                 },
             )
-        },
-        bottomBar = {
-            NavigationBar {
-                TabItem(ui.tab == Tab.Chat, Icons.AutoMirrored.Outlined.Chat, R.string.tab_chat) { vm.switchTab(Tab.Chat) }
-                TabItem(ui.tab == Tab.Threads, Icons.Outlined.History, R.string.tab_threads) { vm.switchTab(Tab.Threads) }
-                TabItem(ui.tab == Tab.Files, Icons.Outlined.Folder, R.string.tab_files) { vm.switchTab(Tab.Files) }
-            }
         },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
@@ -161,6 +177,7 @@ fun DeviceScreen(state: AppState, ui: DeviceUi, busy: Int, vm: MainViewModel, sn
         }
     }
 
+    if (controls) ConversationControlsSheet(ui, vm, onDismiss = { controls = false })
     if (ui.folderBrowser.visible) HostFolderDialog(ui, vm)
     if (confirmUnpair) {
         UnpairDialog(ui.device?.name.orEmpty(), onDismiss = { confirmUnpair = false }) {
@@ -226,23 +243,70 @@ fun UnpairDialog(deviceName: String, onDismiss: () -> Unit, onConfirm: () -> Uni
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun androidx.compose.foundation.layout.RowScope.TabItem(
-    selected: Boolean,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: Int,
-    onClick: () -> Unit,
-) {
-    NavigationBarItem(
-        selected = selected,
-        onClick = onClick,
-        icon = { Icon(icon, contentDescription = null) },
-        label = { Text(stringResource(label)) },
-    )
+private fun ConversationControlsSheet(ui: DeviceUi, vm: MainViewModel, onDismiss: () -> Unit) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    ) {
+        Column(
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(stringResource(R.string.chat_controls), style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(horizontal = 16.dp))
+            Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ConnectionDetails(ui)
+                val windows = ui.status?.windows.orEmpty()
+                if (windows.size > 1) {
+                    WindowPicker(windows, ui.currentWindow()) { id -> onDismiss(); vm.selectWindow(id) }
+                } else {
+                    ui.currentWindow()?.let { window ->
+                        Text(stringResource(R.string.current_project, window.projectsLabel ?: stringResource(R.string.window_untitled, window.id)), style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+            ConversationControls(ui, vm) {
+                onDismiss()
+                vm.switchTab(Tab.Chat)
+                vm.loadQueue()
+            }
+        }
+    }
 }
 
 @Composable
 private fun DeviceTitle(ui: DeviceUi) {
+    val context = listOfNotNull(ui.device?.name, ui.currentWindow()?.projectsLabel).filter { it.isNotBlank() }.distinct().joinToString(" · ")
+    val activity = when {
+        ui.currentWindow()?.architect?.running == true -> stringResource(R.string.architect_running)
+        ui.isGenerating() -> stringResource(R.string.status_working)
+        else -> null
+    }
+    Column {
+        Text(
+            when (ui.tab) {
+                Tab.Chat -> chatTitle(ui)
+                Tab.Threads -> stringResource(R.string.tab_threads)
+                Tab.Files -> stringResource(R.string.tab_files)
+            },
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OnlineDot(ui.isOnline(rememberNow()), Modifier.size(8.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(
+                listOfNotNull(activity, context.takeIf { it.isNotBlank() }).joinToString(" · "),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ConnectionDetails(ui: DeviceUi) {
     val context = LocalContext.current
     val now = rememberNow()
     val device = ui.device
@@ -271,12 +335,11 @@ private fun DeviceTitle(ui: DeviceUi) {
     }
 }
 
-/** The window picker, update banner and status banners under the top bar. */
+/** Connectivity and update warnings stay visible even with conversation controls closed. */
 @Composable
 private fun DeviceHeader(state: AppState, ui: DeviceUi, vm: MainViewModel) {
     val context = LocalContext.current
     val now = rememberNow(15_000L)
-    val windows = ui.status?.windows.orEmpty()
     val device = ui.device
     val banners = buildList {
         if (device != null && !ui.isOnline(now)) {
@@ -288,14 +351,13 @@ private fun DeviceHeader(state: AppState, ui: DeviceUi, vm: MainViewModel) {
         }
         addAll(ui.banners.values)
     }
-    if (windows.size <= 1 && banners.isEmpty() && state.update == null) return
+    if (banners.isEmpty() && state.update == null) return
     Column(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        if (windows.size > 1) WindowPicker(windows, ui.currentWindow(), vm::selectWindow)
         state.update?.let { UpdateBanner(it, onDismiss = vm::dismissUpdate) }
         banners.forEach { BannerRow(it) }
     }
@@ -303,7 +365,7 @@ private fun DeviceHeader(state: AppState, ui: DeviceUi, vm: MainViewModel) {
 
 @Composable
 private fun WindowPicker(windows: List<WindowInfo>, current: WindowInfo?, onSelect: (Long) -> Unit) {
-    var open by remember { mutableStateOf(false) }
+    var open by remember(current?.id) { mutableStateOf(false) }
     val untitled = stringResource(R.string.window_untitled, current?.id ?: 0L)
     Box {
         AssistChip(

@@ -89,6 +89,11 @@
     <string name="time_seconds_ago">%1$ds ago</string>
 
     <!-- Device screen -->
+    <string name="chat_controls">Conversation controls</string>
+    <string name="agent_mode">Agent mode</string>
+    <string name="current_project">Project: %1$s</string>
+    <string name="architect_running">Plan running</string>
+    <string name="action_stop_plan">Stop plan</string>
     <string name="tab_chat">Chat</string>
     <string name="tab_threads">Threads</string>
     <string name="tab_files">Files</string>
@@ -137,7 +142,7 @@
     <string name="folder_parent">Parent folder</string>
     <string name="folder_more">Load more folders</string>
     <string name="folder_open_failed">Couldn’t open folder</string>
-    <string name="folder_opened">Folder opened in a new window. Select it from the window list.</string>
+    <string name="folder_opened">Folder opened in a new window. Select it in Conversation controls.</string>
     <string name="action_close">Close</string>
     <string name="action_retry">Retry</string>
     <string name="action_queue">Queue message</string>

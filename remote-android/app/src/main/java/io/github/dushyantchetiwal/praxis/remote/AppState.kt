@@ -24,6 +24,8 @@ enum class Screen { Loading, SignIn, Devices, Pair, Device, Settings }
 
 enum class Tab { Chat, Threads, Files }
 
+enum class StopTarget { Agent, Plan }
+
 sealed interface FlowPhase {
     data object Idle : FlowPhase
     data object Requesting : FlowPhase
@@ -241,8 +243,25 @@ data class DeviceUi(
 
     fun currentWindow(): WindowInfo? = status?.windows?.find { it.id == windowId }
 
-    fun isGenerating(): Boolean =
-        thread?.status == "generating" || currentWindow()?.thread?.status == "generating"
+    fun parentTab(): Tab? = Tab.Chat.takeIf { tab != Tab.Chat }
+
+    fun conversationTitle(): String? {
+        val summary = currentWindow()?.thread ?: return null
+        return thread?.takeIf { it.sessionId == summary.sessionId }?.title?.takeIf { it.isNotBlank() }
+            ?: summary.title?.takeIf { it.isNotBlank() }
+    }
+
+    fun stopTarget(): StopTarget? = when {
+        currentWindow()?.architect?.running == true -> StopTarget.Plan
+        isGenerating() -> StopTarget.Agent
+        else -> null
+    }
+
+    fun isGenerating(): Boolean {
+        val summary = currentWindow()?.thread ?: return false
+        return summary.status == "generating" ||
+            thread?.takeIf { it.sessionId == summary.sessionId }?.status == "generating"
+    }
 
     fun pendingPermissions(): List<Permission> = currentWindow()?.thread?.pending.orEmpty()
 

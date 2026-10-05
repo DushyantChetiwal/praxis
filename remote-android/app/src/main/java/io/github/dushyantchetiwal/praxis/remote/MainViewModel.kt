@@ -231,7 +231,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!canGoBack(_app.value)) return false
         when (_app.value.screen) {
             Screen.Settings -> go(_app.value.settingsReturn)
-            Screen.Device -> leaveDevice()
+            Screen.Device -> d.parentTab()?.let(::switchTab) ?: leaveDevice()
             Screen.Pair -> cancelPairing()
             else -> return false
         }
