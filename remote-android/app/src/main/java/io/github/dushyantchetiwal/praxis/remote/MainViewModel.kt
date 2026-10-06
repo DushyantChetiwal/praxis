@@ -236,16 +236,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             var previousEpoch: String? = null
+            var wasLive = false
             channel.live.connection.collect { connection ->
                 if (connection?.channel == d.device?.channel) {
                     edit { copy(liveTransport = connection?.connected == true) }
                     if (connection?.connected == true) {
-                        if (previousEpoch != connection.epoch) { resetWatcher(); previousEpoch = connection.epoch }
+                        if (!wasLive || previousEpoch != connection.epoch) { resetWatcher(); previousEpoch = connection.epoch }
+                        wasLive = true
                         ensureWatch()
-                    }
+                    } else { wasLive = false }
                     requestPoll()
                 } else {
                     previousEpoch = null
+                    wasLive = false
                     edit { copy(liveTransport = false) }
                 }
             }
@@ -426,7 +429,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pairJob = null
         stopDevice()
         gh.clearCache()
-        if (explicit) store.clearAccount() else store.clearToken()
+        if (explicit) { store.clearAccount(); imageDrafts.clear() } else store.clearToken()
         composer = ""
         _app.update {
             AppState(
@@ -475,7 +478,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 setDevices { copy(paired = found.filter(::isPaired).map { it.channel }.toSet()) }
                 reconcileDevice(initial)
             } catch (e: ApiException) {
-                if (e.kind != ErrorKind.Auth) setDevices { copy(error = str(R.string.devices_error, e.message.orEmpty())) }
+                if (e.kind != ErrorKind.Auth) {
+                    val cached = store.cachedComputers()
+                    setDevices { copy(
+                        devices = (devices + cached).distinctBy { it.channel },
+                        paired = paired + cached.map { it.channel },
+                        error = str(R.string.devices_error, e.message.orEmpty()),
+                    ) }
+                    reconcileDevice(initial)
+                }
             } finally {
                 setDevices { copy(loading = false, loaded = true) }
             }
@@ -485,7 +496,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Whether this phone holds a key for [device] that the computer still honours. */
     private fun isPaired(device: Device): Boolean {
         if (store.keyFor(device.channel) == null) return false
-        return phoneId in device.phones || withinPairingGrace(device.channel)
+        return device.cached || phoneId in device.phones || withinPairingGrace(device.channel)
     }
 
     private fun withinPairingGrace(channel: String): Boolean =
@@ -740,7 +751,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pollJob?.cancel()
         pollJob = null
         if (!foreground || d.device == null || store.token == null) return
-        d.device?.takeIf { it.nostr }?.let { device -> linkFor(device)?.let(channel.live::start) }
+        d.device?.let { device -> linkFor(device)?.let(channel.live::start) }
         pollJob = viewModelScope.launch {
             while (isActive) {
                 val wait = pollOnce() ?: break
@@ -757,7 +768,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun pollOnce(): Long? {
         val device = d.device ?: return null
         val link = linkFor(device)
-        if (device.nostr && link != null) {
+        if (link != null) {
             channel.live.start(link)
             if (channel.live.ready(link)) {
                 ensureWatch()
@@ -1017,6 +1028,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             session = session,
             baseIndex = d.thread?.takeIf { it.sessionId == session }?.entries?.maxOfOrNull { it.index } ?: -1,
             images = images,
+            fingerprint = io.github.dushyantchetiwal.praxis.remote.data.promptFingerprint(text, images),
         )
         edit { copy(outbox = outbox + item) }
         composer = ""

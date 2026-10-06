@@ -13,6 +13,10 @@ import androidx.exifinterface.media.ExifInterface
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.UUID
+import android.util.Log
+
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -23,7 +27,25 @@ private const val MAX_SOURCE_BYTES = 20 * 1024 * 1024
 const val MAX_IMAGE_BYTES = 2 * 1024 * 1024
 private const val MAX_EDGE = 1600
 
-class PromptImage(val id: String, val bytes: ByteArray, val preview: ImageBitmap)
+class PromptImage(val id: String, val bytes: ByteArray, val preview: ImageBitmap) {
+    internal val encodedHash: ByteArray = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(RemoteCrypto.base64(bytes).toByteArray(Charsets.US_ASCII))
+}
+
+fun promptFingerprint(text: String, images: List<PromptImage>): String {
+    if (images.isEmpty()) return transcriptFingerprint(text)
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+    digest.update("praxis-remote/image-message/v1".toByteArray())
+    digest.update(0.toByte())
+    digest.update(text.trim().toByteArray(Charsets.UTF_8))
+    digest.update(0.toByte())
+    for (image in images) {
+        digest.update("image/jpeg".toByteArray())
+        digest.update(0.toByte())
+        digest.update(image.encodedHash)
+    }
+    return "image-v1:" + RemoteCrypto.base64(digest.digest())
+}
 
 internal fun imageSampleSize(width: Int, height: Int): Int {
     require(width > 0 && height > 0 && width.toLong() * height <= 100_000_000) { "This image is too large to decode. Choose a smaller image." }
@@ -104,19 +126,29 @@ internal fun nextImageOffset(reply: JSONObject, expected: Int): Int {
 
 suspend fun uploadImage(image: PromptImage, target: JSONObject, request: suspend (String, JSONObject) -> JSONObject?): String {
     fun args() = JSONObject(target.toString())
-    val begin = request("image_begin", args().put("size", image.bytes.size).put("mime_type", "image/jpeg"))
+    val begin = request("image_begin", args().put("client_id", image.id).put("size", image.bytes.size).put("mime_type", "image/jpeg"))
         ?: error("Praxis did not acknowledge the image upload.")
     val id = begin.str("upload_id")?.takeIf(::isHexId) ?: error("Praxis returned an invalid image upload ID.")
     val chunkSize = begin.index("chunk_bytes")?.takeIf { it in 1..24 * 1024 } ?: error("Praxis returned an invalid image chunk size.")
-    var offset = 0
-    while (offset < image.bytes.size) {
-        val end = minOf(image.bytes.size, offset + chunkSize)
-        val reply = request("image_chunk", args().put("upload_id", id).put("offset", offset)
-            .put("data", RemoteCrypto.base64(image.bytes.copyOfRange(offset, end))))
-            ?: error("Praxis did not acknowledge the image chunk.")
-        offset = nextImageOffset(reply, end)
+    if (begin.bool("ready")) return id
+    try {
+        var offset = begin.index("next_offset") ?: 0
+        require(offset in 0..image.bytes.size) { "Praxis returned an invalid image resume offset." }
+        while (offset < image.bytes.size) {
+            val end = minOf(image.bytes.size, offset + chunkSize)
+            val reply = request("image_chunk", args().put("upload_id", id).put("offset", offset)
+                .put("data", RemoteCrypto.base64(image.bytes.copyOfRange(offset, end))))
+                ?: error("Praxis did not acknowledge the image chunk.")
+            offset = nextImageOffset(reply, end)
+        }
+        val finish = request("image_finish", args().put("upload_id", id))
+        check(finish?.bool("ready") == true && finish.str("upload_id") == id) { "Praxis could not finish the image upload." }
+        return id
+    } catch (error: Exception) {
+        withContext(NonCancellable) {
+            try { withTimeoutOrNull(5_000) { request("image_discard", args().put("upload_id", id)) } }
+            catch (cleanup: Exception) { Log.d("PraxisRemote", "Incomplete image will expire on the desktop", cleanup) }
+        }
+        throw error
     }
-    val finish = request("image_finish", args().put("upload_id", id))
-    check(finish?.bool("ready") == true && finish.str("upload_id") == id) { "Praxis could not finish the image upload." }
-    return id
 }

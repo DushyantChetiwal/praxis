@@ -25,6 +25,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.nostrdevkit.sdk.Client
+import org.nostrdevkit.sdk.AckPolicy
 import org.nostrdevkit.sdk.ClientNotification
 import org.nostrdevkit.sdk.EventBuilder
 import org.nostrdevkit.sdk.Filter
@@ -144,7 +145,7 @@ class NostrChannel {
                                 when (packet.str("type")) {
                                     "response" -> packet.str("id")?.let { pending[it]?.complete(packet) }
                                     "snapshot" -> if (cursor.accept(packet)) {
-                                        parseSnapshot(packet.obj("snapshot")?.toString())?.let {
+                                        parseSnapshot(packet.obj("snapshot")?.toString())?.takeIf { session === this@Session }?.let {
                                             _snapshots.emit(LiveSnapshot(link.channel, link.phoneId, it))
                                         }
                                     }
@@ -215,7 +216,7 @@ class NostrChannel {
                         Tag.parse(listOf("salt", UUID.randomUUID().toString())),
                     )).finalize(own)
                     try {
-                        withTimeoutOrNull(3_000) { transport.sendEvent(event, okTimeout = Duration.ofSeconds(2)) }
+                        withTimeoutOrNull(3_000) { transport.sendEvent(event, ackPolicy = AckPolicy.none(), okTimeout = Duration.ofSeconds(2)) }
                     } catch (error: CancellationException) { throw error }
                     catch (error: Exception) { Log.d("PraxisRemote", "Waiting for the desktop receipt after relay publication failure", error) }
                     finally { event.close() }

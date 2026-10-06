@@ -1661,9 +1661,9 @@ fn transcript_entry(
     if !include_details {
         value["details_pending"] = json!(true);
         if let AgentThreadEntry::UserMessage(message) = entry {
-            value["fingerprint"] = json!(transcript::fingerprint(
+            value["fingerprint"] = json!(images::fingerprint(message.content.source_blocks()).unwrap_or_else(|| transcript::fingerprint(
                 snapshot_message_text(&message.content, cx).trim()
-            ));
+            )));
         }
     }
     if let AgentThreadEntry::AssistantMessage(message) = entry

@@ -25,6 +25,7 @@ android {
         applicationId = "io.github.dushyantchetiwal.praxis.remote"
         minSdk = 26
         targetSdk = 35
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = remoteVersionCode
         versionName = remoteVersionName
         buildConfigField("String", "GITHUB_CLIENT_ID", javaString(githubClientId))
@@ -96,6 +97,8 @@ dependencies {
         exclude(group = "androidx.appcompat", module = "appcompat")
     }
 
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
     testImplementation(libs.junit)
     testImplementation(libs.org.json)
     testImplementation(libs.kotlinx.coroutines.test)

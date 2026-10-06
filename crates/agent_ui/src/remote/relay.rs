@@ -10,7 +10,7 @@ use futures::{FutureExt as _, StreamExt as _};
 use gpui::{AppContext as _, AsyncApp, Task};
 use gpui_tokio::Tokio;
 use nostr_sdk::prelude::*;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -30,6 +30,7 @@ struct Peer {
     key: Key,
     keys: Keys,
     phone_public: PublicKey,
+    last_seen: Mutex<Option<Instant>>,
 }
 
 type Peers = Arc<RwLock<BTreeMap<String, Arc<Peer>>>>;
@@ -66,6 +67,11 @@ impl Relay {
         Self { peers, changed, stop: Some(stop), task: Some(task) }
     }
 
+    pub(super) fn all_connected(&self) -> bool {
+        let peers = self.peers.read();
+        !peers.is_empty() && peers.values().all(|peer| peer.last_seen.lock().is_some_and(|at| at.elapsed() < Duration::from_secs(45)))
+    }
+
     pub(super) fn set_phones(&self, channel: &str, phones: impl IntoIterator<Item = (String, Key)>) {
         let mut peers = self.peers.write();
         let mut next = BTreeMap::new();
@@ -81,6 +87,7 @@ impl Relay {
                     id: id.clone(), key,
                     keys: Keys::new(SecretKey::from_slice(&desktop)?),
                     phone_public: Keys::new(SecretKey::from_slice(&phone)?).public_key(),
+                    last_seen: Mutex::new(None),
                 })
             };
             match make() {
@@ -231,6 +238,7 @@ async fn serve(channel_id: String, device: String, peers: Peers, changes: Receiv
             published.retain(|phone, _| watches.contains_key(phone));
             for (phone, watch) in &watches {
                 let Some(peer) = peers.read().get(phone).cloned() else { continue; };
+                if peer.last_seen.lock().is_none_or(|at| at.elapsed() >= Duration::from_secs(45)) { continue; }
                 let value = cx.update(|cx| snapshot(&status(&device, cx), Some(watch), cx));
                 let fingerprint = value.to_string();
                 let unchanged = published.get(phone).is_some_and(|(previous, at)| previous == &fingerprint && at.elapsed() < Duration::from_secs(15));
@@ -256,6 +264,7 @@ async fn serve(channel_id: String, device: String, peers: Peers, changes: Receiv
         let Ok(request) = serde_json::from_str::<Request>(&plain) else { continue; };
         if request.id.is_empty() || request.id.len() > 64 || !request.id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) { continue; }
         let answer = if request.op == "hello" {
+            *peer.last_seen.lock() = Some(Instant::now());
             channel::envelope(&request.id, Ok(json!({"epoch": epoch})))
         } else {
             match receipts.begin(&peer.id, &request, &plain, &epoch, Utc::now().timestamp()) {

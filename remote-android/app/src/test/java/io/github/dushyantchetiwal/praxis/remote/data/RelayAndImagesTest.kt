@@ -33,6 +33,24 @@ class RelayAndImagesTest {
         assertThrows(IllegalArgumentException::class.java) { nextImageOffset(JSONObject().put("next_offset", 12.5), 12) }
     }
 
+    @Test fun identitiesAreBoundToThePairingAndDirection() {
+        val link = Link("fixture", "a".repeat(32), "b".repeat(32), ByteArray(32) { 7 }, "Fixture")
+        assertArrayEquals(relaySecret(link, "phone"), relaySecret(link, "phone"))
+        assertFalse(relaySecret(link, "phone").contentEquals(link.key))
+        assertFalse(relaySecret(link, "phone").contentEquals(relaySecret(link, "desktop")))
+        val other = Link("fixture", "a".repeat(32), "c".repeat(32), link.key, "Fixture")
+        assertFalse(relaySecret(link, "phone").contentEquals(relaySecret(other, "phone")))
+    }
+
+    @Test fun unavailableLiveTransportDoesNotSubmitACommand() = kotlinx.coroutines.test.runTest {
+        val transport = NostrChannel()
+        try {
+            val link = Link("fixture", "a".repeat(32), "b".repeat(32), ByteArray(32) { 7 }, "Fixture")
+            assertFalse(transport.ready(link))
+            assertNull(transport.exchange(link, "request", "prompt", JSONObject().put("text", "fixture")))
+        } finally { transport.close() }
+    }
+
     @Test fun legacyDesktopsDoNotAdvertiseNewCapabilities() {
         val status = parseStatus(JSONObject("""{"windows":[{"window":1,"projects":[],"thread":{"session_id":"s","queued":0,"pending":[]}}]}"""))
         assertFalse(status.windows.single().thread!!.imageInput)

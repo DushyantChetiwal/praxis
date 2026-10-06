@@ -179,6 +179,12 @@ class Store(context: Context) {
             .apply()
     }
 
+    fun cachedComputers(): List<Device> = pairedChannels().mapNotNull { channel ->
+        val gist = gistFor(channel) ?: return@mapNotNull null
+        Device(channel, gist, prefs.getString(KEY_NAME_PREFIX + channel, null) ?: "Paired computer",
+            null, null, emptyList(), cached = true)
+    }
+
     /** The computer opened last, by channel. */
     var savedChannel: String?
         get() = prefs.getString(KEY_SAVED_CHANNEL, null)

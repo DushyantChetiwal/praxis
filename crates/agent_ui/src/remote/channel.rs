@@ -360,7 +360,10 @@ impl Channel {
                         RemoteStatus::Connecting
                     };
                     self.report_status(status, cx)?;
-                    self.wait(POLL_INTERVAL, cx).await;
+                    let interval = if self.relay.as_ref().is_some_and(|relay| relay.all_connected()) {
+                        Duration::from_secs(30)
+                    } else { POLL_INTERVAL };
+                    self.wait(interval, cx).await;
                 }
                 Err(error) if github::is_signed_out(&error) => return Err(error),
                 Err(error) => {

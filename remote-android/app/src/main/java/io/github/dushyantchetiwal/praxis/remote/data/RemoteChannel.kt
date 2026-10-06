@@ -137,6 +137,7 @@ data class Device(
     /** Ids of the phones the computer has paired. */
     val phones: List<String>,
     val nostr: Boolean = false,
+    val cached: Boolean = false,
 ) {
     fun seenRecently(now: Long): Boolean = lastSeen != null && now - lastSeen < ONLINE_THRESHOLD_MS
 }
