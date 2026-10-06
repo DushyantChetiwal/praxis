@@ -7,6 +7,7 @@ wiring without a YAML dependency. No Rust builds or network access occur.
 """
 
 import gzip
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -39,6 +40,7 @@ with log.open("a") as output:
         "channel": os.environ.get("ZED_RELEASE_CHANNEL"),
         "version": os.environ.get("RELEASE_VERSION"),
         "bundle_type": os.environ.get("ZED_BUNDLE_TYPE"),
+        "incremental": os.environ.get("CARGO_INCREMENTAL"),
     }) + "\n")
 if os.environ.get("FAIL_TOOL") == command:
     sys.exit(1)
@@ -246,6 +248,15 @@ class BundleSplitModes(unittest.TestCase):
                 self.assertEqual(self.calls(command), [])
             self.assertFalse(any("bundle" in entry["arguments"] or "install" in entry["arguments"] for entry in self.calls("cargo")))
 
+    def test_release_cargo_invocations_keep_incremental_enabled(self):
+        for platform in ("mac", "linux"):
+            for mode in ("--desktop-only", "--remote-server-only"):
+                with self.subTest(platform=platform, mode=mode):
+                    self.run_bundle(platform, mode, environment={"CARGO_INCREMENTAL": "1"})
+                    self.assertTrue(self.calls("cargo"))
+                    self.assertEqual({entry["incremental"] for entry in self.calls("cargo")}, {"1"})
+                    self.assert_mode(desktop=mode == "--desktop-only", remote=mode == "--remote-server-only")
+
     def test_mac_default_combined(self):
         self.run_bundle("mac")
         self.assert_mode(desktop=True, remote=True)
@@ -421,6 +432,69 @@ def workflow_value(fields, name):
     return value
 
 
+class IncrementalCacheIdentity(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("incremental_cache", REPOSITORY / "script/ci-incremental-cache.py")
+        cls.helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.helper)
+
+    def setUp(self):
+        self.environment = {
+            "RUNNER_OS": "Windows", "RUNNER_ARCH": "X64", "ImageVersion": "fixture-1",
+            "PRAXIS_CARGO_PROFILE": "release",
+        }
+
+    def prefix(self, name="bundle-windows-desktop-release", compiler="rustc fixture", recipe="recipe-1", **environment):
+        return self.helper.cache_prefix(name, compiler, recipe, {**self.environment, **environment})
+
+    def test_incompatible_compilers_targets_and_profiles_never_share_a_prefix(self):
+        baseline = self.prefix()
+        for changes in (
+            {"name": "bundle-windows-server-release"},
+            {"name": "bundle-windows-desktop-test"},
+            {"compiler": "rustc next"}, {"recipe": "changed-lock-or-build-flags"},
+            {"RUNNER_OS": "Linux"}, {"RUNNER_ARCH": "ARM64"},
+            {"ImageVersion": "fixture-2"}, {"PRAXIS_CARGO_PROFILE": "praxis-test"},
+            {"RUSTFLAGS": "-C target-cpu=native"}, {"SDKROOT": "different-sdk"},
+        ):
+            with self.subTest(changes=changes):
+                self.assertNotEqual(baseline, self.prefix(**changes))
+        self.assertEqual(baseline, self.prefix(GITHUB_RUN_ID="999", GH_TOKEN="not-a-cache-input"))
+
+    def test_each_build_can_save_new_artifacts_and_restore_the_previous_prefix(self):
+        prefix = self.prefix()
+        keys = {
+            self.helper.cache_key(prefix, "a" * 40, "10", "1"),
+            self.helper.cache_key(prefix, "b" * 40, "11", "1"),
+            self.helper.cache_key(prefix, "a" * 40, "10", "2"),
+        }
+        self.assertEqual(len(keys), 3)
+        self.assertTrue(all(key.startswith(prefix + "-") and len(key) < 512 for key in keys))
+        with self.assertRaises(ValueError):
+            self.prefix(name="bad\noutput=injected")
+        with self.assertRaises(ValueError):
+            self.helper.cache_key(prefix, "main", "10", "1")
+
+    def test_cache_paths_preserve_incremental_and_workspace_state_without_packaging_outputs(self):
+        paths = self.helper.cache_paths("/fixture/cargo")
+        self.assertIn("/fixture/cargo/registry", paths)
+        self.assertIn("/fixture/cargo/git", paths)
+        for directory in ("incremental", ".fingerprint", "deps", "build"):
+            self.assertIn("target/**/" + directory, paths)
+        self.assertNotIn("target", paths)
+        self.assertNotIn("/fixture/cargo", paths)
+        self.assertFalse(any("credentials" in path or path.endswith((".exe", ".zip", ".dmg", ".tar.gz")) for path in paths))
+
+    def test_legacy_cache_is_restore_only_and_cannot_prune_the_new_cache(self):
+        action = (REPOSITORY / ".github/actions/rust-build-cache/action.yml").read_text(encoding="utf-8")
+        self.assertIn("uses: actions/cache/restore@v5", action)
+        self.assertIn('save-if: "false"', action)
+        self.assertIn("steps.restore.outputs.cache-matched-key == ''", action)
+        self.assertLess(action.index("uses: Swatinem/rust-cache@v2"), action.index("Enable incremental compilation after cache restoration"))
+        self.assertIn('output.write("CARGO_INCREMENTAL=1\\n")', action)
+
+
 class BundleWorkflowWiring(unittest.TestCase):
     PRODUCERS = (
         "macos", "macos_remote_server", "windows", "windows_remote_server",
@@ -547,7 +621,7 @@ class BundleWorkflowWiring(unittest.TestCase):
         for job in self.PRODUCERS:
             environment = self.environment(job)
             with self.subTest(job=job):
-                self.assertEqual(workflow_value(environment, "CARGO_INCREMENTAL"), "0")
+                self.assertEqual(workflow_value(environment, "CARGO_INCREMENTAL"), '"1"')
                 if job.startswith("windows"):
                     self.assertEqual(workflow_value(environment, "PRAXIS_CARGO_PROFILE"), self.WINDOWS_PROFILE)
                 else:
@@ -562,6 +636,34 @@ class BundleWorkflowWiring(unittest.TestCase):
         for environment in environments:
             self.assertFalse(any(name.startswith("CARGO_PROFILE_") for name in environment), environment)
             self.assertTrue({"RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS"}.isdisjoint(environment), environment)
+
+    def test_real_bundle_steps_override_cache_defaults_and_save_complete_build_state(self):
+        cache_names = set()
+        for job in self.PRODUCERS:
+            with self.subTest(job=job):
+                steps = self.steps(job)
+                restore = [step for step in steps if step.get("uses", (None,))[0] == "./.github/actions/rust-build-cache"]
+                self.assertEqual(len(restore), 1)
+                self.assertEqual(workflow_value(restore[0], "id"), "build-cache")
+                options = workflow_fields(restore[0]["with"][1], 10)
+                name = workflow_value(options, "cache-name")
+                self.assertNotIn(name, cache_names)
+                cache_names.add(name)
+                self.assertEqual(name, workflow_value(options, "legacy-key"))
+                builds = [step for step in steps if "run" in step and "script/bundle-" in workflow_value(step, "run")]
+                self.assertEqual(len(builds), 1)
+                self.assertNotIn("continue-on-error", builds[0])
+                environment = workflow_fields(builds[0]["env"][1], 10)
+                self.assertEqual(workflow_value(environment, "CARGO_INCREMENTAL"), '"1"')
+                saves = self.action_steps(job, "actions/cache/save")
+                self.assertEqual(len(saves), 1)
+                options = workflow_fields(saves[0]["with"][1], 10)
+                self.assertEqual(workflow_value(options, "key"), "${{ steps.build-cache.outputs.primary-key }}")
+                self.assertEqual(workflow_value(options, "path"), "${{ steps.build-cache.outputs.cache-paths }}")
+                self.assertLess(steps.index(restore[0]), steps.index(builds[0]))
+                self.assertLess(steps.index(builds[0]), steps.index(saves[0]))
+                self.assertIn("!cancelled()", workflow_value(saves[0], "if"))
+                self.assertEqual(self.action_steps(job, "Swatinem/rust-cache"), [])
 
     def test_linux_remote_has_one_producer_and_no_desktop_compile(self):
         invocations = []

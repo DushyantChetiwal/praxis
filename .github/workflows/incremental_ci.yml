@@ -10,6 +10,11 @@ on:
       - crates/architect/**
       - script/benchmark-ci-incremental.py
       - .github/workflows/incremental_ci.yml
+      - .github/workflows/bundle_fork.yml
+      - .github/actions/rust-build-cache/**
+      - script/ci-incremental-cache.py
+      - script/test-bundle-split-modes.py
+      - script/test-bundle-windows-modes.ps1
   workflow_dispatch:
 
 permissions:
@@ -57,3 +62,74 @@ jobs:
           name: incremental-comparison-${{ matrix.label }}
           path: ci-incremental-${{ matrix.incremental }}.json
           if-no-files-found: error
+
+  cache-roundtrip:
+    name: Release incremental cache (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-15]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Restore build state through the production action
+        id: build-cache
+        uses: ./.github/actions/rust-build-cache
+        with:
+          cache-name: cache-smoke-${{ runner.os }}
+          legacy-key: cache-smoke-legacy-${{ runner.os }}
+      - name: Build a real release-profile fixture
+        run: |
+          python -c 'import os; assert os.environ["CARGO_INCREMENTAL"] == "1"'
+          cargo build --locked --release -p architect --target-dir target/incremental-smoke
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          root = Path("target/incremental-smoke/release/incremental")
+          files = sorted(path for path in root.rglob("*") if path.is_file())
+          assert files, "The release build did not produce incremental compilation data"
+          manifest = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
+          Path("incremental-cache-manifest.json").write_text(json.dumps(manifest))
+          print(f"Recorded {len(files)} incremental files for cache verification")
+          PY
+      - name: Save the exact production cache paths
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.build-cache.outputs.cache-paths }}
+          key: ${{ steps.build-cache.outputs.primary-key }}
+      - name: Remove only this job's generated fixture
+        run: python -c 'import shutil; shutil.rmtree("target/incremental-smoke")'
+      - name: Restore the saved cache
+        id: restored
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ steps.build-cache.outputs.cache-paths }}
+          key: ${{ steps.build-cache.outputs.primary-key }}
+          fail-on-cache-miss: true
+      - name: Verify incremental data survived and can rebuild
+        env:
+          RESTORED_KEY: ${{ steps.restored.outputs.cache-matched-key }}
+          EXPECTED_KEY: ${{ steps.build-cache.outputs.primary-key }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          assert os.environ["RESTORED_KEY"] == os.environ["EXPECTED_KEY"]
+          assert os.environ["CARGO_INCREMENTAL"] == "1"
+          manifest = json.loads(Path("incremental-cache-manifest.json").read_text())
+          for name, expected in manifest.items():
+              assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == expected, name
+          print(f"Restored and verified {len(manifest)} incremental files")
+          PY
+          cargo build --locked --release -p architect --target-dir target/incremental-smoke

@@ -127,6 +127,7 @@ jobs:
           .github/workflows/android_remote.yml
           .github/workflows/remote_relay_probe.yml
           .github/workflows/incremental_ci.yml
+          .github/actions/rust-build-cache/action.yml
           --check
 
       - name: Prepare formatting corrections
@@ -135,7 +136,7 @@ jobs:
           cargo fmt --all
           if [ -f script/probe-praxis-relay.rs ]; then rustfmt --edition 2024 script/probe-praxis-relay.rs; fi
           ./script/prettier --write
-          pnpm dlx prettier@3.5.0 .github/workflows/architect_quality.yml .github/workflows/android_remote.yml .github/workflows/remote_relay_probe.yml .github/workflows/incremental_ci.yml --write
+          pnpm dlx prettier@3.5.0 .github/workflows/architect_quality.yml .github/workflows/android_remote.yml .github/workflows/remote_relay_probe.yml .github/workflows/incremental_ci.yml .github/workflows/bundle_fork.yml .github/actions/rust-build-cache/action.yml --write
           git --no-pager diff --binary > rust-format.patch
 
       - name: Upload formatting corrections

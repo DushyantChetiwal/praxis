@@ -45,7 +45,7 @@ function AssertEqual($Actual, $Expected, [string]$Message) {
 $environmentNames = @(
     'CI', 'ZED_WORKSPACE', 'RELEASE_VERSION', 'ZED_RELEASE_CHANNEL', 'RELEASE_CHANNEL',
     'SENTRY_AUTH_TOKEN', 'ENDPOINT', 'ACCOUNT_NAME', 'CERT_PROFILE_NAME', 'FILE_DIGEST',
-    'TIMESTAMP_DIGEST', 'TIMESTAMP_SERVER', 'TRACE'
+    'TIMESTAMP_DIGEST', 'TIMESTAMP_SERVER', 'TRACE', 'CARGO_INCREMENTAL'
 )
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) {
@@ -54,6 +54,7 @@ foreach ($name in $environmentNames) {
 
 try {
     $env:CI = 'true'
+    $env:CARGO_INCREMENTAL = '1'
     foreach ($case in @(
         @{ Arguments = @{}; Desktop = $true; Remote = $true },
         @{ Arguments = @{ DesktopOnly = $true }; Desktop = $true; Remote = $false },
@@ -150,6 +151,28 @@ try {
         AssertEqual $commands @('target add x86_64-pc-windows-msvc') 'Remote-only preparation'
     }
 
+    foreach ($profile in @('release', 'praxis-test')) {
+        $testPhase = "Incremental desktop build: profile=$profile"
+        & {
+            $channel = 'dev'
+            $target = 'x86_64-pc-windows-msvc'
+            $CargoProfile = $profile
+            $CargoOutDir = "./target/$target/$CargoProfile"
+            $innoDir = 'fixture-installer'
+            $commands = [System.Collections.Generic.List[string]]::new()
+            $copies = [System.Collections.Generic.List[string]]::new()
+            function cargo {
+                AssertEqual $env:CARGO_INCREMENTAL '1' 'Desktop Cargo inherits incremental mode'
+                AssertEqual $args[4] $CargoProfile 'Incremental mode preserves the requested optimization profile'
+                $commands.Add($args -join ' ')
+            }
+            function Copy-Item($Path, $Destination, [switch]$Force) { $copies.Add($Path) }
+            BuildZedAndItsFriends
+            AssertEqual $commands.Count 2 'Desktop and shell-extension builds are both checked'
+            AssertEqual $copies.Count 4 'Only the existing installer binaries are staged'
+        }
+    }
+
     foreach ($signed in @($false, $true)) {
         $testPhase = "Remote build and packaging: signed=$signed"
         & {
@@ -165,6 +188,7 @@ try {
             $env:TRACE = ''
             $operations = [System.Collections.Generic.List[string]]::new()
             function cargo {
+                AssertEqual $env:CARGO_INCREMENTAL '1' 'Remote Cargo inherits incremental mode'
                 AssertEqual $args @('--config', '.cargo/bundle-config.toml', 'build', '--profile', 'release', '--package', 'remote_server', '--target', $target) 'Remote uses the existing release build configuration'
                 $operations.Add('build')
             }
