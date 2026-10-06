@@ -350,10 +350,6 @@ fn snapshot(status: &Value, watch: Option<&Watch>, cx: &mut App) -> Value {
     })
 }
 
-#[cfg(test)]
-fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Value>> {
-    handle_paired(op, args, device, "", cx)
-}
 
 fn handle_paired(
     op: &str,

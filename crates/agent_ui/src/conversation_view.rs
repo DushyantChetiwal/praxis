@@ -1996,7 +1996,11 @@ impl ConversationView {
                 }
             }
             AcpThreadEvent::ModeUpdated(_mode) => {
-                // The connection keeps track of the mode
+                if let Some(thread_view) = self.thread_view(&session_id)
+                    && let Some(selector) = thread_view.read(cx).mode_selector.clone()
+                {
+                    selector.update(cx, |_, cx| cx.notify());
+                }
                 cx.notify();
             }
             AcpThreadEvent::ConfigOptionsUpdated(_) => {

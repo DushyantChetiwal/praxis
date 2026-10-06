@@ -406,9 +406,9 @@ mod tests {
     fn image_fingerprints_distinguish_image_only_messages_and_captions() {
         let one = acp::ContentBlock::Image(acp::ImageContent::new("one", "image/png"));
         let two = acp::ContentBlock::Image(acp::ImageContent::new("two", "image/png"));
-        assert_ne!(fingerprint(&[one.clone()]), fingerprint(&[two]));
+        assert_ne!(fingerprint(std::slice::from_ref(&one)), fingerprint(&[two]));
         assert_ne!(
-            fingerprint(&[one.clone()]),
+            fingerprint(std::slice::from_ref(&one)),
             fingerprint(&[
                 acp::ContentBlock::Text(acp::TextContent::new("caption")),
                 one

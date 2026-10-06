@@ -5765,7 +5765,8 @@ impl Thread {
 
         // Derive diagnostics and prompt capabilities from the actual request, not
         // another inventory snapshot that could diverge as filtering evolves.
-        let available_tools: Vec<SharedString> = tools.iter().map(|tool| tool.name.clone().into()).collect();
+        let available_tools: Vec<SharedString> =
+            tools.iter().map(|tool| tool.name.clone().into()).collect();
         log::info!(
             "Native request capabilities: session={} prompt={} mode={} profile={} tools={} write_file={} edit_file={} terminal={}",
             self.id,

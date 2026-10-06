@@ -137,7 +137,10 @@ fn current(peers: &Peers, peer: &Arc<Peer>) -> bool {
         .is_some_and(|active| Arc::ptr_eq(active, peer))
 }
 
-async fn until_stopped<T>(stopped: &Receiver<()>, work: impl std::future::Future<Output = T>) -> Option<T> {
+async fn until_stopped<T>(
+    stopped: &Receiver<()>,
+    work: impl std::future::Future<Output = T>,
+) -> Option<T> {
     let work = work.fuse();
     futures::pin_mut!(work);
     futures::select_biased! {
@@ -345,7 +348,15 @@ async fn serve(
     let (network_stop, network_stopped) = async_channel::bounded(1);
     let network = Tokio::spawn_result(
         cx,
-        network(channel_id, peers.clone(), changes, incoming, responses, network_stopped, cx.background_executor().clone()),
+        network(
+            channel_id,
+            peers.clone(),
+            changes,
+            incoming,
+            responses,
+            network_stopped,
+            cx.background_executor().clone(),
+        ),
     );
     let result = until_stopped(&stopped, async {
     let mut receipts = Receipts::default();
@@ -493,7 +504,10 @@ mod tests {
         futures::pin_mut!(waiting);
         assert!(waiting.as_mut().now_or_never().is_none());
         drop(stop);
-        assert!(waiting.await.is_none(), "shutdown must not wait for queue capacity");
+        assert!(
+            waiting.await.is_none(),
+            "shutdown must not wait for queue capacity"
+        );
         assert_eq!(receiver.try_recv().expect("retained first item"), "first");
         assert!(receiver.is_empty());
         assert_eq!(until_stopped(&stopped, async { 42 }).await, None);

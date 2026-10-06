@@ -214,6 +214,7 @@ jobs:
           cargo test --locked -p agent --lib terminal_tasks_wait_
           cargo test --locked -p markdown --lib deferred_markdown_
           cargo test --locked -p acp_thread --lib deferred_tool_
+          cargo test --locked -p agent_ui --lib compact_terminal_wait_
 
       - name: Test remote transport and image input
         run: |
@@ -247,6 +248,7 @@ jobs:
         run: |
           cargo test --locked -p agent --lib test_repetition_
           cargo test --locked -p agent --lib internal_tests::test_a_new_session_offers_plan_and_build -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_native_mode_changes_notify_the_conversation -- --exact
           cargo test --locked -p agent --lib internal_tests::test_plan_mode_keeps_read_tools_and_denies_execution -- --exact
           cargo test --locked -p agent --lib internal_tests::test_mode_changes_refresh_the_next_provider_request -- --exact
           cargo test --locked -p agent --lib internal_tests::test_plan_mode_and_filtered_tools_survive_reopening -- --exact
