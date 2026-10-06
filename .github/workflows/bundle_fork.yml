@@ -159,8 +159,7 @@ jobs:
             runner: macos-15
             target: x86_64-apple-darwin
     env:
-      # Nothing is reused between runs, so incremental artifacts are only cost.
-      CARGO_INCREMENTAL: 0
+      CARGO_INCREMENTAL: "1"
       # Compile the Praxis release feed without redirecting any upstream cloud
       # traffic.
       PRAXIS_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
@@ -174,11 +173,12 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
 
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+      - name: Restore incremental Rust build state
+        id: build-cache
+        uses: ./.github/actions/rust-build-cache
         with:
-          shared-key: bundle-macos-${{ matrix.architecture }}
-          cache-on-failure: true
+          cache-name: bundle-macos-${{ matrix.architecture }}
+          legacy-key: bundle-macos-${{ matrix.architecture }}
 
       - name: Set up Node
         # `bundle-mac` installs `dmg-license` globally to attach the license
@@ -193,7 +193,17 @@ jobs:
         run: rustup show && cargo --version
 
       - name: Bundle
+        env:
+          CARGO_INCREMENTAL: "1"
         run: ./script/bundle-mac --desktop-only ${{ matrix.target }}
+
+      - name: Save incremental Rust build state
+        if: ${{ !cancelled() && steps.build-cache.outputs.primary-key != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.build-cache.outputs.cache-paths }}
+          key: ${{ steps.build-cache.outputs.primary-key }}
 
       - name: Upload the disk image
         uses: actions/upload-artifact@v7
@@ -221,7 +231,7 @@ jobs:
           - architecture: x86_64
             target: x86_64-apple-darwin
     env:
-      CARGO_INCREMENTAL: 0
+      CARGO_INCREMENTAL: "1"
       RUST_BACKTRACE: 1
     steps:
       - name: Check out the fork
@@ -229,14 +239,25 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
 
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+      - name: Restore incremental Rust build state
+        id: build-cache
+        uses: ./.github/actions/rust-build-cache
         with:
-          shared-key: bundle-macos-remote-server-${{ matrix.architecture }}
-          cache-on-failure: true
+          cache-name: bundle-macos-remote-server-${{ matrix.architecture }}
+          legacy-key: bundle-macos-remote-server-${{ matrix.architecture }}
 
       - name: Build and package the remote server
+        env:
+          CARGO_INCREMENTAL: "1"
         run: ./script/bundle-mac --remote-server-only ${{ matrix.target }}
+
+      - name: Save incremental Rust build state
+        if: ${{ !cancelled() && steps.build-cache.outputs.primary-key != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.build-cache.outputs.cache-paths }}
+          key: ${{ steps.build-cache.outputs.primary-key }}
 
       - name: Upload the remote server
         uses: actions/upload-artifact@v7
@@ -257,7 +278,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     env:
-      CARGO_INCREMENTAL: 0
+      CARGO_INCREMENTAL: "1"
       RUST_BACKTRACE: 1
     steps:
       - name: Check out the fork
@@ -265,11 +286,12 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
 
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+      - name: Restore incremental Rust build state
+        id: build-cache
+        uses: ./.github/actions/rust-build-cache
         with:
-          shared-key: bundle-linux-remote-server-x86_64
-          cache-on-failure: true
+          cache-name: bundle-linux-remote-server-x86_64
+          legacy-key: bundle-linux-remote-server-x86_64
 
       - name: Install Linux build dependencies
         run: ./script/linux
@@ -278,7 +300,17 @@ jobs:
         run: ./script/download-wasi-sdk
 
       - name: Build the remote server
+        env:
+          CARGO_INCREMENTAL: "1"
         run: ./script/bundle-linux --remote-server-only
+
+      - name: Save incremental Rust build state
+        if: ${{ !cancelled() && steps.build-cache.outputs.primary-key != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.build-cache.outputs.cache-paths }}
+          key: ${{ steps.build-cache.outputs.primary-key }}
 
       - name: Upload the remote server
         uses: actions/upload-artifact@v7
@@ -298,7 +330,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     env:
-      CARGO_INCREMENTAL: 0
+      CARGO_INCREMENTAL: "1"
       RUST_BACKTRACE: 1
       PRAXIS_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
       PRAXIS_RELEASE_ASSET_BASE_URL: https://github.com/${{ github.repository }}/releases/download/praxis-dev-${{ github.run_number }}-${{ github.run_attempt }}
@@ -308,11 +340,12 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
 
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+      - name: Restore incremental Rust build state
+        id: build-cache
+        uses: ./.github/actions/rust-build-cache
         with:
-          shared-key: bundle-linux-x86_64
-          cache-on-failure: true
+          cache-name: bundle-linux-x86_64
+          legacy-key: bundle-linux-x86_64
 
       - name: Install Linux build dependencies
         run: ./script/linux
@@ -321,7 +354,17 @@ jobs:
         run: ./script/download-wasi-sdk
 
       - name: Bundle only the desktop app
+        env:
+          CARGO_INCREMENTAL: "1"
         run: ./script/bundle-linux --desktop-only
+
+      - name: Save incremental Rust build state
+        if: ${{ !cancelled() && steps.build-cache.outputs.primary-key != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.build-cache.outputs.cache-paths }}
+          key: ${{ steps.build-cache.outputs.primary-key }}
 
       - name: Upload the desktop archive
         uses: actions/upload-artifact@v7
@@ -347,7 +390,7 @@ jobs:
       actions: read
       contents: read
     env:
-      CARGO_INCREMENTAL: 0
+      CARGO_INCREMENTAL: "1"
       RUST_BACKTRACE: 1
       PRAXIS_UPDATE_MANIFEST_BASE_URL: https://github.com/${{ github.repository }}/releases/latest/download
       PRAXIS_RELEASE_ASSET_BASE_URL: ${{ !inputs.test_build && format('https://github.com/{0}/releases/download/praxis-dev-{1}-{2}', github.repository, github.run_number, github.run_attempt) || '' }}
@@ -368,18 +411,29 @@ jobs:
           git config --system core.longpaths true
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
 
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+      - name: Restore incremental Rust build state
+        id: build-cache
+        uses: ./.github/actions/rust-build-cache
         with:
-          shared-key: bundle-windows-x86_64-${{ inputs.test_build && 'test' || 'release' }}
-          cache-on-failure: true
+          cache-name: bundle-windows-x86_64-${{ inputs.test_build && 'test' || 'release' }}
+          legacy-key: bundle-windows-x86_64-${{ inputs.test_build && 'test' || 'release' }}
 
       - name: Show the toolchain
         run: rustup show; cargo --version
 
       - name: Bundle
+        env:
+          CARGO_INCREMENTAL: "1"
         run: ./script/bundle-windows.ps1 -DesktopOnly
         shell: pwsh
+
+      - name: Save incremental Rust build state
+        if: ${{ !cancelled() && steps.build-cache.outputs.primary-key != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.build-cache.outputs.cache-paths }}
+          key: ${{ steps.build-cache.outputs.primary-key }}
 
       - name: Upload the installer
         uses: actions/upload-artifact@v7
@@ -400,7 +454,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 150
     env:
-      CARGO_INCREMENTAL: 0
+      CARGO_INCREMENTAL: "1"
       RUST_BACKTRACE: 1
       PRAXIS_CARGO_PROFILE: ${{ inputs.test_build && 'praxis-test' || 'release' }}
     steps:
@@ -415,15 +469,26 @@ jobs:
           git config --system core.longpaths true
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force
 
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+      - name: Restore incremental Rust build state
+        id: build-cache
+        uses: ./.github/actions/rust-build-cache
         with:
-          shared-key: bundle-windows-remote-server-x86_64-${{ inputs.test_build && 'test' || 'release' }}
-          cache-on-failure: true
+          cache-name: bundle-windows-remote-server-x86_64-${{ inputs.test_build && 'test' || 'release' }}
+          legacy-key: bundle-windows-remote-server-x86_64-${{ inputs.test_build && 'test' || 'release' }}
 
       - name: Build and package the remote server
+        env:
+          CARGO_INCREMENTAL: "1"
         run: ./script/bundle-windows.ps1 -RemoteServerOnly
         shell: pwsh
+
+      - name: Save incremental Rust build state
+        if: ${{ !cancelled() && steps.build-cache.outputs.primary-key != '' }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.build-cache.outputs.cache-paths }}
+          key: ${{ steps.build-cache.outputs.primary-key }}
 
       - name: Upload the remote server
         uses: actions/upload-artifact@v7
