@@ -204,7 +204,11 @@ impl ElicitationFormState {
     fn snapshot(&self, cx: &App) -> ElicitationFormSubmission {
         ElicitationFormSubmission {
             question_answer_field: self.question_freeform_active.as_ref().map(|active| {
-                if active.get() { "freeform_answer" } else { "answer" }
+                if active.get() {
+                    "freeform_answer"
+                } else {
+                    "answer"
+                }
             }),
             fields: self
                 .fields
@@ -459,7 +463,9 @@ impl ElicitationFormSubmission {
                 _ => false,
             };
             if !answered {
-                errors.entry(field.to_string()).or_insert_with(|| "Choose an option or enter an answer".into());
+                errors
+                    .entry(field.to_string())
+                    .or_insert_with(|| "Choose an option or enter an answer".into());
             }
         }
         if errors.is_empty() {
@@ -683,8 +689,17 @@ mod tests {
                 }
             });
             view.update(cx, |view, cx| {
-                view.form_state.question_freeform_active.as_ref().expect("question").set(true);
-                assert!(view.form_state.collect(&schema, cx).expect_err("an empty active answer must remain pending").contains_key("freeform_answer"));
+                view.form_state
+                    .question_freeform_active
+                    .as_ref()
+                    .expect("question")
+                    .set(true);
+                assert!(
+                    view.form_state
+                        .collect(&schema, cx)
+                        .expect_err("an empty active answer must remain pending")
+                        .contains_key("freeform_answer")
+                );
             });
             cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
             cx.simulate_input("Use a local database instead");

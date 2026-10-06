@@ -1305,11 +1305,12 @@ impl ThreadView {
                 state.collapse_tool_call(id);
             }
         });
-        let show_input = expanded && self.thread.read(cx).tool_call(id).is_some_and(|(_, call)| {
-            Self::tool_call_shows_raw_input(call)
-                && (!matches!(call.status, ToolCallStatus::WaitingForConfirmation { .. })
-                    || self.expanded_tool_call_raw_inputs.contains(id))
-        });
+        let show_input = expanded
+            && self.thread.read(cx).tool_call(id).is_some_and(|(_, call)| {
+                Self::tool_call_shows_raw_input(call)
+                    && (!matches!(call.status, ToolCallStatus::WaitingForConfirmation { .. })
+                        || self.expanded_tool_call_raw_inputs.contains(id))
+            });
         self.thread.update(cx, |thread, cx| {
             thread.set_tool_call_raw_input_expanded(id, show_input, cx);
             if !expanded {
@@ -10248,7 +10249,10 @@ impl ThreadView {
     fn tool_call_shows_raw_input(call: &ToolCall) -> bool {
         !matches!(call.kind, acp::ToolKind::Execute | acp::ToolKind::Edit)
             && call.diffs().next().is_none()
-            && !call.content().iter().any(|content| content.image().is_some())
+            && !call
+                .content()
+                .iter()
+                .any(|content| content.image().is_some())
     }
 
     fn latest_active_terminal_wait_id<'a>(

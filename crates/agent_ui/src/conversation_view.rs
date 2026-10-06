@@ -8523,23 +8523,41 @@ pub(crate) mod tests {
                 .raw_input(input.clone())
                 .content(vec!["Complete output".into()]),
         )]);
-        let (conversation, cx) = setup_conversation_view(StubAgentServer::new(connection), cx).await;
+        let (conversation, cx) =
+            setup_conversation_view(StubAgentServer::new(connection), cx).await;
         let view = active_thread(&conversation, cx);
         let thread = view.read_with(cx, |view, _| view.thread.clone());
-        thread.update(cx, |thread, cx| thread.send_raw("Inspect the tool", cx)).await.expect("prompt");
+        thread
+            .update(cx, |thread, cx| thread.send_raw("Inspect the tool", cx))
+            .await
+            .expect("prompt");
         cx.run_until_parked();
         thread.read_with(cx, |thread, _| {
-            assert!(thread.tool_call(&id).expect("tool").1.raw_input_markdown.is_none());
+            assert!(
+                thread
+                    .tool_call(&id)
+                    .expect("tool")
+                    .1
+                    .raw_input_markdown
+                    .is_none()
+            );
         });
         for expanded in [true, false, true] {
-            view.update(cx, |view, cx| view.set_tool_call_expanded(&id, expanded, cx));
+            view.update(cx, |view, cx| {
+                view.set_tool_call_expanded(&id, expanded, cx)
+            });
             cx.run_until_parked();
             thread.read_with(cx, |thread, cx| {
                 let call = thread.tool_call(&id).expect("tool").1;
                 assert_eq!(call.raw_input.as_ref(), Some(&input));
                 assert_eq!(call.raw_input_markdown.is_some(), expanded);
                 if let Some(markdown) = &call.raw_input_markdown {
-                    assert!(markdown.read(cx).source().contains("Complete Unicode input Ω"));
+                    assert!(
+                        markdown
+                            .read(cx)
+                            .source()
+                            .contains("Complete Unicode input Ω")
+                    );
                 }
             });
         }
