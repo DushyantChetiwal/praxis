@@ -1,0 +1,32 @@
+name: Remote dependency lockfile
+
+on:
+  push:
+    branches:
+      - fix-loading-thread-selections
+    paths:
+      - Cargo.toml
+      - crates/agent_ui/Cargo.toml
+      - .github/workflows/remote_dependency_lock.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Resolve added workspace dependencies
+        run: cargo update --workspace
+      - name: Capture lockfile patch for review
+        run: git --no-pager diff --binary -- Cargo.lock > remote-dependencies.patch
+      - uses: actions/upload-artifact@v7
+        with:
+          name: remote-dependencies
+          path: remote-dependencies.patch
+          if-no-files-found: error
