@@ -9340,6 +9340,71 @@ mod internal_tests {
         });
     }
 
+    #[gpui::test]
+    async fn test_mode_changes_refresh_the_next_provider_request(cx: &mut TestAppContext) {
+        use language_model::{LanguageModelToolUse, LanguageModelToolUseInput};
+
+        let fake = init_test(cx);
+        let (connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let model = fake.model("thread");
+        thread.update(cx, |thread, cx| thread.set_model(model.clone(), cx));
+        let modes = cx.update(|cx| connection.session_modes(&session_id, cx)).expect("mode selector");
+
+        for initial_mode in [SessionMode::Plan, SessionMode::Architect] {
+            cx.update(|cx| modes.set_mode(acp::SessionModeId::new(initial_mode.id()), cx))
+                .await.expect("select read-only mode");
+            let prompt = cx.update(|cx| {
+                acp_thread::AgentSessionClientUserMessageIds::prompt(
+                    connection.as_ref(),
+                    ClientUserMessageId::new(),
+                    acp::PromptRequest::new(session_id.clone(), vec!["Inspect the project".into()]),
+                    cx,
+                )
+            });
+            cx.run_until_parked();
+            let mut request = fake.pending_completions_for(&model).pop().expect("initial request");
+            assert!(!request.tools.iter().any(|tool| tool.name == WriteFileTool::NAME));
+
+            for next_mode in [SessionMode::Build, initial_mode] {
+                cx.update(|cx| modes.set_mode(acp::SessionModeId::new(next_mode.id()), cx))
+                    .await.expect("switch mode while the provider is streaming");
+                assert_eq!(modes.current_mode().0.as_ref(), next_mode.id());
+                // The provider already owns this request. Only the next one can
+                // gain tools; execution still rechecks the current mode.
+                assert_eq!(
+                    request.tools.iter().any(|tool| tool.name == WriteFileTool::NAME),
+                    next_mode != SessionMode::Build,
+                );
+                let input = json!({"path": "a"});
+                fake.send_event(&model, &request, LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+                    id: format!("inspect-{}-{}", initial_mode.id(), next_mode.id()).into(),
+                    name: ListDirectoryTool::NAME.into(),
+                    raw_input: input.to_string(),
+                    input: LanguageModelToolUseInput::Json(input),
+                    is_input_complete: true,
+                    thought_signature: None,
+                }));
+                fake.end_stream(&model, &request);
+                cx.run_until_parked();
+                request = fake.pending_completions_for(&model).pop().expect("tool-result request");
+                assert_eq!(request.intent, Some(CompletionIntent::ToolResults));
+                for name in [WriteFileTool::NAME, EditFileTool::NAME, TerminalTool::NAME] {
+                    assert_eq!(
+                        request.tools.iter().any(|tool| tool.name == name),
+                        next_mode == SessionMode::Build,
+                        "{name} must reflect the mode selected before this request",
+                    );
+                }
+            }
+            fake.send_text(&model, &request, "Inspection complete");
+            fake.end_stream(&model, &request);
+            cx.run_until_parked();
+            prompt.await.expect("turn completes without changing its work budget");
+        }
+    }
+
     mod architect_coordinator_tool_tests {
         use super::*;
         use agent_settings::{AgentProfileId, AgentSettings, ToolRules};

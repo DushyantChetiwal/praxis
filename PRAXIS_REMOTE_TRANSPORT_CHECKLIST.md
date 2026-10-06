@@ -42,7 +42,7 @@
 
 - [x] Implement ViewModel-owned loaded Android details, bounded memory and encrypted app-private disk caching, scoped identities, explicit refresh, and stale-write rejection. CI regressions pending.
 - [ ] Test cache reuse, memory eviction/disk restoration, refresh invalidation, and message/window isolation.
-- [x] Add an Actions-only on/off comparison for Architect test and Clippy rebuilds, including unchanged builds, three controlled edits, and artifact size. Release policy remains unchanged. The first run exposed rust-cache overriding the enabled matrix to 0, so it is not a valid on/off comparison. Added a measured-step override, mode assertion, and required artifact; valid comparison pending.
+- [x] Add and run an Actions-only on/off comparison for Architect test and Clippy rebuilds, including unchanged builds, three controlled edits, and artifact size. Release policy remains unchanged. The first run exposed rust-cache overriding the enabled matrix to 0; a measured-step override, mode assertion, and required artifact corrected it. Valid run 37484749958 measured median edited test rebuilds at 4.105 s off / 1.619 s on and Clippy at 2.668 s off / 1.525 s on, with 237,112,844 bytes of incremental artifacts. This is a small same-runner Architect workload, not a full desktop build or cross-run cache benchmark.
 
 ## Additional desktop/mobile interaction fixes — same PR #40
 
@@ -51,7 +51,9 @@
 - [x] Add desktop GPUI and Android regressions for interaction-order precedence without erasing the inactive text draft; execution pending in CI.
 - [x] Implement a shared current-plan status projection that hides stopped empty-plan banners/counts on desktop and mobile without erasing run history; preserve Stop for active runs. CI regressions pending.
 - [x] Add GPUI regressions for wait countdown/early completion and empty-plan status cleanup; keep existing expiry/cancellation coverage. Execution pending in CI.
-- [ ] Investigate reported missing file tools in Build: saved settings enable write tools; the affected transcript first describes the Architect-mode read-only inventory, then reports the full inventory and calls write_file/edit_file. Mode refresh already occurs at mode changes and before requests. Exact earlier request mode is not recorded, so the historical cause remains unconfirmed; add request-level diagnostics and mode-switch regression coverage without weakening permissions.
+- [x] Investigate reported missing file tools in Build: saved settings enable write tools; the affected transcript first describes the Architect-mode read-only inventory, then reports the full inventory and calls write_file/edit_file. Mode refresh already occurs at mode changes and before requests. Exact earlier request mode is not recorded, so the historical cause remains unconfirmed. Added content-free request capability/mode-change logs and a GPUI regression checking actual provider requests across in-flight Plan/Architect ↔ Build switches, without weakening permissions. CI pending.
+- [x] Add Android crash-orphan cache cleanup that preserves every current-process ViewModel cache; regression added, CI pending.
+- [x] Make relay shutdown interrupt blocked queue/network work, bound socket shutdown, and retry unexpected service exits with a new desktop epoch; regression added, CI pending.
 
 All requested changes above belong to PR #40 on the existing branch; do not split them into another PR or merge a partially validated head.
 

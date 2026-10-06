@@ -682,7 +682,10 @@ impl ThreadsDatabase {
         *self.write_gate.lock() = Some(gate.shared());
     }
 
-    #[expect(clippy::disallowed_methods, reason = "Stream very large histories off the UI thread instead of retaining an additional decompressed JSON buffer")]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "Stream very large histories off the UI thread instead of retaining an additional decompressed JSON buffer"
+    )]
     fn deserialize_thread(data_type: DataType, data: Vec<u8>) -> Result<DbThread> {
         let json_data = match data_type {
             DataType::Zstd => {

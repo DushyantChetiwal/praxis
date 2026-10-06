@@ -61,8 +61,16 @@ impl Relay {
         let task = cx.update(|cx| cx.spawn({
             let peers = peers.clone();
             async move |cx| {
-                if let Err(error) = serve(channel, device, peers, changes, stopped, cx).await {
-                    log::warn!("Praxis Remote live transport stopped; GitHub fallback remains available: {error:#}");
+                loop {
+                    let result = serve(channel.clone(), device.clone(), peers.clone(), changes.clone(), stopped.clone(), cx).await;
+                    for peer in peers.read().values() {
+                        *peer.last_seen.lock() = None;
+                    }
+                    if stopped.is_closed() { break; }
+                    if let Err(error) = result {
+                        log::warn!("Praxis Remote live transport stopped; retrying in 30 seconds with GitHub fallback available: {error:#}");
+                    }
+                    if until_stopped(&stopped, cx.background_executor().timer(Duration::from_secs(30))).await.is_none() { break; }
                 }
             }
         }));
@@ -129,24 +137,43 @@ fn current(peers: &Peers, peer: &Arc<Peer>) -> bool {
         .is_some_and(|active| Arc::ptr_eq(active, peer))
 }
 
+async fn until_stopped<T>(stopped: &Receiver<()>, work: impl std::future::Future<Output = T>) -> Option<T> {
+    let work = work.fuse();
+    futures::pin_mut!(work);
+    futures::select_biased! {
+        _ = stopped.recv().fuse() => None,
+        result = work => Some(result),
+    }
+}
+
 async fn network(
     channel: String,
     peers: Peers,
     changes: Receiver<()>,
     incoming: Sender<Packet>,
     outgoing: Receiver<Packet>,
+    stopped: Receiver<()>,
+    executor: gpui::BackgroundExecutor,
 ) -> Result<()> {
     let client = Client::default();
+    let result = until_stopped(&stopped, async {
     for relay in RELAYS {
         client.add_relay(relay).await?;
     }
     let mut notifications = client.notifications();
     client.connect().await;
     let receive = async {
+        let mut subscribe_pending = true;
         loop {
+            let changed = if subscribe_pending {
+                futures::future::ready(Ok(())).left_future()
+            } else {
+                changes.recv().right_future()
+            };
             futures::select_biased! {
-                changed = changes.recv().fuse() => {
+                changed = changed.fuse() => {
                     if changed.is_err() { break; }
+                    subscribe_pending = false;
                     let filters: Vec<_> = peers.read().values().map(|peer| Filter::new()
                         .author(peer.phone_public).pubkey(peer.keys.public_key())
                         .kind(Kind::from(PACKET_KIND)).limit(0)).collect();
@@ -208,8 +235,15 @@ async fn network(
         futures::future::Either::Left((result, _))
         | futures::future::Either::Right((result, _)) => result,
     };
-    client.shutdown().await;
     result
+    }).await.unwrap_or(Ok(()));
+    let shutdown = client.shutdown().fuse();
+    let timeout = executor.timer(Duration::from_secs(5)).fuse();
+    futures::pin_mut!(shutdown, timeout);
+    futures::select_biased! {
+        _ = shutdown => result,
+        _ = timeout => Err(anyhow!("Timed out closing the live relay sockets")),
+    }
 }
 
 #[derive(Deserialize)]
@@ -308,10 +342,12 @@ async fn serve(
     let epoch = crypto::random_id()?;
     let (incoming, requests) = async_channel::bounded(32);
     let (outgoing, responses) = async_channel::bounded(32);
+    let (network_stop, network_stopped) = async_channel::bounded(1);
     let network = Tokio::spawn_result(
         cx,
-        network(channel_id, peers.clone(), changes, incoming, responses),
+        network(channel_id, peers.clone(), changes, incoming, responses, network_stopped, cx.background_executor().clone()),
     );
+    let result = until_stopped(&stopped, async {
     let mut receipts = Receipts::default();
     let mut watches: HashMap<String, Watch> = HashMap::new();
     let mut published: HashMap<String, (String, Instant)> = HashMap::new();
@@ -435,13 +471,35 @@ async fn serve(
             break;
         }
     }
+    Ok::<_, anyhow::Error>(())
+    }).await;
+    drop(network_stop);
     drop(outgoing);
-    network.await
+    drop(requests);
+    network.await?;
+    result.unwrap_or(Ok(()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    async fn relay_shutdown_interrupts_queued_network_work(_cx: &mut gpui::TestAppContext) {
+        let (stop, stopped) = async_channel::bounded::<()>(1);
+        let (sender, receiver) = async_channel::bounded(1);
+        sender.try_send("first").expect("fill the bounded queue");
+        let waiting = until_stopped(&stopped, sender.send("second"));
+        futures::pin_mut!(waiting);
+        assert!(waiting.as_mut().now_or_never().is_none());
+        drop(stop);
+        assert!(waiting.await.is_none(), "shutdown must not wait for queue capacity");
+        assert_eq!(receiver.try_recv().expect("retained first item"), "first");
+        assert!(receiver.is_empty());
+        assert_eq!(until_stopped(&stopped, async { 42 }).await, None);
+        let (_stop, stopped) = async_channel::bounded::<()>(1);
+        assert_eq!(until_stopped(&stopped, async { 42 }).await, Some(42));
+    }
 
     fn request(epoch: &str) -> Request {
         Request {

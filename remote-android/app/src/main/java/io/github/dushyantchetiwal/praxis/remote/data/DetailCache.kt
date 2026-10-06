@@ -18,6 +18,23 @@ class DetailCache<T : Any>(
     private val memoryBytes: Long = 16L * 1024 * 1024,
     private val diskBytes: Long = 128L * 1024 * 1024,
 ) {
+    companion object {
+        private val processPrefix = "details-${java.util.UUID.randomUUID()}-"
+        private val ownedDirectoryName = Regex("details-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?")
+
+        fun newDirectory(cacheRoot: File): File = File(cacheRoot, "$processPrefix${java.util.UUID.randomUUID()}")
+
+        suspend fun removeAbandonedDirectories(cacheRoot: File) = withContext(Dispatchers.IO) {
+            // Keys exist only in memory. Previous-process caches cannot be read;
+            // preserve every ViewModel in this process, including overlapping lifetimes.
+            cacheRoot.listFiles().orEmpty().filter {
+                it.isDirectory && ownedDirectoryName.matches(it.name) && !it.name.startsWith(processPrefix)
+            }.forEach {
+                check(it.deleteRecursively() || !it.exists()) { "Could not remove an abandoned conversation cache" }
+            }
+        }
+    }
+
     private val key = ByteArray(32).also(SecureRandom()::nextBytes)
     private val entries = LinkedHashMap<String, T>(16, 0.75f, true)
     private val revisions = LinkedHashMap<String, Long>(16, 0.75f, true)

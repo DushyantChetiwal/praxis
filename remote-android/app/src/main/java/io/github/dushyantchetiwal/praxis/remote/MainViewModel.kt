@@ -148,15 +148,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val phoneId: String by lazy { store.phoneId }
     private var detailCache = newDetailCache()
 
-    private fun newDetailCache() = DetailCache(
-        directory = java.io.File(getApplication<Application>().cacheDir, "details-${java.util.UUID.randomUUID()}"),
-        weight = LoadedDetail::cacheWeight,
-        encode = { detail: LoadedDetail -> encodeDetailBody(detail.body) },
-        decode = { bytes ->
-            val body = decodeDetailBody(bytes)
-            LoadedDetail(body, parseMarkdown(body.chunks.joinToString("") { it.text }))
-        },
-    )
+    private fun newDetailCache(): DetailCache<LoadedDetail> {
+        val root = getApplication<Application>().cacheDir
+        viewModelScope.launch {
+            try { DetailCache.removeAbandonedDirectories(root) }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) { android.util.Log.w("PraxisRemote", "Could not remove abandoned conversation caches", error) }
+        }
+        return DetailCache(
+            directory = DetailCache.newDirectory(root),
+            weight = LoadedDetail::cacheWeight,
+            encode = { detail: LoadedDetail -> encodeDetailBody(detail.body) },
+            decode = { bytes ->
+                val body = decodeDetailBody(bytes)
+                LoadedDetail(body, parseMarkdown(body.chunks.joinToString("") { it.text }))
+            },
+        )
+    }
 
     fun detailIdentity(request: DetailRequest): String = io.github.dushyantchetiwal.praxis.remote.data.detailCacheIdentity(
         d.device?.channel, d.windowId, d.currentWindow()?.thread?.sessionId, request,

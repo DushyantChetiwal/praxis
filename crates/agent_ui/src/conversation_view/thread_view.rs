@@ -8395,22 +8395,41 @@ impl ThreadView {
             tool_call.status,
             ToolCallStatus::WaitingForConfirmation { .. }
         );
-        if tool_call.tool_name.as_deref() == Some("terminal_wait") && !needs_confirmation {
-            let waiting = matches!(tool_call.status, ToolCallStatus::Pending | ToolCallStatus::InProgress);
+        if tool_call.tool_name.as_deref() == Some("terminal_wait")
+            && !needs_confirmation
+            && !matches!(tool_call.status, ToolCallStatus::Failed | ToolCallStatus::Rejected)
+        {
+            let waiting = matches!(
+                tool_call.status,
+                ToolCallStatus::Pending | ToolCallStatus::InProgress
+            );
             let label: SharedString = match tool_call.status {
                 ToolCallStatus::Completed => "Finished waiting".into(),
-                ToolCallStatus::Canceled | ToolCallStatus::Rejected => "Wait cancelled".into(),
-                ToolCallStatus::Failed => "Wait failed".into(),
+                ToolCallStatus::Canceled => "Wait cancelled".into(),
                 _ => tool_call.label.read(cx).source().clone(),
             };
-            return div().px_5().py_1().w_full().child(
-                h_flex().gap_1().w_full()
-                    .child(Divider::horizontal())
-                    .child(Button::new(("terminal-wait-status", entry_ix), label)
-                        .label_size(LabelSize::Small).loading(waiting).disabled(true)
-                        .start_icon(Icon::new(IconName::Clock).size(IconSize::XSmall).color(Color::Muted)))
-                    .child(Divider::horizontal()),
-            ).into_any_element();
+            return div()
+                .px_5()
+                .py_1()
+                .w_full()
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .w_full()
+                        .child(Divider::horizontal())
+                        .child(
+                            Button::new(("terminal-wait-status", entry_ix), label)
+                                .label_size(LabelSize::Small)
+                                .loading(waiting)
+                                .disabled(true)
+                                .start_icon(
+                                    Icon::new(IconName::Clock)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Muted),
+                                ),
+                        )
+                        .child(Divider::horizontal()),
+                );
         }
         let is_terminal_tool = matches!(tool_call.kind, acp::ToolKind::Execute);
 

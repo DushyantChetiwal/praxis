@@ -55,6 +55,27 @@ class DetailCacheTest {
         } finally { cache.close(); cache.removeFiles() }
     }
 
+    @Test fun startupRemovesUnreadableOldCachesWithoutRemovingLiveViewModels() = runTest {
+        val root = kotlin.io.path.createTempDirectory("cache-root").toFile()
+        val abandoned = File(root, "details-00000000-0000-0000-0000-000000000000")
+        val olderProcess = File(root, "details-00000000-0000-0000-0000-000000000000-11111111-1111-1111-1111-111111111111")
+        val live = listOf(DetailCache.newDirectory(root), DetailCache.newDirectory(root))
+        val unrelated = File(root, "details-unrelated")
+        try {
+            (live + listOf(abandoned, olderProcess, unrelated)).forEach { directory ->
+                assertTrue(directory.mkdirs())
+                File(directory, "body.cache").writeText("cache fixture")
+            }
+            DetailCache.removeAbandonedDirectories(root)
+            assertFalse(abandoned.exists())
+            assertFalse(olderProcess.exists())
+            live.forEach { assertTrue(File(it, "body.cache").isFile) }
+            assertTrue(File(unrelated, "body.cache").isFile)
+            DetailCache.removeAbandonedDirectories(root)
+            live.forEach { assertTrue(it.isDirectory) }
+        } finally { assertTrue(root.deleteRecursively()) }
+    }
+
     @Test fun identityIncludesWindowRootMessagePartAndQueue() {
         val request = DetailRequest("child", 3, 1)
         val identity = detailCacheIdentity("device", 1, "root", request)
