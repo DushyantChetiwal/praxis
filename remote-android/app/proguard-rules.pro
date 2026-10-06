@@ -1,6 +1,10 @@
 # Praxis Remote uses org.json (part of Android) and no reflection-based
 # serialization, so the app's own classes need no keep rules.
 
+# UniFFI calls JNA by generated native symbol names, including in release builds.
+-keep class org.nostrdevkit.sdk.** { *; }
+-keep class com.sun.jna.** { *; }
+
 # OkHttp ships its own consumer rules; these cover optional TLS providers it
 # probes for at runtime.
 -dontwarn okhttp3.internal.platform.**

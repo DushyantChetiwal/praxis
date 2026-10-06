@@ -136,6 +136,7 @@ data class Device(
     val lastSeen: Long?,
     /** Ids of the phones the computer has paired. */
     val phones: List<String>,
+    val nostr: Boolean = false,
 ) {
     fun seenRecently(now: Long): Boolean = lastSeen != null && now - lastSeen < ONLINE_THRESHOLD_MS
 }
@@ -266,6 +267,7 @@ data class ThreadSummary(
     val queueManagement: Boolean = false,
     val questions: List<QuestionHeader> = emptyList(),
     val questionCount: Int = 0,
+    val imageInput: Boolean = false,
 )
 
 data class Architect(
@@ -401,6 +403,7 @@ fun parseMeta(text: String?, gistId: String): Device? {
         startedAt = parseTime(o.str("started_at")),
         lastSeen = parseTime(o.str("last_seen")),
         phones = o.arr("phones")?.strings().orEmpty(),
+        nostr = o.int("nostr") == 1,
     )
 }
 
@@ -453,6 +456,7 @@ private fun parseThreadSummary(o: JSONObject): ThreadSummary = ThreadSummary(
     sendNow = o.bool("send_now"),
     steering = o.bool("steering"),
     queueManagement = o.bool("queue_management"),
+    imageInput = o.bool("image_input"),
     questions = parseQuestionHeaders(o.arr("questions")),
     questionCount = o.index("question_count") ?: 0,
     mode = o.obj("mode")?.let { m ->
@@ -650,6 +654,7 @@ class RemoteChannel(
     private val context = context.applicationContext
     private val mutex = Mutex()
     private val random = SecureRandom()
+    val live = NostrChannel()
     private val background = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _pending = MutableStateFlow(0)
@@ -673,6 +678,7 @@ class RemoteChannel(
      */
     suspend fun exchange(link: Link, op: String, args: JSONObject): JSONObject {
         val id = newRequestId()
+        live.exchange(link, id, op, args)?.let { return it }
         val payload = JSONObject()
             .put("id", id)
             .put("op", op)

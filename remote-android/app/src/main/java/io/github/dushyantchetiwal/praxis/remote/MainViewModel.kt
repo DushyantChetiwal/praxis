@@ -7,6 +7,7 @@ import android.os.Build
 import androidx.annotation.StringRes
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
@@ -42,6 +43,11 @@ import io.github.dushyantchetiwal.praxis.remote.data.Pairer
 import io.github.dushyantchetiwal.praxis.remote.data.Permission
 import io.github.dushyantchetiwal.praxis.remote.data.PermissionOption
 import io.github.dushyantchetiwal.praxis.remote.data.RemoteChannel
+import io.github.dushyantchetiwal.praxis.remote.data.PromptImage
+import io.github.dushyantchetiwal.praxis.remote.data.prepareImage
+import io.github.dushyantchetiwal.praxis.remote.data.uploadImage
+import io.github.dushyantchetiwal.praxis.remote.data.MAX_PROMPT_IMAGES
+import io.github.dushyantchetiwal.praxis.remote.data.MAX_RETAINED_IMAGES
 import io.github.dushyantchetiwal.praxis.remote.data.RemoteViewScope
 import io.github.dushyantchetiwal.praxis.remote.data.viewScopedAction
 import io.github.dushyantchetiwal.praxis.remote.data.Snapshot
@@ -138,6 +144,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** The composer's text, kept here so a failed send can put it back. */
     var composer by mutableStateOf("")
+    private val imageDrafts = mutableStateMapOf<String, List<PromptImage>>()
+    private fun imageDraftKey() = "${viewKey()}:${d.currentWindow()?.thread?.sessionId}"
+    val composerImages: List<PromptImage> get() = imageDrafts[imageDraftKey()].orEmpty()
+    var preparingImage by mutableStateOf(false)
+        private set
+    val hasPrompt: Boolean get() = composer.isNotBlank() || composerImages.isNotEmpty()
+
+    fun addImage(uri: Uri) {
+        if (preparingImage || d.currentWindow()?.thread?.imageInput != true) return
+        val draft = imageDraftKey()
+        if (composerImages.size >= MAX_PROMPT_IMAGES || imageDrafts.values.sumOf { it.size } + d.outbox.sumOf { it.images.size } >= MAX_RETAINED_IMAGES) {
+            message(str(R.string.image_limit))
+            return
+        }
+        preparingImage = true
+        viewModelScope.launch {
+            try {
+                val image = prepareImage(getApplication(), uri)
+                imageDrafts[draft] = imageDrafts[draft].orEmpty() + image
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { message(error.message ?: str(R.string.image_failed)) }
+            finally { preparingImage = false }
+        }
+    }
+
+    fun removeImage(id: String) {
+        imageDrafts[imageDraftKey()] = composerImages.filterNot { it.id == id }
+    }
 
     val builtInClientId: String = BuildConfig.GITHUB_CLIENT_ID.trim()
 
@@ -189,6 +223,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun now() = System.currentTimeMillis()
 
     init {
+        viewModelScope.launch {
+            channel.live.snapshots.collect { update ->
+                if (foreground && d.device?.channel == update.channel && phoneId == update.phoneId) {
+                    edit { copy(lastContact = now(), stateApplied = true) }
+                    applySnapshot(update.snapshot)
+                    setBanner("poll", null)
+                    setBanner("state", null)
+                    ensureWatch()
+                }
+            }
+        }
+        viewModelScope.launch {
+            var previousEpoch: String? = null
+            channel.live.connection.collect { connection ->
+                if (connection?.channel == d.device?.channel) {
+                    edit { copy(liveTransport = connection?.connected == true) }
+                    if (connection?.connected == true) {
+                        if (previousEpoch != connection.epoch) { resetWatcher(); previousEpoch = connection.epoch }
+                        ensureWatch()
+                    }
+                    requestPoll()
+                } else {
+                    previousEpoch = null
+                    edit { copy(liveTransport = false) }
+                }
+            }
+        }
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 store.loadSecrets()
@@ -256,6 +317,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // While hidden there is no polling and no watch renewal, so the laptop
         // stops publishing snapshots once the watch runs out.
         foreground = false
+        channel.live.stop()
         pollJob?.cancel()
         pollJob = null
         devicesJob?.cancel()
@@ -588,6 +650,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun stopDevice() {
+        channel.live.stop()
         invalidateQuestionRequests()
         viewRevision++
         cancelHistoryRequest()
@@ -668,10 +731,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Live state: gist polling
     // -----------------------------------------------------------------------
 
+    override fun onCleared() {
+        channel.live.close()
+        super.onCleared()
+    }
+
     private fun startPolling() {
         pollJob?.cancel()
         pollJob = null
         if (!foreground || d.device == null || store.token == null) return
+        d.device?.takeIf { it.nostr }?.let { device -> linkFor(device)?.let(channel.live::start) }
         pollJob = viewModelScope.launch {
             while (isActive) {
                 val wait = pollOnce() ?: break
@@ -687,6 +756,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Reads the computer's gist (free when unchanged); returns the delay before the next read. */
     private suspend fun pollOnce(): Long? {
         val device = d.device ?: return null
+        val link = linkFor(device)
+        if (device.nostr && link != null) {
+            channel.live.start(link)
+            if (channel.live.ready(link)) {
+                ensureWatch()
+                pruneOutbox()
+                return 5_000L
+            }
+        }
         var wait: Long? = STATE_POLL_MS
         try {
             // A 304 still carries the cached gist, which matters right after reselecting a computer.
@@ -743,7 +821,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!checkPairing(device)) return
         val link = linkFor(device) ?: return
         try {
-            gists.snapshot(gist, link)?.let(::applySnapshot)
+            if (!channel.live.ready(link)) gists.snapshot(gist, link)?.let(::applySnapshot)
             setBanner("state", null)
         } catch (e: CryptoException) {
             setBanner("state", str(R.string.banner_state_unreadable, device.name), error = true)
@@ -916,7 +994,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendPrompt(sendNow: Boolean = false, steer: Boolean = false) {
         val text = composer.trim()
-        if (text.isEmpty() || d.device == null) return
+        val images = composerImages
+        val draft = imageDraftKey()
+        if ((text.isEmpty() && images.isEmpty()) || d.device == null || preparingImage) return
+        if (images.isNotEmpty() && d.currentWindow()?.thread?.imageInput != true) {
+            message(str(R.string.image_unsupported))
+            return
+        }
         val scope = requestScope()
         val session = d.currentWindow()?.thread?.sessionId
         val args = windowArgs {
@@ -932,11 +1016,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             doneAt = 0L,
             session = session,
             baseIndex = d.thread?.takeIf { it.sessionId == session }?.entries?.maxOfOrNull { it.index } ?: -1,
+            images = images,
         )
         edit { copy(outbox = outbox + item) }
         composer = ""
+        imageDrafts.remove(draft)
         viewModelScope.launch {
             try {
+                if (images.isNotEmpty()) {
+                    val target = JSONObject().put("session_id", session)
+                    args.opt("window")?.let { target.put("window", it) }
+                    val ids = images.map { image -> uploadImage(image, target) { op, upload -> praxis(op, upload, scope) } }
+                    args.put("images", org.json.JSONArray(ids))
+                }
                 val result = praxis("prompt", args, scope)
                     ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
                 if (scope != requestScope()) return@launch
@@ -954,24 +1046,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (queued) message(str(R.string.toast_queued))
                 requestPoll()
-            } catch (e: ApiException) {
-                if (scope != requestScope()) return@launch
+            } catch (error: CancellationException) {
+                if (images.isNotEmpty() && imageDrafts[draft].isNullOrEmpty()) imageDrafts[draft] = images
+                throw error
+            } catch (error: Exception) {
+                if (scope != requestScope()) {
+                    if (images.isNotEmpty() && imageDrafts[draft].isNullOrEmpty()) imageDrafts[draft] = images
+                    return@launch
+                }
                 edit { copy(outbox = outbox.map {
                     if (it.id == item.id) it.copy(state = OutboxState.Unconfirmed, doneAt = now()) else it
                 }) }
-                report(e, str(R.string.label_message_unconfirmed))
+                val failure = error as? ApiException ?: ApiException(ErrorKind.State, error.message ?: str(R.string.image_failed))
+                report(failure, str(R.string.label_message_unconfirmed))
             }
         }
     }
 
     fun canRestorePromptDraft(item: OutboxItem): Boolean = d.outbox.any {
-        it.id == item.id && it.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)
+        it.id == item.id && composerImages.isEmpty() && it.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)
     }
 
     fun restorePromptDraft(item: OutboxItem) {
         val retained = d.outbox.firstOrNull { it.id == item.id } ?: return
-        if (!retained.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)) return
+        if (composerImages.isNotEmpty() || !retained.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)) return
         composer = retained.text
+        imageDrafts[imageDraftKey()] = retained.images
         edit { copy(outbox = outbox.filterNot { it.id == retained.id }) }
     }
 

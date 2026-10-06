@@ -169,6 +169,21 @@ pub(super) fn response_aad(channel: &str, phone_id: &str, request_id: &str) -> S
     format!("{PROTOCOL}/response/{channel}/{phone_id}/{request_id}")
 }
 
+pub(super) fn relay_aad(channel: &str, phone_id: &str, direction: &str) -> String {
+    format!("{PROTOCOL}/nostr/{channel}/{phone_id}/{direction}")
+}
+
+pub(super) fn relay_secret(key: &Key, channel: &str, phone_id: &str, role: &str) -> Result<Key> {
+    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"praxis-remote/nostr/v1");
+    let prk = salt.extract(key);
+    let info = relay_aad(channel, phone_id, role);
+    let mut secret = [0; KEY_LEN];
+    prk.expand(&[info.as_bytes()], OutputLen(secret.len()))
+        .and_then(|okm| okm.fill(&mut secret))
+        .map_err(|_| anyhow!("could not derive relay identity"))?;
+    Ok(secret)
+}
+
 /// Encrypts `plaintext` into a blob: `base64(nonce || ciphertext || tag)`.
 pub(super) fn seal(key: &Key, aad: &str, plaintext: &[u8]) -> Result<String> {
     let mut nonce = [0; NONCE_LEN];

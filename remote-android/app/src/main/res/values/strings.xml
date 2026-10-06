@@ -1,6 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Praxis Remote</string>
+    <string name="transport_live">Live connection · encrypted Nostr relay</string>
+    <string name="transport_github">GitHub connection · encrypted fallback</string>
+    <string name="image_attach">Attach image</string>
+    <string name="image_remove">Remove image</string>
+    <string name="image_preview">Attached image</string>
+    <string name="image_message">Image message</string>
+    <string name="image_preparing">Preparing image…</string>
+    <string name="image_unsupported">Select a vision-capable model to attach images.</string>
+    <string name="image_limit">Attach up to four images. Finish or restore pending image messages before adding more.</string>
+    <string name="image_failed">The image could not be prepared or uploaded. Your draft can be restored.</string>
 
     <!-- Common actions -->
     <string name="action_back">Back</string>

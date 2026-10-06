@@ -4526,6 +4526,36 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    async fn test_remote_images_preserve_content_through_queue_and_send_now(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (conversation, cx) = setup_conversation_view(StubAgentServer::new(StubAgentConnection::new()), cx).await;
+        add_to_workspace(conversation.clone(), cx);
+        let view = active_thread(&conversation, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.send_text("first".into(), false, window, cx);
+        });
+        cx.run_until_parked();
+        let content = vec![png_image()];
+        let queued = view.update_in(cx, |view, window, cx| {
+            view.send_remote_content(content.clone(), false, window, cx).expect("image queued")
+        });
+        view.read_with(cx, |view, _| {
+            let entry = view.message_queue.iter().find(|entry| entry.id == queued).expect("queued image");
+            assert_eq!(entry.content, content);
+        });
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.send_remote_content(content.clone(), true, window, cx).is_none());
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.message_queue.first_id(), Some(queued));
+            assert!(view.thread.read(cx).entries().iter().any(|entry| {
+                matches!(entry, AgentThreadEntry::UserMessage(message) if message.content.source_blocks() == content.as_slice())
+            }));
+        });
+    }
+
+    #[gpui::test]
     async fn test_queued_message_steer_defaults_off_and_toggles(cx: &mut TestAppContext) {
         init_test(cx);
 

@@ -95,6 +95,7 @@ data class OutboxItem(
     val sendingNow: Boolean = false,
     val steer: Boolean = false,
     val fingerprint: String = io.github.dushyantchetiwal.praxis.remote.data.transcriptFingerprint(text),
+    val images: List<io.github.dushyantchetiwal.praxis.remote.data.PromptImage> = emptyList(),
 ) {
     fun canRestoreDraft(activeSession: String?, draft: String): Boolean =
         state == OutboxState.Unconfirmed && session == activeSession && draft.isBlank()
@@ -235,6 +236,7 @@ data class DeviceUi(
     val answered: Set<String> = emptySet(),
     val busyPermissions: Set<String> = emptySet(),
     val lastContact: Long = 0L,
+    val liveTransport: Boolean = false,
     val banners: Map<String, Banner> = emptyMap(),
     val stopping: Boolean = false,
     val startingThread: Boolean = false,

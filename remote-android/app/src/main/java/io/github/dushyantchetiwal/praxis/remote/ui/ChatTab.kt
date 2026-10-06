@@ -1,5 +1,13 @@
 package io.github.dushyantchetiwal.praxis.remote.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.material.icons.outlined.AddPhotoAlternate
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.layout.ContentScale
+import io.github.dushyantchetiwal.praxis.remote.data.PromptImage
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -158,6 +166,8 @@ internal fun ConversationControls(ui: DeviceUi, vm: MainViewModel, onOpenQueue: 
     val summary = window?.thread
     val now = rememberNow(5_000L)
     ThreadHeader(ui, ui.isGenerating(), onOpenQueue)
+    Text(stringResource(if (ui.liveTransport) R.string.transport_live else R.string.transport_github),
+        style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 12.dp))
     if (ui.isGenerating() && window?.architect?.running == true) {
         TextButton(onClick = vm::stopGenerating, enabled = !ui.stopping, modifier = Modifier.padding(horizontal = 8.dp)) {
             Text(stringResource(R.string.action_stop_agent))
@@ -857,7 +867,8 @@ private fun OutboxBubble(item: OutboxItem, canSendNow: Boolean, canSteer: Boolea
         },
     )
     Column(horizontalAlignment = Alignment.End, modifier = Modifier.fillMaxWidth()) {
-        UserBubble(item.text, Modifier.alpha(0.7f), label)
+        UserBubble(item.text.ifBlank { stringResource(R.string.image_message) }, Modifier.alpha(0.7f), label)
+        if (item.images.isNotEmpty()) ImagePreviews(item.images)
         if (item.state == OutboxState.Unconfirmed) {
             TextButton(onClick = { vm.restorePromptDraft(item) }, enabled = vm.canRestorePromptDraft(item)) {
                 Text(stringResource(R.string.action_restore_draft))
@@ -938,10 +949,29 @@ private fun ToolStatusIcon(status: String?) {
 }
 
 @Composable
+private fun ImagePreviews(images: List<PromptImage>, onRemove: ((String) -> Unit)? = null) {
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        images.forEach { image ->
+            key(image.id) {
+                Box {
+                    Image(image.preview, contentDescription = stringResource(R.string.image_preview),
+                        contentScale = ContentScale.Fit, modifier = Modifier.size(72.dp))
+                    if (onRemove != null) IconButton(onClick = { onRemove(image.id) }, modifier = Modifier.align(Alignment.TopEnd)) {
+                        Icon(Icons.Filled.RemoveCircleOutline, contentDescription = stringResource(R.string.image_remove))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun Composer(ui: DeviceUi, vm: MainViewModel, generating: Boolean) {
     Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
         Column {
-            if (generating && ui.currentWindow()?.thread?.sendNow == true && vm.composer.isNotBlank()) {
+            if (vm.composerImages.isNotEmpty()) ImagePreviews(vm.composerImages, vm::removeImage)
+            if (vm.preparingImage) Text(stringResource(R.string.image_preparing), modifier = Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.bodySmall)
+            if (generating && ui.currentWindow()?.thread?.sendNow == true && vm.hasPrompt && !vm.preparingImage) {
                 Row(Modifier.align(Alignment.End)) {
                     if (ui.currentWindow()?.thread?.steering == true) TextButton(onClick = { vm.sendPrompt(steer = true) }) {
                         Text(stringResource(R.string.action_steer))
@@ -960,10 +990,19 @@ private fun Composer(ui: DeviceUi, vm: MainViewModel, generating: Boolean) {
 @Composable
 private fun ComposerInput(ui: DeviceUi, vm: MainViewModel, generating: Boolean) {
     val stopTarget = ui.stopTarget()
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let(vm::addImage) }
     Row(
         Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.Bottom,
     ) {
+        val imageLabel = stringResource(if (ui.currentWindow()?.thread?.imageInput == true) R.string.image_attach else R.string.image_unsupported)
+        TooltipBox(positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+            tooltip = { PlainTooltip { Text(imageLabel) } }, state = rememberTooltipState()) {
+            IconButton(onClick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                enabled = ui.currentWindow()?.thread?.imageInput == true && !vm.preparingImage && vm.composerImages.size < 4) {
+                Icon(Icons.Outlined.AddPhotoAlternate, contentDescription = imageLabel)
+            }
+        }
         OutlinedTextField(
             value = vm.composer,
             onValueChange = { vm.composer = it },
@@ -997,7 +1036,7 @@ private fun ComposerInput(ui: DeviceUi, vm: MainViewModel, generating: Boolean) 
         Spacer(Modifier.width(6.dp))
         FilledIconButton(
             onClick = { vm.sendPrompt() },
-            enabled = ui.device != null && vm.composer.isNotBlank(),
+            enabled = ui.device != null && vm.hasPrompt && !vm.preparingImage,
             modifier = Modifier.size(52.dp),
         ) {
             Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(if (generating) R.string.action_queue else R.string.action_send))

@@ -199,6 +199,11 @@ jobs:
           shared-key: architect-agent-tests
           cache-on-failure: true
 
+      - name: Test remote transport and image input
+        run: |
+          cargo test --locked -p agent_ui --lib remote::
+          cargo test --locked -p agent_ui --lib test_remote_images_
+
       - name: Test background terminal tab inspection
         run: cargo test --locked -p terminal_view --lib background_agent_terminals_
 

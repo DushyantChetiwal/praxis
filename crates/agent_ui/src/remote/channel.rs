@@ -21,7 +21,7 @@ use util::ResultExt as _;
 use super::crypto::{self, Key, PROTOCOL, PairingKey, PairingSecrets};
 use super::github::{self, Api, SignedOut, Tokens};
 use super::store::{self, LocalState, PhoneInfo, Secrets};
-use super::{PraxisRemote, RemoteStatus, Watch, handle, resolve_device_name, snapshot, status};
+use super::{PraxisRemote, RemoteStatus, Watch, handle_paired, resolve_device_name, snapshot, status};
 use crate::automation::workspace_windows;
 
 const META_FILE: &str = "praxis-remote.json";
@@ -132,6 +132,8 @@ async fn run_channel(
     let device = resolve_device_name().await;
     let api = Api::new(http, tokens);
     let mut channel = Channel::new(this.clone(), api, state, secrets, device);
+    channel.relay = Some(super::relay::Relay::start(channel.state.channel.clone(), channel.device.clone(), cx));
+    channel.sync_relay();
     channel.sender = Some(sender);
     channel.commands = Some(commands);
     channel.report_phones(cx)?;
@@ -250,6 +252,7 @@ struct Channel {
     device: String,
     started_at: DateTime<Utc>,
     phones: BTreeMap<String, Phone>,
+    relay: Option<super::relay::Relay>,
     /// Set when the phones changed and have not been saved yet.
     phones_dirty: bool,
     sender: Option<mpsc::UnboundedSender<Command>>,
@@ -305,6 +308,7 @@ impl Channel {
             device,
             started_at: Utc::now(),
             phones,
+            relay: None,
             phones_dirty: false,
             sender: None,
             commands: None,
@@ -439,8 +443,15 @@ impl Channel {
         self.add_phone(info, secrets.key, cx)
     }
 
+    fn sync_relay(&self) {
+        if let Some(relay) = &self.relay {
+            relay.set_phones(&self.state.channel, self.phones.iter().map(|(id, phone)| (id.clone(), phone.key)));
+        }
+    }
+
     fn add_phone(&mut self, info: PhoneInfo, key: Key, cx: &mut AsyncApp) -> Result<()> {
         self.phones.insert(info.id.clone(), Phone { info, key });
+        self.sync_relay();
         self.phones_dirty = true;
         self.publish_now = true;
         self.report_phones(cx)
@@ -451,7 +462,9 @@ impl Channel {
             return Ok(());
         };
         log::info!("Praxis Remote unpaired {:?}", phone.info.name);
+        self.sync_relay();
         self.watches.remove(phone_id);
+        cx.update(|cx| super::images::clear(phone_id, cx));
         self.phones_dirty = true;
         self.publish_now = true;
         self.report_phones(cx)
@@ -792,7 +805,7 @@ impl Channel {
             }
             op => {
                 let device = self.device.clone();
-                let task = cx.update(|cx| handle(op, args, &device, cx));
+                let task = cx.update(|cx| handle_paired(op, args, &device, phone_id, cx));
                 task.await
             }
         }
@@ -1147,6 +1160,7 @@ fn meta_json<'a>(
         "started_at": rfc3339(started_at),
         "last_seen": rfc3339(now),
         "phones": phones,
+        "nostr": 1,
     });
     format!("{meta:#}")
 }
@@ -1172,7 +1186,7 @@ fn state_json(
 }
 
 /// A snapshot as text, with its timestamp, cut down if it is too large.
-fn fit_snapshot(mut snapshot: Value, now: DateTime<Utc>) -> String {
+pub(super) fn fit_snapshot(mut snapshot: Value, now: DateTime<Utc>) -> String {
     if let Some(object) = snapshot.as_object_mut() {
         object.insert("updated_at".into(), json!(rfc3339(now)));
     }
@@ -1426,7 +1440,7 @@ fn open_request(
 
 /// The answer's plain text: `{"id", "ok", "result" | "error"}`, replaced by
 /// an error if it would not fit in one comment.
-fn envelope(id: &str, answer: Result<Value>) -> String {
+pub(super) fn envelope(id: &str, answer: Result<Value>) -> String {
     let payload = match answer {
         Ok(result) => json!({ "id": id, "ok": true, "result": result }),
         Err(error) => json!({ "id": id, "ok": false, "error": format!("{error:#}") }),

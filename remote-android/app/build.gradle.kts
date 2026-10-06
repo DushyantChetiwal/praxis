@@ -89,6 +89,12 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.okhttp)
     implementation(libs.androidx.security.crypto)
+    implementation(libs.androidx.exif)
+    implementation(libs.nostr.sdk) {
+        // Keep the app's tested Kotlin/coroutines pair; the binding only uses its stable APIs.
+        exclude(group = "org.jetbrains.kotlinx", module = "kotlinx-coroutines-core")
+        exclude(group = "androidx.appcompat", module = "appcompat")
+    }
 
     testImplementation(libs.junit)
     testImplementation(libs.org.json)

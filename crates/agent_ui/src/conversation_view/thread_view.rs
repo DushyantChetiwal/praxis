@@ -1703,7 +1703,21 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<QueueEntryId> {
-        let content = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
+        self.send_remote_content(
+            vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
+            send_now,
+            window,
+            cx,
+        )
+    }
+
+    pub(crate) fn send_remote_content(
+        &mut self,
+        content: Vec<acp::ContentBlock>,
+        send_now: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<QueueEntryId> {
         cx.emit(AcpThreadViewEvent::Interacted);
         if self.thread.read(cx).status() != ThreadStatus::Idle || self.is_loading_contents {
             self.add_to_queue(content, Vec::new(), window, cx);
