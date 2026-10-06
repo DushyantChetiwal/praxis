@@ -490,6 +490,7 @@ pub struct Markdown {
     images_by_source_offset: HashMap<usize, Arc<Image>>,
     should_reparse: bool,
     pending_parse: Option<Task<()>>,
+    parsing_deferred: bool,
     focus_handle: FocusHandle,
     language_registry: Option<Arc<LanguageRegistry>>,
     fallback_code_block_language: Option<LanguageName>,
@@ -666,6 +667,43 @@ impl Markdown {
         options: MarkdownOptions,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_internal(
+            source,
+            language_registry,
+            fallback_code_block_language,
+            options,
+            false,
+            cx,
+        )
+    }
+
+    /// Retains complete source without parsing off-screen conversation bodies.
+    /// Layout or an explicit `ensure_parsed` starts the normal parser.
+    pub fn new_deferred_with_options(
+        source: SharedString,
+        language_registry: Option<Arc<LanguageRegistry>>,
+        fallback_code_block_language: Option<LanguageName>,
+        options: MarkdownOptions,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_internal(
+            source,
+            language_registry,
+            fallback_code_block_language,
+            options,
+            true,
+            cx,
+        )
+    }
+
+    fn new_internal(
+        source: SharedString,
+        language_registry: Option<Arc<LanguageRegistry>>,
+        fallback_code_block_language: Option<LanguageName>,
+        options: MarkdownOptions,
+        parsing_deferred: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
 
         let theme_subscription = if options.render_mermaid_diagrams {
@@ -690,6 +728,7 @@ impl Markdown {
             images_by_source_offset: Default::default(),
             parsed_markdown: ParsedMarkdown::default(),
             pending_parse: None,
+            parsing_deferred,
             focus_handle,
             language_registry,
             fallback_code_block_language,
@@ -1194,7 +1233,30 @@ impl Markdown {
         self.context_menu_selected_markdown.as_ref()
     }
 
+    pub fn ensure_parsed(&mut self, cx: &mut Context<Self>) {
+        if self.parsing_deferred {
+            self.parsing_deferred = false;
+            self.parse(cx);
+        }
+    }
+
+    pub fn release_render_cache(&mut self, cx: &mut Context<Self>) {
+        self.pending_parse = None;
+        self.parsing_deferred = true;
+        self.should_reparse = false;
+        self.parsed_markdown = ParsedMarkdown::default();
+        self.images_by_source_offset.clear();
+        self.mermaid_state.clear(cx);
+        self.mermaid_views.clear();
+        self.code_block_scroll_handles.clear();
+        self.selection = Selection::default();
+    }
+
     fn parse(&mut self, cx: &mut Context<Self>) {
+        if self.parsing_deferred {
+            cx.notify();
+            return;
+        }
         if self.source.is_empty() {
             self.should_reparse = false;
             self.pending_parse.take();
@@ -2581,6 +2643,10 @@ impl Element for MarkdownElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (gpui::LayoutId, Self::RequestLayoutState) {
+        if self.markdown.read(cx).parsing_deferred {
+            self.markdown
+                .update(cx, |markdown, cx| markdown.ensure_parsed(cx));
+        }
         let highlights = {
             let markdown = self.markdown.read(cx);
             let colors = cx.theme().colors();
@@ -5116,6 +5182,54 @@ impl InputHandler for MarkdownInputHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn deferred_markdown_keeps_full_source_without_parsing_hidden_bodies(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let source: SharedString = "```text\nlarge tool body\n```\n".repeat(2048).into();
+        let markdown = cx.new(|cx| {
+            Markdown::new_deferred_with_options(
+                source.clone(),
+                None,
+                None,
+                MarkdownOptions::default(),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        markdown.read_with(cx, |markdown, _| {
+            assert_eq!(markdown.source(), &source);
+            assert!(markdown.pending_parse.is_none());
+            assert!(markdown.parsed_markdown.events.is_empty());
+        });
+        markdown.update(cx, |markdown, cx| markdown.ensure_parsed(cx));
+        cx.run_until_parked();
+        markdown.read_with(cx, |markdown, _| {
+            assert_eq!(markdown.parsed_markdown.source, source);
+            assert!(!markdown.parsed_markdown.events.is_empty());
+        });
+        markdown.update(cx, |markdown, cx| {
+            markdown.release_render_cache(cx);
+            markdown.append("Full suffix retained", cx);
+        });
+        cx.run_until_parked();
+        markdown.read_with(cx, |markdown, _| {
+            assert!(markdown.source().ends_with("Full suffix retained"));
+            assert!(markdown.pending_parse.is_none());
+            assert!(markdown.parsed_markdown.events.is_empty());
+        });
+        markdown.update(cx, |markdown, cx| markdown.ensure_parsed(cx));
+        cx.run_until_parked();
+        markdown.read_with(cx, |markdown, _| {
+            assert!(
+                markdown
+                    .parsed_markdown
+                    .source
+                    .ends_with("Full suffix retained")
+            )
+        });
+    }
     use gpui::{
         Background, DevicePixels, Font, FontId, FontMetrics, FontRun, GlyphId, LineLayout,
         Modifiers, NoopTextSystem, PlatformTextSystem, RenderGlyphParams, RenderImage, ScrollDelta,

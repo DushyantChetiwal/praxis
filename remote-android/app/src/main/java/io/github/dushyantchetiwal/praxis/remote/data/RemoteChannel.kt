@@ -136,6 +136,8 @@ data class Device(
     val lastSeen: Long?,
     /** Ids of the phones the computer has paired. */
     val phones: List<String>,
+    val nostr: Boolean = false,
+    val cached: Boolean = false,
 ) {
     fun seenRecently(now: Long): Boolean = lastSeen != null && now - lastSeen < ONLINE_THRESHOLD_MS
 }
@@ -228,9 +230,11 @@ fun parseQuestionForm(result: JSONObject): QuestionForm? {
     return QuestionForm(question, options, multiple, result.bool("auto_answer_paused"))
 }
 
-fun questionAnswerContent(form: QuestionForm, selected: Set<String>, freeform: String): JSONObject? {
+fun questionAnswerContent(form: QuestionForm, selected: Set<String>, freeform: String, freeformActive: Boolean = freeform.isNotBlank()): JSONObject? {
     val text = freeform.trim()
-    if (text.isNotEmpty()) return JSONObject().put(if (form.options.isEmpty()) "answer" else "freeform_answer", text)
+    if (form.options.isEmpty() || freeformActive) {
+        return text.takeIf(String::isNotEmpty)?.let { JSONObject().put(if (form.options.isEmpty()) "answer" else "freeform_answer", it) }
+    }
     if (selected.isEmpty() || (!form.allowMultiple && selected.size != 1) || selected.any { value -> form.options.none { it.value == value } }) return null
     val values = form.options.filter { it.value in selected }.map { it.value }
     return JSONObject().put("answer", if (form.allowMultiple) JSONArray(values) else values.single())
@@ -266,6 +270,7 @@ data class ThreadSummary(
     val queueManagement: Boolean = false,
     val questions: List<QuestionHeader> = emptyList(),
     val questionCount: Int = 0,
+    val imageInput: Boolean = false,
 )
 
 data class Architect(
@@ -401,6 +406,7 @@ fun parseMeta(text: String?, gistId: String): Device? {
         startedAt = parseTime(o.str("started_at")),
         lastSeen = parseTime(o.str("last_seen")),
         phones = o.arr("phones")?.strings().orEmpty(),
+        nostr = o.int("nostr") == 1,
     )
 }
 
@@ -453,6 +459,7 @@ private fun parseThreadSummary(o: JSONObject): ThreadSummary = ThreadSummary(
     sendNow = o.bool("send_now"),
     steering = o.bool("steering"),
     queueManagement = o.bool("queue_management"),
+    imageInput = o.bool("image_input"),
     questions = parseQuestionHeaders(o.arr("questions")),
     questionCount = o.index("question_count") ?: 0,
     mode = o.obj("mode")?.let { m ->
@@ -650,6 +657,7 @@ class RemoteChannel(
     private val context = context.applicationContext
     private val mutex = Mutex()
     private val random = SecureRandom()
+    val live = NostrChannel()
     private val background = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _pending = MutableStateFlow(0)
@@ -673,6 +681,7 @@ class RemoteChannel(
      */
     suspend fun exchange(link: Link, op: String, args: JSONObject): JSONObject {
         val id = newRequestId()
+        live.exchange(link, id, op, args)?.let { return it }
         val payload = JSONObject()
             .put("id", id)
             .put("op", op)

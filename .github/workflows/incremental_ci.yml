@@ -1,0 +1,59 @@
+name: Incremental CI comparison
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/architect/**
+      - script/benchmark-ci-incremental.py
+      - .github/workflows/incremental_ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: incremental-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: Incremental tests and Clippy (${{ matrix.label }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: disabled
+            incremental: "0"
+          - label: enabled
+            incremental: "1"
+    env:
+      CARGO_INCREMENTAL: ${{ matrix.incremental }}
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: target/incremental-comparison
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: incremental-comparison-${{ matrix.label }}
+          workspaces: . -> target/incremental-comparison
+      - name: Measure initial, unchanged, and edited builds
+        env:
+          # rust-cache exports CARGO_INCREMENTAL=0; override it at the measured step.
+          CARGO_INCREMENTAL: ${{ matrix.incremental }}
+          EXPECTED_INCREMENTAL: ${{ matrix.incremental }}
+        run: python script/benchmark-ci-incremental.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: incremental-comparison-${{ matrix.label }}
+          path: ci-incremental-${{ matrix.incremental }}.json
+          if-no-files-found: error

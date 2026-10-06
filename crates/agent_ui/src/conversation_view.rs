@@ -1996,7 +1996,11 @@ impl ConversationView {
                 }
             }
             AcpThreadEvent::ModeUpdated(_mode) => {
-                // The connection keeps track of the mode
+                if let Some(thread_view) = self.thread_view(&session_id)
+                    && let Some(selector) = thread_view.read(cx).mode_selector.clone()
+                {
+                    selector.update(cx, |_, cx| cx.notify());
+                }
                 cx.notify();
             }
             AcpThreadEvent::ConfigOptionsUpdated(_) => {
@@ -3622,9 +3626,7 @@ impl ConversationView {
     pub fn expand_tool_call(&mut self, tool_call_id: acp::ToolCallId, cx: &mut Context<Self>) {
         if let Some(active) = self.active_thread() {
             active.update(cx, |active, cx| {
-                active.entry_view_state.update(cx, |state, _cx| {
-                    state.expand_tool_call(tool_call_id);
-                });
+                active.set_tool_call_expanded(&tool_call_id, true, cx);
             });
             cx.notify();
         }
@@ -4522,6 +4524,47 @@ pub(crate) mod tests {
                 count,
                 "never resend a delivered ID"
             );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_remote_images_preserve_content_through_queue_and_send_now(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let (conversation, cx) =
+            setup_conversation_view(StubAgentServer::new(StubAgentConnection::new()), cx).await;
+        add_to_workspace(conversation.clone(), cx);
+        let view = active_thread(&conversation, cx);
+        view.update_in(cx, |view, window, cx| {
+            view.send_text("first".into(), false, window, cx);
+        });
+        cx.run_until_parked();
+        let content = vec![png_image()];
+        let queued = view.update_in(cx, |view, window, cx| {
+            view.send_remote_content(content.clone(), false, window, cx)
+                .expect("image queued")
+        });
+        view.read_with(cx, |view, _| {
+            let entry = view
+                .message_queue
+                .iter()
+                .find(|entry| entry.id == queued)
+                .expect("queued image");
+            assert_eq!(entry.content, content);
+        });
+        view.update_in(cx, |view, window, cx| {
+            assert!(
+                view.send_remote_content(content.clone(), true, window, cx)
+                    .is_none()
+            );
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.message_queue.first_id(), Some(queued));
+            assert!(view.thread.read(cx).entries().iter().any(|entry| {
+                matches!(entry, AgentThreadEntry::UserMessage(message) if message.content.source_blocks() == content.as_slice())
+            }));
         });
     }
 
@@ -8464,6 +8507,59 @@ pub(crate) mod tests {
                     cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
                 assert_eq!(copied.as_deref(), Some(expected));
             }
+        }
+    }
+
+    #[gpui::test]
+    async fn test_deferred_tool_input_follows_card_expansion(cx: &mut TestAppContext) {
+        init_test(cx);
+        let id = acp::ToolCallId::new("deferred-input");
+        let input = json!({"text": "Complete Unicode input Ω\n".repeat(4096)});
+        let connection = StubAgentConnection::new();
+        connection.set_next_prompt_updates(vec![acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(id.clone(), "Inspect output")
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Completed)
+                .raw_input(input.clone())
+                .content(vec!["Complete output".into()]),
+        )]);
+        let (conversation, cx) =
+            setup_conversation_view(StubAgentServer::new(connection), cx).await;
+        let view = active_thread(&conversation, cx);
+        let thread = view.read_with(cx, |view, _| view.thread.clone());
+        thread
+            .update(cx, |thread, cx| thread.send_raw("Inspect the tool", cx))
+            .await
+            .expect("prompt");
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert!(
+                thread
+                    .tool_call(&id)
+                    .expect("tool")
+                    .1
+                    .raw_input_markdown
+                    .is_none()
+            );
+        });
+        for expanded in [true, false, true] {
+            view.update(cx, |view, cx| {
+                view.set_tool_call_expanded(&id, expanded, cx)
+            });
+            cx.run_until_parked();
+            thread.read_with(cx, |thread, cx| {
+                let call = thread.tool_call(&id).expect("tool").1;
+                assert_eq!(call.raw_input.as_ref(), Some(&input));
+                assert_eq!(call.raw_input_markdown.is_some(), expanded);
+                if let Some(markdown) = &call.raw_input_markdown {
+                    assert!(
+                        markdown
+                            .read(cx)
+                            .source()
+                            .contains("Complete Unicode input Ω")
+                    );
+                }
+            });
         }
     }
 

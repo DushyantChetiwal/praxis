@@ -24,8 +24,10 @@ mod channel;
 mod crypto;
 mod folders;
 mod github;
+mod images;
 mod modal;
 mod questions;
+mod relay;
 mod store;
 mod transcript;
 
@@ -348,8 +350,33 @@ fn snapshot(status: &Value, watch: Option<&Watch>, cx: &mut App) -> Value {
     })
 }
 
-fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Value>> {
+fn handle_paired(
+    op: &str,
+    args: &Value,
+    device: &str,
+    phone: &str,
+    cx: &mut App,
+) -> Task<Result<Value>> {
     let window = args.get("window").and_then(Value::as_u64);
+    if matches!(
+        op,
+        "image_begin" | "image_chunk" | "image_finish" | "image_discard"
+    ) {
+        let session = with_workspace(window, cx, |workspace, _, cx| {
+            anyhow::ensure!(!phone.is_empty(), "Images require an authenticated phone");
+            required(args, "session_id")?;
+            let view = requested_root_view(workspace, args, cx)?;
+            anyhow::ensure!(
+                view.read(cx).thread.read(cx).prompt_capabilities().image,
+                "This model does not accept images. Select a vision-capable model."
+            );
+            Ok(view.read(cx).session_id.to_string())
+        });
+        return match session {
+            Ok(session) => images::handle(phone, &session, op, args, cx),
+            Err(error) => Task::ready(Err(error)),
+        };
+    }
     let result = match op {
         "status" => Ok(status(device, cx)),
         "host_folders" => {
@@ -385,10 +412,23 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
         }
         "prompt" => with_workspace(window, cx, |workspace, window, cx| {
             let text = required(args, "text")?.to_string();
-            if text.trim().is_empty() {
-                bail!("the message is empty");
-            }
             let view = requested_root_view(workspace, args, cx)?;
+            let session = view.read(cx).session_id.to_string();
+            let mut content = if args.get("images").is_some() {
+                anyhow::ensure!(!phone.is_empty(), "Images require an authenticated phone");
+                required(args, "session_id")?;
+                anyhow::ensure!(
+                    view.read(cx).thread.read(cx).prompt_capabilities().image,
+                    "This model does not accept images. Select a vision-capable model."
+                );
+                images::contents(phone, &session, args, cx)?
+            } else {
+                Vec::new()
+            };
+            if !text.trim().is_empty() {
+                content.insert(0, acp::ContentBlock::Text(acp::TextContent::new(text)));
+            }
+            anyhow::ensure!(!content.is_empty(), "the message is empty");
             let send_now = args.get("send_now").and_then(Value::as_bool) == Some(true);
             let steer = args.get("steer").and_then(Value::as_bool) == Some(true);
             if steer && (send_now || view.read(cx).as_native_thread(cx).is_none()) {
@@ -397,7 +437,11 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
             let session_id = view.read(cx).session_id.clone();
             let queue_id = view
                 .update(cx, |view, cx| {
-                    let id = view.send_text(text, send_now, window, cx);
+                    let id = if let [acp::ContentBlock::Text(text)] = content.as_slice() {
+                        view.send_text(text.text.clone(), send_now, window, cx)
+                    } else {
+                        view.send_remote_content(content, send_now, window, cx)
+                    };
                     if let Some(id) = id
                         && steer
                     {
@@ -408,6 +452,7 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
                     id
                 })
                 .map(|id| id.to_string());
+            images::consume(phone, args, cx);
             Ok(json!({
                 "queued": queue_id.is_some(),
                 "steer": queue_id.is_some() && steer,
@@ -863,6 +908,7 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
         "send_now": true,
         "steering": view.as_native_thread(cx).is_some(),
         "queue_management": true,
+        "image_input": thread.prompt_capabilities().image,
         "questions": questions,
         "question_count": question_count,
         "pending": pending_permissions(conversation_view.read(cx), cx),
@@ -884,7 +930,7 @@ fn architect_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
 }
 
 fn architect_thread_summary(thread: &agent::Thread) -> Option<Value> {
-    let graph = thread.architect_graph()?;
+    let graph = thread.architect_status_graph()?;
     let run = thread.architect_run();
     let running = run.is_some_and(agent::ArchitectRun::is_running);
     // Branches of a plan run side by side, so there can be several at once.
@@ -1627,9 +1673,11 @@ fn transcript_entry(
     if !include_details {
         value["details_pending"] = json!(true);
         if let AgentThreadEntry::UserMessage(message) = entry {
-            value["fingerprint"] = json!(transcript::fingerprint(
-                snapshot_message_text(&message.content, cx).trim()
-            ));
+            value["fingerprint"] = json!(
+                images::fingerprint(message.content.source_blocks()).unwrap_or_else(|| {
+                    transcript::fingerprint(snapshot_message_text(&message.content, cx).trim())
+                })
+            );
         }
     }
     if let AgentThreadEntry::AssistantMessage(message) = entry
@@ -1687,7 +1735,17 @@ fn message_preview(content: &acp_thread::MessageContent) -> String {
             }
             _ => None,
         })
-        .unwrap_or_default()
+        .unwrap_or_else(|| {
+            if content
+                .source_blocks()
+                .iter()
+                .any(|block| matches!(block, acp::ContentBlock::Image(_)))
+            {
+                "Image attachment".into()
+            } else {
+                String::new()
+            }
+        })
 }
 
 fn fit_transcript_header(mut value: Value, limit: usize) -> Option<Value> {

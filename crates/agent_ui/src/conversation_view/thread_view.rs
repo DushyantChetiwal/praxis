@@ -1292,6 +1292,34 @@ impl ThreadView {
         !self.message_queue.is_empty()
     }
 
+    pub(crate) fn set_tool_call_expanded(
+        &mut self,
+        id: &acp::ToolCallId,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.entry_view_state.update(cx, |state, _| {
+            if expanded {
+                state.expand_tool_call(id.clone());
+            } else {
+                state.collapse_tool_call(id);
+            }
+        });
+        let show_input = expanded
+            && self.thread.read(cx).tool_call(id).is_some_and(|(_, call)| {
+                Self::tool_call_shows_raw_input(call)
+                    && (!matches!(call.status, ToolCallStatus::WaitingForConfirmation { .. })
+                        || self.expanded_tool_call_raw_inputs.contains(id))
+            });
+        self.thread.update(cx, |thread, cx| {
+            thread.set_tool_call_raw_input_expanded(id, show_input, cx);
+            if !expanded {
+                thread.release_tool_call_render_cache(id, cx);
+            }
+        });
+        cx.notify();
+    }
+
     // events
 
     pub fn handle_entry_view_event(
@@ -1703,7 +1731,21 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<QueueEntryId> {
-        let content = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
+        self.send_remote_content(
+            vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
+            send_now,
+            window,
+            cx,
+        )
+    }
+
+    pub(crate) fn send_remote_content(
+        &mut self,
+        content: Vec<acp::ContentBlock>,
+        send_now: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<QueueEntryId> {
         cx.emit(AcpThreadViewEvent::Interacted);
         if self.thread.read(cx).status() != ThreadStatus::Idle || self.is_loading_contents {
             self.add_to_queue(content, Vec::new(), window, cx);
@@ -8381,6 +8423,54 @@ impl ThreadView {
             tool_call.status,
             ToolCallStatus::WaitingForConfirmation { .. }
         );
+        if tool_call.tool_name.as_deref() == Some("terminal_wait")
+            && !needs_confirmation
+            && !matches!(
+                tool_call.status,
+                ToolCallStatus::Failed | ToolCallStatus::Rejected
+            )
+        {
+            let waiting = matches!(
+                tool_call.status,
+                ToolCallStatus::Pending | ToolCallStatus::InProgress
+            );
+            if waiting {
+                let entries = self.thread.read(cx).entries();
+                let visible =
+                    Self::latest_active_terminal_wait_id(entries.iter().filter_map(|entry| {
+                        let AgentThreadEntry::ToolCall(call) = entry else {
+                            return None;
+                        };
+                        Some((&call.id, call.tool_name.as_deref(), &call.status))
+                    }));
+                if visible.is_some_and(|id| id != &tool_call.id) {
+                    return div();
+                }
+            }
+            let label: SharedString = match tool_call.status {
+                ToolCallStatus::Completed => "Finished waiting".into(),
+                ToolCallStatus::Canceled => "Wait cancelled".into(),
+                _ => tool_call.label.read(cx).source().clone(),
+            };
+            return div().px_5().py_1().w_full().child(
+                h_flex()
+                    .gap_1()
+                    .w_full()
+                    .child(Divider::horizontal())
+                    .child(
+                        Button::new(("terminal-wait-status", entry_ix), label)
+                            .label_size(LabelSize::Small)
+                            .loading(waiting)
+                            .disabled(true)
+                            .start_icon(
+                                Icon::new(IconName::Clock)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .child(Divider::horizontal()),
+            );
+        }
         let is_terminal_tool = matches!(tool_call.kind, acp::ToolKind::Execute);
 
         let is_edit =
@@ -8405,9 +8495,7 @@ impl ThreadView {
 
         let use_card_layout = needs_confirmation || is_edit || is_terminal_tool;
 
-        let has_image_content = tool_call.content().iter().any(|c| c.image().is_some());
-
-        let should_show_raw_input = !is_terminal_tool && !is_edit && !has_image_content;
+        let should_show_raw_input = Self::tool_call_shows_raw_input(tool_call);
 
         let has_content = !tool_call.content().is_empty()
             || (should_show_raw_input && tool_call.raw_input.is_some());
@@ -8513,9 +8601,19 @@ impl ThreadView {
                                                     {
                                                         this.expanded_tool_call_raw_inputs
                                                             .remove(&id);
+                                                        this.thread.update(cx, |thread, cx| {
+                                                            thread.set_tool_call_raw_input_expanded(
+                                                                &id, false, cx,
+                                                            )
+                                                        });
                                                     } else {
                                                         this.expanded_tool_call_raw_inputs
                                                             .insert(id.clone());
+                                                        this.thread.update(cx, |thread, cx| {
+                                                            thread.set_tool_call_raw_input_expanded(
+                                                                &id, true, cx,
+                                                            )
+                                                        });
                                                     }
                                                     cx.notify();
                                                 }
@@ -8619,9 +8717,7 @@ impl ThreadView {
                                                   _,
                                                   window,
                                                   cx: &mut Context<Self>| {
-                                                this.entry_view_state.update(cx, |state, _cx| {
-                                                    state.collapse_tool_call(&tool_call_id);
-                                                });
+                                                this.set_tool_call_expanded(&tool_call_id, false, cx);
                                                 this.refresh_thread_search(window, cx);
                                                 cx.notify();
                                             }
@@ -8715,15 +8811,8 @@ impl ThreadView {
                                                                   _,
                                                                   window,
                                                                   cx: &mut Context<Self>| {
-                                                                this.entry_view_state.update(
-                                                                    cx,
-                                                                    |state, _cx| {
-                                                                        state
-                                                                            .toggle_tool_call_expansion(
-                                                                                &id,
-                                                                            );
-                                                                    },
-                                                                );
+                                                                let expanded = !this.entry_view_state.read(cx).is_tool_call_expanded(&id);
+                                                                this.set_tool_call_expanded(&id, expanded, cx);
                                                                 this.refresh_thread_search(window, cx);
                                                                 cx.notify();
                                                             }
@@ -10155,6 +10244,27 @@ impl ThreadView {
             .child(bar(3, "w_3_5"))
             .child(bar(4, "w_2_5"))
             .into_any_element()
+    }
+
+    fn tool_call_shows_raw_input(call: &ToolCall) -> bool {
+        !matches!(call.kind, acp::ToolKind::Execute | acp::ToolKind::Edit)
+            && call.diffs().next().is_none()
+            && !call
+                .content()
+                .iter()
+                .any(|content| content.image().is_some())
+    }
+
+    fn latest_active_terminal_wait_id<'a>(
+        calls: impl DoubleEndedIterator<
+            Item = (&'a acp::ToolCallId, Option<&'a str>, &'a ToolCallStatus),
+        >,
+    ) -> Option<&'a acp::ToolCallId> {
+        calls.rev().find_map(|(id, name, status)| {
+            (name == Some("terminal_wait")
+                && matches!(status, ToolCallStatus::Pending | ToolCallStatus::InProgress))
+            .then_some(id)
+        })
     }
 
     fn tool_call_icon_tooltip(
@@ -12979,6 +13089,41 @@ mod tests {
     use std::path::Path;
     use util::path;
     use workspace::MultiWorkspace;
+
+    #[gpui::test]
+    fn compact_terminal_wait_selects_one_active_timer(_cx: &mut gpui::TestAppContext) {
+        let first: acp::ToolCallId = "first".into();
+        let second: acp::ToolCallId = "second".into();
+        let unrelated: acp::ToolCallId = "read".into();
+        let mut calls = [
+            (
+                first.clone(),
+                Some("terminal_wait"),
+                ToolCallStatus::InProgress,
+            ),
+            (
+                second.clone(),
+                Some("terminal_wait"),
+                ToolCallStatus::Pending,
+            ),
+            (unrelated, Some("read_file"), ToolCallStatus::InProgress),
+        ];
+        let selected = |calls: &[(acp::ToolCallId, Option<&str>, ToolCallStatus)]| {
+            ThreadView::latest_active_terminal_wait_id(
+                calls.iter().map(|(id, name, status)| (id, *name, status)),
+            )
+            .cloned()
+        };
+        assert_eq!(selected(&calls), Some(second));
+        calls[1].2 = ToolCallStatus::Completed;
+        assert_eq!(selected(&calls), Some(first));
+        calls[0].2 = ToolCallStatus::Failed;
+        assert_eq!(
+            selected(&calls),
+            None,
+            "failures retain their normal inspectable tool card"
+        );
+    }
 
     #[test]
     fn test_tool_call_icon_tooltip() {

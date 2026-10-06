@@ -1192,16 +1192,21 @@ impl ArchitectPane {
             .map(ArchitectGraph::steps_without_capture)
             .unwrap_or_default();
         let ready = step_count > 0 && issues.is_empty();
-        let latest_run = self.thread.read(cx).architect_run().map(|run| {
-            (
-                run.history().len(),
-                if run.is_running() {
-                    "in progress"
-                } else {
-                    "finished"
-                },
-            )
-        });
+        let latest_run = self
+            .thread
+            .read(cx)
+            .architect_run()
+            .filter(|_| self.thread.read(cx).architect_status_graph().is_some())
+            .map(|run| {
+                (
+                    run.history().len(),
+                    if run.is_running() {
+                        "in progress"
+                    } else {
+                        "finished"
+                    },
+                )
+            });
 
         div()
             .id("architect-overview-inspector")

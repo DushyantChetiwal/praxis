@@ -42,6 +42,9 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Switch
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -132,6 +135,19 @@ fun SettingsScreen(state: AppState, ui: DeviceUi, vm: MainViewModel, snackbar: S
                         Text(stringResource(R.string.settings_sign_out))
                     }
                 }
+            }
+
+            Section(stringResource(R.string.settings_connection)) {
+                val relayLabel = stringResource(R.string.settings_live_relay)
+                ListItem(
+                    headlineContent = { Text(relayLabel) },
+                    supportingContent = { Text(stringResource(R.string.settings_live_relay_help)) },
+                    trailingContent = {
+                        Switch(checked = vm.liveRelayEnabled, onCheckedChange = vm::changeLiveRelayEnabled,
+                            modifier = Modifier.semantics { contentDescription = relayLabel })
+                    },
+                    colors = transparentItem(),
+                )
             }
 
             Section(stringResource(R.string.settings_pairing)) {

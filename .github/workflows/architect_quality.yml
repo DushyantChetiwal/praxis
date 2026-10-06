@@ -110,6 +110,10 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
+      - name: Check relay probe formatting
+        if: hashFiles('script/probe-praxis-relay.rs') != ''
+        run: rustfmt --edition 2024 --check script/probe-praxis-relay.rs
+
       - name: Check repository documentation formatting
         run: ./script/prettier
 
@@ -121,13 +125,17 @@ jobs:
           .github/workflows/bundle_fork.yml
           .github/workflows/bundle_after_merge.yml
           .github/workflows/android_remote.yml
+          .github/workflows/remote_relay_probe.yml
+          .github/workflows/incremental_ci.yml
           --check
 
       - name: Prepare formatting corrections
         if: failure()
         run: |
           cargo fmt --all
+          if [ -f script/probe-praxis-relay.rs ]; then rustfmt --edition 2024 script/probe-praxis-relay.rs; fi
           ./script/prettier --write
+          pnpm dlx prettier@3.5.0 .github/workflows/architect_quality.yml .github/workflows/android_remote.yml .github/workflows/remote_relay_probe.yml .github/workflows/incremental_ci.yml --write
           git --no-pager diff --binary > rust-format.patch
 
       - name: Upload formatting corrections
@@ -199,6 +207,23 @@ jobs:
           shared-key: architect-agent-tests
           cache-on-failure: true
 
+      - name: Test lossless history memory behavior
+        run: |
+          cargo test --locked -p agent --lib db::tests::
+          cargo test --locked -p agent --lib cleared_architect_plan_
+          cargo test --locked -p agent --lib terminal_tasks_wait_
+          cargo test --locked -p markdown --lib deferred_markdown_
+          cargo test --locked -p acp_thread --lib deferred_tool_
+          cargo test --locked -p agent_ui --lib compact_terminal_wait_
+          cargo test --locked -p agent_ui --lib test_deferred_tool_input_
+          cargo test --locked -p agent_ui --lib test_thread_search_
+          cargo test --locked -p agent_ui --lib test_mixed_assistant_content_
+
+      - name: Test remote transport and image input
+        run: |
+          cargo test --locked -p agent_ui --lib remote::
+          cargo test --locked -p agent_ui --lib test_remote_images_
+
       - name: Test background terminal tab inspection
         run: cargo test --locked -p terminal_view --lib background_agent_terminals_
 
@@ -226,7 +251,9 @@ jobs:
         run: |
           cargo test --locked -p agent --lib test_repetition_
           cargo test --locked -p agent --lib internal_tests::test_a_new_session_offers_plan_and_build -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_native_mode_changes_notify_the_conversation -- --exact
           cargo test --locked -p agent --lib internal_tests::test_plan_mode_keeps_read_tools_and_denies_execution -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_mode_changes_refresh_the_next_provider_request -- --exact
           cargo test --locked -p agent --lib internal_tests::test_plan_mode_and_filtered_tools_survive_reopening -- --exact
           cargo test --locked -p agent --lib internal_tests::test_architect_coordinator_owns_mode_and_cancellation -- --exact
           cargo test --locked -p agent --lib internal_tests::test_ask_question_is_available_to_root_threads_in_both_modes -- --exact

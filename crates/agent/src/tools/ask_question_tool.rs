@@ -221,7 +221,7 @@ impl AskQuestionTool {
                 acp::StringPropertySchema::new()
                     .title("Or write your own answer")
                     .description(
-                        "If provided, this answer is used instead of the selected options.",
+                        "Use this field for a custom answer; select an option to use that instead.",
                     ),
                 false,
             )

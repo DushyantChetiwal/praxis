@@ -25,6 +25,7 @@ android {
         applicationId = "io.github.dushyantchetiwal.praxis.remote"
         minSdk = 26
         targetSdk = 35
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = remoteVersionCode
         versionName = remoteVersionName
         buildConfigField("String", "GITHUB_CLIENT_ID", javaString(githubClientId))
@@ -89,7 +90,15 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.okhttp)
     implementation(libs.androidx.security.crypto)
+    implementation(libs.androidx.exif)
+    implementation(libs.nostr.sdk) {
+        // Keep the app's tested Kotlin/coroutines pair; the binding only uses its stable APIs.
+        exclude(group = "org.jetbrains.kotlinx", module = "kotlinx-coroutines-core")
+        exclude(group = "androidx.appcompat", module = "appcompat")
+    }
 
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
     testImplementation(libs.junit)
     testImplementation(libs.org.json)
     testImplementation(libs.kotlinx.coroutines.test)

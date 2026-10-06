@@ -199,6 +199,12 @@ impl SharedThread {
     }
 }
 
+#[derive(Deserialize)]
+struct ThreadVersion {
+    #[serde(default)]
+    version: Option<serde_json::Value>,
+}
+
 impl DbThread {
     pub const VERSION: &'static str = "0.3.0";
 
@@ -207,10 +213,10 @@ impl DbThread {
     }
 
     pub fn from_json(json: &[u8]) -> Result<Self> {
-        let saved_thread_json = serde_json::from_slice::<serde_json::Value>(json)?;
-        match saved_thread_json.get("version") {
+        let version: ThreadVersion = serde_json::from_slice(json)?;
+        match version.version {
             Some(serde_json::Value::String(version)) => match version.as_str() {
-                Self::VERSION => Ok(serde_json::from_value(saved_thread_json)?),
+                Self::VERSION => Ok(serde_json::from_slice(json)?),
                 _ => Self::upgrade_from_agent_1(crate::legacy_thread::SerializedThread::from_json(
                     json,
                 )?),
@@ -542,16 +548,19 @@ impl ThreadsDatabase {
                     Some(serialized_folder_paths.order),
                 )
             };
-        let json_data = serde_json::to_string(&SerializedThread {
-            thread,
-            version: DbThread::VERSION,
-        })?;
-
-        let connection = connection.lock();
-
-        let compressed = zstd::encode_all(json_data.as_bytes(), COMPRESSION_LEVEL)?;
+        // Serialize into the compressor instead of allocating the entire expanded
+        // transcript alongside its live objects and compressed database blob.
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), COMPRESSION_LEVEL)?;
+        serde_json::to_writer(
+            &mut encoder,
+            &SerializedThread {
+                thread,
+                version: DbThread::VERSION,
+            },
+        )?;
+        let data = encoder.finish()?;
         let data_type = DataType::Zstd;
-        let data = compressed;
+        let connection = connection.lock();
 
         // Use the thread's updated_at as created_at for new threads.
         // This ensures the creation time reflects when the thread was conceptually
@@ -633,13 +642,15 @@ impl ThreadsDatabase {
         let connection = self.connection.clone();
 
         self.executor.spawn(async move {
-            let connection = connection.lock();
-            let mut select = connection.select_bound::<Arc<str>, (DataType, Vec<u8>)>(indoc! {"
-                SELECT data_type, data FROM threads WHERE id = ? LIMIT 1
-            "})?;
-
-            let rows = select(id.0)?;
-            if let Some((data_type, data)) = rows.into_iter().next() {
+            let row = {
+                let connection = connection.lock();
+                let mut select =
+                    connection.select_bound::<Arc<str>, (DataType, Vec<u8>)>(indoc! {"
+                    SELECT data_type, data FROM threads WHERE id = ? LIMIT 1
+                "})?;
+                select(id.0)?.into_iter().next()
+            };
+            if let Some((data_type, data)) = row {
                 Ok(Some(Self::deserialize_thread(data_type, data)?))
             } else {
                 Ok(None)
@@ -671,11 +682,27 @@ impl ThreadsDatabase {
         *self.write_gate.lock() = Some(gate.shared());
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "Stream very large histories off the UI thread instead of retaining an additional decompressed JSON buffer"
+    )]
     fn deserialize_thread(data_type: DataType, data: Vec<u8>) -> Result<DbThread> {
         let json_data = match data_type {
             DataType::Zstd => {
-                let decompressed = zstd::decode_all(&data[..])?;
-                String::from_utf8(decompressed)?
+                let reader = || -> Result<_> {
+                    Ok(std::io::BufReader::new(zstd::stream::read::Decoder::new(
+                        data.as_slice(),
+                    )?))
+                };
+                // Unknown fields are skipped without building their JSON trees.
+                // Legacy formats keep their existing migration path.
+                let version: ThreadVersion = serde_json::from_reader(reader()?)?;
+                if version.version.as_ref().and_then(serde_json::Value::as_str)
+                    == Some(DbThread::VERSION)
+                {
+                    return Ok(serde_json::from_reader(reader()?)?);
+                }
+                String::from_utf8(zstd::decode_all(data.as_slice())?)?
             }
             DataType::Json => String::from_utf8(data)?,
         };
@@ -801,6 +828,36 @@ mod tests {
     use collections::HashMap;
     use gpui::TestAppContext;
     use std::sync::Arc;
+
+    #[gpui::test]
+    async fn test_large_thread_streaming_roundtrip_preserves_full_content(cx: &mut TestAppContext) {
+        let database = ThreadsDatabase::new(cx.executor()).expect("database");
+        let mut thread = make_thread("large history", Utc::now());
+        let source = "Full text with quotes \" and Unicode Ω, not a preview.\n".repeat(8192);
+        thread.messages = vec![Arc::new(crate::Message::Agent(crate::AgentMessage {
+            content: vec![crate::AgentMessageContent::Text(source.clone())],
+            ..Default::default()
+        }))];
+        let expected = thread.messages.clone();
+        let mut json = serde_json::to_value(&thread).expect("fixture");
+        json["version"] = serde_json::json!(DbThread::VERSION);
+        let plain = serde_json::to_vec(&json).expect("fixture JSON");
+        assert_eq!(
+            DbThread::from_json(&plain).expect("plain JSON").messages,
+            expected
+        );
+        database
+            .save_thread(session_id("large-history"), thread, PathList::default())
+            .await
+            .expect("save");
+        let restored = database
+            .load_thread(session_id("large-history"))
+            .await
+            .expect("load")
+            .expect("thread");
+        assert_eq!(restored.messages, expected);
+        assert!(restored.messages[0].to_markdown().contains(&source));
+    }
 
     #[test]
     fn test_shared_thread_roundtrip() {

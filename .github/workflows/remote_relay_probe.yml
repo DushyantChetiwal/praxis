@@ -1,0 +1,59 @@
+name: Remote relay interoperability probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix-loading-thread-selections
+    paths:
+      - script/probe-praxis-relay.rs
+      - .github/workflows/remote_relay_probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Bounded synthetic relay round trip
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Prepare isolated probe manifest
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/praxis-relay-probe"
+          cp Cargo.lock "${RUNNER_TEMP}/praxis-relay-probe/Cargo.lock"
+          cat > "${RUNNER_TEMP}/praxis-relay-probe/Cargo.toml" <<EOF
+          [package]
+          name = "praxis-relay-probe"
+          version = "0.1.0"
+          edition = "2024"
+          [workspace]
+          [[bin]]
+          name = "praxis-relay-probe"
+          path = "${GITHUB_WORKSPACE}/script/probe-praxis-relay.rs"
+          [dependencies]
+          anyhow = "1"
+          base64 = "0.22"
+          futures = "0.3"
+          nostr-sdk = "=0.45.4"
+          ring = "0.17"
+          tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+          EOF
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ runner.temp }}/praxis-relay-probe
+      - name: Probe with synthetic keys and payloads only
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo run --manifest-path "${RUNNER_TEMP}/praxis-relay-probe/Cargo.toml" 2>&1 | tee relay-probe.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: relay-probe
+          path: relay-probe.log
+          if-no-files-found: ignore

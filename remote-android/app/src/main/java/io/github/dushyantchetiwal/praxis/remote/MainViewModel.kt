@@ -7,6 +7,7 @@ import android.os.Build
 import androidx.annotation.StringRes
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
@@ -16,6 +17,11 @@ import io.github.dushyantchetiwal.praxis.remote.data.CryptoException
 import io.github.dushyantchetiwal.praxis.remote.data.Device
 import io.github.dushyantchetiwal.praxis.remote.data.DetailRequest
 import io.github.dushyantchetiwal.praxis.remote.data.DetailBody
+import io.github.dushyantchetiwal.praxis.remote.data.DetailCache
+import io.github.dushyantchetiwal.praxis.remote.data.encodeDetailBody
+import io.github.dushyantchetiwal.praxis.remote.data.decodeDetailBody
+import io.github.dushyantchetiwal.praxis.remote.ui.MdBlock
+import io.github.dushyantchetiwal.praxis.remote.ui.parseMarkdown
 import io.github.dushyantchetiwal.praxis.remote.data.DetailChunk
 import io.github.dushyantchetiwal.praxis.remote.data.parseDetailChunk
 import io.github.dushyantchetiwal.praxis.remote.data.ModelOption
@@ -42,6 +48,11 @@ import io.github.dushyantchetiwal.praxis.remote.data.Pairer
 import io.github.dushyantchetiwal.praxis.remote.data.Permission
 import io.github.dushyantchetiwal.praxis.remote.data.PermissionOption
 import io.github.dushyantchetiwal.praxis.remote.data.RemoteChannel
+import io.github.dushyantchetiwal.praxis.remote.data.PromptImage
+import io.github.dushyantchetiwal.praxis.remote.data.prepareImage
+import io.github.dushyantchetiwal.praxis.remote.data.uploadImage
+import io.github.dushyantchetiwal.praxis.remote.data.MAX_PROMPT_IMAGES
+import io.github.dushyantchetiwal.praxis.remote.data.MAX_RETAINED_IMAGES
 import io.github.dushyantchetiwal.praxis.remote.data.RemoteViewScope
 import io.github.dushyantchetiwal.praxis.remote.data.viewScopedAction
 import io.github.dushyantchetiwal.praxis.remote.data.Snapshot
@@ -101,6 +112,20 @@ private val LISTING_SCREENS = setOf(Screen.Devices, Screen.Pair, Screen.Device)
  * All app state and behaviour. State is only changed on the main thread, so
  * like the web app it needs no locking; network calls suspend on IO.
  */
+data class LoadedDetail(val body: DetailBody, val blocks: List<MdBlock>) {
+    fun cacheWeight(): Long = body.chunks.sumOf { it.text.length.toLong() * 2 + 192 } + blocks.sumOf { block ->
+        val text = when (block) {
+            is MdBlock.Paragraph -> block.text
+            is MdBlock.Heading -> block.text
+            is MdBlock.Code -> block.code
+            is MdBlock.Item -> block.text
+            is MdBlock.Quote -> block.text
+            MdBlock.Rule -> ""
+        }
+        text.length.toLong() * 2 + 96
+    }
+}
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val store = Store(application)
     private val http = GitHubClient.newHttpClient()
@@ -121,6 +146,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val gists = Gists(gh)
     private val pairer = Pairer(application, gh) { store.login }
     private val phoneId: String by lazy { store.phoneId }
+    private var detailCache = newDetailCache()
+
+    private fun newDetailCache(): DetailCache<LoadedDetail> {
+        val root = getApplication<Application>().cacheDir
+        viewModelScope.launch {
+            try { DetailCache.removeAbandonedDirectories(root) }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) { android.util.Log.w("PraxisRemote", "Could not remove abandoned conversation caches", error) }
+        }
+        return DetailCache(
+            directory = DetailCache.newDirectory(root),
+            weight = LoadedDetail::cacheWeight,
+            encode = { detail: LoadedDetail -> encodeDetailBody(detail.body) },
+            decode = { bytes ->
+                val body = decodeDetailBody(bytes)
+                LoadedDetail(body, parseMarkdown(body.chunks.joinToString("") { it.text }))
+            },
+        )
+    }
+
+    fun detailIdentity(request: DetailRequest): String = io.github.dushyantchetiwal.praxis.remote.data.detailCacheIdentity(
+        d.device?.channel, d.windowId, d.currentWindow()?.thread?.sessionId, request,
+    )
+
+    fun cachedDetail(identity: String): LoadedDetail? = detailCache.peek(identity)
+
+    suspend fun restoreDetail(identity: String): LoadedDetail? = try {
+        detailCache.restore(identity)
+    } catch (error: CancellationException) { throw error }
+    catch (error: Exception) { android.util.Log.w("PraxisRemote", "Conversation cache unavailable", error); null }
+
+    fun rememberDetail(identity: String, detail: LoadedDetail) {
+        val cache = detailCache
+        val revision = cache.remember(identity, detail)
+        viewModelScope.launch {
+            try { cache.persist(identity, detail, revision) }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) { android.util.Log.w("PraxisRemote", "Could not persist conversation cache", error) }
+        }
+    }
+
+    fun invalidateDetail(identity: String) {
+        val cache = detailCache
+        val revision = cache.invalidate(identity)
+        viewModelScope.launch {
+            try { cache.remove(identity, revision) }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) { android.util.Log.w("PraxisRemote", "Could not remove cached details", error) }
+        }
+    }
+
+    private fun closeDetailCache() {
+        val cache = detailCache
+        cache.close()
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            try { cache.removeFiles() }
+            catch (error: Exception) { android.util.Log.w("PraxisRemote", "Could not clear conversation cache", error) }
+        }
+    }
 
     private val _app = MutableStateFlow(
         AppState(clientIdOverride = store.clientIdOverride, login = store.login, phoneName = phoneName()),
@@ -138,6 +222,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** The composer's text, kept here so a failed send can put it back. */
     var composer by mutableStateOf("")
+    private val imageDrafts = mutableStateMapOf<String, List<PromptImage>>()
+    private fun imageDraftKey() = "${viewKey()}:${d.currentWindow()?.thread?.sessionId}"
+    val composerImages: List<PromptImage> get() = imageDrafts[imageDraftKey()].orEmpty()
+    var preparingImage by mutableStateOf(false)
+        private set
+    val hasPrompt: Boolean get() = composer.isNotBlank() || composerImages.isNotEmpty()
+    var liveRelayEnabled by mutableStateOf(store.liveRelayEnabled)
+        private set
+
+    fun changeLiveRelayEnabled(enabled: Boolean) {
+        store.liveRelayEnabled = enabled
+        liveRelayEnabled = enabled
+        channel.live.stop()
+        resetWatcher()
+        startPolling()
+        requestPoll()
+    }
+
+    fun addImage(uri: Uri) {
+        if (preparingImage || d.currentWindow()?.thread?.imageInput != true) return
+        val draft = imageDraftKey()
+        if (composerImages.size >= MAX_PROMPT_IMAGES || imageDrafts.values.sumOf { it.size } + d.outbox.sumOf { it.images.size } >= MAX_RETAINED_IMAGES) {
+            message(str(R.string.image_limit))
+            return
+        }
+        preparingImage = true
+        viewModelScope.launch {
+            try {
+                val image = prepareImage(getApplication(), uri)
+                imageDrafts[draft] = imageDrafts[draft].orEmpty() + image
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { message(error.message ?: str(R.string.image_failed)) }
+            finally { preparingImage = false }
+        }
+    }
+
+    fun removeImage(id: String) {
+        imageDrafts[imageDraftKey()] = composerImages.filterNot { it.id == id }
+    }
 
     val builtInClientId: String = BuildConfig.GITHUB_CLIENT_ID.trim()
 
@@ -189,6 +312,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun now() = System.currentTimeMillis()
 
     init {
+        viewModelScope.launch {
+            channel.live.snapshots.collect { update ->
+                if (foreground && d.device?.channel == update.channel && phoneId == update.phoneId) {
+                    edit { copy(lastContact = now(), stateApplied = true) }
+                    applySnapshot(update.snapshot)
+                    setBanner("poll", null)
+                    setBanner("state", null)
+                    ensureWatch()
+                }
+            }
+        }
+        viewModelScope.launch {
+            var previousEpoch: String? = null
+            var wasLive = false
+            channel.live.connection.collect { connection ->
+                if (connection?.channel == d.device?.channel) {
+                    edit { copy(liveTransport = connection?.connected == true) }
+                    if (connection?.connected == true) {
+                        if (!wasLive || previousEpoch != connection.epoch) { resetWatcher(); previousEpoch = connection.epoch }
+                        wasLive = true
+                        ensureWatch()
+                    } else { wasLive = false }
+                    requestPoll()
+                } else {
+                    previousEpoch = null
+                    wasLive = false
+                    edit { copy(liveTransport = false) }
+                }
+            }
+        }
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
                 store.loadSecrets()
@@ -256,6 +409,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // While hidden there is no polling and no watch renewal, so the laptop
         // stops publishing snapshots once the watch runs out.
         foreground = false
+        channel.live.stop()
         pollJob?.cancel()
         pollJob = null
         devicesJob?.cancel()
@@ -364,7 +518,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pairJob = null
         stopDevice()
         gh.clearCache()
-        if (explicit) store.clearAccount() else store.clearToken()
+        if (explicit) {
+            store.clearAccount()
+            imageDrafts.clear()
+            closeDetailCache()
+            detailCache = newDetailCache()
+        } else store.clearToken()
         composer = ""
         _app.update {
             AppState(
@@ -413,7 +572,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 setDevices { copy(paired = found.filter(::isPaired).map { it.channel }.toSet()) }
                 reconcileDevice(initial)
             } catch (e: ApiException) {
-                if (e.kind != ErrorKind.Auth) setDevices { copy(error = str(R.string.devices_error, e.message.orEmpty())) }
+                if (e.kind != ErrorKind.Auth) {
+                    val cached = store.cachedComputers()
+                    setDevices { copy(
+                        devices = (devices + cached).distinctBy { it.channel },
+                        paired = paired + cached.map { it.channel },
+                        error = str(R.string.devices_error, e.message.orEmpty()),
+                    ) }
+                    reconcileDevice(initial)
+                }
             } finally {
                 setDevices { copy(loading = false, loaded = true) }
             }
@@ -423,7 +590,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Whether this phone holds a key for [device] that the computer still honours. */
     private fun isPaired(device: Device): Boolean {
         if (store.keyFor(device.channel) == null) return false
-        return phoneId in device.phones || withinPairingGrace(device.channel)
+        return device.cached || phoneId in device.phones || withinPairingGrace(device.channel)
     }
 
     private fun withinPairingGrace(channel: String): Boolean =
@@ -588,6 +755,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun stopDevice() {
+        channel.live.stop()
         invalidateQuestionRequests()
         viewRevision++
         cancelHistoryRequest()
@@ -668,10 +836,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Live state: gist polling
     // -----------------------------------------------------------------------
 
+    override fun onCleared() {
+        closeDetailCache()
+        channel.live.close()
+        super.onCleared()
+    }
+
     private fun startPolling() {
         pollJob?.cancel()
         pollJob = null
         if (!foreground || d.device == null || store.token == null) return
+        if (liveRelayEnabled) d.device?.let { device -> linkFor(device)?.let(channel.live::start) }
         pollJob = viewModelScope.launch {
             while (isActive) {
                 val wait = pollOnce() ?: break
@@ -687,6 +862,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Reads the computer's gist (free when unchanged); returns the delay before the next read. */
     private suspend fun pollOnce(): Long? {
         val device = d.device ?: return null
+        val link = linkFor(device)
+        if (liveRelayEnabled && link != null) {
+            channel.live.start(link)
+            if (channel.live.ready(link)) {
+                ensureWatch()
+                pruneOutbox()
+                return 5_000L
+            }
+        }
         var wait: Long? = STATE_POLL_MS
         try {
             // A 304 still carries the cached gist, which matters right after reselecting a computer.
@@ -743,7 +927,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!checkPairing(device)) return
         val link = linkFor(device) ?: return
         try {
-            gists.snapshot(gist, link)?.let(::applySnapshot)
+            if (!channel.live.ready(link)) gists.snapshot(gist, link)?.let(::applySnapshot)
             setBanner("state", null)
         } catch (e: CryptoException) {
             setBanner("state", str(R.string.banner_state_unreadable, device.name), error = true)
@@ -916,7 +1100,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendPrompt(sendNow: Boolean = false, steer: Boolean = false) {
         val text = composer.trim()
-        if (text.isEmpty() || d.device == null) return
+        val images = composerImages
+        val draft = imageDraftKey()
+        if ((text.isEmpty() && images.isEmpty()) || d.device == null || preparingImage) return
+        if (images.isNotEmpty() && d.currentWindow()?.thread?.imageInput != true) {
+            message(str(R.string.image_unsupported))
+            return
+        }
         val scope = requestScope()
         val session = d.currentWindow()?.thread?.sessionId
         val args = windowArgs {
@@ -932,11 +1122,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             doneAt = 0L,
             session = session,
             baseIndex = d.thread?.takeIf { it.sessionId == session }?.entries?.maxOfOrNull { it.index } ?: -1,
+            images = images,
+            fingerprint = io.github.dushyantchetiwal.praxis.remote.data.promptFingerprint(text, images),
         )
         edit { copy(outbox = outbox + item) }
         composer = ""
+        imageDrafts.remove(draft)
         viewModelScope.launch {
             try {
+                if (images.isNotEmpty()) {
+                    val target = JSONObject().put("session_id", session)
+                    args.opt("window")?.let { target.put("window", it) }
+                    val ids = images.map { image -> uploadImage(image, target) { op, upload -> praxis(op, upload, scope) } }
+                    args.put("images", org.json.JSONArray(ids))
+                }
                 val result = praxis("prompt", args, scope)
                     ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
                 if (scope != requestScope()) return@launch
@@ -954,24 +1153,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (queued) message(str(R.string.toast_queued))
                 requestPoll()
-            } catch (e: ApiException) {
-                if (scope != requestScope()) return@launch
+            } catch (error: CancellationException) {
+                if (images.isNotEmpty() && imageDrafts[draft].isNullOrEmpty()) imageDrafts[draft] = images
+                throw error
+            } catch (error: Exception) {
+                if (scope != requestScope()) {
+                    if (images.isNotEmpty() && imageDrafts[draft].isNullOrEmpty()) imageDrafts[draft] = images
+                    return@launch
+                }
                 edit { copy(outbox = outbox.map {
                     if (it.id == item.id) it.copy(state = OutboxState.Unconfirmed, doneAt = now()) else it
                 }) }
-                report(e, str(R.string.label_message_unconfirmed))
+                val failure = error as? ApiException ?: ApiException(ErrorKind.State, error.message ?: str(R.string.image_failed))
+                report(failure, str(R.string.label_message_unconfirmed))
             }
         }
     }
 
     fun canRestorePromptDraft(item: OutboxItem): Boolean = d.outbox.any {
-        it.id == item.id && it.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)
+        it.id == item.id && composerImages.isEmpty() && it.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)
     }
 
     fun restorePromptDraft(item: OutboxItem) {
         val retained = d.outbox.firstOrNull { it.id == item.id } ?: return
-        if (!retained.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)) return
+        if (composerImages.isNotEmpty() || !retained.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)) return
         composer = retained.text
+        imageDrafts[imageDraftKey()] = retained.images
         edit { copy(outbox = outbox.filterNot { it.id == retained.id }) }
     }
 
@@ -1247,13 +1454,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectQuestionOption(value: String) {
         val form = d.question.form ?: return
         if (d.question.sending || form.options.none { it.value == value }) return
-        edit { copy(question = question.copy(selected = if (!form.allowMultiple) setOf(value) else {
+        edit { copy(question = question.copy(freeformActive = false, selected = if (!form.allowMultiple || question.freeformActive) setOf(value) else {
             if (value in question.selected) question.selected - value else question.selected + value
         })) }
     }
 
+    fun activateQuestionFreeform() {
+        if (!d.question.sending) edit { copy(question = question.copy(freeformActive = true)) }
+    }
+
     fun editQuestionAnswer(text: String) {
-        if (!d.question.sending) edit { copy(question = question.copy(freeform = text)) }
+        if (!d.question.sending) edit { copy(question = question.copy(freeform = text, freeformActive = true)) }
     }
 
     fun submitQuestion(decline: Boolean = false) {
@@ -1261,7 +1472,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val header = state.header ?: return
         val form = state.form ?: return
         if (state.sending || state.loading) return
-        val content = questionAnswerContent(form, state.selected, state.freeform)
+        val content = questionAnswerContent(form, state.selected, state.freeform, state.freeformActive)
         if (!decline && content == null) return
         val request = questionRequest
         val scope = requestScope()

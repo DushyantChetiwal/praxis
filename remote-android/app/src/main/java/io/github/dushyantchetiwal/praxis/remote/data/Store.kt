@@ -169,6 +169,10 @@ class Store(context: Context) {
     // Computers
     // -----------------------------------------------------------------------
 
+    var liveRelayEnabled: Boolean
+        get() = prefs.getBoolean("live_relay_enabled", true)
+        set(value) = prefs.edit().putBoolean("live_relay_enabled", value).apply()
+
     fun gistFor(channel: String): String? = prefs.getString(KEY_GIST_PREFIX + channel, null)
 
     fun rememberComputer(channel: String, gistId: String, name: String) {
@@ -177,6 +181,12 @@ class Store(context: Context) {
             .putString(KEY_GIST_PREFIX + channel, gistId)
             .putString(KEY_NAME_PREFIX + channel, name)
             .apply()
+    }
+
+    fun cachedComputers(): List<Device> = pairedChannels().mapNotNull { channel ->
+        val gist = gistFor(channel) ?: return@mapNotNull null
+        Device(channel, gist, prefs.getString(KEY_NAME_PREFIX + channel, null) ?: "Paired computer",
+            null, null, emptyList(), cached = true)
     }
 
     /** The computer opened last, by channel. */

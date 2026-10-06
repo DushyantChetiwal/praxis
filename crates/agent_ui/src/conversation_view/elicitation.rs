@@ -5,6 +5,7 @@ use component::{Component, ComponentScope, example_group_with_title, single_exam
 use editor::Editor;
 use futures::channel::oneshot;
 use gpui::{AnyElement, App, Div, Empty, Entity, Focusable, Hsla, SharedString, Window, div};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use ui::{
@@ -37,6 +38,7 @@ enum ElicitationFieldValue {
 #[derive(PartialEq, Eq)]
 pub(crate) struct ElicitationFormSubmission {
     fields: HashMap<String, ElicitationFieldValue>,
+    question_answer_field: Option<&'static str>,
 }
 
 pub(crate) struct ElicitationFormState {
@@ -44,6 +46,8 @@ pub(crate) struct ElicitationFormState {
     field_errors: HashMap<String, SharedString>,
     is_submitting: bool,
     edit_subscriptions: Vec<gpui::Subscription>,
+    question_freeform_active: Option<Rc<Cell<bool>>>,
+    on_text_edit: Option<Rc<dyn Fn(&mut App)>>,
 }
 
 impl ElicitationFormState {
@@ -130,8 +134,24 @@ impl ElicitationFormState {
             fields.insert(name.clone(), field);
         }
 
+        let question_freeform_active = (required.is_empty()
+            && fields.len() == 2
+            && matches!(
+                fields.get("answer"),
+                Some(
+                    ElicitationFieldState::SingleSelect { .. }
+                        | ElicitationFieldState::MultiSelect(_)
+                )
+            )
+            && matches!(
+                fields.get("freeform_answer"),
+                Some(ElicitationFieldState::Text(_))
+            ))
+        .then(|| Rc::new(Cell::new(false)));
         Self {
             fields,
+            question_freeform_active,
+            on_text_edit: None,
             field_errors: HashMap::default(),
             is_submitting: false,
             edit_subscriptions: Vec::new(),
@@ -139,7 +159,13 @@ impl ElicitationFormState {
     }
 
     pub(crate) fn observe_text_edits(&mut self, on_edit: Rc<dyn Fn(&mut App)>, cx: &mut App) {
-        for field in self.fields.values() {
+        self.on_text_edit = Some(on_edit.clone());
+        for (name, field) in &self.fields {
+            let freeform_active = if name == "freeform_answer" {
+                self.question_freeform_active.clone()
+            } else {
+                None
+            };
             let ElicitationFieldState::Text(editor) = field else {
                 continue;
             };
@@ -153,6 +179,9 @@ impl ElicitationFormState {
                         let text = editor.read(cx).text(cx);
                         if text != previous_text {
                             previous_text = text;
+                            if let Some(active) = &freeform_active {
+                                active.set(true);
+                            }
                             on_edit(cx);
                         }
                     }
@@ -160,11 +189,31 @@ impl ElicitationFormState {
         }
     }
 
+    fn field_is_active(&self, name: &str) -> bool {
+        match self
+            .question_freeform_active
+            .as_ref()
+            .map(|active| active.get())
+        {
+            Some(true) => name != "answer",
+            Some(false) => name != "freeform_answer",
+            None => true,
+        }
+    }
+
     fn snapshot(&self, cx: &App) -> ElicitationFormSubmission {
         ElicitationFormSubmission {
+            question_answer_field: self.question_freeform_active.as_ref().map(|active| {
+                if active.get() {
+                    "freeform_answer"
+                } else {
+                    "answer"
+                }
+            }),
             fields: self
                 .fields
                 .iter()
+                .filter(|(name, _)| self.field_is_active(name))
                 .map(|(name, field)| {
                     let value = match field {
                         ElicitationFieldState::Text(editor) => {
@@ -238,6 +287,11 @@ impl ElicitationFormState {
     }
 
     pub(crate) fn set_single_select(&mut self, field_name: &str, value: String) {
+        if field_name == "answer"
+            && let Some(active) = &self.question_freeform_active
+        {
+            active.set(false);
+        }
         if let Some(ElicitationFieldState::SingleSelect { value: selected }) =
             self.fields.get_mut(field_name)
         {
@@ -247,7 +301,15 @@ impl ElicitationFormState {
     }
 
     pub(crate) fn set_multi_select(&mut self, field_name: &str, value: String, selected: bool) {
+        let switching_from_text = field_name == "answer"
+            && self
+                .question_freeform_active
+                .as_ref()
+                .is_some_and(|active| active.replace(false));
         if let Some(ElicitationFieldState::MultiSelect(values)) = self.fields.get_mut(field_name) {
+            if switching_from_text {
+                values.clear();
+            }
             if selected {
                 values.insert(value);
             } else {
@@ -394,6 +456,18 @@ impl ElicitationFormSubmission {
             }
         }
 
+        if let Some(field) = self.question_answer_field {
+            let answered = match content.get(field) {
+                Some(acp::ElicitationContentValue::String(value)) => !value.trim().is_empty(),
+                Some(acp::ElicitationContentValue::StringArray(values)) => !values.is_empty(),
+                _ => false,
+            };
+            if !answered {
+                errors
+                    .entry(field.to_string())
+                    .or_insert_with(|| "Choose an option or enter an answer".into());
+            }
+        }
         if errors.is_empty() {
             Ok(content)
         } else {
@@ -603,8 +677,29 @@ mod tests {
             let editor = view.read_with(cx, |view, cx| {
                 // No option should be silently selected when the user only
                 // wants to write text.
-                assert!(view.form_state.collect(&schema, cx).unwrap().is_empty());
+                assert!(view.form_state.collect(&schema, cx).is_err());
                 view.editor("freeform_answer")
+            });
+            view.update(cx, |view, _| {
+                if allow_multiple {
+                    view.form_state
+                        .set_multi_select("answer", "sqlite".into(), true);
+                } else {
+                    view.form_state.set_single_select("answer", "sqlite".into());
+                }
+            });
+            view.update(cx, |view, cx| {
+                view.form_state
+                    .question_freeform_active
+                    .as_ref()
+                    .expect("question")
+                    .set(true);
+                assert!(
+                    view.form_state
+                        .collect(&schema, cx)
+                        .expect_err("an empty active answer must remain pending")
+                        .contains_key("freeform_answer")
+                );
             });
             cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
             cx.simulate_input("Use a local database instead");
@@ -613,6 +708,7 @@ mod tests {
             view.read_with(cx, |view, cx| {
                 let content = view.form_state.collect(&schema, cx).unwrap();
                 assert_eq!(content.len(), 1);
+                assert!(!view.form_state.field_is_active("answer"));
                 assert_eq!(
                     content.get("freeform_answer"),
                     Some(&"Use a local database instead".into())
@@ -629,6 +725,13 @@ mod tests {
             });
             let before =
                 view.read_with(cx, |view, cx| view.form_state.collect(&schema, cx).unwrap());
+            assert_eq!(
+                before.len(),
+                1,
+                "the last explicit choice excludes retained freeform text"
+            );
+            assert!(before.contains_key("answer"));
+            assert!(!before.contains_key("freeform_answer"));
             for _ in 0..3 {
                 cx.deactivate_window();
                 cx.executor()
@@ -2077,13 +2180,18 @@ impl<'a> ElicitationCard<'a> {
             .children(mode.requested_schema.properties.iter().filter_map(
                 |(field_name, property)| {
                     let field = state.fields.get(field_name)?;
-                    Some(self.render_field(
-                        field_name,
-                        property,
-                        field,
-                        state.field_errors.get(field_name),
-                        cx,
-                    ))
+                    Some(
+                        self.render_field(
+                            field_name,
+                            property,
+                            field,
+                            state
+                                .field_errors
+                                .get(field_name)
+                                .filter(|_| state.field_is_active(field_name)),
+                            cx,
+                        ),
+                    )
                 },
             ))
             .into_any_element()
@@ -2186,8 +2294,27 @@ impl<'a> ElicitationCard<'a> {
                     let on_submit = self.handlers.on_submit.clone();
                     let elicitation_id = self.elicitation.id.clone();
                     let is_submitting = self.form_state.is_some_and(|state| state.is_submitting);
+                    let activation = self
+                        .form_state
+                        .filter(|_| field_name == "freeform_answer")
+                        .and_then(|state| {
+                            state
+                                .question_freeform_active
+                                .clone()
+                                .map(|active| (active, state.on_text_edit.clone()))
+                        });
 
                     div()
+                        .id(format!("elicitation-editor-{}-{field_name}", self.entry_ix))
+                        .when_some(activation, |this, (active, on_edit)| {
+                            this.capture_any_mouse_down(move |_, _, cx| {
+                                active.set(true);
+                                if let Some(on_edit) = &on_edit {
+                                    on_edit(cx);
+                                }
+                                cx.refresh_windows();
+                            })
+                        })
                         .track_focus(&editor.focus_handle(cx).tab_stop(true))
                         .on_action(move |_: &menu::Confirm, window, cx| {
                             if !is_submitting {
@@ -2215,7 +2342,10 @@ impl<'a> ElicitationCard<'a> {
                     };
                     self.render_single_select(
                         field_name,
-                        value.as_ref(),
+                        value.as_ref().filter(|_| {
+                            self.form_state
+                                .is_none_or(|state| state.field_is_active(field_name))
+                        }),
                         options,
                         error.is_some(),
                         cx,
@@ -2231,7 +2361,10 @@ impl<'a> ElicitationCard<'a> {
                     v_flex()
                         .gap_1()
                         .children(options.into_iter().map(|option| {
-                            let is_selected = selected.contains(&option.value);
+                            let is_selected = selected.contains(&option.value)
+                                && self
+                                    .form_state
+                                    .is_none_or(|state| state.field_is_active(field_name));
                             let checkbox_state = if is_selected {
                                 ToggleState::Selected
                             } else {

@@ -2945,6 +2945,14 @@ impl Thread {
         self.architect_graph.as_ref()
     }
 
+    /// Current-plan UI state is absent after clearing the graph. Retained run
+    /// history is separate; an active run must still expose its Stop control.
+    pub fn architect_status_graph(&self) -> Option<&architect::ArchitectGraph> {
+        self.architect_graph().filter(|graph| {
+            !graph.is_empty() || self.architect_run().is_some_and(ArchitectRun::is_running)
+        })
+    }
+
     pub fn architect_event_sequence(&self) -> u64 {
         self.persistent_architect.sequence
     }
@@ -3376,6 +3384,12 @@ impl Thread {
         if self.session_mode.get() == mode {
             return;
         }
+        log::info!(
+            "Native session mode changed: session={} previous={} current={}; in-flight requests retain their original tools",
+            self.id,
+            self.session_mode.get().id(),
+            mode.id(),
+        );
         self.session_mode.set(mode);
         self.updated_at = Utc::now();
         self.refresh_turn_tools(cx);
@@ -5749,19 +5763,21 @@ impl Thread {
         log::debug!("Building completion request");
         log::debug!("Completion intent: {:?}", completion_intent);
 
-        let available_tools: Vec<_> = self
-            .running_turn
-            .as_ref()
-            .map(|turn| {
-                turn.tools
-                    .iter()
-                    .filter(|(_, tool)| tool.capability().is_allowed_in(mode))
-                    .map(|(name, _)| name.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        log::debug!("Request includes {} tools", available_tools.len());
+        // Derive diagnostics and prompt capabilities from the actual request, not
+        // another inventory snapshot that could diverge as filtering evolves.
+        let available_tools: Vec<SharedString> =
+            tools.iter().map(|tool| tool.name.clone().into()).collect();
+        log::info!(
+            "Native request capabilities: session={} prompt={} mode={} profile={} tools={} write_file={} edit_file={} terminal={}",
+            self.id,
+            self.prompt_id,
+            mode.id(),
+            self.profile_id.as_str(),
+            tools.len(),
+            tools.iter().any(|tool| tool.name == WriteFileTool::NAME),
+            tools.iter().any(|tool| tool.name == EditFileTool::NAME),
+            tools.iter().any(|tool| tool.name == TerminalTool::NAME),
+        );
         let messages = self.build_request_messages(available_tools, cx);
         log::debug!("Request will include {} messages", messages.len());
 
@@ -8985,6 +9001,31 @@ mod tests {
 
             (thread, event_stream, fake)
         })
+    }
+
+    #[gpui::test]
+    async fn cleared_architect_plan_hides_status_without_erasing_run_history(
+        cx: &mut TestAppContext,
+    ) {
+        let (thread, _, _) = setup_thread_for_test(cx).await;
+        thread.update(cx, |thread, cx| {
+            let mut graph = architect::ArchitectGraph::default();
+            graph.add_node(architect::ArchitectNode::new("build", "Build"));
+            thread.set_architect_graph(Some(graph), cx);
+            thread.start_architect_run(architect::NodePath::root("build".into()), "Build".into(), Task::ready(()), cx);
+            thread.finish_architect_run(architect::RunOutcome::Failed { message: "Retained failure".into() }, cx);
+            let id = thread.architect_run().expect("run").id;
+            assert!(thread.architect_status_graph().is_some());
+            thread.update_architect_graph(|graph| { graph.nodes.clear(); graph.edges.clear(); }, cx);
+            assert!(thread.architect_status_graph().is_none());
+            let retained = thread.architect_run().expect("history remains");
+            assert_eq!(retained.id, id);
+            assert!(matches!(&retained.outcome, Some(architect::RunOutcome::Failed { message }) if message == "Retained failure"));
+            thread.reopen_architect_run(Task::ready(()), cx);
+            assert!(thread.architect_status_graph().is_some(), "an active run must retain its Stop control");
+            thread.finish_architect_run(architect::RunOutcome::Cancelled, cx);
+            assert!(thread.architect_status_graph().is_none());
+        });
     }
 
     fn set_auto_compact_settings(cx: &mut App, auto_compact: agent_settings::AutoCompactSettings) {
