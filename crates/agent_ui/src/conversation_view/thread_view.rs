@@ -8527,9 +8527,11 @@ impl ThreadView {
                                                     {
                                                         this.expanded_tool_call_raw_inputs
                                                             .remove(&id);
+                                                        this.thread.update(cx, |thread, cx| thread.set_tool_call_raw_input_expanded(&id, false, cx));
                                                     } else {
                                                         this.expanded_tool_call_raw_inputs
                                                             .insert(id.clone());
+                                                        this.thread.update(cx, |thread, cx| thread.set_tool_call_raw_input_expanded(&id, true, cx));
                                                     }
                                                     cx.notify();
                                                 }
@@ -8738,6 +8740,9 @@ impl ThreadView {
                                                                             );
                                                                     },
                                                                 );
+                                                                if !this.entry_view_state.read(cx).is_tool_call_expanded(&id) {
+                                                                    this.thread.update(cx, |thread, cx| thread.release_tool_call_render_cache(&id, cx));
+                                                                }
                                                                 this.refresh_thread_search(window, cx);
                                                                 cx.notify();
                                                             }

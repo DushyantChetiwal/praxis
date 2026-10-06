@@ -1134,6 +1134,7 @@ pub struct ToolCall {
     pub resolved_locations: Vec<Option<AgentLocation>>,
     pub raw_input: Option<serde_json::Value>,
     pub raw_input_markdown: Option<Entity<Markdown>>,
+    raw_input_expanded: bool,
     pub raw_output: Option<serde_json::Value>,
     raw_output_content: Option<Box<ToolCallContent>>,
     pub tool_name: Option<SharedString>,
@@ -1217,10 +1218,11 @@ impl ToolCall {
             }
         }
 
-        let raw_input_markdown = tool_call
-            .raw_input
-            .as_ref()
-            .and_then(|input| markdown_for_raw_output(input, &language_registry, cx));
+        let raw_input_markdown = if tool_call.kind == acp::ToolKind::Edit
+            && matches!(&status, ToolCallStatus::Pending | ToolCallStatus::InProgress)
+        {
+            tool_call.raw_input.as_ref().and_then(|input| markdown_for_raw_output(input, &language_registry, cx))
+        } else { None };
 
         let tool_name = tool_call
             .name
@@ -1259,6 +1261,7 @@ impl ToolCall {
             cancellation_requested_at,
             raw_input: tool_call.raw_input,
             raw_input_markdown,
+            raw_input_expanded: false,
             raw_output: tool_call.raw_output,
             raw_output_content: None,
             tool_name,
@@ -1431,8 +1434,13 @@ impl ToolCall {
         }
 
         if let Some(raw_input) = raw_input {
-            self.raw_input_markdown = markdown_for_raw_output(&raw_input, &language_registry, cx);
             self.raw_input = Some(raw_input);
+            if self.raw_input_expanded || self.needs_live_raw_input() {
+                self.raw_input_markdown = self.raw_input.as_ref().and_then(|input| markdown_for_raw_output(input, &language_registry, cx));
+            }
+        }
+        if !self.raw_input_expanded && !self.needs_live_raw_input() {
+            self.raw_input_markdown = None;
         }
 
         if let Some(raw_output) = raw_output {
@@ -1442,6 +1450,21 @@ impl ToolCall {
             self.update_raw_output_content(&language_registry, cx);
         }
         Ok(())
+    }
+
+    fn set_raw_input_expanded(&mut self, expanded: bool, languages: &Arc<LanguageRegistry>, cx: &mut App) {
+        self.raw_input_expanded = expanded;
+        if expanded && self.raw_input_markdown.is_none() {
+            self.raw_input_markdown = self.raw_input.as_ref().and_then(|input| markdown_for_raw_output(input, languages, cx));
+        } else if !expanded && !self.needs_live_raw_input() {
+            self.raw_input_markdown = None;
+        }
+    }
+
+    fn needs_live_raw_input(&self) -> bool {
+        self.kind == acp::ToolKind::Edit
+            && matches!(self.status, ToolCallStatus::Pending | ToolCallStatus::InProgress)
+            && self.structured_content.is_empty()
     }
 
     fn update_raw_output_content(
@@ -1463,7 +1486,7 @@ impl ToolCall {
             update_markdown_in_place(markdown, &text, cx);
         } else {
             let markdown =
-                cx.new(|cx| Markdown::new(text.into(), Some(language_registry.clone()), None, cx));
+                cx.new(|cx| Markdown::new_deferred_with_options(text.into(), Some(language_registry.clone()), None, MarkdownOptions::default(), cx));
             self.raw_output_content = Some(Box::new(ToolCallContent::ContentBlock(
                 ContentBlock::from_markdown(markdown),
             )));
@@ -2138,7 +2161,7 @@ impl ContentBlock {
         cx: &mut App,
     ) -> Entity<Markdown> {
         cx.new(|cx| {
-            Markdown::new_with_options(
+            Markdown::new_deferred_with_options(
                 content.into(),
                 Some(language_registry.clone()),
                 None,
@@ -3964,6 +3987,7 @@ impl AcpThread {
                     resolved_locations: Vec::new(),
                     raw_input: None,
                     raw_input_markdown: None,
+                    raw_input_expanded: false,
                     raw_output: None,
                     raw_output_content: None,
                     tool_name: None,
@@ -4119,6 +4143,27 @@ impl AcpThread {
                     None
                 }
             })
+    }
+
+    pub fn set_tool_call_raw_input_expanded(&mut self, id: &acp::ToolCallId, expanded: bool, cx: &mut Context<Self>) {
+        let languages = self.project.read(cx).languages().clone();
+        let Some((_, call)) = self.tool_call_mut(id) else { return; };
+        call.set_raw_input_expanded(expanded, &languages, cx);
+        cx.notify();
+    }
+
+    pub fn release_tool_call_render_cache(&mut self, id: &acp::ToolCallId, cx: &mut Context<Self>) {
+        let Some((_, call)) = self.tool_call_mut(id) else { return; };
+        if let Some(markdown) = &call.raw_input_markdown {
+            markdown.update(cx, |markdown, cx| markdown.release_render_cache(cx));
+        }
+        for content in call.content() {
+            if let ToolCallContent::ContentBlock(block) = content
+                && let Some(markdown) = block.markdown()
+            {
+                markdown.update(cx, |markdown, cx| markdown.release_render_cache(cx));
+            }
+        }
     }
 
     pub fn tool_call(&self, id: &acp::ToolCallId) -> Option<(usize, &ToolCall)> {
@@ -5827,7 +5872,7 @@ fn markdown_for_raw_output(
     cx: &mut App,
 ) -> Option<Entity<Markdown>> {
     let text = raw_output_text(raw_output)?;
-    Some(cx.new(|cx| Markdown::new(text.into(), Some(language_registry.clone()), None, cx)))
+    Some(cx.new(|cx| Markdown::new_deferred_with_options(text.into(), Some(language_registry.clone()), None, MarkdownOptions::default(), cx)))
 }
 
 fn raw_output_text(raw_output: &serde_json::Value) -> Option<String> {
@@ -9187,6 +9232,28 @@ mod tests {
                 );
             });
         }
+    }
+
+    #[gpui::test]
+    fn deferred_tool_raw_inputs_preserve_data_and_release_collapsed_views(cx: &mut TestAppContext) {
+        init_test(cx);
+        let languages = cx.update(|cx| Arc::new(LanguageRegistry::test(cx.background_executor().clone())));
+        let input = serde_json::json!({"content": "complete source\n".repeat(8192)});
+        let mut call = cx.update(|cx| ToolCall::from_acp(
+            acp::ToolCall::new("large-input", "Historical tool").raw_input(input.clone()),
+            ToolCallStatus::Completed, languages.clone(), &HashMap::default(), cx,
+        ).expect("tool"));
+        assert!(call.raw_input_markdown.is_none());
+        assert_eq!(call.raw_input.as_ref(), Some(&input));
+        cx.update(|cx| call.set_raw_input_expanded(true, &languages, cx));
+        let markdown = call.raw_input_markdown.clone().expect("explicitly loaded");
+        let source = cx.read(|cx| markdown.read(cx).source().clone());
+        cx.update(|cx| call.set_raw_input_expanded(false, &languages, cx));
+        assert!(call.raw_input_markdown.is_none());
+        assert_eq!(call.raw_input.as_ref(), Some(&input));
+        cx.update(|cx| call.set_raw_input_expanded(true, &languages, cx));
+        let reopened = call.raw_input_markdown.as_ref().expect("reopened");
+        cx.read(|cx| assert_eq!(reopened.read(cx).source(), &source));
     }
 
     #[gpui::test]
