@@ -17,6 +17,11 @@ import io.github.dushyantchetiwal.praxis.remote.data.CryptoException
 import io.github.dushyantchetiwal.praxis.remote.data.Device
 import io.github.dushyantchetiwal.praxis.remote.data.DetailRequest
 import io.github.dushyantchetiwal.praxis.remote.data.DetailBody
+import io.github.dushyantchetiwal.praxis.remote.data.DetailCache
+import io.github.dushyantchetiwal.praxis.remote.data.encodeDetailBody
+import io.github.dushyantchetiwal.praxis.remote.data.decodeDetailBody
+import io.github.dushyantchetiwal.praxis.remote.ui.MdBlock
+import io.github.dushyantchetiwal.praxis.remote.ui.parseMarkdown
 import io.github.dushyantchetiwal.praxis.remote.data.DetailChunk
 import io.github.dushyantchetiwal.praxis.remote.data.parseDetailChunk
 import io.github.dushyantchetiwal.praxis.remote.data.ModelOption
@@ -107,6 +112,20 @@ private val LISTING_SCREENS = setOf(Screen.Devices, Screen.Pair, Screen.Device)
  * All app state and behaviour. State is only changed on the main thread, so
  * like the web app it needs no locking; network calls suspend on IO.
  */
+data class LoadedDetail(val body: DetailBody, val blocks: List<MdBlock>) {
+    fun cacheWeight(): Long = body.chunks.sumOf { it.text.length.toLong() * 2 + 192 } + blocks.sumOf { block ->
+        val text = when (block) {
+            is MdBlock.Paragraph -> block.text
+            is MdBlock.Heading -> block.text
+            is MdBlock.Code -> block.code
+            is MdBlock.Item -> block.text
+            is MdBlock.Quote -> block.text
+            MdBlock.Rule -> ""
+        }
+        text.length.toLong() * 2 + 96
+    }
+}
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val store = Store(application)
     private val http = GitHubClient.newHttpClient()
@@ -127,6 +146,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val gists = Gists(gh)
     private val pairer = Pairer(application, gh) { store.login }
     private val phoneId: String by lazy { store.phoneId }
+    private var detailCache = newDetailCache()
+
+    private fun newDetailCache() = DetailCache(
+        directory = java.io.File(getApplication<Application>().cacheDir, "details-${java.util.UUID.randomUUID()}"),
+        weight = LoadedDetail::cacheWeight,
+        encode = { detail: LoadedDetail -> encodeDetailBody(detail.body) },
+        decode = { bytes ->
+            val body = decodeDetailBody(bytes)
+            LoadedDetail(body, parseMarkdown(body.chunks.joinToString("") { it.text }))
+        },
+    )
+
+    fun detailIdentity(request: DetailRequest): String = io.github.dushyantchetiwal.praxis.remote.data.detailCacheIdentity(
+        d.device?.channel, d.windowId, d.currentWindow()?.thread?.sessionId, request,
+    )
+
+    fun cachedDetail(identity: String): LoadedDetail? = detailCache.peek(identity)
+
+    suspend fun restoreDetail(identity: String): LoadedDetail? = try {
+        detailCache.restore(identity)
+    } catch (error: CancellationException) { throw error }
+    catch (error: Exception) { android.util.Log.w("PraxisRemote", "Conversation cache unavailable", error); null }
+
+    fun rememberDetail(identity: String, detail: LoadedDetail) {
+        val cache = detailCache
+        val revision = cache.remember(identity, detail)
+        viewModelScope.launch {
+            try { cache.persist(identity, detail, revision) }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) { android.util.Log.w("PraxisRemote", "Could not persist conversation cache", error) }
+        }
+    }
+
+    fun invalidateDetail(identity: String) {
+        val cache = detailCache
+        val revision = cache.invalidate(identity)
+        viewModelScope.launch {
+            try { cache.remove(identity, revision) }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) { android.util.Log.w("PraxisRemote", "Could not remove cached details", error) }
+        }
+    }
+
+    private fun closeDetailCache() {
+        val cache = detailCache
+        cache.close()
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            try { cache.removeFiles() }
+            catch (error: Exception) { android.util.Log.w("PraxisRemote", "Could not clear conversation cache", error) }
+        }
+    }
 
     private val _app = MutableStateFlow(
         AppState(clientIdOverride = store.clientIdOverride, login = store.login, phoneName = phoneName()),
@@ -150,6 +220,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var preparingImage by mutableStateOf(false)
         private set
     val hasPrompt: Boolean get() = composer.isNotBlank() || composerImages.isNotEmpty()
+    var liveRelayEnabled by mutableStateOf(store.liveRelayEnabled)
+        private set
+
+    fun setLiveRelayEnabled(enabled: Boolean) {
+        store.liveRelayEnabled = enabled
+        liveRelayEnabled = enabled
+        channel.live.stop()
+        resetWatcher()
+        startPolling()
+        requestPoll()
+    }
 
     fun addImage(uri: Uri) {
         if (preparingImage || d.currentWindow()?.thread?.imageInput != true) return
@@ -429,7 +510,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pairJob = null
         stopDevice()
         gh.clearCache()
-        if (explicit) { store.clearAccount(); imageDrafts.clear() } else store.clearToken()
+        if (explicit) {
+            store.clearAccount()
+            imageDrafts.clear()
+            closeDetailCache()
+            detailCache = newDetailCache()
+        } else store.clearToken()
         composer = ""
         _app.update {
             AppState(
@@ -743,6 +829,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // -----------------------------------------------------------------------
 
     override fun onCleared() {
+        closeDetailCache()
         channel.live.close()
         super.onCleared()
     }
@@ -751,7 +838,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pollJob?.cancel()
         pollJob = null
         if (!foreground || d.device == null || store.token == null) return
-        d.device?.let { device -> linkFor(device)?.let(channel.live::start) }
+        if (liveRelayEnabled) d.device?.let { device -> linkFor(device)?.let(channel.live::start) }
         pollJob = viewModelScope.launch {
             while (isActive) {
                 val wait = pollOnce() ?: break
@@ -768,7 +855,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun pollOnce(): Long? {
         val device = d.device ?: return null
         val link = linkFor(device)
-        if (link != null) {
+        if (liveRelayEnabled && link != null) {
             channel.live.start(link)
             if (channel.live.ready(link)) {
                 ensureWatch()

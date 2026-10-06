@@ -169,6 +169,10 @@ class Store(context: Context) {
     // Computers
     // -----------------------------------------------------------------------
 
+    var liveRelayEnabled: Boolean
+        get() = prefs.getBoolean("live_relay_enabled", true)
+        set(value) = prefs.edit().putBoolean("live_relay_enabled", value).apply()
+
     fun gistFor(channel: String): String? = prefs.getString(KEY_GIST_PREFIX + channel, null)
 
     fun rememberComputer(channel: String, gistId: String, name: String) {

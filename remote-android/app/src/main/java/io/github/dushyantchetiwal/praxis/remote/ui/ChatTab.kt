@@ -103,6 +103,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.dushyantchetiwal.praxis.remote.DeviceUi
 import io.github.dushyantchetiwal.praxis.remote.MainViewModel
+import io.github.dushyantchetiwal.praxis.remote.LoadedDetail
 import io.github.dushyantchetiwal.praxis.remote.OutboxItem
 import io.github.dushyantchetiwal.praxis.remote.OutboxState
 import io.github.dushyantchetiwal.praxis.remote.R
@@ -787,19 +788,31 @@ private fun EntryDetails(text: String, pending: Boolean, request: DetailRequest?
         SelectionContainer { Markdown(text, style = MaterialTheme.typography.bodySmall) }
         return
     }
-    var body by remember(request) { mutableStateOf(DetailBody()) }
-    var blocks by remember(request) { mutableStateOf<List<MdBlock>>(emptyList()) }
-    var error by remember(request) { mutableStateOf<String?>(null) }
-    var attempt by remember(request) { mutableStateOf(0) }
-    var loading by remember(request) { mutableStateOf(true) }
+    val identity = vm.detailIdentity(request)
+    val retained = remember(identity) { vm.cachedDetail(identity) }
+    var body by remember(identity) { mutableStateOf(retained?.body ?: DetailBody()) }
+    var blocks by remember(identity) { mutableStateOf(retained?.blocks ?: emptyList()) }
+    var error by remember(identity) { mutableStateOf<String?>(null) }
+    var attempt by remember(identity) { mutableStateOf(0) }
+    var loading by remember(identity) { mutableStateOf(retained == null) }
     val failure = stringResource(R.string.details_failed)
-    LaunchedEffect(request, attempt) {
-        loading = true
+    LaunchedEffect(identity, attempt) {
+        if (attempt == 0 && body.version != null) { loading = false; return@LaunchedEffect }
         error = null
         try {
+            if (attempt == 0) {
+                val cached = vm.restoreDetail(identity)
+                if (cached != null) {
+                    body = cached.body
+                    blocks = cached.blocks
+                    return@LaunchedEffect
+                }
+            }
+            loading = true
             val chunk = vm.loadDetail(request, body)
             val next = body.append(chunk) ?: throw ApiException(ErrorKind.State, failure)
             val parsed = withContext(Dispatchers.Default) { parseMarkdown(next.chunks.joinToString("") { it.text }) }
+            vm.rememberDetail(identity, LoadedDetail(next, parsed))
             body = next
             blocks = parsed
         } catch (exception: ApiException) {
@@ -823,7 +836,7 @@ private fun EntryDetails(text: String, pending: Boolean, request: DetailRequest?
             if (!body.complete) TextButton(onClick = { loading = true; attempt++ }, enabled = !loading) {
                 Text(stringResource(if (error != null) R.string.action_retry else R.string.details_more))
             }
-            TextButton(onClick = { body = DetailBody(); blocks = emptyList(); loading = true; attempt++ }, enabled = !loading) {
+            TextButton(onClick = { vm.invalidateDetail(identity); body = DetailBody(); blocks = emptyList(); loading = true; attempt++ }, enabled = !loading) {
                 Text(stringResource(R.string.details_refresh))
             }
         }
