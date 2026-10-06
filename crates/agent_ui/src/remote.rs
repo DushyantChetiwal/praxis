@@ -355,14 +355,26 @@ fn handle(op: &str, args: &Value, device: &str, cx: &mut App) -> Task<Result<Val
     handle_paired(op, args, device, "", cx)
 }
 
-fn handle_paired(op: &str, args: &Value, device: &str, phone: &str, cx: &mut App) -> Task<Result<Value>> {
+fn handle_paired(
+    op: &str,
+    args: &Value,
+    device: &str,
+    phone: &str,
+    cx: &mut App,
+) -> Task<Result<Value>> {
     let window = args.get("window").and_then(Value::as_u64);
-    if matches!(op, "image_begin" | "image_chunk" | "image_finish" | "image_discard") {
+    if matches!(
+        op,
+        "image_begin" | "image_chunk" | "image_finish" | "image_discard"
+    ) {
         let session = with_workspace(window, cx, |workspace, _, cx| {
             anyhow::ensure!(!phone.is_empty(), "Images require an authenticated phone");
             required(args, "session_id")?;
             let view = requested_root_view(workspace, args, cx)?;
-            anyhow::ensure!(view.read(cx).thread.read(cx).prompt_capabilities().image, "This model does not accept images. Select a vision-capable model.");
+            anyhow::ensure!(
+                view.read(cx).thread.read(cx).prompt_capabilities().image,
+                "This model does not accept images. Select a vision-capable model."
+            );
             Ok(view.read(cx).session_id.to_string())
         });
         return match session {
@@ -410,9 +422,14 @@ fn handle_paired(op: &str, args: &Value, device: &str, phone: &str, cx: &mut App
             let mut content = if args.get("images").is_some() {
                 anyhow::ensure!(!phone.is_empty(), "Images require an authenticated phone");
                 required(args, "session_id")?;
-                anyhow::ensure!(view.read(cx).thread.read(cx).prompt_capabilities().image, "This model does not accept images. Select a vision-capable model.");
+                anyhow::ensure!(
+                    view.read(cx).thread.read(cx).prompt_capabilities().image,
+                    "This model does not accept images. Select a vision-capable model."
+                );
                 images::contents(phone, &session, args, cx)?
-            } else { Vec::new() };
+            } else {
+                Vec::new()
+            };
             if !text.trim().is_empty() {
                 content.insert(0, acp::ContentBlock::Text(acp::TextContent::new(text)));
             }
@@ -1661,9 +1678,11 @@ fn transcript_entry(
     if !include_details {
         value["details_pending"] = json!(true);
         if let AgentThreadEntry::UserMessage(message) = entry {
-            value["fingerprint"] = json!(images::fingerprint(message.content.source_blocks()).unwrap_or_else(|| transcript::fingerprint(
-                snapshot_message_text(&message.content, cx).trim()
-            )));
+            value["fingerprint"] = json!(
+                images::fingerprint(message.content.source_blocks()).unwrap_or_else(|| {
+                    transcript::fingerprint(snapshot_message_text(&message.content, cx).trim())
+                })
+            );
         }
     }
     if let AgentThreadEntry::AssistantMessage(message) = entry
@@ -1722,9 +1741,15 @@ fn message_preview(content: &acp_thread::MessageContent) -> String {
             _ => None,
         })
         .unwrap_or_else(|| {
-            if content.source_blocks().iter().any(|block| matches!(block, acp::ContentBlock::Image(_))) {
+            if content
+                .source_blocks()
+                .iter()
+                .any(|block| matches!(block, acp::ContentBlock::Image(_)))
+            {
                 "Image attachment".into()
-            } else { String::new() }
+            } else {
+                String::new()
+            }
         })
 }
 

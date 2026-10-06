@@ -96,7 +96,7 @@ class NostrChannel {
     fun close() { stop(); scope.cancel() }
 
     fun ready(link: Link): Boolean = session?.let {
-        it.link.channel == link.channel && it.link.phoneId == link.phoneId && it.ready()
+        it.link.channel == link.channel && it.link.phoneId == link.phoneId && it.link.key.contentEquals(link.key) && it.ready()
     } == true
 
     // Null means no command was submitted. Once submitted, every failure is surfaced,
@@ -117,7 +117,10 @@ class NostrChannel {
         @Volatile private var epoch: String? = null
         @Volatile private var lastHello = 0L
 
-        fun ready(): Boolean = epoch != null && System.nanoTime() - lastHello < 30_000_000_000L && job?.isActive == true
+        fun ready(): Boolean {
+            val last = lastHello
+            return epoch != null && last != 0L && System.nanoTime() - last in 0 until 30_000_000_000L && job?.isActive == true
+        }
 
         suspend fun run() {
             var receiver: Job? = null

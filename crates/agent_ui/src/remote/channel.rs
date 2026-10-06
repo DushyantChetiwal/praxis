@@ -21,7 +21,9 @@ use util::ResultExt as _;
 use super::crypto::{self, Key, PROTOCOL, PairingKey, PairingSecrets};
 use super::github::{self, Api, SignedOut, Tokens};
 use super::store::{self, LocalState, PhoneInfo, Secrets};
-use super::{PraxisRemote, RemoteStatus, Watch, handle_paired, resolve_device_name, snapshot, status};
+use super::{
+    PraxisRemote, RemoteStatus, Watch, handle_paired, resolve_device_name, snapshot, status,
+};
 use crate::automation::workspace_windows;
 
 const META_FILE: &str = "praxis-remote.json";
@@ -132,7 +134,11 @@ async fn run_channel(
     let device = resolve_device_name().await;
     let api = Api::new(http, tokens);
     let mut channel = Channel::new(this.clone(), api, state, secrets, device);
-    channel.relay = Some(super::relay::Relay::start(channel.state.channel.clone(), channel.device.clone(), cx));
+    channel.relay = Some(super::relay::Relay::start(
+        channel.state.channel.clone(),
+        channel.device.clone(),
+        cx,
+    ));
     channel.sync_relay();
     channel.sender = Some(sender);
     channel.commands = Some(commands);
@@ -360,9 +366,15 @@ impl Channel {
                         RemoteStatus::Connecting
                     };
                     self.report_status(status, cx)?;
-                    let interval = if self.relay.as_ref().is_some_and(|relay| relay.all_connected()) {
+                    let interval = if self
+                        .relay
+                        .as_ref()
+                        .is_some_and(|relay| relay.all_connected())
+                    {
                         Duration::from_secs(30)
-                    } else { POLL_INTERVAL };
+                    } else {
+                        POLL_INTERVAL
+                    };
                     self.wait(interval, cx).await;
                 }
                 Err(error) if github::is_signed_out(&error) => return Err(error),
@@ -448,7 +460,12 @@ impl Channel {
 
     fn sync_relay(&self) {
         if let Some(relay) = &self.relay {
-            relay.set_phones(&self.state.channel, self.phones.iter().map(|(id, phone)| (id.clone(), phone.key)));
+            relay.set_phones(
+                &self.state.channel,
+                self.phones
+                    .iter()
+                    .map(|(id, phone)| (id.clone(), phone.key)),
+            );
         }
     }
 

@@ -56,6 +56,58 @@ Every blob is bound to where it belongs through its additional authenticated dat
 | Request                  | `praxis-remote/v2/request/<channel>/<phone_id>`               |
 | Answer                   | `praxis-remote/v2/response/<channel>/<phone_id>/<request_id>` |
 
+## Optional live Nostr transport
+
+Updated desktops advertise `"nostr": 1` in their public gist metadata. A paired phone can also probe the live channel
+when that metadata is unavailable; no command is sent until an authenticated desktop handshake succeeds. GitHub
+still handles pairing, discovery, unpairing, and compatibility fallback. Its network calls run separately from the
+live service, including during rate-limit backoff.
+
+The prototype uses `wss://relay.damus.io` and `wss://nos.lol`, NIP-01 WebSockets, and application-specific ephemeral
+kind `21761`. This is **not** a NIP-17 message or a NIP-59 gift wrap. The application retains its existing AES-GCM
+paired-channel encryption instead of introducing a second private-message cryptosystem. Nostr signing and event
+validation use the maintained Rust SDK and its Android bindings.
+
+For each paired channel, derive separate desktop and phone signing secrets:
+
+```text
+prk = HKDF-Extract("praxis-remote/nostr/v1", existing_pairing_key)
+secret(role) = HKDF-Expand(prk, "praxis-remote/v2/nostr/<channel>/<phone_id>/<role>", 32)
+role = "desktop" or "phone"
+```
+
+Import the result as a secp256k1 secret scalar using the SDK; invalid scalars fail safely to fallback. These are not
+the P-256 pairing keys. The existing pairing secret authenticates the derived identities without trusting keys
+announced by a relay. They remain private and are never written into public metadata or project files.
+
+Packets have the expected author's signature and a `p` tag naming the peer. Content is an AES-GCM blob whose AAD is
+`praxis-remote/v2/nostr/<channel>/<phone_id>/request` toward the desktop, or
+`praxis-remote/v2/nostr/<channel>/<phone_id>/desktop` toward the phone. Receivers verify the signature, author,
+recipient, kind, encrypted authentication tag, and size. Relay event timestamps must be within the request age window.
+Packets are bounded to 96,000 base64 characters, leaving room below the tested relays' WebSocket limits.
+
+A request is `{id, op, args, sent_at, epoch}`. The read-only `hello` operation may omit `epoch`; its authenticated reply
+returns the desktop's fresh random incarnation ID. Every subsequent operation must match that ID and the normal
+five-minute request/two-minute clock-skew window. An old request cannot execute in a restarted desktop session.
+Responses carry `{type: "response", epoch, id, ok, result | error}`. The desktop records a request before dispatch,
+rejects different payloads reusing the same ID, and retains bounded result receipts until requests expire. A duplicate
+with an unavailable receipt is explicitly ambiguous, not executed again. Caches have both entry and byte bounds.
+
+The app may use GitHub when no live command has been submitted. After possible submission it can only retry the
+**same** request in that desktop incarnation; it never silently falls back by creating another GitHub command.
+This does not promise exactly-once arbitrary commands across manual resends with new IDs. Relay acceptance is not
+peer delivery or execution confirmation.
+
+`watch` requests produce `{type: "snapshot", epoch, sequence, snapshot}` packets. Sequence numbers increase within
+an incarnation. Phones ignore duplicates, older sequences, and unverified incarnations. The inner snapshot has the
+same compact-header and lossless-detail contract as GitHub snapshots. Changes are coalesced to at most one snapshot
+per second, with a 15-second heartbeat. Only recently live phones receive them; the phone closes relay connections
+in the background. `batch` and `unpair` continue through GitHub.
+
+Relays observe connection metadata and can reject or throttle traffic. Ephemeral delivery is not durable storage,
+a deletion guarantee, forward secrecy, or a permanent free-capacity promise. No paid relay, central service, or
+public image-hosting account is configured.
+
 ## Pairing
 
 Pairing agrees a key for one phone and shows a six-digit code on both screens. The user approves the phone on the computer only if the codes match. The phone commits to its key before it sees the computer's, so someone who can edit comments as the user still cannot choose keys that make the codes match (a one in a million chance per attempt).
@@ -140,7 +192,34 @@ Clients hide the new controls when these flags are absent. Model and Send Now re
   below. A removed message cannot be fetched or recreated by an old action.
 
 These are additive version-2 extensions. They do not change pairing, encryption, replay protection, or transport
-cadence. Commands still traverse the serialized GitHub comment channel; Send Now is not a low-latency push channel.
+cadence for legacy clients. Updated clients prefer the optional live channel described above; the serialized GitHub
+comment channel remains the compatibility fallback.
+
+### Image input
+
+A root's `image_input` flag reflects its current ACP image capability. Clients only offer image attachment when it
+is true. Image operations require the exact root `session_id` and optional `window`; both uploads and consumption
+are scoped to the authenticated phone and conversation, not to caller-provided phone identifiers.
+
+- `image_begin`: `{session_id, window?, client_id?, size, mime_type}` reserves a bounded in-memory upload and returns
+  `{upload_id, chunk_bytes, next_offset, ready}`. `client_id` is a phone-generated UUID that makes retries resume the
+  same image; reusing it with different target or metadata is rejected. Valid formats are PNG, JPEG, and WebP.
+- `image_chunk`: `{session_id, window?, upload_id, offset, data}` appends at the exact next byte offset. `data` is
+  base64 for at most 24 KiB. Identical already-received chunks are idempotent; missing, conflicting, or overflowing
+  chunks are rejected. The reply contains the authoritative `next_offset`.
+- `image_finish`: validates completeness and decodes the image on a background executor with explicit dimension and
+  allocation limits. It returns `{upload_id, ready: true}` only after validation.
+- `image_discard`: removes that phone's upload in that conversation. Uploads also expire after five idle minutes and
+  are removed on unpair. The desktop reserves at most 16 MiB across uploads and four uploads per phone.
+- `prompt`: adds `images: [upload_id, ...]` to existing arguments. Text may be empty when an image is present. The
+  desktop checks the current model again, consumes complete uploads, and sends real ACP Image content through the
+  same Queue/Steer/Send Now state machine. It never replaces images with URLs or text descriptions.
+
+An individual prepared image is at most 2 MiB. Android reads at most 20 MiB from the photo picker, bounds bitmap
+sampling, applies orientation, resizes to a 1600-pixel long edge, and re-encodes JPEG without the original metadata.
+These are image/resource bounds, not conversation truncation. Failed sends retain recoverable in-memory image drafts.
+Image-only transcript headers remain visible. Their fingerprints include image content hashes as well as the caption,
+so unrelated image messages do not incorrectly acknowledge each other's outbox entries.
 
 ### Conversation snapshots and thinking
 

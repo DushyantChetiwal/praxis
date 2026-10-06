@@ -4526,9 +4526,12 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    async fn test_remote_images_preserve_content_through_queue_and_send_now(cx: &mut TestAppContext) {
+    async fn test_remote_images_preserve_content_through_queue_and_send_now(
+        cx: &mut TestAppContext,
+    ) {
         init_test(cx);
-        let (conversation, cx) = setup_conversation_view(StubAgentServer::new(StubAgentConnection::new()), cx).await;
+        let (conversation, cx) =
+            setup_conversation_view(StubAgentServer::new(StubAgentConnection::new()), cx).await;
         add_to_workspace(conversation.clone(), cx);
         let view = active_thread(&conversation, cx);
         view.update_in(cx, |view, window, cx| {
@@ -4537,14 +4540,22 @@ pub(crate) mod tests {
         cx.run_until_parked();
         let content = vec![png_image()];
         let queued = view.update_in(cx, |view, window, cx| {
-            view.send_remote_content(content.clone(), false, window, cx).expect("image queued")
+            view.send_remote_content(content.clone(), false, window, cx)
+                .expect("image queued")
         });
         view.read_with(cx, |view, _| {
-            let entry = view.message_queue.iter().find(|entry| entry.id == queued).expect("queued image");
+            let entry = view
+                .message_queue
+                .iter()
+                .find(|entry| entry.id == queued)
+                .expect("queued image");
             assert_eq!(entry.content, content);
         });
         view.update_in(cx, |view, window, cx| {
-            assert!(view.send_remote_content(content.clone(), true, window, cx).is_none());
+            assert!(
+                view.send_remote_content(content.clone(), true, window, cx)
+                    .is_none()
+            );
         });
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {

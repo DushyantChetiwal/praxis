@@ -110,6 +110,10 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
+      - name: Check relay probe formatting
+        if: hashFiles('script/probe-praxis-relay.rs') != ''
+        run: rustfmt --edition 2024 --check script/probe-praxis-relay.rs
+
       - name: Check repository documentation formatting
         run: ./script/prettier
 
@@ -121,13 +125,17 @@ jobs:
           .github/workflows/bundle_fork.yml
           .github/workflows/bundle_after_merge.yml
           .github/workflows/android_remote.yml
+          .github/workflows/remote_relay_probe.yml
+          .github/workflows/incremental_ci.yml
           --check
 
       - name: Prepare formatting corrections
         if: failure()
         run: |
           cargo fmt --all
+          if [ -f script/probe-praxis-relay.rs ]; then rustfmt --edition 2024 script/probe-praxis-relay.rs; fi
           ./script/prettier --write
+          pnpm dlx prettier@3.5.0 .github/workflows/architect_quality.yml .github/workflows/android_remote.yml .github/workflows/remote_relay_probe.yml .github/workflows/incremental_ci.yml --write
           git --no-pager diff --binary > rust-format.patch
 
       - name: Upload formatting corrections
@@ -198,6 +206,12 @@ jobs:
         with:
           shared-key: architect-agent-tests
           cache-on-failure: true
+
+      - name: Test lossless history memory behavior
+        run: |
+          cargo test --locked -p agent --lib db::tests::
+          cargo test --locked -p markdown --lib deferred_markdown_
+          cargo test --locked -p acp_thread --lib deferred_tool_
 
       - name: Test remote transport and image input
         run: |

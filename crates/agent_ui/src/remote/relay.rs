@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result, anyhow, ensure};
 use async_channel::{Receiver, Sender};
 use chrono::{DateTime, Utc};
 use futures::{FutureExt as _, StreamExt as _};
-use gpui::{AppContext as _, AsyncApp, Task};
+use gpui::{AsyncApp, Task};
 use gpui_tokio::Tokio;
 use nostr_sdk::prelude::*;
 use parking_lot::{Mutex, RwLock};
@@ -47,7 +47,9 @@ impl Drop for Relay {
     fn drop(&mut self) {
         self.stop.take();
         // Let the service close the SDK sockets rather than orphaning its workers.
-        if let Some(task) = self.task.take() { task.detach(); }
+        if let Some(task) = self.task.take() {
+            task.detach();
+        }
     }
 }
 
@@ -64,15 +66,29 @@ impl Relay {
                 }
             }
         }));
-        Self { peers, changed, stop: Some(stop), task: Some(task) }
+        Self {
+            peers,
+            changed,
+            stop: Some(stop),
+            task: Some(task),
+        }
     }
 
     pub(super) fn all_connected(&self) -> bool {
         let peers = self.peers.read();
-        !peers.is_empty() && peers.values().all(|peer| peer.last_seen.lock().is_some_and(|at| at.elapsed() < Duration::from_secs(45)))
+        !peers.is_empty()
+            && peers.values().all(|peer| {
+                peer.last_seen
+                    .lock()
+                    .is_some_and(|at| at.elapsed() < Duration::from_secs(45))
+            })
     }
 
-    pub(super) fn set_phones(&self, channel: &str, phones: impl IntoIterator<Item = (String, Key)>) {
+    pub(super) fn set_phones(
+        &self,
+        channel: &str,
+        phones: impl IntoIterator<Item = (String, Key)>,
+    ) {
         let mut peers = self.peers.write();
         let mut next = BTreeMap::new();
         for (id, key) in phones {
@@ -84,14 +100,17 @@ impl Relay {
                 let desktop = crypto::relay_secret(&key, channel, &id, "desktop")?;
                 let phone = crypto::relay_secret(&key, channel, &id, "phone")?;
                 Ok(Peer {
-                    id: id.clone(), key,
+                    id: id.clone(),
+                    key,
                     keys: Keys::new(SecretKey::from_slice(&desktop)?),
                     phone_public: Keys::new(SecretKey::from_slice(&phone)?).public_key(),
                     last_seen: Mutex::new(None),
                 })
             };
             match make() {
-                Ok(peer) => { next.insert(id, Arc::new(peer)); }
+                Ok(peer) => {
+                    next.insert(id, Arc::new(peer));
+                }
                 Err(error) => log::warn!("Praxis Remote could not prepare a live peer: {error:#}"),
             }
         }
@@ -104,12 +123,23 @@ impl Relay {
 }
 
 fn current(peers: &Peers, peer: &Arc<Peer>) -> bool {
-    peers.read().get(&peer.id).is_some_and(|active| Arc::ptr_eq(active, peer))
+    peers
+        .read()
+        .get(&peer.id)
+        .is_some_and(|active| Arc::ptr_eq(active, peer))
 }
 
-async fn network(channel: String, peers: Peers, changes: Receiver<()>, incoming: Sender<Packet>, outgoing: Receiver<Packet>) -> Result<()> {
+async fn network(
+    channel: String,
+    peers: Peers,
+    changes: Receiver<()>,
+    incoming: Sender<Packet>,
+    outgoing: Receiver<Packet>,
+) -> Result<()> {
     let client = Client::default();
-    for relay in RELAYS { client.add_relay(relay).await?; }
+    for relay in RELAYS {
+        client.add_relay(relay).await?;
+    }
     let mut notifications = client.notifications();
     client.connect().await;
     let receive = async {
@@ -148,22 +178,35 @@ async fn network(channel: String, peers: Peers, changes: Receiver<()>, incoming:
     };
     let transmit = async {
         while let Ok((peer, plain)) = outgoing.recv().await {
-            if !current(&peers, &peer) { continue; }
+            if !current(&peers, &peer) {
+                continue;
+            }
             let aad = crypto::relay_aad(&channel, &peer.id, "desktop");
             let blob = crypto::seal(&peer.key, &aad, plain.as_bytes())?;
-            ensure!(blob.len() <= MAX_PACKET_BYTES, "live packet exceeds the transport limit");
+            ensure!(
+                blob.len() <= MAX_PACKET_BYTES,
+                "live packet exceeds the transport limit"
+            );
             let event = EventBuilder::new(Kind::from(PACKET_KIND), blob)
                 .tags([Tag::public_key(peer.phone_public)])
                 .finalize(&peer.keys)?;
-            if let Err(error) = client.send_event(&event).ack_policy(AckPolicy::none()).ok_timeout(Duration::from_secs(2)).await {
+            if let Err(error) = client
+                .send_event(&event)
+                .ack_policy(AckPolicy::none())
+                .ok_timeout(Duration::from_secs(2))
+                .await
+            {
                 log::debug!("Praxis Remote live packet was not acknowledged by a relay: {error:#}");
             }
         }
         Ok::<_, anyhow::Error>(())
     };
-    let result = futures::future::select(pin!(receive), pin!(transmit)).await;
+    let receive = pin!(receive);
+    let transmit = pin!(transmit);
+    let result = futures::future::select(receive, transmit).await;
     let result = match result {
-        futures::future::Either::Left((result, _)) | futures::future::Either::Right((result, _)) => result,
+        futures::future::Either::Left((result, _))
+        | futures::future::Either::Right((result, _)) => result,
     };
     client.shutdown().await;
     result
@@ -193,25 +236,60 @@ struct Receipts {
 }
 
 impl Receipts {
-    fn begin(&mut self, phone: &str, request: &Request, plain: &str, epoch: &str, now: i64) -> Result<Option<String>> {
-        ensure!(request.epoch.as_deref() == Some(epoch), "Praxis restarted. This request was not executed by the new session. Refresh and check the conversation before resending.");
+    fn begin(
+        &mut self,
+        phone: &str,
+        request: &Request,
+        plain: &str,
+        epoch: &str,
+        now: i64,
+    ) -> Result<Option<String>> {
+        ensure!(
+            request.epoch.as_deref() == Some(epoch),
+            "Praxis restarted. This request was not executed by the new session. Refresh and check the conversation before resending."
+        );
         let sent = DateTime::parse_from_rfc3339(&request.sent_at)?.timestamp();
-        ensure!((-120..=REQUEST_AGE).contains(&(now - sent)), "This live request expired. Refresh before sending a new request.");
+        ensure!(
+            (-120..=REQUEST_AGE).contains(&(now - sent)),
+            "This live request expired. Refresh before sending a new request."
+        );
         self.entries.retain(|_, receipt| receipt.expires >= now);
-        self.bytes = self.entries.values().filter_map(|receipt| receipt.answer.as_ref()).map(String::len).sum();
-        let fingerprint = ring::digest::digest(&ring::digest::SHA256, plain.as_bytes()).as_ref().to_vec();
+        self.bytes = self
+            .entries
+            .values()
+            .filter_map(|receipt| receipt.answer.as_ref())
+            .map(String::len)
+            .sum();
+        let fingerprint = ring::digest::digest(&ring::digest::SHA256, plain.as_bytes())
+            .as_ref()
+            .to_vec();
         let id = (phone.to_string(), request.id.clone());
         if let Some(receipt) = self.entries.get(&id) {
-            ensure!(receipt.fingerprint == fingerprint, "A request ID was reused with different content.");
+            ensure!(
+                receipt.fingerprint == fingerprint,
+                "A request ID was reused with different content."
+            );
             return receipt.answer.clone().map(Some).context("This request was already received but its result is unavailable. Check the conversation before resending.");
         }
-        ensure!(self.entries.len() < MAX_RECEIPTS, "Too many recent live requests. Retry after older requests expire.");
-        self.entries.insert(id, Receipt { fingerprint, expires: sent + REQUEST_AGE, answer: None });
+        ensure!(
+            self.entries.len() < MAX_RECEIPTS,
+            "Too many recent live requests. Retry after older requests expire."
+        );
+        self.entries.insert(
+            id,
+            Receipt {
+                fingerprint,
+                expires: sent + REQUEST_AGE,
+                answer: None,
+            },
+        );
         Ok(None)
     }
 
     fn finish(&mut self, phone: &str, id: &str, answer: String) {
-        if self.bytes.saturating_add(answer.len()) > MAX_RECEIPT_BYTES { return; }
+        if self.bytes.saturating_add(answer.len()) > MAX_RECEIPT_BYTES {
+            return;
+        }
         if let Some(receipt) = self.entries.get_mut(&(phone.into(), id.into())) {
             self.bytes += answer.len();
             receipt.answer = Some(answer);
@@ -219,35 +297,61 @@ impl Receipts {
     }
 }
 
-async fn serve(channel_id: String, device: String, peers: Peers, changes: Receiver<()>, stopped: Receiver<()>, cx: &mut AsyncApp) -> Result<()> {
+async fn serve(
+    channel_id: String,
+    device: String,
+    peers: Peers,
+    changes: Receiver<()>,
+    stopped: Receiver<()>,
+    cx: &mut AsyncApp,
+) -> Result<()> {
     let epoch = crypto::random_id()?;
     let (incoming, requests) = async_channel::bounded(32);
     let (outgoing, responses) = async_channel::bounded(32);
-    let network = Tokio::spawn_result(cx, network(channel_id, peers.clone(), changes, incoming, responses));
+    let network = Tokio::spawn_result(
+        cx,
+        network(channel_id, peers.clone(), changes, incoming, responses),
+    );
     let mut receipts = Receipts::default();
     let mut watches: HashMap<String, Watch> = HashMap::new();
     let mut published: HashMap<String, (String, Instant)> = HashMap::new();
     let mut sequence = 0u64;
     let mut next_snapshot = Instant::now();
     loop {
-        if stopped.is_closed() { break; }
+        if stopped.is_closed() {
+            break;
+        }
         if Instant::now() >= next_snapshot {
             next_snapshot = Instant::now() + Duration::from_secs(1);
             let now = Utc::now();
             watches.retain(|phone, watch| watch.until > now && peers.read().contains_key(phone));
             published.retain(|phone, _| watches.contains_key(phone));
             for (phone, watch) in &watches {
-                let Some(peer) = peers.read().get(phone).cloned() else { continue; };
-                if peer.last_seen.lock().is_none_or(|at| at.elapsed() >= Duration::from_secs(45)) { continue; }
+                let Some(peer) = peers.read().get(phone).cloned() else {
+                    continue;
+                };
+                if peer
+                    .last_seen
+                    .lock()
+                    .is_none_or(|at| at.elapsed() >= Duration::from_secs(45))
+                {
+                    continue;
+                }
                 let value = cx.update(|cx| snapshot(&status(&device, cx), Some(watch), cx));
                 let fingerprint = value.to_string();
-                let unchanged = published.get(phone).is_some_and(|(previous, at)| previous == &fingerprint && at.elapsed() < Duration::from_secs(15));
-                if unchanged { continue; }
+                let unchanged = published.get(phone).is_some_and(|(previous, at)| {
+                    previous == &fingerprint && at.elapsed() < Duration::from_secs(15)
+                });
+                if unchanged {
+                    continue;
+                }
                 let snapshot: Value = serde_json::from_str(&channel::fit_snapshot(value, now))?;
                 sequence = sequence.saturating_add(1);
                 let packet = json!({"type": "snapshot", "epoch": epoch, "sequence": sequence, "snapshot": snapshot}).to_string();
                 match outgoing.try_send((peer, packet)) {
-                    Ok(()) => { published.insert(phone.clone(), (fingerprint, Instant::now())); }
+                    Ok(()) => {
+                        published.insert(phone.clone(), (fingerprint, Instant::now()));
+                    }
                     Err(async_channel::TrySendError::Full(_)) => {}
                     Err(error) => return Err(anyhow!("live connection stopped: {error}")),
                 }
@@ -259,10 +363,24 @@ async fn serve(channel_id: String, device: String, peers: Peers, changes: Receiv
             packet = requests.recv().fuse() => packet.ok(),
             _ = timer.fuse() => continue,
         };
-        let Some((peer, plain)) = packet else { break; };
-        if !current(&peers, &peer) { continue; }
-        let Ok(request) = serde_json::from_str::<Request>(&plain) else { continue; };
-        if request.id.is_empty() || request.id.len() > 64 || !request.id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) { continue; }
+        let Some((peer, plain)) = packet else {
+            break;
+        };
+        if !current(&peers, &peer) {
+            continue;
+        }
+        let Ok(request) = serde_json::from_str::<Request>(&plain) else {
+            continue;
+        };
+        if request.id.is_empty()
+            || request.id.len() > 64
+            || !request
+                .id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            continue;
+        }
         let answer = if request.op == "hello" {
             *peer.last_seen.lock() = Some(Instant::now());
             channel::envelope(&request.id, Ok(json!({"epoch": epoch})))
@@ -272,11 +390,24 @@ async fn serve(channel_id: String, device: String, peers: Peers, changes: Receiv
                 Err(error) => channel::envelope(&request.id, Err(error)),
                 Ok(None) => {
                     let result = if request.op == "watch" {
-                        let seconds = request.args.get("seconds").and_then(Value::as_i64).unwrap_or(300).clamp(1, 900);
+                        let seconds = request
+                            .args
+                            .get("seconds")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(300)
+                            .clamp(1, 900);
                         let watch = Watch {
                             window: request.args.get("window").and_then(Value::as_u64),
-                            session_id: request.args.get("session_id").and_then(Value::as_str).map(str::to_string),
-                            include_details: request.args.get("include_details").and_then(Value::as_bool) != Some(false),
+                            session_id: request
+                                .args
+                                .get("session_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            include_details: request
+                                .args
+                                .get("include_details")
+                                .and_then(Value::as_bool)
+                                != Some(false),
                             until: Utc::now() + chrono::Duration::seconds(seconds),
                         };
                         let until = watch.until.to_rfc3339();
@@ -286,7 +417,10 @@ async fn serve(channel_id: String, device: String, peers: Peers, changes: Receiv
                     } else if matches!(request.op.as_str(), "unpair" | "batch") {
                         Err(anyhow!("Use the GitHub channel for this operation"))
                     } else {
-                        cx.update(|cx| handle_paired(&request.op, &request.args, &device, &peer.id, cx)).await
+                        cx.update(|cx| {
+                            handle_paired(&request.op, &request.args, &device, &peer.id, cx)
+                        })
+                        .await
                     };
                     let answer = channel::envelope(&request.id, result);
                     receipts.finish(&peer.id, &request.id, answer.clone());
@@ -297,7 +431,9 @@ async fn serve(channel_id: String, device: String, peers: Peers, changes: Receiv
         let mut answer: Value = serde_json::from_str(&answer)?;
         answer["type"] = json!("response");
         answer["epoch"] = json!(epoch);
-        if outgoing.send((peer, answer.to_string())).await.is_err() { break; }
+        if outgoing.send((peer, answer.to_string())).await.is_err() {
+            break;
+        }
     }
     drop(outgoing);
     network.await
@@ -308,22 +444,61 @@ mod tests {
     use super::*;
 
     fn request(epoch: &str) -> Request {
-        Request { id: "request-1".into(), op: "prompt".into(), args: json!({}), sent_at: "2026-10-06T00:00:00Z".into(), epoch: Some(epoch.into()) }
+        Request {
+            id: "request-1".into(),
+            op: "prompt".into(),
+            args: json!({}),
+            sent_at: "2026-10-06T00:00:00Z".into(),
+            epoch: Some(epoch.into()),
+        }
     }
 
     #[test]
     fn live_receipts_never_execute_duplicates_or_old_desktop_requests() {
-        let now = DateTime::parse_from_rfc3339("2026-10-06T00:00:00Z").unwrap().timestamp();
+        let now = DateTime::parse_from_rfc3339("2026-10-06T00:00:00Z")
+            .unwrap()
+            .timestamp();
         let mut receipts = Receipts::default();
         let request = request("epoch");
-        assert_eq!(receipts.begin("phone", &request, "one", "epoch", now).unwrap(), None);
-        assert!(receipts.begin("phone", &request, "one", "epoch", now).is_err());
+        assert_eq!(
+            receipts
+                .begin("phone", &request, "one", "epoch", now)
+                .unwrap(),
+            None
+        );
+        assert!(
+            receipts
+                .begin("phone", &request, "one", "epoch", now)
+                .is_err()
+        );
         receipts.finish("phone", &request.id, "answer".into());
-        assert_eq!(receipts.begin("phone", &request, "one", "epoch", now).unwrap(), Some("answer".into()));
-        assert!(receipts.begin("phone", &request, "different", "epoch", now).is_err());
-        assert!(receipts.begin("phone", &request, "one", "new-epoch", now).is_err());
-        assert!(receipts.begin("phone", &request, "one", "epoch", now + 301).is_err());
-        assert_eq!(receipts.begin("other", &request, "one", "epoch", now).unwrap(), None);
+        assert_eq!(
+            receipts
+                .begin("phone", &request, "one", "epoch", now)
+                .unwrap(),
+            Some("answer".into())
+        );
+        assert!(
+            receipts
+                .begin("phone", &request, "different", "epoch", now)
+                .is_err()
+        );
+        assert!(
+            receipts
+                .begin("phone", &request, "one", "new-epoch", now)
+                .is_err()
+        );
+        assert!(
+            receipts
+                .begin("phone", &request, "one", "epoch", now + 301)
+                .is_err()
+        );
+        assert_eq!(
+            receipts
+                .begin("other", &request, "one", "epoch", now)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -331,11 +506,24 @@ mod tests {
         let key = [7; 32];
         let desktop = crypto::relay_secret(&key, "channel", "phone", "desktop").unwrap();
         assert_ne!(desktop, key);
-        assert_ne!(desktop, crypto::relay_secret(&key, "channel", "phone", "phone").unwrap());
-        assert_ne!(desktop, crypto::relay_secret(&key, "channel", "other", "desktop").unwrap());
+        assert_ne!(
+            desktop,
+            crypto::relay_secret(&key, "channel", "phone", "phone").unwrap()
+        );
+        assert_ne!(
+            desktop,
+            crypto::relay_secret(&key, "channel", "other", "desktop").unwrap()
+        );
         let aad = crypto::relay_aad("channel", "phone", "request");
         let sealed = crypto::seal(&key, &aad, b"private").unwrap();
-        assert!(crypto::open(&key, &crypto::relay_aad("channel", "phone", "desktop"), &sealed).is_err());
+        assert!(
+            crypto::open(
+                &key,
+                &crypto::relay_aad("channel", "phone", "desktop"),
+                &sealed
+            )
+            .is_err()
+        );
         assert_eq!(crypto::open(&key, &aad, &sealed).unwrap(), b"private");
         assert!(SecretKey::from_slice(&desktop).is_ok());
     }
