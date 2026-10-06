@@ -210,6 +210,8 @@ jobs:
       - name: Test lossless history memory behavior
         run: |
           cargo test --locked -p agent --lib db::tests::
+          cargo test --locked -p agent --lib cleared_architect_plan_
+          cargo test --locked -p agent --lib terminal_tasks_wait_
           cargo test --locked -p markdown --lib deferred_markdown_
           cargo test --locked -p acp_thread --lib deferred_tool_
 

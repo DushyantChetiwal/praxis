@@ -143,7 +143,7 @@ fun SettingsScreen(state: AppState, ui: DeviceUi, vm: MainViewModel, snackbar: S
                     headlineContent = { Text(relayLabel) },
                     supportingContent = { Text(stringResource(R.string.settings_live_relay_help)) },
                     trailingContent = {
-                        Switch(checked = vm.liveRelayEnabled, onCheckedChange = vm::setLiveRelayEnabled,
+                        Switch(checked = vm.liveRelayEnabled, onCheckedChange = vm::changeLiveRelayEnabled,
                             modifier = Modifier.semantics { contentDescription = relayLabel })
                     },
                     colors = transparentItem(),

@@ -51,6 +51,18 @@ class RelayAndImagesTest {
         } finally { transport.close() }
     }
 
+    @Test fun theLastQuestionAnswerModeWinsWithoutErasingTheDraft() {
+        val form = QuestionForm("Which?", listOf(QuestionOption("a", "A", null), QuestionOption("b", "B", null)), false, true)
+        val draft = "Use a different option"
+        val custom = questionAnswerContent(form, setOf("a"), draft, freeformActive = true)!!
+        assertEquals(draft, custom.getString("freeform_answer"))
+        assertFalse(custom.has("answer"))
+        val choice = questionAnswerContent(form, setOf("a"), draft, freeformActive = false)!!
+        assertEquals("a", choice.getString("answer"))
+        assertFalse(choice.has("freeform_answer"))
+        assertNull(questionAnswerContent(form, setOf("a"), "", freeformActive = true))
+    }
+
     @Test fun legacyDesktopsDoNotAdvertiseNewCapabilities() {
         val status = parseStatus(JSONObject("""{"windows":[{"window":1,"projects":[],"thread":{"session_id":"s","queued":0,"pending":[]}}]}"""))
         assertFalse(status.windows.single().thread!!.imageInput)

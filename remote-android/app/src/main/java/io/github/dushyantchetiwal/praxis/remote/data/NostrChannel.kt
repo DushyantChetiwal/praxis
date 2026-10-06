@@ -37,7 +37,7 @@ import org.nostrdevkit.sdk.Tag
 
 internal const val RELAY_KIND: UShort = 21761u
 internal const val RELAY_PACKET_LIMIT = 96_000
-private val RELAYS = listOf("wss://relay.damus.io", "wss://nos.lol")
+private val RELAYS = listOf("wss://relay.damus.io", "wss://relay.primal.net")
 
 internal fun relayAad(link: Link, direction: String): String =
     "$PROTOCOL/nostr/${link.channel}/${link.phoneId}/$direction"

@@ -16,7 +16,7 @@
 - [ ] Push changed compact snapshots; keep full history on the desktop and fetch details only on demand.
 - [ ] Back off and report relay failure honestly; retain the existing fallback for older desktops and unavailable relays.
 - [ ] Add deterministic tests for authentication, stale/duplicate/reordered traffic, restart ambiguity, lifecycle cleanup, and fallback boundaries.
-- [x] Run a bounded synthetic probe with no user content: Actions run 37460811242 delivered Damus encrypted round trips in 204–336 ms; nos.lol timed out. A replacement relay probe is pending; these are runner measurements, not phone latency or capacity guarantees.
+- [x] Run a bounded synthetic probe with no user content: Actions run 37460811242 delivered Damus encrypted round trips in 204–336 ms; nos.lol timed out. Replacement probe 37472159528 delivered all three round trips on both Damus (216–231 ms) and Primal (454–530 ms); the transport now selects those two relays. These are runner measurements, not phone latency or capacity guarantees.
 
 ## Phone image input
 
@@ -42,7 +42,18 @@
 
 - [x] Implement ViewModel-owned loaded Android details, bounded memory and encrypted app-private disk caching, scoped identities, explicit refresh, and stale-write rejection. CI regressions pending.
 - [ ] Test cache reuse, memory eviction/disk restoration, refresh invalidation, and message/window isolation.
-- [x] Add an Actions-only on/off comparison for Architect test and Clippy rebuilds, including unchanged builds, three controlled edits, and artifact size. Release policy remains unchanged. Measurements pending.
+- [x] Add an Actions-only on/off comparison for Architect test and Clippy rebuilds, including unchanged builds, three controlled edits, and artifact size. Release policy remains unchanged. The first run exposed rust-cache overriding the enabled matrix to 0, so it is not a valid on/off comparison. Added a measured-step override, mode assertion, and required artifact; valid comparison pending.
+
+## Additional desktop/mobile interaction fixes — same PR #40
+
+- [x] Implement compact terminal-wait status rows, monotonic GPUI-executor countdown updates, and no UUID in normal display; preserve task data and early wake/cancellation semantics. CI regression pending.
+- [x] Implement last-interaction answer modes on desktop and Android; freeform interaction clears visual choice selection, while a later choice overrides retained text. Passive window activation does not change the answer mode. CI regressions pending.
+- [x] Add desktop GPUI and Android regressions for interaction-order precedence without erasing the inactive text draft; execution pending in CI.
+- [x] Implement a shared current-plan status projection that hides stopped empty-plan banners/counts on desktop and mobile without erasing run history; preserve Stop for active runs. CI regressions pending.
+- [x] Add GPUI regressions for wait countdown/early completion and empty-plan status cleanup; keep existing expiry/cancellation coverage. Execution pending in CI.
+- [ ] Investigate reported missing file tools in Build: saved settings enable write tools; the affected transcript first describes the Architect-mode read-only inventory, then reports the full inventory and calls write_file/edit_file. Mode refresh already occurs at mode changes and before requests. Exact earlier request mode is not recorded, so the historical cause remains unconfirmed; add request-level diagnostics and mode-switch regression coverage without weakening permissions.
+
+All requested changes above belong to PR #40 on the existing branch; do not split them into another PR or merge a partially validated head.
 
 ## Validation and delivery
 

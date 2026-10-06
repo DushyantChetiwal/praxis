@@ -1219,10 +1219,17 @@ impl ToolCall {
         }
 
         let raw_input_markdown = if tool_call.kind == acp::ToolKind::Edit
-            && matches!(&status, ToolCallStatus::Pending | ToolCallStatus::InProgress)
-        {
-            tool_call.raw_input.as_ref().and_then(|input| markdown_for_raw_output(input, &language_registry, cx))
-        } else { None };
+            && matches!(
+                &status,
+                ToolCallStatus::Pending | ToolCallStatus::InProgress
+            ) {
+            tool_call
+                .raw_input
+                .as_ref()
+                .and_then(|input| markdown_for_raw_output(input, &language_registry, cx))
+        } else {
+            None
+        };
 
         let tool_name = tool_call
             .name
@@ -1436,7 +1443,10 @@ impl ToolCall {
         if let Some(raw_input) = raw_input {
             self.raw_input = Some(raw_input);
             if self.raw_input_expanded || self.needs_live_raw_input() {
-                self.raw_input_markdown = self.raw_input.as_ref().and_then(|input| markdown_for_raw_output(input, &language_registry, cx));
+                self.raw_input_markdown = self
+                    .raw_input
+                    .as_ref()
+                    .and_then(|input| markdown_for_raw_output(input, &language_registry, cx));
             }
         }
         if !self.raw_input_expanded && !self.needs_live_raw_input() {
@@ -1452,10 +1462,18 @@ impl ToolCall {
         Ok(())
     }
 
-    fn set_raw_input_expanded(&mut self, expanded: bool, languages: &Arc<LanguageRegistry>, cx: &mut App) {
+    fn set_raw_input_expanded(
+        &mut self,
+        expanded: bool,
+        languages: &Arc<LanguageRegistry>,
+        cx: &mut App,
+    ) {
         self.raw_input_expanded = expanded;
         if expanded && self.raw_input_markdown.is_none() {
-            self.raw_input_markdown = self.raw_input.as_ref().and_then(|input| markdown_for_raw_output(input, languages, cx));
+            self.raw_input_markdown = self
+                .raw_input
+                .as_ref()
+                .and_then(|input| markdown_for_raw_output(input, languages, cx));
         } else if !expanded && !self.needs_live_raw_input() {
             self.raw_input_markdown = None;
         }
@@ -1463,7 +1481,10 @@ impl ToolCall {
 
     fn needs_live_raw_input(&self) -> bool {
         self.kind == acp::ToolKind::Edit
-            && matches!(self.status, ToolCallStatus::Pending | ToolCallStatus::InProgress)
+            && matches!(
+                self.status,
+                ToolCallStatus::Pending | ToolCallStatus::InProgress
+            )
             && self.structured_content.is_empty()
     }
 
@@ -1485,8 +1506,15 @@ impl ToolCall {
         {
             update_markdown_in_place(markdown, &text, cx);
         } else {
-            let markdown =
-                cx.new(|cx| Markdown::new_deferred_with_options(text.into(), Some(language_registry.clone()), None, MarkdownOptions::default(), cx));
+            let markdown = cx.new(|cx| {
+                Markdown::new_deferred_with_options(
+                    text.into(),
+                    Some(language_registry.clone()),
+                    None,
+                    MarkdownOptions::default(),
+                    cx,
+                )
+            });
             self.raw_output_content = Some(Box::new(ToolCallContent::ContentBlock(
                 ContentBlock::from_markdown(markdown),
             )));
@@ -4145,15 +4173,24 @@ impl AcpThread {
             })
     }
 
-    pub fn set_tool_call_raw_input_expanded(&mut self, id: &acp::ToolCallId, expanded: bool, cx: &mut Context<Self>) {
+    pub fn set_tool_call_raw_input_expanded(
+        &mut self,
+        id: &acp::ToolCallId,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
         let languages = self.project.read(cx).languages().clone();
-        let Some((_, call)) = self.tool_call_mut(id) else { return; };
+        let Some((_, call)) = self.tool_call_mut(id) else {
+            return;
+        };
         call.set_raw_input_expanded(expanded, &languages, cx);
         cx.notify();
     }
 
     pub fn release_tool_call_render_cache(&mut self, id: &acp::ToolCallId, cx: &mut Context<Self>) {
-        let Some((_, call)) = self.tool_call_mut(id) else { return; };
+        let Some((_, call)) = self.tool_call_mut(id) else {
+            return;
+        };
         if let Some(markdown) = &call.raw_input_markdown {
             markdown.update(cx, |markdown, cx| markdown.release_render_cache(cx));
         }
@@ -5872,7 +5909,15 @@ fn markdown_for_raw_output(
     cx: &mut App,
 ) -> Option<Entity<Markdown>> {
     let text = raw_output_text(raw_output)?;
-    Some(cx.new(|cx| Markdown::new_deferred_with_options(text.into(), Some(language_registry.clone()), None, MarkdownOptions::default(), cx)))
+    Some(cx.new(|cx| {
+        Markdown::new_deferred_with_options(
+            text.into(),
+            Some(language_registry.clone()),
+            None,
+            MarkdownOptions::default(),
+            cx,
+        )
+    }))
 }
 
 fn raw_output_text(raw_output: &serde_json::Value) -> Option<String> {
@@ -9237,12 +9282,19 @@ mod tests {
     #[gpui::test]
     fn deferred_tool_raw_inputs_preserve_data_and_release_collapsed_views(cx: &mut TestAppContext) {
         init_test(cx);
-        let languages = cx.update(|cx| Arc::new(LanguageRegistry::test(cx.background_executor().clone())));
+        let languages =
+            cx.update(|cx| Arc::new(LanguageRegistry::test(cx.background_executor().clone())));
         let input = serde_json::json!({"content": "complete source\n".repeat(8192)});
-        let mut call = cx.update(|cx| ToolCall::from_acp(
-            acp::ToolCall::new("large-input", "Historical tool").raw_input(input.clone()),
-            ToolCallStatus::Completed, languages.clone(), &HashMap::default(), cx,
-        ).expect("tool"));
+        let mut call = cx.update(|cx| {
+            ToolCall::from_acp(
+                acp::ToolCall::new("large-input", "Historical tool").raw_input(input.clone()),
+                ToolCallStatus::Completed,
+                languages.clone(),
+                &HashMap::default(),
+                cx,
+            )
+            .expect("tool")
+        });
         assert!(call.raw_input_markdown.is_none());
         assert_eq!(call.raw_input.as_ref(), Some(&input));
         cx.update(|cx| call.set_raw_input_expanded(true, &languages, cx));

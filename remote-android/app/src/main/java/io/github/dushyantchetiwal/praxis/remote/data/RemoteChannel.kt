@@ -230,9 +230,11 @@ fun parseQuestionForm(result: JSONObject): QuestionForm? {
     return QuestionForm(question, options, multiple, result.bool("auto_answer_paused"))
 }
 
-fun questionAnswerContent(form: QuestionForm, selected: Set<String>, freeform: String): JSONObject? {
+fun questionAnswerContent(form: QuestionForm, selected: Set<String>, freeform: String, freeformActive: Boolean = freeform.isNotBlank()): JSONObject? {
     val text = freeform.trim()
-    if (text.isNotEmpty()) return JSONObject().put(if (form.options.isEmpty()) "answer" else "freeform_answer", text)
+    if (form.options.isEmpty() || freeformActive) {
+        return text.takeIf(String::isNotEmpty)?.let { JSONObject().put(if (form.options.isEmpty()) "answer" else "freeform_answer", it) }
+    }
     if (selected.isEmpty() || (!form.allowMultiple && selected.size != 1) || selected.any { value -> form.options.none { it.value == value } }) return null
     val values = form.options.filter { it.value in selected }.map { it.value }
     return JSONObject().put("answer", if (form.allowMultiple) JSONArray(values) else values.single())

@@ -667,7 +667,14 @@ impl Markdown {
         options: MarkdownOptions,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_internal(source, language_registry, fallback_code_block_language, options, false, cx)
+        Self::new_internal(
+            source,
+            language_registry,
+            fallback_code_block_language,
+            options,
+            false,
+            cx,
+        )
     }
 
     /// Retains complete source without parsing off-screen conversation bodies.
@@ -679,7 +686,14 @@ impl Markdown {
         options: MarkdownOptions,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_internal(source, language_registry, fallback_code_block_language, options, true, cx)
+        Self::new_internal(
+            source,
+            language_registry,
+            fallback_code_block_language,
+            options,
+            true,
+            cx,
+        )
     }
 
     fn new_internal(
@@ -2630,7 +2644,8 @@ impl Element for MarkdownElement {
         cx: &mut App,
     ) -> (gpui::LayoutId, Self::RequestLayoutState) {
         if self.markdown.read(cx).parsing_deferred {
-            self.markdown.update(cx, |markdown, cx| markdown.ensure_parsed(cx));
+            self.markdown
+                .update(cx, |markdown, cx| markdown.ensure_parsed(cx));
         }
         let highlights = {
             let markdown = self.markdown.read(cx);
@@ -5169,9 +5184,19 @@ mod tests {
     use super::*;
 
     #[gpui::test]
-    fn deferred_markdown_keeps_full_source_without_parsing_hidden_bodies(cx: &mut gpui::TestAppContext) {
+    fn deferred_markdown_keeps_full_source_without_parsing_hidden_bodies(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let source: SharedString = "```text\nlarge tool body\n```\n".repeat(2048).into();
-        let markdown = cx.new(|cx| Markdown::new_deferred_with_options(source.clone(), None, None, MarkdownOptions::default(), cx));
+        let markdown = cx.new(|cx| {
+            Markdown::new_deferred_with_options(
+                source.clone(),
+                None,
+                None,
+                MarkdownOptions::default(),
+                cx,
+            )
+        });
         cx.run_until_parked();
         markdown.read_with(cx, |markdown, _| {
             assert_eq!(markdown.source(), &source);
@@ -5196,7 +5221,14 @@ mod tests {
         });
         markdown.update(cx, |markdown, cx| markdown.ensure_parsed(cx));
         cx.run_until_parked();
-        markdown.read_with(cx, |markdown, _| assert!(markdown.parsed_markdown.source.ends_with("Full suffix retained")));
+        markdown.read_with(cx, |markdown, _| {
+            assert!(
+                markdown
+                    .parsed_markdown
+                    .source
+                    .ends_with("Full suffix retained")
+            )
+        });
     }
     use gpui::{
         Background, DevicePixels, Font, FontId, FontMetrics, FontRun, GlyphId, LineLayout,

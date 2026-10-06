@@ -19,7 +19,7 @@ use super::{Watch, channel, handle_paired, snapshot, status};
 
 // Application-specific ephemeral events: never public notes or stored DMs.
 const PACKET_KIND: u16 = 21761;
-const RELAYS: [&str; 2] = ["wss://relay.damus.io", "wss://nos.lol"];
+const RELAYS: [&str; 2] = ["wss://relay.damus.io", "wss://relay.primal.net"];
 const MAX_PACKET_BYTES: usize = 96_000;
 const MAX_RECEIPTS: usize = 4096;
 const MAX_RECEIPT_BYTES: usize = 8 * 1024 * 1024;

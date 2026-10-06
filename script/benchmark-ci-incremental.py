@@ -14,6 +14,8 @@ if os.environ.get("GITHUB_ACTIONS") != "true":
 mode = os.environ["CARGO_INCREMENTAL"]
 if mode not in {"0", "1"}:
     raise SystemExit("CARGO_INCREMENTAL must be 0 or 1")
+if mode != os.environ.get("EXPECTED_INCREMENTAL"):
+    raise SystemExit("The measured incremental mode differs from the matrix setting")
 
 root = Path(__file__).resolve().parent.parent
 source = root / "crates/architect/src/architect.rs"
@@ -59,11 +61,13 @@ finally:
     artifact_bytes = sum(path.stat().st_size for path in target.rglob("*") if path.is_file()) if target.exists() else 0
     result = {
         "source_sha": subprocess.check_output(["git", "--no-pager", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
+        "pr_head_sha": os.environ.get("PR_HEAD_SHA"),
         "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),
         "incremental": mode == "1",
         "scope": "Architect crate; same-runner warm edits; not a cross-run cache-hit benchmark",
         "measurements": measurements,
         "target_artifact_bytes": artifact_bytes,
+        "incremental_artifact_bytes": sum(path.stat().st_size for path in target.rglob("*") if path.is_file() and "incremental" in path.parts),
     }
     for kind in ("test", "clippy"):
         values = [item["seconds"] for item in measurements if item["label"].startswith("edited_") and item["label"].endswith("_" + kind)]

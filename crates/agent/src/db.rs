@@ -551,10 +551,13 @@ impl ThreadsDatabase {
         // Serialize into the compressor instead of allocating the entire expanded
         // transcript alongside its live objects and compressed database blob.
         let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), COMPRESSION_LEVEL)?;
-        serde_json::to_writer(&mut encoder, &SerializedThread {
-            thread,
-            version: DbThread::VERSION,
-        })?;
+        serde_json::to_writer(
+            &mut encoder,
+            &SerializedThread {
+                thread,
+                version: DbThread::VERSION,
+            },
+        )?;
         let data = encoder.finish()?;
         let data_type = DataType::Zstd;
         let connection = connection.lock();
@@ -641,7 +644,8 @@ impl ThreadsDatabase {
         self.executor.spawn(async move {
             let row = {
                 let connection = connection.lock();
-                let mut select = connection.select_bound::<Arc<str>, (DataType, Vec<u8>)>(indoc! {"
+                let mut select =
+                    connection.select_bound::<Arc<str>, (DataType, Vec<u8>)>(indoc! {"
                     SELECT data_type, data FROM threads WHERE id = ? LIMIT 1
                 "})?;
                 select(id.0)?.into_iter().next()
@@ -678,16 +682,21 @@ impl ThreadsDatabase {
         *self.write_gate.lock() = Some(gate.shared());
     }
 
+    #[expect(clippy::disallowed_methods, reason = "Stream very large histories off the UI thread instead of retaining an additional decompressed JSON buffer")]
     fn deserialize_thread(data_type: DataType, data: Vec<u8>) -> Result<DbThread> {
         let json_data = match data_type {
             DataType::Zstd => {
                 let reader = || -> Result<_> {
-                    Ok(std::io::BufReader::new(zstd::stream::read::Decoder::new(data.as_slice())?))
+                    Ok(std::io::BufReader::new(zstd::stream::read::Decoder::new(
+                        data.as_slice(),
+                    )?))
                 };
                 // Unknown fields are skipped without building their JSON trees.
                 // Legacy formats keep their existing migration path.
                 let version: ThreadVersion = serde_json::from_reader(reader()?)?;
-                if version.version.as_ref().and_then(serde_json::Value::as_str) == Some(DbThread::VERSION) {
+                if version.version.as_ref().and_then(serde_json::Value::as_str)
+                    == Some(DbThread::VERSION)
+                {
                     return Ok(serde_json::from_reader(reader()?)?);
                 }
                 String::from_utf8(zstd::decode_all(data.as_slice())?)?
@@ -830,9 +839,19 @@ mod tests {
         let mut json = serde_json::to_value(&thread).expect("fixture");
         json["version"] = serde_json::json!(DbThread::VERSION);
         let plain = serde_json::to_vec(&json).expect("fixture JSON");
-        assert_eq!(DbThread::from_json(&plain).expect("plain JSON").messages, expected);
-        database.save_thread(session_id("large-history"), thread, PathList::default()).await.expect("save");
-        let restored = database.load_thread(session_id("large-history")).await.expect("load").expect("thread");
+        assert_eq!(
+            DbThread::from_json(&plain).expect("plain JSON").messages,
+            expected
+        );
+        database
+            .save_thread(session_id("large-history"), thread, PathList::default())
+            .await
+            .expect("save");
+        let restored = database
+            .load_thread(session_id("large-history"))
+            .await
+            .expect("load")
+            .expect("thread");
         assert_eq!(restored.messages, expected);
         assert!(restored.messages[0].to_markdown().contains(&source));
     }

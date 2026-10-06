@@ -935,7 +935,7 @@ fn architect_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
 }
 
 fn architect_thread_summary(thread: &agent::Thread) -> Option<Value> {
-    let graph = thread.architect_graph()?;
+    let graph = thread.architect_status_graph()?;
     let run = thread.architect_run();
     let running = run.is_some_and(agent::ArchitectRun::is_running);
     // Branches of a plan run side by side, so there can be several at once.

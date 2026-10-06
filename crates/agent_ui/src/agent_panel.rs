@@ -5851,7 +5851,7 @@ impl AgentPanel {
             .active_thread_view(cx)
             .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))?;
         let thread_ref = thread.read(cx);
-        let graph = thread_ref.architect_graph()?;
+        let graph = thread_ref.architect_status_graph()?;
         let run = thread_ref.architect_run();
 
         // Counted through nested plans, as Run counts what is left to lock.

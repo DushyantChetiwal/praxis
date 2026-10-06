@@ -22,6 +22,9 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -60,7 +63,7 @@ fun QuestionDialogs(ui: DeviceUi, vm: MainViewModel) {
     val state = ui.question
     if (state.visible && state.header != null) {
         val form = state.form
-        val canAnswer = form != null && questionAnswerContent(form, state.selected, state.freeform) != null
+        val canAnswer = form != null && questionAnswerContent(form, state.selected, state.freeform, state.freeformActive) != null
         AlertDialog(
             onDismissRequest = vm::dismissQuestion,
             title = { Text(stringResource(R.string.question_needed)) },
@@ -94,7 +97,7 @@ fun QuestionDialogs(ui: DeviceUi, vm: MainViewModel) {
                                 Text(stringResource(R.string.question_auto_paused), style = MaterialTheme.typography.labelSmall)
                             }
                             items(form.options, key = { it.value }) { option ->
-                                val selected = option.value in state.selected
+                                val selected = !state.freeformActive && option.value in state.selected
                                 val selection = if (form.allowMultiple) Modifier.toggleable(
                                     value = selected, enabled = !state.sending, role = Role.Checkbox,
                                     onValueChange = { vm.selectQuestionOption(option.value) },
@@ -117,7 +120,14 @@ fun QuestionDialogs(ui: DeviceUi, vm: MainViewModel) {
                             onValueChange = vm::editQuestionAnswer,
                             label = { Text(stringResource(if (form.options.isEmpty()) R.string.question_answer else R.string.question_freeform)) },
                             enabled = !state.sending,
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().pointerInput(state.sending) {
+                                awaitPointerEventScope {
+                                    while (true) {
+                                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                                        if (event.changes.any { it.changedToDown() }) vm.activateQuestionFreeform()
+                                    }
+                                }
+                            },
                             maxLines = 4,
                         )
                     }

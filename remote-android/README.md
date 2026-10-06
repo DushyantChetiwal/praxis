@@ -10,7 +10,7 @@ GitHub remains the compatibility fallback. Neither device opens an inbound liste
   `praxis-remote.json` file, with the computer's name, whether it is online, and whether this phone is paired.
 - **Pairing.** The phone and the computer agree a key (P-256 ECDH, HKDF-SHA-256) in one gist comment. Both show a
   six-digit code, and the user approves the phone on the computer if they match. Keys stay in encrypted preferences.
-- **Live relay.** Existing paired devices automatically try the community relays at `relay.damus.io` and `nos.lol`.
+- **Live relay.** Existing paired devices automatically try the community relays at `relay.damus.io` and `relay.primal.net`.
   There is no new account, server, key entry, or pairing step. Changed compact snapshots arrive at most once a second,
   with a heartbeat every 15 seconds. The desktop runs this separately from GitHub requests, so a GitHub quota wait
   does not block an established live connection. Conversation controls show which transport is active.

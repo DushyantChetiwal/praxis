@@ -36,6 +36,7 @@ jobs:
       CARGO_INCREMENTAL: ${{ matrix.incremental }}
       CARGO_TERM_COLOR: always
       CARGO_TARGET_DIR: target/incremental-comparison
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -45,10 +46,14 @@ jobs:
           shared-key: incremental-comparison-${{ matrix.label }}
           workspaces: . -> target/incremental-comparison
       - name: Measure initial, unchanged, and edited builds
+        env:
+          # rust-cache exports CARGO_INCREMENTAL=0; override it at the measured step.
+          CARGO_INCREMENTAL: ${{ matrix.incremental }}
+          EXPECTED_INCREMENTAL: ${{ matrix.incremental }}
         run: python script/benchmark-ci-incremental.py
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: incremental-comparison-${{ matrix.label }}
           path: ci-incremental-${{ matrix.incremental }}.json
-          if-no-files-found: ignore
+          if-no-files-found: error

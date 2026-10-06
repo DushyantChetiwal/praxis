@@ -85,7 +85,10 @@ async fn main() -> Result<()> {
             Err(_) => println!("{relay}: timed out after 40 seconds"),
         }
     }
-    ensure!(passed > 0, "No tested relay delivered the synthetic encrypted round trip");
+    ensure!(
+        passed > 0,
+        "No tested relay delivered the synthetic encrypted round trip"
+    );
     println!("{passed}/2 relays delivered the probe. This is not a capacity or uptime guarantee.");
     Ok(())
 }

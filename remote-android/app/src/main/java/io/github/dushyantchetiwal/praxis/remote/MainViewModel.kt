@@ -223,7 +223,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     var liveRelayEnabled by mutableStateOf(store.liveRelayEnabled)
         private set
 
-    fun setLiveRelayEnabled(enabled: Boolean) {
+    fun changeLiveRelayEnabled(enabled: Boolean) {
         store.liveRelayEnabled = enabled
         liveRelayEnabled = enabled
         channel.live.stop()
@@ -1446,13 +1446,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectQuestionOption(value: String) {
         val form = d.question.form ?: return
         if (d.question.sending || form.options.none { it.value == value }) return
-        edit { copy(question = question.copy(selected = if (!form.allowMultiple) setOf(value) else {
+        edit { copy(question = question.copy(freeformActive = false, selected = if (!form.allowMultiple || question.freeformActive) setOf(value) else {
             if (value in question.selected) question.selected - value else question.selected + value
         })) }
     }
 
+    fun activateQuestionFreeform() {
+        if (!d.question.sending) edit { copy(question = question.copy(freeformActive = true)) }
+    }
+
     fun editQuestionAnswer(text: String) {
-        if (!d.question.sending) edit { copy(question = question.copy(freeform = text)) }
+        if (!d.question.sending) edit { copy(question = question.copy(freeform = text, freeformActive = true)) }
     }
 
     fun submitQuestion(decline: Boolean = false) {
@@ -1460,7 +1464,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val header = state.header ?: return
         val form = state.form ?: return
         if (state.sending || state.loading) return
-        val content = questionAnswerContent(form, state.selected, state.freeform)
+        val content = questionAnswerContent(form, state.selected, state.freeform, state.freeformActive)
         if (!decline && content == null) return
         val request = questionRequest
         val scope = requestScope()

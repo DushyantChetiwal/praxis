@@ -63,7 +63,7 @@ when that metadata is unavailable; no command is sent until an authenticated des
 still handles pairing, discovery, unpairing, and compatibility fallback. Its network calls run separately from the
 live service, including during rate-limit backoff.
 
-The prototype uses `wss://relay.damus.io` and `wss://nos.lol`, NIP-01 WebSockets, and application-specific ephemeral
+The prototype uses `wss://relay.damus.io` and `wss://relay.primal.net`, NIP-01 WebSockets, and application-specific ephemeral
 kind `21761`. This is **not** a NIP-17 message or a NIP-59 gift wrap. The application retains its existing AES-GCM
 paired-channel encryption instead of introducing a second private-message cryptosystem. Nostr signing and event
 validation use the maintained Rust SDK and its Android bindings.

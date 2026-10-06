@@ -176,6 +176,7 @@ data class QuestionState(
     val form: QuestionForm? = null,
     val selected: Set<String> = emptySet(),
     val freeform: String = "",
+    val freeformActive: Boolean = false,
     val error: String? = null,
 )
 

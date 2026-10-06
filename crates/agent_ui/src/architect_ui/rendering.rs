@@ -455,7 +455,7 @@ impl ArchitectPane {
 
         let running = self.is_running(cx);
         let paused = self.is_paused(cx);
-        let can_resume = self.can_resume(cx);
+        let can_resume = self.can_resume(cx) && self.thread.read(cx).architect_status_graph().is_some();
         let resume_tooltip = if running {
             "Carry on from where the run paused"
         } else {
@@ -497,7 +497,8 @@ impl ArchitectPane {
             1 => "Select the one thing that needs attention".into(),
             count => format!("Select the first of {count} things that need attention").into(),
         };
-        let latest_run = self.thread.read(cx).architect_run();
+        let latest_run = self.thread.read(cx).architect_run()
+            .filter(|_| self.thread.read(cx).architect_status_graph().is_some());
         let run_needs_attention = latest_run
             .and_then(|run| run.outcome.as_ref())
             .is_some_and(|outcome| !outcome.is_success());
@@ -1440,6 +1441,7 @@ impl ArchitectPane {
 
     fn render_run_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let thread = self.thread.read(cx);
+        thread.architect_status_graph()?;
         let run = thread
             .architect_run()
             .filter(|run| !run.result_dismissed())?;
@@ -3497,6 +3499,19 @@ mod tests {
                 }
             });
         }
+
+        thread.update(cx, |thread, cx| {
+            thread.start_architect_run(NodePath::root("build".into()), "Build".into(), Task::ready(()), cx);
+            thread.finish_architect_run(RunOutcome::Failed { message: failure_message.into() }, cx);
+            thread.update_architect_graph(|graph| { graph.nodes.clear(); graph.edges.clear(); }, cx);
+        });
+        view.update(cx, |view, cx| {
+            view.pane.update(cx, |pane, cx| assert!(pane.render_run_bar(cx).is_none()));
+        });
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.architect_status_graph().is_none());
+            assert!(matches!(thread.architect_run().and_then(|run| run.outcome.as_ref()), Some(RunOutcome::Failed { .. })));
+        });
 
         let mut nested = ArchitectGraph::default();
         nested.add_node(ArchitectNode::new("first", "First"));

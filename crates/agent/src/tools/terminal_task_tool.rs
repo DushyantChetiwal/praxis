@@ -499,6 +499,35 @@ pub struct TerminalStopToolInput {
     pub task_id: String,
 }
 
+fn terminal_wait_title(remaining: Duration) -> String {
+    let seconds = remaining.as_millis().div_ceil(1000);
+    format!("Waiting · {}:{:02} remaining", seconds / 60, seconds % 60)
+}
+
+async fn wait_with_countdown(
+    task: &TerminalTask,
+    wait_ms: u64,
+    event_stream: &ToolCallEventStream,
+    cx: &AsyncApp,
+) -> Result<(), String> {
+    let executor = cx.background_executor().clone();
+    let deadline = executor.now() + Duration::from_millis(wait_ms);
+    let completion = task.wait(wait_ms, cx).fuse();
+    futures::pin_mut!(completion);
+    event_stream.update_fields(acp::ToolCallUpdateFields::new().title(terminal_wait_title(Duration::from_millis(wait_ms))));
+    loop {
+        futures::select_biased! {
+            _ = event_stream.cancelled_by_user().fuse() => return Err("Terminal wait cancelled".into()),
+            _ = completion => break,
+            _ = executor.timer(Duration::from_secs(1)).fuse() => {
+                event_stream.update_fields(acp::ToolCallUpdateFields::new().title(terminal_wait_title(deadline.saturating_duration_since(executor.now()))));
+            },
+        }
+    }
+    event_stream.update_fields(acp::ToolCallUpdateFields::new().title("Finished waiting"));
+    Ok(())
+}
+
 macro_rules! terminal_management_tool {
     ($tool:ident, $input:ty, $name:literal, $title:literal, $capability:ident, $restricted:literal, $action:expr) => {
         pub struct $tool {
@@ -519,7 +548,7 @@ macro_rules! terminal_management_tool {
                 ToolCapability::$capability
             }
             fn kind() -> acp::ToolKind {
-                acp::ToolKind::Execute
+                if Self::NAME == "terminal_wait" { acp::ToolKind::Other } else { acp::ToolKind::Execute }
             }
             fn allow_in_restricted_mode() -> bool {
                 $restricted
@@ -529,6 +558,7 @@ macro_rules! terminal_management_tool {
                 input: Result<Self::Input, serde_json::Value>,
                 _cx: &mut App,
             ) -> SharedString {
+                if Self::NAME == "terminal_wait" { return $title.into(); }
                 match input {
                     Ok(input) => format!("{} {}", $title, input.task_id).into(),
                     Err(_) => $title.into(),
@@ -548,7 +578,9 @@ macro_rules! terminal_management_tool {
                         .ok_or_else(|| "Terminal thread has been released".to_string())?
                         .get(&input.task_id)?;
                     let wait_ms: u64 = ($action)(&task, &input)?;
-                    if wait_ms > 0 {
+                    if wait_ms > 0 && Self::NAME == "terminal_wait" {
+                        wait_with_countdown(&task, wait_ms, &event_stream, cx).await?;
+                    } else if wait_ms > 0 {
                         futures::select_biased! {
                             _ = event_stream.cancelled_by_user().fuse() => {
                                 // Turn replacement cancels this wait, not its job.
@@ -578,7 +610,7 @@ terminal_management_tool!(
     TerminalWaitTool,
     TerminalWaitToolInput,
     "terminal_wait",
-    "Waiting for terminal task",
+    "Waiting",
     ReadOnly,
     true,
     |_task: &TerminalTask, input: &TerminalWaitToolInput| {
@@ -770,6 +802,31 @@ mod tests {
             task.response(false, &cx.to_async()).unwrap().len()
                 < COMMAND_OUTPUT_LIMIT as usize + 1024
         );
+    }
+
+    #[gpui::test]
+    async fn terminal_tasks_wait_countdown_is_compact_and_wakes_early(cx: &mut TestAppContext) {
+        let registry = Rc::new(TerminalTaskRegistry::default());
+        let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
+        let task = start(&registry, terminal.clone(), None, cx);
+        let tool = Arc::new(TerminalWaitTool::new(&registry));
+        assert_eq!(TerminalWaitTool::kind(), acp::ToolKind::Other);
+        let title = cx.update(|cx| tool.initial_title(Ok(TerminalWaitToolInput { task_id: task.id.clone(), timeout_ms: None }), cx));
+        assert_eq!(title.as_ref(), "Waiting");
+        assert!(!title.contains(&task.id));
+        let (stream, mut events) = ToolCallEventStream::test();
+        let wait = cx.update(|cx| tool.run(ToolInput::resolved(TerminalWaitToolInput {
+            task_id: task.id.clone(), timeout_ms: None,
+        }), stream, cx));
+        cx.run_until_parked();
+        assert_eq!(events.expect_update_fields().await.title.as_deref(), Some("Waiting · 0:30 remaining"));
+        advance(cx, 1000);
+        assert_eq!(events.expect_update_fields().await.title.as_deref(), Some("Waiting · 0:29 remaining"));
+        terminal.signal_exit();
+        cx.run_until_parked();
+        assert_eq!(events.expect_update_fields().await.title.as_deref(), Some("Finished waiting"));
+        assert!(wait.await.expect("wait").contains("still_running: false"));
+        assert!(!terminal.was_killed());
     }
 
     #[gpui::test]
