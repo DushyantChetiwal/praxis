@@ -215,6 +215,9 @@ jobs:
           cargo test --locked -p markdown --lib deferred_markdown_
           cargo test --locked -p acp_thread --lib deferred_tool_
           cargo test --locked -p agent_ui --lib compact_terminal_wait_
+          cargo test --locked -p agent_ui --lib test_deferred_tool_input_
+          cargo test --locked -p agent_ui --lib test_thread_search_
+          cargo test --locked -p agent_ui --lib test_mixed_assistant_content_
 
       - name: Test remote transport and image input
         run: |

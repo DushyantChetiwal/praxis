@@ -1292,6 +1292,33 @@ impl ThreadView {
         !self.message_queue.is_empty()
     }
 
+    pub(crate) fn set_tool_call_expanded(
+        &mut self,
+        id: &acp::ToolCallId,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.entry_view_state.update(cx, |state, _| {
+            if expanded {
+                state.expand_tool_call(id.clone());
+            } else {
+                state.collapse_tool_call(id);
+            }
+        });
+        let show_input = expanded && self.thread.read(cx).tool_call(id).is_some_and(|(_, call)| {
+            Self::tool_call_shows_raw_input(call)
+                && (!matches!(call.status, ToolCallStatus::WaitingForConfirmation { .. })
+                    || self.expanded_tool_call_raw_inputs.contains(id))
+        });
+        self.thread.update(cx, |thread, cx| {
+            thread.set_tool_call_raw_input_expanded(id, show_input, cx);
+            if !expanded {
+                thread.release_tool_call_render_cache(id, cx);
+            }
+        });
+        cx.notify();
+    }
+
     // events
 
     pub fn handle_entry_view_event(
@@ -8408,10 +8435,13 @@ impl ThreadView {
             );
             if waiting {
                 let entries = self.thread.read(cx).entries();
-                let visible = Self::latest_active_terminal_wait_id(entries.iter().filter_map(|entry| {
-                    let AgentThreadEntry::ToolCall(call) = entry else { return None; };
-                    Some((&call.id, call.tool_name.as_deref(), &call.status))
-                }));
+                let visible =
+                    Self::latest_active_terminal_wait_id(entries.iter().filter_map(|entry| {
+                        let AgentThreadEntry::ToolCall(call) = entry else {
+                            return None;
+                        };
+                        Some((&call.id, call.tool_name.as_deref(), &call.status))
+                    }));
                 if visible.is_some_and(|id| id != &tool_call.id) {
                     return div();
                 }
@@ -8464,9 +8494,7 @@ impl ThreadView {
 
         let use_card_layout = needs_confirmation || is_edit || is_terminal_tool;
 
-        let has_image_content = tool_call.content().iter().any(|c| c.image().is_some());
-
-        let should_show_raw_input = !is_terminal_tool && !is_edit && !has_image_content;
+        let should_show_raw_input = Self::tool_call_shows_raw_input(tool_call);
 
         let has_content = !tool_call.content().is_empty()
             || (should_show_raw_input && tool_call.raw_input.is_some());
@@ -8688,9 +8716,7 @@ impl ThreadView {
                                                   _,
                                                   window,
                                                   cx: &mut Context<Self>| {
-                                                this.entry_view_state.update(cx, |state, _cx| {
-                                                    state.collapse_tool_call(&tool_call_id);
-                                                });
+                                                this.set_tool_call_expanded(&tool_call_id, false, cx);
                                                 this.refresh_thread_search(window, cx);
                                                 cx.notify();
                                             }
@@ -8784,18 +8810,8 @@ impl ThreadView {
                                                                   _,
                                                                   window,
                                                                   cx: &mut Context<Self>| {
-                                                                this.entry_view_state.update(
-                                                                    cx,
-                                                                    |state, _cx| {
-                                                                        state
-                                                                            .toggle_tool_call_expansion(
-                                                                                &id,
-                                                                            );
-                                                                    },
-                                                                );
-                                                                if !this.entry_view_state.read(cx).is_tool_call_expanded(&id) {
-                                                                    this.thread.update(cx, |thread, cx| thread.release_tool_call_render_cache(&id, cx));
-                                                                }
+                                                                let expanded = !this.entry_view_state.read(cx).is_tool_call_expanded(&id);
+                                                                this.set_tool_call_expanded(&id, expanded, cx);
                                                                 this.refresh_thread_search(window, cx);
                                                                 cx.notify();
                                                             }
@@ -10229,8 +10245,16 @@ impl ThreadView {
             .into_any_element()
     }
 
+    fn tool_call_shows_raw_input(call: &ToolCall) -> bool {
+        !matches!(call.kind, acp::ToolKind::Execute | acp::ToolKind::Edit)
+            && call.diffs().next().is_none()
+            && !call.content().iter().any(|content| content.image().is_some())
+    }
+
     fn latest_active_terminal_wait_id<'a>(
-        calls: impl DoubleEndedIterator<Item = (&'a acp::ToolCallId, Option<&'a str>, &'a ToolCallStatus)>,
+        calls: impl DoubleEndedIterator<
+            Item = (&'a acp::ToolCallId, Option<&'a str>, &'a ToolCallStatus),
+        >,
     ) -> Option<&'a acp::ToolCallId> {
         calls.rev().find_map(|(id, name, status)| {
             (name == Some("terminal_wait")
@@ -13068,18 +13092,33 @@ mod tests {
         let second: acp::ToolCallId = "second".into();
         let unrelated: acp::ToolCallId = "read".into();
         let mut calls = [
-            (first.clone(), Some("terminal_wait"), ToolCallStatus::InProgress),
-            (second.clone(), Some("terminal_wait"), ToolCallStatus::Pending),
+            (
+                first.clone(),
+                Some("terminal_wait"),
+                ToolCallStatus::InProgress,
+            ),
+            (
+                second.clone(),
+                Some("terminal_wait"),
+                ToolCallStatus::Pending,
+            ),
             (unrelated, Some("read_file"), ToolCallStatus::InProgress),
         ];
         let selected = |calls: &[(acp::ToolCallId, Option<&str>, ToolCallStatus)]| {
-            ThreadView::latest_active_terminal_wait_id(calls.iter().map(|(id, name, status)| (id, *name, status))).cloned()
+            ThreadView::latest_active_terminal_wait_id(
+                calls.iter().map(|(id, name, status)| (id, *name, status)),
+            )
+            .cloned()
         };
         assert_eq!(selected(&calls), Some(second));
         calls[1].2 = ToolCallStatus::Completed;
         assert_eq!(selected(&calls), Some(first));
         calls[0].2 = ToolCallStatus::Failed;
-        assert_eq!(selected(&calls), None, "failures retain their normal inspectable tool card");
+        assert_eq!(
+            selected(&calls),
+            None,
+            "failures retain their normal inspectable tool card"
+        );
     }
 
     #[test]

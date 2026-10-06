@@ -102,7 +102,10 @@ peer delivery or execution confirmation.
 an incarnation. Phones ignore duplicates, older sequences, and unverified incarnations. The inner snapshot has the
 same compact-header and lossless-detail contract as GitHub snapshots. Changes are coalesced to at most one snapshot
 per second, with a 15-second heartbeat. Only recently live phones receive them; the phone closes relay connections
-in the background. `batch` and `unpair` continue through GitHub.
+in the background. `batch` and `unpair` continue through GitHub. The Android live-relay switch controls the phone;
+while desktop Remote remains enabled, its relay sockets may stay connected. Publication to an inactive phone stops
+after its last handshake ages out (45 seconds). An unexpectedly stopped desktop relay service retries after 30 seconds
+with a new incarnation, rather than reusing uncertain command receipts.
 
 Relays observe connection metadata and can reject or throttle traffic. Ephemeral delivery is not durable storage,
 a deletion guarantee, forward secrecy, or a permanent free-capacity promise. No paid relay, central service, or

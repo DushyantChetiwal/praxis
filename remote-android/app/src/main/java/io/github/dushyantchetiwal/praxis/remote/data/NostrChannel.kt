@@ -47,6 +47,9 @@ internal fun relaySecret(link: Link, role: String): ByteArray = RemoteCrypto.hkd
     relayAad(link, role).toByteArray(), 32,
 )
 
+internal fun sameRelayPeer(first: Link, second: Link): Boolean =
+    first.channel == second.channel && first.phoneId == second.phoneId && first.key.contentEquals(second.key)
+
 internal class RelayCursor {
     var epoch: String? = null
         private set
@@ -72,7 +75,7 @@ data class LiveConnection(val channel: String, val connected: Boolean, val epoch
 /** Relays only carry the existing paired channel's authenticated ciphertext. */
 class NostrChannel {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var session: Session? = null
+    @Volatile private var session: Session? = null
     private val _snapshots = MutableSharedFlow<LiveSnapshot>(extraBufferCapacity = 1)
     val snapshots = _snapshots.asSharedFlow()
     private val _connection = MutableStateFlow<LiveConnection?>(null)
@@ -80,7 +83,7 @@ class NostrChannel {
 
     fun start(link: Link) {
         val previous = session
-        if (previous?.job?.isActive == true && previous.link.let { it.channel == link.channel && it.phoneId == link.phoneId && it.key.contentEquals(link.key) }) return
+        if (previous?.job?.isActive == true && sameRelayPeer(previous.link, link)) return
         stop()
         val next = Session(link)
         session = next
@@ -95,20 +98,20 @@ class NostrChannel {
 
     fun close() { stop(); scope.cancel() }
 
-    fun ready(link: Link): Boolean = session?.let {
-        it.link.channel == link.channel && it.link.phoneId == link.phoneId && it.link.key.contentEquals(link.key) && it.ready()
-    } == true
+    fun ready(link: Link): Boolean = session?.let { sameRelayPeer(it.link, link) && it.ready() } == true
 
     // Null means no command was submitted. Once submitted, every failure is surfaced,
     // never converted into a second dispatch over GitHub.
     suspend fun exchange(link: Link, id: String, op: String, args: JSONObject): JSONObject? {
         if (op == "unpair" || op == "batch") return null
-        val active = session?.takeIf { ready(link) } ?: return null
+        // Check the captured session, not a second read that may refer to a
+        // different computer after a concurrent selection change.
+        val active = session?.takeIf { sameRelayPeer(it.link, link) && it.ready() } ?: return null
         return active.exchange(id, op, args)
     }
 
     private inner class Session(val link: Link) {
-        var job: Job? = null
+        @Volatile var job: Job? = null
         private var client: Client? = null
         private var keys: Keys? = null
         private var desktop: Keys? = null
@@ -162,7 +165,7 @@ class NostrChannel {
                 transport.connect(Duration.ofSeconds(8))
                 transport.subscribe(ReqTarget.auto(listOf(Filter().author(peer.publicKey()).pubkey(own.publicKey()).kind(Kind(RELAY_KIND)).limit(0uL))), id = "praxis-live")
                 var failures = 0
-                while (job?.isActive == true) {
+                while (kotlinx.coroutines.currentCoroutineContext().isActive) {
                     val answer = try {
                         withTimeoutOrNull(6_000) { exchange(UUID.randomUUID().toString(), "hello", JSONObject(), attempts = 1) }
                     } catch (error: CancellationException) { throw error }

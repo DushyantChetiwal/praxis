@@ -38,6 +38,7 @@ enum ElicitationFieldValue {
 #[derive(PartialEq, Eq)]
 pub(crate) struct ElicitationFormSubmission {
     fields: HashMap<String, ElicitationFieldValue>,
+    question_answer_field: Option<&'static str>,
 }
 
 pub(crate) struct ElicitationFormState {
@@ -202,6 +203,9 @@ impl ElicitationFormState {
 
     fn snapshot(&self, cx: &App) -> ElicitationFormSubmission {
         ElicitationFormSubmission {
+            question_answer_field: self.question_freeform_active.as_ref().map(|active| {
+                if active.get() { "freeform_answer" } else { "answer" }
+            }),
             fields: self
                 .fields
                 .iter()
@@ -448,6 +452,16 @@ impl ElicitationFormSubmission {
             }
         }
 
+        if let Some(field) = self.question_answer_field {
+            let answered = match content.get(field) {
+                Some(acp::ElicitationContentValue::String(value)) => !value.trim().is_empty(),
+                Some(acp::ElicitationContentValue::StringArray(values)) => !values.is_empty(),
+                _ => false,
+            };
+            if !answered {
+                errors.entry(field.to_string()).or_insert_with(|| "Choose an option or enter an answer".into());
+            }
+        }
         if errors.is_empty() {
             Ok(content)
         } else {
@@ -657,7 +671,7 @@ mod tests {
             let editor = view.read_with(cx, |view, cx| {
                 // No option should be silently selected when the user only
                 // wants to write text.
-                assert!(view.form_state.collect(&schema, cx).unwrap().is_empty());
+                assert!(view.form_state.collect(&schema, cx).is_err());
                 view.editor("freeform_answer")
             });
             view.update(cx, |view, _| {
@@ -667,6 +681,10 @@ mod tests {
                 } else {
                     view.form_state.set_single_select("answer", "sqlite".into());
                 }
+            });
+            view.update(cx, |view, cx| {
+                view.form_state.question_freeform_active.as_ref().expect("question").set(true);
+                assert!(view.form_state.collect(&schema, cx).expect_err("an empty active answer must remain pending").contains_key("freeform_answer"));
             });
             cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
             cx.simulate_input("Use a local database instead");

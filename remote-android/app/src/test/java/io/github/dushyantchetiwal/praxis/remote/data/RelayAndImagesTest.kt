@@ -42,6 +42,16 @@ class RelayAndImagesTest {
         assertFalse(relaySecret(link, "phone").contentEquals(relaySecret(other, "phone")))
     }
 
+    @Test fun capturedRelayPeersCannotMatchAnotherComputerOrPairing() {
+        val selected = Link("gist", "a".repeat(32), "b".repeat(32), ByteArray(32) { 7 }, "Computer")
+        fun peer(channel: String = selected.channel, phoneId: String = selected.phoneId, key: ByteArray = selected.key.copyOf()) =
+            Link("another-gist", channel, phoneId, key, "Renamed")
+        assertTrue(sameRelayPeer(selected, peer()))
+        assertFalse(sameRelayPeer(selected, peer(channel = "c".repeat(32))))
+        assertFalse(sameRelayPeer(selected, peer(phoneId = "d".repeat(32))))
+        assertFalse(sameRelayPeer(selected, peer(key = ByteArray(32) { 8 })))
+    }
+
     @Test fun unavailableLiveTransportDoesNotSubmitACommand() = kotlinx.coroutines.test.runTest {
         val transport = NostrChannel()
         try {

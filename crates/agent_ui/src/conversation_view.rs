@@ -3626,9 +3626,7 @@ impl ConversationView {
     pub fn expand_tool_call(&mut self, tool_call_id: acp::ToolCallId, cx: &mut Context<Self>) {
         if let Some(active) = self.active_thread() {
             active.update(cx, |active, cx| {
-                active.entry_view_state.update(cx, |state, _cx| {
-                    state.expand_tool_call(tool_call_id);
-                });
+                active.set_tool_call_expanded(&tool_call_id, true, cx);
             });
             cx.notify();
         }
@@ -8509,6 +8507,41 @@ pub(crate) mod tests {
                     cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
                 assert_eq!(copied.as_deref(), Some(expected));
             }
+        }
+    }
+
+    #[gpui::test]
+    async fn test_deferred_tool_input_follows_card_expansion(cx: &mut TestAppContext) {
+        init_test(cx);
+        let id = acp::ToolCallId::new("deferred-input");
+        let input = json!({"text": "Complete Unicode input Ω\n".repeat(4096)});
+        let connection = StubAgentConnection::new();
+        connection.set_next_prompt_updates(vec![acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(id.clone(), "Inspect output")
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Completed)
+                .raw_input(input.clone())
+                .content(vec!["Complete output".into()]),
+        )]);
+        let (conversation, cx) = setup_conversation_view(StubAgentServer::new(connection), cx).await;
+        let view = active_thread(&conversation, cx);
+        let thread = view.read_with(cx, |view, _| view.thread.clone());
+        thread.update(cx, |thread, cx| thread.send_raw("Inspect the tool", cx)).await.expect("prompt");
+        cx.run_until_parked();
+        thread.read_with(cx, |thread, _| {
+            assert!(thread.tool_call(&id).expect("tool").1.raw_input_markdown.is_none());
+        });
+        for expanded in [true, false, true] {
+            view.update(cx, |view, cx| view.set_tool_call_expanded(&id, expanded, cx));
+            cx.run_until_parked();
+            thread.read_with(cx, |thread, cx| {
+                let call = thread.tool_call(&id).expect("tool").1;
+                assert_eq!(call.raw_input.as_ref(), Some(&input));
+                assert_eq!(call.raw_input_markdown.is_some(), expanded);
+                if let Some(markdown) = &call.raw_input_markdown {
+                    assert!(markdown.read(cx).source().contains("Complete Unicode input Ω"));
+                }
+            });
         }
     }
 

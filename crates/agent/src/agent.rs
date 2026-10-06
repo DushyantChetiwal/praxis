@@ -9302,25 +9302,38 @@ mod internal_tests {
         let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
         let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
         let observed = Rc::new(std::cell::RefCell::new(Vec::new()));
-        let _subscription = cx.update(|cx| cx.subscribe(&acp_thread, {
-            let observed = observed.clone();
-            move |_, event, _| {
-                if let acp_thread::AcpThreadEvent::ModeUpdated(mode) = event {
-                    observed.borrow_mut().push(mode.clone());
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&acp_thread, {
+                let observed = observed.clone();
+                move |_, event, _| {
+                    if let acp_thread::AcpThreadEvent::ModeUpdated(mode) = event {
+                        observed.borrow_mut().push(mode.clone());
+                    }
                 }
-            }
-        }));
-        for mode in [SessionMode::Architect, SessionMode::Plan, SessionMode::Build] {
+            })
+        });
+        for mode in [
+            SessionMode::Architect,
+            SessionMode::Plan,
+            SessionMode::Build,
+        ] {
             thread.update(cx, |thread, cx| thread.set_session_mode(mode, cx));
             cx.run_until_parked();
-            assert_eq!(observed.borrow().last(), Some(&acp::SessionModeId::new(mode.id())));
+            assert_eq!(
+                observed.borrow().last(),
+                Some(&acp::SessionModeId::new(mode.id()))
+            );
         }
         thread.update(cx, |thread, cx| {
             thread.set_session_mode(SessionMode::Build, cx);
             thread.set_title("Unrelated update".into(), cx);
         });
         cx.run_until_parked();
-        assert_eq!(observed.borrow().len(), 3, "ordinary notifications must not duplicate mode events");
+        assert_eq!(
+            observed.borrow().len(),
+            3,
+            "ordinary notifications must not duplicate mode events"
+        );
     }
 
     #[gpui::test]

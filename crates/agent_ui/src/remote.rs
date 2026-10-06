@@ -350,7 +350,6 @@ fn snapshot(status: &Value, watch: Option<&Watch>, cx: &mut App) -> Value {
     })
 }
 
-
 fn handle_paired(
     op: &str,
     args: &Value,
