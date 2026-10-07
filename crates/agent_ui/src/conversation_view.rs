@@ -8674,6 +8674,9 @@ pub(crate) mod tests {
                         diff.buffer().expect("opened buffer").read(cx).text(),
                         new_text
                     );
+                    let editor_text = editor.expect("opened editor").read(cx).text(cx);
+                    assert!(editor_text.contains(&old_text));
+                    assert!(editor_text.contains(&new_text));
                 }
                 for (id, unopened) in diffs.iter().skip(1) {
                     assert!(!state.is_tool_call_expanded(id));
@@ -8685,7 +8688,9 @@ pub(crate) mod tests {
         view.update(cx, |view, cx| view.set_tool_call_expanded(id, true, cx));
         cx.run_until_parked();
         let previous_multibuffer = diff.read_with(cx, |diff, _| {
-            diff.multibuffer().expect("first materialization").entity_id()
+            diff.multibuffer()
+                .expect("first materialization")
+                .entity_id()
         });
         view.update(cx, |view, cx| {
             view.set_tool_call_expanded(id, false, cx);
