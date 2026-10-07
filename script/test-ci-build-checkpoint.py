@@ -235,7 +235,7 @@ class ArchiveTests(unittest.TestCase):
         restored = fresh / "target/release/deps/linked.rlib"
         self.assertTrue(restored.is_symlink())
         self.assertEqual(restored.read_bytes(), original.read_bytes())
-        self.assertTrue(restored.resolve().is_relative_to(fresh))
+        self.assertTrue(restored.resolve().is_relative_to(fresh.resolve()))
         link.unlink()
         link.symlink_to(self.cargo / "credentials.toml")
         with self.assertRaisesRegex(ValueError, "symlink leaves"):

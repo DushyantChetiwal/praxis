@@ -56,6 +56,7 @@ jobs:
           workspaces: . -> target/incremental-comparison
       - name: Measure initial, unchanged, and edited builds
         env:
+          # rust-cache exports CARGO_INCREMENTAL=0; override it at the measured step.
           CARGO_INCREMENTAL: ${{ matrix.incremental }}
           EXPECTED_INCREMENTAL: ${{ matrix.incremental }}
         run: python script/benchmark-ci-incremental.py
