@@ -348,6 +348,16 @@ impl EntryViewState {
                 }
 
                 for (diff, multibuffer) in diffs {
+                    // Close/reopen can precede the queued entry updates, leaving
+                    // an editor attached to the previous materialization.
+                    let stale_editor = views.get(&diff.entity_id()).cloned()
+                        .and_then(|view| view.downcast::<Editor>().ok())
+                        .is_some_and(|editor| {
+                            editor.read(cx).buffer().entity_id() != multibuffer.entity_id()
+                        });
+                    if stale_editor {
+                        views.remove(&diff.entity_id());
+                    }
                     views.entry(diff.entity_id()).or_insert_with(|| {
                         let editor = create_editor_diff(multibuffer, window, cx);
                         cx.subscribe(&editor, {

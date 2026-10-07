@@ -8578,6 +8578,18 @@ pub(crate) mod tests {
         let languages = cx.update(|_, cx| {
             Arc::new(language::LanguageRegistry::test(cx.background_executor().clone()))
         });
+        let new_diff_events = Rc::new(std::cell::Cell::new(0));
+        let entry_state = view.read_with(cx, |view, _| view.entry_view_state.clone());
+        let _subscription = cx.update(|_, cx| {
+            cx.subscribe(&entry_state, {
+                let new_diff_events = new_diff_events.clone();
+                move |_, event: &crate::entry_view_state::EntryViewEvent, _| {
+                    if matches!(event.view_event, crate::entry_view_state::ViewEvent::NewDiff(_)) {
+                        new_diff_events.set(new_diff_events.get() + 1);
+                    }
+                }
+            })
+        });
         let old_text = "Saved before Ω\n".repeat(128);
         let new_text = "Saved after 日本語\n".repeat(128);
         let mut diffs = Vec::new();
@@ -8643,6 +8655,29 @@ pub(crate) mod tests {
             });
         }
 
+        view.update(cx, |view, cx| view.set_tool_call_expanded(id, true, cx));
+        cx.run_until_parked();
+        let previous_multibuffer = diff.read_with(cx, |diff, _| {
+            diff.multibuffer().expect("first materialization").entity_id()
+        });
+        view.update(cx, |view, cx| {
+            view.set_tool_call_expanded(id, false, cx);
+            view.set_tool_call_expanded(id, true, cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            let (index, _) = view.thread.read(cx).tool_call(id).expect("reopened tool");
+            let editor = view.entry_view_state.read(cx).entry(index).expect("reopened entry")
+                .editor_for_diff(diff).expect("reopened editor");
+            let current_multibuffer = diff.read(cx).multibuffer().expect("new materialization");
+            assert_ne!(current_multibuffer.entity_id(), previous_multibuffer);
+            assert_eq!(editor.read(cx).buffer().entity_id(), current_multibuffer.entity_id());
+        });
+        view.update(cx, |view, cx| view.set_tool_call_expanded(id, false, cx));
+        cx.run_until_parked();
+
+        assert_eq!(new_diff_events.get(), 0, "historical views must not trigger live expansion");
+
         let live_id = acp::ToolCallId::new("live-edit");
         let live_diff = cx.new(|cx| {
             acp_thread::Diff::finalized(
@@ -8669,6 +8704,7 @@ pub(crate) mod tests {
         view.read_with(cx, |view, cx| {
             assert!(view.entry_view_state.read(cx).is_tool_call_expanded(&live_id));
         });
+        assert_eq!(new_diff_events.get(), 1, "live edits still announce their view");
         view.update(cx, |view, cx| view.set_tool_call_expanded(&live_id, false, cx));
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {

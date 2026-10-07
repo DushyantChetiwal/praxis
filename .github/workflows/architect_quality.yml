@@ -220,6 +220,8 @@ jobs:
           cargo test --locked -p agent --lib tools::edit_file_tool::tests::
           cargo test --locked -p agent --lib tools::write_file_tool::tests::
           cargo test --locked -p agent_ui --lib historical_diff_cards_
+          cargo test --locked -p agent_ui --lib entry_view_state::tests::test_diff_sync
+          cargo test --locked -p agent_ui --lib test_rewind_views
           cargo test --locked -p agent_ui --lib compact_terminal_wait_
           cargo test --locked -p agent_ui --lib test_deferred_tool_input_
           cargo test --locked -p agent_ui --lib test_thread_search_
