@@ -133,6 +133,10 @@ class ProvenanceTests(unittest.TestCase):
             "name": name, "run_id": 10, "status": "completed", "conclusion": "success",
             "steps": [{"name": anchor, "status": "completed", "conclusion": "success"}],
         } for name, anchor in validation.EXPECTED_JOBS.items()]
+        self.jobs[0]["steps"].extend([
+            {"name": "Prepare formatting corrections", "status": "completed", "conclusion": "skipped"},
+            {"name": "Upload formatting corrections", "status": "completed", "conclusion": "skipped"},
+        ])
         self.artifact = {
             "id": 20, "name": validation.artifact_name(10, 1), "expired": False,
             "size_in_bytes": 1024,
@@ -370,6 +374,34 @@ class ProvenanceTests(unittest.TestCase):
         self.assertFalse(self.check()[0])
         self.jobs[0]["steps"] = []
         self.assertFalse(self.check()[0])
+
+    def test_successful_formatting_records_and_reuses_with_failure_only_steps_skipped(self):
+        self.set_execution_environment()
+        receipt = self.validator.record(MERGE)
+        self.assertEqual(receipt["source_tree"], TREE)
+        self.assertEqual(receipt["kind"], "original-full")
+        self.assertEqual(validation.read_receipt(archive_bytes(receipt)), receipt)
+        self.api.responses[ZIP_PATH] = archive_bytes(receipt)
+        os.environ.clear()
+        self.assertTrue(self.check()[0])
+
+    def test_skip_exceptions_do_not_apply_to_tests_or_other_jobs(self):
+        for job in self.jobs:
+            for name in ("Additional validation", "Prepare formatting corrections", "Upload formatting corrections"):
+                if job["name"] == "Formatting" and name != "Additional validation":
+                    continue
+                with self.subTest(job=job["name"], step=name):
+                    job["steps"].append({"name": name, "status": "completed", "conclusion": "skipped"})
+                    self.assertFalse(self.check()[0])
+                    job["steps"].pop()
+
+    def test_optional_formatting_diagnostics_must_not_fail_or_remain_active(self):
+        step = self.jobs[0]["steps"][1]
+        for status, conclusion in (("completed", "failure"), ("completed", "cancelled"),
+                                   ("completed", "timed_out"), ("in_progress", "skipped")):
+            with self.subTest(status=status, conclusion=conclusion):
+                step.update(status=status, conclusion=conclusion)
+                self.assertFalse(self.check()[0])
 
     def test_missing_or_duplicate_expected_job_rejected(self):
         removed = self.jobs.pop()
@@ -852,6 +884,16 @@ class ArchiveAndCliTests(unittest.TestCase):
                 self.assertEqual(output.read_text(), "validated=false\n")
                 self.assertIn("Cannot prove validation", printed.getvalue())
 
+    def test_record_failure_is_fatal_and_cannot_look_like_a_valid_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            with patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}, clear=True), patch.object(validation, "Validator", side_effect=validation.Unverified("missing test step")):
+                with contextlib.redirect_stdout(io.StringIO()) as printed:
+                    result = validation.main(["record", "--repository", REPOSITORY, "--source-sha", TARGET])
+            self.assertEqual(result, 1)
+            self.assertEqual(output.read_text(), "recorded=false\n")
+            self.assertIn("::error::Original validation receipt was not recorded", printed.getvalue())
+
     def test_check_success_output_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "output"
@@ -945,6 +987,18 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('assert all(job["result"] == "success"', self.workflow)
         self.assertIn('assert all(job["result"] == "skipped"', self.workflow)
         self.assertIn("run: python script/test-praxis-validation.py", self.workflow)
+
+    def test_receipt_skip_allowlist_matches_failure_only_workflow_steps(self):
+        formatting = self.workflow.split("  formatting:\n", 1)[1].split("  architect-tests:\n", 1)[0]
+        self.assertEqual(set(validation.ALLOWED_SKIPPED_STEPS), {"Formatting"})
+        for name in validation.ALLOWED_SKIPPED_STEPS["Formatting"]:
+            self.assertIn(f"- name: {name}\n        if: failure()\n", formatting)
+        receipt = self.workflow.split("  full-receipt:\n", 1)[1].split("  source-validated:\n", 1)[0]
+        self.assertIn('case "$GITHUB_WORKFLOW_REF" in', receipt)
+        self.assertIn('"$GITHUB_REPOSITORY/.github/workflows/architect_quality.yml@"*)', receipt)
+        self.assertIn('echo "recorded=not_applicable"', receipt)
+        self.assertNotIn('echo "recorded=false"', receipt)
+        self.assertIn("if-no-files-found: error", receipt)
 
     def test_aggregate_rejects_failed_or_skipped_checks_without_verified_reuse(self):
         block = self.workflow.split("          python - <<'PY'\n", 1)[1].split("          PY\n", 1)[0]
