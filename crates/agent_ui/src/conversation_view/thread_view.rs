@@ -1302,18 +1302,29 @@ impl ThreadView {
     ) {
         self.historical_diff_observers.remove(id);
         if expanded {
-            let diffs = self.thread.read(cx).tool_call(id).map(|(_, call)| {
-                call.diffs().filter(|diff| diff.read(cx).is_historical()).cloned().collect::<Vec<_>>()
-            }).unwrap_or_default();
-            let observers = diffs.into_iter().map(|diff| {
-                let id = id.clone();
-                cx.observe(&diff, move |this, _, cx| {
-                    if let Some((index, _)) = this.thread.read(cx).tool_call(&id) {
-                        this.list_state.remeasure_items(index..index + 1);
-                    }
-                    cx.notify();
+            let diffs = self
+                .thread
+                .read(cx)
+                .tool_call(id)
+                .map(|(_, call)| {
+                    call.diffs()
+                        .filter(|diff| diff.read(cx).is_historical())
+                        .cloned()
+                        .collect::<Vec<_>>()
                 })
-            }).collect::<Vec<_>>();
+                .unwrap_or_default();
+            let observers = diffs
+                .into_iter()
+                .map(|diff| {
+                    let id = id.clone();
+                    cx.observe(&diff, move |this, _, cx| {
+                        if let Some((index, _)) = this.thread.read(cx).tool_call(&id) {
+                            this.list_state.remeasure_items(index..index + 1);
+                        }
+                        cx.notify();
+                    })
+                })
+                .collect::<Vec<_>>();
             if !observers.is_empty() {
                 self.historical_diff_observers.insert(id.clone(), observers);
             }

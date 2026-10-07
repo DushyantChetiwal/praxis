@@ -4188,7 +4188,9 @@ impl AcpThread {
     }
 
     pub fn materialize_tool_call_diffs(&mut self, id: &acp::ToolCallId, cx: &mut Context<Self>) {
-        let Some((index, call)) = self.tool_call_mut(id) else { return; };
+        let Some((index, call)) = self.tool_call_mut(id) else {
+            return;
+        };
         let mut changed = false;
         for diff in call.diffs() {
             changed |= diff.update(cx, |diff, cx| diff.materialize(cx));

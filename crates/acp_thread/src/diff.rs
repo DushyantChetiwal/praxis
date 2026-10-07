@@ -23,7 +23,13 @@ impl Diff {
         language_registry: Arc<LanguageRegistry>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::Finalized(Self::finalized_data(path, old_text, new_text, language_registry, cx))
+        Self::Finalized(Self::finalized_data(
+            path,
+            old_text,
+            new_text,
+            language_registry,
+            cx,
+        ))
     }
 
     fn finalized_data(
@@ -118,11 +124,17 @@ impl Diff {
     }
 
     pub fn materialize(&mut self, cx: &mut Context<Self>) -> bool {
-        let Self::Historical(snapshot) = self else { return false; };
-        if snapshot.view.is_some() { return false; }
+        let Self::Historical(snapshot) = self else {
+            return false;
+        };
+        if snapshot.view.is_some() {
+            return false;
+        }
         snapshot.view = Some(Self::finalized_data(
             snapshot.path.clone(),
-            snapshot.base_text_exists.then(|| snapshot.base_text.to_string()),
+            snapshot
+                .base_text_exists
+                .then(|| snapshot.base_text.to_string()),
             snapshot.new_text.to_string(),
             snapshot.language_registry.clone(),
             cx,
@@ -132,15 +144,22 @@ impl Diff {
     }
 
     pub fn release_render_cache(&mut self, cx: &mut Context<Self>) -> bool {
-        let Self::Historical(snapshot) = self else { return false; };
-        if snapshot.view.take().is_none() { return false; }
+        let Self::Historical(snapshot) = self else {
+            return false;
+        };
+        if snapshot.view.take().is_none() {
+            return false;
+        }
         cx.notify();
         true
     }
 
     pub fn is_loading(&self) -> bool {
         match self {
-            Self::Historical(snapshot) => snapshot.view.as_ref().is_some_and(|view| !view._update_diff.is_ready()),
+            Self::Historical(snapshot) => snapshot
+                .view
+                .as_ref()
+                .is_some_and(|view| !view._update_diff.is_ready()),
             _ => false,
         }
     }
@@ -230,9 +249,17 @@ impl Diff {
         if let Self::Historical(snapshot) = self {
             return format!("Diff: {}\n```\n{}\n```\n", snapshot.path, snapshot.new_text);
         }
-        let buffer_text = self.multibuffer().map(|buffer| {
-            buffer.read(cx).all_buffers().iter().map(|buffer| buffer.read(cx).text()).join("\n")
-        }).unwrap_or_default();
+        let buffer_text = self
+            .multibuffer()
+            .map(|buffer| {
+                buffer
+                    .read(cx)
+                    .all_buffers()
+                    .iter()
+                    .map(|buffer| buffer.read(cx).text())
+                    .join("\n")
+            })
+            .unwrap_or_default();
         let path = match self {
             Diff::Pending(PendingDiff {
                 new_buffer: buffer, ..
@@ -251,7 +278,8 @@ impl Diff {
     }
 
     pub fn has_revealed_range(&self, cx: &App) -> bool {
-        self.multibuffer().is_some_and(|buffer| !buffer.read(cx).is_empty())
+        self.multibuffer()
+            .is_some_and(|buffer| !buffer.read(cx).is_empty())
     }
 
     pub fn needs_update(&self, old_text: &str, new_text: &str, cx: &App) -> bool {
@@ -272,7 +300,9 @@ impl Diff {
                 base_text.as_ref() != old_text
                     || !new_buffer.read(cx).as_rope().chunks().equals_str(new_text)
             }
-            Diff::Historical(snapshot) => snapshot.base_text.as_ref() != old_text || snapshot.new_text.as_ref() != new_text,
+            Diff::Historical(snapshot) => {
+                snapshot.base_text.as_ref() != old_text || snapshot.new_text.as_ref() != new_text
+            }
         }
     }
 }
@@ -358,7 +388,9 @@ impl PendingDiff {
         let update_diff = cx.spawn(async move |this, cx| {
             let buffer_diff = buffer_diff.await?;
             this.update(cx, |this, cx| {
-                let multibuffer = this.multibuffer().ok_or_else(|| anyhow::anyhow!("Live diff lost its multibuffer"))?;
+                let multibuffer = this
+                    .multibuffer()
+                    .ok_or_else(|| anyhow::anyhow!("Live diff lost its multibuffer"))?;
                 multibuffer.update(cx, |multibuffer, cx| {
                     let path_key = PathKey::for_buffer(&buffer, cx);
                     multibuffer.clear(cx);
@@ -592,7 +624,10 @@ mod tests {
         diff.read_with(cx, |diff, cx| {
             assert!(!diff.is_loading());
             assert!(diff.has_revealed_range(cx));
-            assert_eq!(diff.buffer().expect("reopened buffer").read(cx).text(), "Complete Ω\n");
+            assert_eq!(
+                diff.buffer().expect("reopened buffer").read(cx).text(),
+                "Complete Ω\n"
+            );
         });
         diff.update(cx, |diff, cx| assert!(diff.release_render_cache(cx)));
         cx.run_until_parked();

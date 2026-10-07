@@ -8576,7 +8576,9 @@ pub(crate) mod tests {
         let view = active_thread(&conversation, cx);
         let thread = view.read_with(cx, |view, _| view.thread.clone());
         let languages = cx.update(|_, cx| {
-            Arc::new(language::LanguageRegistry::test(cx.background_executor().clone()))
+            Arc::new(language::LanguageRegistry::test(
+                cx.background_executor().clone(),
+            ))
         });
         let new_diff_events = Rc::new(std::cell::Cell::new(0));
         let entry_state = view.read_with(cx, |view, _| view.entry_view_state.clone());
@@ -8584,7 +8586,10 @@ pub(crate) mod tests {
             cx.subscribe(&entry_state, {
                 let new_diff_events = new_diff_events.clone();
                 move |_, event: &crate::entry_view_state::EntryViewEvent, _| {
-                    if matches!(event.view_event, crate::entry_view_state::ViewEvent::NewDiff(_)) {
+                    if matches!(
+                        event.view_event,
+                        crate::entry_view_state::ViewEvent::NewDiff(_)
+                    ) {
                         new_diff_events.set(new_diff_events.get() + 1);
                     }
                 }
@@ -8604,16 +8609,23 @@ pub(crate) mod tests {
                 )
             });
             thread.update(cx, |thread, cx| {
-                thread.upsert_tool_call(
-                    acp::ToolCall::new(id.clone(), "Saved edit")
-                        .kind(acp::ToolKind::Edit)
-                        .status(acp::ToolCallStatus::Completed),
-                    cx,
-                ).expect("restore tool header");
-                thread.update_tool_call(
-                    acp_thread::ToolCallUpdateDiff { id: id.clone(), diff: diff.clone() },
-                    cx,
-                ).expect("restore saved diff");
+                thread
+                    .upsert_tool_call(
+                        acp::ToolCall::new(id.clone(), "Saved edit")
+                            .kind(acp::ToolKind::Edit)
+                            .status(acp::ToolCallStatus::Completed),
+                        cx,
+                    )
+                    .expect("restore tool header");
+                thread
+                    .update_tool_call(
+                        acp_thread::ToolCallUpdateDiff {
+                            id: id.clone(),
+                            diff: diff.clone(),
+                        },
+                        cx,
+                    )
+                    .expect("restore saved diff");
             });
             diffs.push((id, diff));
         }
@@ -8622,8 +8634,17 @@ pub(crate) mod tests {
             let state = view.entry_view_state.read(cx);
             for (id, diff) in &diffs {
                 let (index, _) = view.thread.read(cx).tool_call(id).expect("saved tool");
-                assert!(!state.is_tool_call_expanded(id), "history must not auto-expand");
-                assert!(state.entry(index).expect("saved entry").editor_for_diff(diff).is_none());
+                assert!(
+                    !state.is_tool_call_expanded(id),
+                    "history must not auto-expand"
+                );
+                assert!(
+                    state
+                        .entry(index)
+                        .expect("saved entry")
+                        .editor_for_diff(diff)
+                        .is_none()
+                );
                 assert!(diff.read(cx).buffer().is_none());
             }
         });
@@ -8635,7 +8656,10 @@ pub(crate) mod tests {
             view.read_with(cx, |view, cx| {
                 let (index, _) = view.thread.read(cx).tool_call(id).expect("saved tool");
                 let state = view.entry_view_state.read(cx);
-                let editor = state.entry(index).expect("saved entry").editor_for_diff(diff);
+                let editor = state
+                    .entry(index)
+                    .expect("saved entry")
+                    .editor_for_diff(diff);
                 assert_eq!(state.is_tool_call_expanded(id), expanded);
                 assert_eq!(editor.is_some(), expanded);
                 let diff = diff.read(cx);
@@ -8646,7 +8670,10 @@ pub(crate) mod tests {
                 assert_eq!(diff.base_text().as_ref(), old_text);
                 if expanded {
                     assert!(diff.has_revealed_range(cx));
-                    assert_eq!(diff.buffer().expect("opened buffer").read(cx).text(), new_text);
+                    assert_eq!(
+                        diff.buffer().expect("opened buffer").read(cx).text(),
+                        new_text
+                    );
                 }
                 for (id, unopened) in diffs.iter().skip(1) {
                     assert!(!state.is_tool_call_expanded(id));
@@ -8667,16 +8694,28 @@ pub(crate) mod tests {
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {
             let (index, _) = view.thread.read(cx).tool_call(id).expect("reopened tool");
-            let editor = view.entry_view_state.read(cx).entry(index).expect("reopened entry")
-                .editor_for_diff(diff).expect("reopened editor");
+            let editor = view
+                .entry_view_state
+                .read(cx)
+                .entry(index)
+                .expect("reopened entry")
+                .editor_for_diff(diff)
+                .expect("reopened editor");
             let current_multibuffer = diff.read(cx).multibuffer().expect("new materialization");
             assert_ne!(current_multibuffer.entity_id(), previous_multibuffer);
-            assert_eq!(editor.read(cx).buffer().entity_id(), current_multibuffer.entity_id());
+            assert_eq!(
+                editor.read(cx).buffer().entity_id(),
+                current_multibuffer.entity_id()
+            );
         });
         view.update(cx, |view, cx| view.set_tool_call_expanded(id, false, cx));
         cx.run_until_parked();
 
-        assert_eq!(new_diff_events.get(), 0, "historical views must not trigger live expansion");
+        assert_eq!(
+            new_diff_events.get(),
+            0,
+            "historical views must not trigger live expansion"
+        );
 
         let live_id = acp::ToolCallId::new("live-edit");
         let live_diff = cx.new(|cx| {
@@ -8689,28 +8728,51 @@ pub(crate) mod tests {
             )
         });
         thread.update(cx, |thread, cx| {
-            thread.upsert_tool_call(
-                acp::ToolCall::new(live_id.clone(), "Live edit")
-                    .kind(acp::ToolKind::Edit)
-                    .status(acp::ToolCallStatus::Completed),
-                cx,
-            ).expect("live tool");
-            thread.update_tool_call(
-                acp_thread::ToolCallUpdateDiff { id: live_id.clone(), diff: live_diff.clone() },
-                cx,
-            ).expect("live diff");
+            thread
+                .upsert_tool_call(
+                    acp::ToolCall::new(live_id.clone(), "Live edit")
+                        .kind(acp::ToolKind::Edit)
+                        .status(acp::ToolCallStatus::Completed),
+                    cx,
+                )
+                .expect("live tool");
+            thread
+                .update_tool_call(
+                    acp_thread::ToolCallUpdateDiff {
+                        id: live_id.clone(),
+                        diff: live_diff.clone(),
+                    },
+                    cx,
+                )
+                .expect("live diff");
         });
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {
-            assert!(view.entry_view_state.read(cx).is_tool_call_expanded(&live_id));
+            assert!(
+                view.entry_view_state
+                    .read(cx)
+                    .is_tool_call_expanded(&live_id)
+            );
         });
-        assert_eq!(new_diff_events.get(), 1, "live edits still announce their view");
-        view.update(cx, |view, cx| view.set_tool_call_expanded(&live_id, false, cx));
+        assert_eq!(
+            new_diff_events.get(),
+            1,
+            "live edits still announce their view"
+        );
+        view.update(cx, |view, cx| {
+            view.set_tool_call_expanded(&live_id, false, cx)
+        });
         cx.run_until_parked();
         view.read_with(cx, |view, cx| {
             let (index, _) = view.thread.read(cx).tool_call(&live_id).expect("live tool");
-            assert!(view.entry_view_state.read(cx).entry(index).expect("live entry")
-                .editor_for_diff(&live_diff).is_some());
+            assert!(
+                view.entry_view_state
+                    .read(cx)
+                    .entry(index)
+                    .expect("live entry")
+                    .editor_for_diff(&live_diff)
+                    .is_some()
+            );
             assert!(live_diff.read(cx).buffer().is_some());
         });
     }

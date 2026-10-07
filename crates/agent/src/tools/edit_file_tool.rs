@@ -308,20 +308,22 @@ mod tests {
         let new_text = "Saved after 日本語\n".repeat(128);
         let (events, mut receiver) = ToolCallEventStream::test();
         cx.update(|cx| {
-            edit_tool.replay(
-                EditFileToolInput {
-                    path: "root/file.txt".into(),
-                    edits: Vec::new(),
-                },
-                EditFileToolOutput::Success {
-                    input_path: "root/file.txt".into(),
-                    old_text: Arc::new(old_text.clone()),
-                    new_text: new_text.clone(),
-                    diff: String::new(),
-                },
-                events,
-                cx,
-            ).expect("replay saved edit");
+            edit_tool
+                .replay(
+                    EditFileToolInput {
+                        path: "root/file.txt".into(),
+                        edits: Vec::new(),
+                    },
+                    EditFileToolOutput::Success {
+                        input_path: "root/file.txt".into(),
+                        old_text: Arc::new(old_text.clone()),
+                        new_text: new_text.clone(),
+                        diff: String::new(),
+                    },
+                    events,
+                    cx,
+                )
+                .expect("replay saved edit");
         });
         let diff = receiver.expect_diff().await;
         cx.run_until_parked();
@@ -336,7 +338,9 @@ mod tests {
             );
         });
         assert_eq!(
-            fs.load(path!("/root/file.txt").as_ref()).await.expect("current file"),
+            fs.load(path!("/root/file.txt").as_ref())
+                .await
+                .expect("current file"),
             "Current file contents\n"
         );
     }

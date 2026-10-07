@@ -285,10 +285,18 @@ impl EntryViewState {
             AgentThreadEntry::ToolCall(tool_call) => {
                 let id = tool_call.id.clone();
                 let terminals = tool_call.terminals().cloned().collect::<Vec<_>>();
-                let diffs = tool_call.diffs().filter_map(|diff| {
-                    diff.read(cx).multibuffer().cloned().map(|buffer| (diff.clone(), buffer))
-                }).collect::<Vec<_>>();
-                let materialized_ids = terminals.iter().map(Entity::entity_id)
+                let diffs = tool_call
+                    .diffs()
+                    .filter_map(|diff| {
+                        diff.read(cx)
+                            .multibuffer()
+                            .cloned()
+                            .map(|buffer| (diff.clone(), buffer))
+                    })
+                    .collect::<Vec<_>>();
+                let materialized_ids = terminals
+                    .iter()
+                    .map(Entity::entity_id)
                     .chain(diffs.iter().map(|(diff, _)| diff.entity_id()))
                     .collect::<HashSet<_>>();
 
@@ -350,7 +358,9 @@ impl EntryViewState {
                 for (diff, multibuffer) in diffs {
                     // Close/reopen can precede the queued entry updates, leaving
                     // an editor attached to the previous materialization.
-                    let stale_editor = views.get(&diff.entity_id()).cloned()
+                    let stale_editor = views
+                        .get(&diff.entity_id())
+                        .cloned()
                         .and_then(|view| view.downcast::<Editor>().ok())
                         .is_some_and(|editor| {
                             editor.read(cx).buffer().entity_id() != multibuffer.entity_id()
@@ -369,7 +379,9 @@ impl EntryViewState {
                                     split,
                                 } = event
                                 {
-                                    let Some(multibuffer) = diff.read(cx).multibuffer() else { return; };
+                                    let Some(multibuffer) = diff.read(cx).multibuffer() else {
+                                        return;
+                                    };
                                     if let Some((buffer_id, (ranges, _))) =
                                         selections_by_buffer.iter().next()
                                     {

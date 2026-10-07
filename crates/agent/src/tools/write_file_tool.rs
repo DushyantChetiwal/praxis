@@ -292,20 +292,22 @@ mod tests {
         let new_text = "Saved complete file Ω\n".repeat(128);
         let (events, mut receiver) = ToolCallEventStream::test();
         cx.update(|cx| {
-            write_tool.replay(
-                WriteFileToolInput {
-                    path: "root/file.txt".into(),
-                    content: new_text.clone(),
-                },
-                EditSessionOutput::Success {
-                    input_path: "root/file.txt".into(),
-                    old_text: Arc::new(String::new()),
-                    new_text: new_text.clone(),
-                    diff: String::new(),
-                },
-                events,
-                cx,
-            ).expect("replay saved write");
+            write_tool
+                .replay(
+                    WriteFileToolInput {
+                        path: "root/file.txt".into(),
+                        content: new_text.clone(),
+                    },
+                    EditSessionOutput::Success {
+                        input_path: "root/file.txt".into(),
+                        old_text: Arc::new(String::new()),
+                        new_text: new_text.clone(),
+                        diff: String::new(),
+                    },
+                    events,
+                    cx,
+                )
+                .expect("replay saved write");
         });
         let diff = receiver.expect_diff().await;
         cx.run_until_parked();
@@ -320,7 +322,9 @@ mod tests {
             );
         });
         assert_eq!(
-            fs.load(path!("/root/file.txt").as_ref()).await.expect("current file"),
+            fs.load(path!("/root/file.txt").as_ref())
+                .await
+                .expect("current file"),
             "Current file contents\n"
         );
     }
