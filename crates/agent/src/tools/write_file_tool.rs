@@ -284,6 +284,48 @@ mod tests {
     use util::rel_path::{RelPath, rel_path};
 
     #[gpui::test]
+    async fn historical_diff_replay_preserves_write_contents_without_rewriting_files(
+        cx: &mut TestAppContext,
+    ) {
+        let (write_tool, _project, _action_log, fs, _thread) =
+            setup_test(cx, json!({"file.txt": "Current file contents\n"})).await;
+        let new_text = "Saved complete file Ω\n".repeat(128);
+        let (events, mut receiver) = ToolCallEventStream::test();
+        cx.update(|cx| {
+            write_tool.replay(
+                WriteFileToolInput {
+                    path: "root/file.txt".into(),
+                    content: new_text.clone(),
+                },
+                EditSessionOutput::Success {
+                    input_path: "root/file.txt".into(),
+                    old_text: Arc::new(String::new()),
+                    new_text: new_text.clone(),
+                    diff: String::new(),
+                },
+                events,
+                cx,
+            ).expect("replay saved write");
+        });
+        let diff = receiver.expect_diff().await;
+        cx.run_until_parked();
+        diff.read_with(cx, |diff, cx| {
+            assert!(diff.is_historical());
+            assert!(diff.buffer().is_none());
+            assert!(diff.multibuffer().is_none());
+            assert!(!diff.needs_update("", &new_text, cx));
+            assert_eq!(
+                diff.to_markdown(cx),
+                format!("Diff: root/file.txt\n```\n{new_text}\n```\n")
+            );
+        });
+        assert_eq!(
+            fs.load(path!("/root/file.txt").as_ref()).await.expect("current file"),
+            "Current file contents\n"
+        );
+    }
+
+    #[gpui::test]
     async fn test_streaming_write_create_file(cx: &mut TestAppContext) {
         let (write_tool, _project, _action_log, _fs, _thread) =
             setup_test(cx, json!({"dir": {}})).await;

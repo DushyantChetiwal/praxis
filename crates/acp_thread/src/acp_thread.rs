@@ -4187,19 +4187,42 @@ impl AcpThread {
         cx.notify();
     }
 
+    pub fn materialize_tool_call_diffs(&mut self, id: &acp::ToolCallId, cx: &mut Context<Self>) {
+        let Some((index, call)) = self.tool_call_mut(id) else { return; };
+        let mut changed = false;
+        for diff in call.diffs() {
+            changed |= diff.update(cx, |diff, cx| diff.materialize(cx));
+        }
+        if changed {
+            cx.emit(AcpThreadEvent::EntryUpdated(index));
+            cx.notify();
+        }
+    }
+
     pub fn release_tool_call_render_cache(&mut self, id: &acp::ToolCallId, cx: &mut Context<Self>) {
-        let Some((_, call)) = self.tool_call_mut(id) else {
+        let Some((index, call)) = self.tool_call_mut(id) else {
             return;
         };
+        let mut changed = false;
         if let Some(markdown) = &call.raw_input_markdown {
             markdown.update(cx, |markdown, cx| markdown.release_render_cache(cx));
         }
         for content in call.content() {
-            if let ToolCallContent::ContentBlock(block) = content
-                && let Some(markdown) = block.markdown()
-            {
-                markdown.update(cx, |markdown, cx| markdown.release_render_cache(cx));
+            match content {
+                ToolCallContent::ContentBlock(block) => {
+                    if let Some(markdown) = block.markdown() {
+                        markdown.update(cx, |markdown, cx| markdown.release_render_cache(cx));
+                    }
+                }
+                ToolCallContent::Diff(diff) => {
+                    changed |= diff.update(cx, |diff, cx| diff.release_render_cache(cx));
+                }
+                ToolCallContent::Terminal(_) => {}
             }
+        }
+        if changed {
+            cx.emit(AcpThreadEvent::EntryUpdated(index));
+            cx.notify();
         }
     }
 

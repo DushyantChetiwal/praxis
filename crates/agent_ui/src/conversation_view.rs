@@ -8564,6 +8564,122 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    async fn historical_diff_cards_load_on_open_and_release_on_close(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.expand_edit_card = true;
+            AgentSettings::override_global(settings, cx);
+        });
+        let (conversation, cx) =
+            setup_conversation_view(StubAgentServer::new(StubAgentConnection::new()), cx).await;
+        let view = active_thread(&conversation, cx);
+        let thread = view.read_with(cx, |view, _| view.thread.clone());
+        let languages = cx.update(|_, cx| {
+            Arc::new(language::LanguageRegistry::test(cx.background_executor().clone()))
+        });
+        let old_text = "Saved before Ω\n".repeat(128);
+        let new_text = "Saved after 日本語\n".repeat(128);
+        let mut diffs = Vec::new();
+        for index in 0..64 {
+            let id = acp::ToolCallId::new(format!("historical-edit-{index}"));
+            let diff = cx.new(|_| {
+                acp_thread::Diff::historical(
+                    format!("saved-{index}.txt"),
+                    Some(old_text.clone()),
+                    new_text.clone(),
+                    languages.clone(),
+                )
+            });
+            thread.update(cx, |thread, cx| {
+                thread.upsert_tool_call(
+                    acp::ToolCall::new(id.clone(), "Saved edit")
+                        .kind(acp::ToolKind::Edit)
+                        .status(acp::ToolCallStatus::Completed),
+                    cx,
+                ).expect("restore tool header");
+                thread.update_tool_call(
+                    acp_thread::ToolCallUpdateDiff { id: id.clone(), diff: diff.clone() },
+                    cx,
+                ).expect("restore saved diff");
+            });
+            diffs.push((id, diff));
+        }
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            let state = view.entry_view_state.read(cx);
+            for (id, diff) in &diffs {
+                let (index, _) = view.thread.read(cx).tool_call(id).expect("saved tool");
+                assert!(!state.is_tool_call_expanded(id), "history must not auto-expand");
+                assert!(state.entry(index).expect("saved entry").editor_for_diff(diff).is_none());
+                assert!(diff.read(cx).buffer().is_none());
+            }
+        });
+
+        let (id, diff) = diffs.first().expect("saved edit");
+        for expanded in [true, false, true, false] {
+            view.update(cx, |view, cx| view.set_tool_call_expanded(id, expanded, cx));
+            cx.run_until_parked();
+            view.read_with(cx, |view, cx| {
+                let (index, _) = view.thread.read(cx).tool_call(id).expect("saved tool");
+                let state = view.entry_view_state.read(cx);
+                let editor = state.entry(index).expect("saved entry").editor_for_diff(diff);
+                assert_eq!(state.is_tool_call_expanded(id), expanded);
+                assert_eq!(editor.is_some(), expanded);
+                let diff = diff.read(cx);
+                assert_eq!(diff.buffer().is_some(), expanded);
+                assert_eq!(diff.multibuffer().is_some(), expanded);
+                assert!(!diff.is_loading());
+                assert!(!diff.needs_update(&old_text, &new_text, cx));
+                assert_eq!(diff.base_text().as_ref(), old_text);
+                if expanded {
+                    assert!(diff.has_revealed_range(cx));
+                    assert_eq!(diff.buffer().expect("opened buffer").read(cx).text(), new_text);
+                }
+                for (id, unopened) in diffs.iter().skip(1) {
+                    assert!(!state.is_tool_call_expanded(id));
+                    assert!(unopened.read(cx).buffer().is_none());
+                }
+            });
+        }
+
+        let live_id = acp::ToolCallId::new("live-edit");
+        let live_diff = cx.new(|cx| {
+            acp_thread::Diff::finalized(
+                "live.txt".into(),
+                Some("before\n".into()),
+                "after\n".into(),
+                languages,
+                cx,
+            )
+        });
+        thread.update(cx, |thread, cx| {
+            thread.upsert_tool_call(
+                acp::ToolCall::new(live_id.clone(), "Live edit")
+                    .kind(acp::ToolKind::Edit)
+                    .status(acp::ToolCallStatus::Completed),
+                cx,
+            ).expect("live tool");
+            thread.update_tool_call(
+                acp_thread::ToolCallUpdateDiff { id: live_id.clone(), diff: live_diff.clone() },
+                cx,
+            ).expect("live diff");
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            assert!(view.entry_view_state.read(cx).is_tool_call_expanded(&live_id));
+        });
+        view.update(cx, |view, cx| view.set_tool_call_expanded(&live_id, false, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, cx| {
+            let (index, _) = view.thread.read(cx).tool_call(&live_id).expect("live tool");
+            assert!(view.entry_view_state.read(cx).entry(index).expect("live entry")
+                .editor_for_diff(&live_diff).is_some());
+            assert!(live_diff.read(cx).buffer().is_some());
+        });
+    }
+
+    #[gpui::test]
     async fn test_thread_search_includes_expanded_tool_call_content(cx: &mut TestAppContext) {
         init_test(cx);
 

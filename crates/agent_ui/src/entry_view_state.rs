@@ -14,6 +14,7 @@ use gpui::{
     Focusable, ScrollHandle, TextStyleRefinement, WeakEntity, Window,
 };
 use language::language_settings::SoftWrap;
+use multi_buffer::MultiBuffer;
 use project::{AgentId, Project, project_settings::DiagnosticSeverity};
 use rope::Point;
 use settings::{Settings as _, ThinkingBlockDisplay};
@@ -284,7 +285,12 @@ impl EntryViewState {
             AgentThreadEntry::ToolCall(tool_call) => {
                 let id = tool_call.id.clone();
                 let terminals = tool_call.terminals().cloned().collect::<Vec<_>>();
-                let diffs = tool_call.diffs().cloned().collect::<Vec<_>>();
+                let diffs = tool_call.diffs().filter_map(|diff| {
+                    diff.read(cx).multibuffer().cloned().map(|buffer| (diff.clone(), buffer))
+                }).collect::<Vec<_>>();
+                let materialized_ids = terminals.iter().map(Entity::entity_id)
+                    .chain(diffs.iter().map(|(diff, _)| diff.entity_id()))
+                    .collect::<HashSet<_>>();
 
                 let views = if let Some(Entry::ToolCall(tool_call)) = self.entries.get_mut(index) {
                     &mut tool_call.content
@@ -301,6 +307,10 @@ impl EntryViewState {
                     };
                     &mut tool_call.content
                 };
+
+                // Dropping a historical diff's buffers is ineffective while an
+                // old editor view still owns its multibuffer.
+                views.retain(|id, _| materialized_ids.contains(id));
 
                 let is_tool_call_completed =
                     matches!(tool_call.status, acp_thread::ToolCallStatus::Completed);
@@ -337,9 +347,9 @@ impl EntryViewState {
                     }
                 }
 
-                for diff in diffs {
+                for (diff, multibuffer) in diffs {
                     views.entry(diff.entity_id()).or_insert_with(|| {
-                        let editor = create_editor_diff(diff.clone(), window, cx);
+                        let editor = create_editor_diff(multibuffer, window, cx);
                         cx.subscribe(&editor, {
                             let diff = diff.clone();
                             let entry_index = index;
@@ -349,7 +359,7 @@ impl EntryViewState {
                                     split,
                                 } = event
                                 {
-                                    let multibuffer = diff.read(cx).multibuffer();
+                                    let Some(multibuffer) = diff.read(cx).multibuffer() else { return; };
                                     if let Some((buffer_id, (ranges, _))) =
                                         selections_by_buffer.iter().next()
                                     {
@@ -376,10 +386,12 @@ impl EntryViewState {
                             }
                         })
                         .detach();
-                        cx.emit(EntryViewEvent {
-                            entry_index: index,
-                            view_event: ViewEvent::NewDiff(id.clone()),
-                        });
+                        if !diff.read(cx).is_historical() {
+                            cx.emit(EntryViewEvent {
+                                entry_index: index,
+                                view_event: ViewEvent::NewDiff(id.clone()),
+                            });
+                        }
                         editor.into_any()
                     });
                 }
@@ -675,7 +687,7 @@ fn create_terminal(
 }
 
 fn create_editor_diff(
-    diff: Entity<acp_thread::Diff>,
+    multibuffer: Entity<MultiBuffer>,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<Editor> {
@@ -686,7 +698,7 @@ fn create_editor_diff(
                 show_active_line_background: false,
                 sizing_behavior: SizingBehavior::SizeByContent,
             },
-            diff.read(cx).multibuffer().clone(),
+            multibuffer,
             None,
             window,
             cx,
