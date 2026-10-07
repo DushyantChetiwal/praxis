@@ -32,6 +32,11 @@ EXPECTED_JOBS = {
     "Windows update helper tests": "Test the Windows update helper",
     "Clippy package checks": "Check the Architect packages with Clippy",
 }
+# Successful formatting deliberately skips the failure-only repair/upload steps.
+# Keep this scoped to exact non-validation steps, not arbitrary skipped commands.
+ALLOWED_SKIPPED_STEPS = {
+    "Formatting": frozenset({"Prepare formatting corrections", "Upload formatting corrections"}),
+}
 ACTIVE = {"queued", "in_progress", "waiting", "pending", "requested"}
 SCAN_SECONDS = 60
 SCAN_CANDIDATES = 300
@@ -246,8 +251,16 @@ class Validator:
                     and job["conclusion"] == "success", f"full job did not succeed: {name}")
             steps = job["steps"]
             require(any(step["name"] == anchor for step in steps), f"missing test step: {name}")
-            require(all(step["status"] == "completed" and step["conclusion"] == "success"
-                        for step in steps), f"skipped or unsuccessful step: {name}")
+            allowed_skips = ALLOWED_SKIPPED_STEPS.get(name, frozenset())
+            for step in steps:
+                require(
+                    step["status"] == "completed" and (
+                        step["conclusion"] == "success" or (
+                            step["conclusion"] == "skipped" and step["name"] in allowed_skips
+                        )
+                    ),
+                    f"skipped or unsuccessful step: {name} / {step['name']}",
+                )
 
     def artifact_receipt(self, run):
         artifacts = self.api.pages(f"{self.api.root}/actions/runs/{run['id']}/artifacts", "artifacts")
@@ -534,6 +547,9 @@ def main(argv=None):
         # provenance must cost work, never authorize skipped work.
         output("validated" if arguments.command == "check" else "recorded", "false")
         print(f"Cannot prove validation: {error}; full validation remains required for reuse")
+        if arguments.command == "record":
+            print(f"::error::Original validation receipt was not recorded: {error}")
+            return 1
     return 0
 
 

@@ -95,8 +95,12 @@ it never accepts that main run's skipped jobs as evidence.
   write `receipt.json`, uploaded as
   `praxis-quality-full-RUN_ID-RUN_ATTEMPT` with 30-day retention. It independently
   checks the attempt's jobs through the API, including successful executed steps.
-  Missing provenance can prevent receipt issuance without invalidating a full
-  suite that actually passed. Upload failure still fails the aggregate.
+  The two failure-only formatting correction/upload steps may be skipped on a
+  successful run; no other skipped step is accepted. A recording error in a direct
+  run exits nonzero and fails the aggregate instead of silently leaving no receipt.
+  Reusable invocations and dispatches selecting a different event SHA explicitly
+  report `recorded=not_applicable`; their full checks still run, but they cannot
+  issue original evidence. Upload failure fails the aggregate.
 - A reused run uploads no receipt. A run with skipped tests is never evidence for
   another reuse, even if an artifact is present. Successful originals, not
   recursive skip chains, are the only authorization.
@@ -118,8 +122,11 @@ they lack the captured event provenance. Acceptance requires all of the followin
   size, and contains exactly one small regular `receipt.json` member. No paths,
   symlinks, duplicate members, or extra files are accepted.
 - The expected named jobs, including every native path matrix job, each succeeded in that exact attempt,
-  with successful steps and a known test step. Failed, cancelled, absent,
-  ambiguous, and skipped jobs are rejected.
+  with successful steps and a known test step. Only Formatting's exact
+  `Prepare formatting corrections` and `Upload formatting corrections` steps may
+  have the expected `skipped` conclusion; failures or unfinished states are still
+  rejected. Failed, cancelled, absent, ambiguous, and skipped jobs or test steps
+  are rejected.
 - GitHub's actual tested commit tree equals the local target tree, including
   workflow files, scripts, toolchain, and all other tracked content.
 - The recorded executing workflow blob equals both the source definition and
