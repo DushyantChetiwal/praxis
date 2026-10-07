@@ -614,6 +614,7 @@ pub struct ThreadView {
     pub list_state: ListState,
     pub session_capabilities: SharedSessionCapabilities,
     pub expanded_tool_call_raw_inputs: HashSet<acp::ToolCallId>,
+    historical_diff_observers: HashMap<acp::ToolCallId, Vec<Subscription>>,
     collapsed_sandbox_authorization_details: HashSet<acp::ToolCallId>,
     collapsed_sandbox_network_details: HashSet<acp::ToolCallId>,
     /// A subagent thread the user talks to directly, rather than one the agent
@@ -1040,6 +1041,7 @@ impl ThreadView {
             last_token_limit_telemetry: None,
             thread_feedback: Default::default(),
             expanded_tool_call_raw_inputs: HashSet::default(),
+            historical_diff_observers: HashMap::default(),
             collapsed_sandbox_authorization_details: HashSet::default(),
             collapsed_sandbox_network_details: HashSet::default(),
             user_driven: false,
@@ -1298,6 +1300,35 @@ impl ThreadView {
         expanded: bool,
         cx: &mut Context<Self>,
     ) {
+        self.historical_diff_observers.remove(id);
+        if expanded {
+            let diffs = self
+                .thread
+                .read(cx)
+                .tool_call(id)
+                .map(|(_, call)| {
+                    call.diffs()
+                        .filter(|diff| diff.read(cx).is_historical())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let observers = diffs
+                .into_iter()
+                .map(|diff| {
+                    let id = id.clone();
+                    cx.observe(&diff, move |this, _, cx| {
+                        if let Some((index, _)) = this.thread.read(cx).tool_call(&id) {
+                            this.list_state.remeasure_items(index..index + 1);
+                        }
+                        cx.notify();
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !observers.is_empty() {
+                self.historical_diff_observers.insert(id.clone(), observers);
+            }
+        }
         self.entry_view_state.update(cx, |state, _| {
             if expanded {
                 state.expand_tool_call(id.clone());
@@ -1313,7 +1344,9 @@ impl ThreadView {
             });
         self.thread.update(cx, |thread, cx| {
             thread.set_tool_call_raw_input_expanded(id, show_input, cx);
-            if !expanded {
+            if expanded {
+                thread.materialize_tool_call_diffs(id, cx);
+            } else {
                 thread.release_tool_call_render_cache(id, cx);
             }
         });
@@ -8872,8 +8905,11 @@ impl ThreadView {
                                                                     let base_text = diff_data
                                                                         .base_text()
                                                                         .clone();
-                                                                    let buffer =
-                                                                        diff_data.buffer().clone();
+                                                                    let Some(buffer) =
+                                                                        diff_data.buffer().cloned()
+                                                                    else {
+                                                                        return;
+                                                                    };
                                                                     buffer.update(
                                                                         cx,
                                                                         |buffer, cx| {
@@ -10741,7 +10777,9 @@ impl ThreadView {
             })
             .child(if let Some(editor) = revealed_diff_editor {
                 editor.into_any_element()
-            } else if tool_progress && self.as_native_connection(cx).is_some() {
+            } else if diff.read(cx).is_loading()
+                || (tool_progress && self.as_native_connection(cx).is_some())
+            {
                 self.render_diff_loading(cx)
             } else {
                 Empty.into_any()

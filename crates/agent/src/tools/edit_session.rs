@@ -248,13 +248,12 @@ impl EditSessionContext {
                 new_text,
                 ..
             } => {
-                event_stream.update_diff(cx.new(|cx| {
-                    Diff::finalized(
+                event_stream.update_diff(cx.new(|_| {
+                    Diff::historical(
                         input_path.to_string_lossy().into_owned(),
                         Some(old_text.to_string()),
                         new_text,
                         self.language_registry.clone(),
-                        cx,
                     )
                 }));
                 Ok(())
