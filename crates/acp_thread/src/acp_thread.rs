@@ -15129,7 +15129,9 @@ mod tests {
         );
         assert_ne!(completed["last_activity"], previous["last_activity"]);
         complete
-            .send(Ok(acp_v1::PromptResponse::new(acp_v1::StopReason::Cancelled)))
+            .send(Ok(acp_v1::PromptResponse::new(
+                acp_v1::StopReason::Cancelled,
+            )))
             .expect("backend should still be running");
         cancellation.await.expect("cancellation should finish");
         request.await.expect("turn should finish");
@@ -20650,7 +20652,8 @@ mod tests {
             assert!(!timed_out);
             assert_eq!(
                 actual.action,
-                response.map_or(acp_v2::ElicitationAction::Cancel, |response| response.action)
+                response.map_or(acp_v2::ElicitationAction::Cancel, |response| response
+                    .action)
             );
         }
     }

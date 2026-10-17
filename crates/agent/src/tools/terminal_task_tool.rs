@@ -451,10 +451,7 @@ impl TerminalTask {
     }
 }
 
-fn bounded_output(
-    mut output: ProcessOutput,
-    selection: TerminalOutputSelection,
-) -> ProcessOutput {
+fn bounded_output(mut output: ProcessOutput, selection: TerminalOutputSelection) -> ProcessOutput {
     output.output = select_terminal_output_lines(&output.output, selection);
     if output.output.len() > COMMAND_OUTPUT_LIMIT as usize {
         let mut end = COMMAND_OUTPUT_LIMIT as usize;
@@ -515,9 +512,8 @@ async fn wait_with_countdown(
     let deadline = executor.now() + Duration::from_millis(wait_ms);
     let completion = task.wait(wait_ms, cx).fuse();
     futures::pin_mut!(completion);
-    event_stream.update_fields(|update| {
-        update.title(terminal_wait_title(Duration::from_millis(wait_ms)))
-    });
+    event_stream
+        .update_fields(|update| update.title(terminal_wait_title(Duration::from_millis(wait_ms))));
     loop {
         futures::select_biased! {
             _ = event_stream.cancelled_by_user().fuse() => return Err("Terminal wait cancelled".into()),
@@ -844,18 +840,33 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(
-            events.expect_update_fields().await.title.value().map(String::as_str),
+            events
+                .expect_update_fields()
+                .await
+                .title
+                .value()
+                .map(String::as_str),
             Some("Waiting · 0:30 remaining")
         );
         advance(cx, 1000);
         assert_eq!(
-            events.expect_update_fields().await.title.value().map(String::as_str),
+            events
+                .expect_update_fields()
+                .await
+                .title
+                .value()
+                .map(String::as_str),
             Some("Waiting · 0:29 remaining")
         );
         terminal.signal_exit();
         cx.run_until_parked();
         assert_eq!(
-            events.expect_update_fields().await.title.value().map(String::as_str),
+            events
+                .expect_update_fields()
+                .await
+                .title
+                .value()
+                .map(String::as_str),
             Some("Finished waiting")
         );
         assert!(wait.await.expect("wait").contains("still_running: false"));
@@ -1212,10 +1223,8 @@ mod tests {
 
     #[test]
     fn terminal_tasks_output_selection_precedes_cap() {
-        let output = ProcessOutput::new(
-            format!("first\n{}\nlast", "middle\n".repeat(10_000)),
-            false,
-        );
+        let output =
+            ProcessOutput::new(format!("first\n{}\nlast", "middle\n".repeat(10_000)), false);
         let output = bounded_output(
             output,
             TerminalOutputSelection {

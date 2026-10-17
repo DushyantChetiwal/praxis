@@ -3040,9 +3040,8 @@ async fn send_and_wait(
         // Native sessions accept the message first and report the end of the
         // turn separately, so the send itself does not wait for the step.
         Some(connection) => {
-            let completion = cx.update(|cx| {
-                connection.send_and_wait_for_completion(thread.clone(), content, cx)
-            });
+            let completion = cx
+                .update(|cx| connection.send_and_wait_for_completion(thread.clone(), content, cx));
             match completion.await.map_err(failed)? {
                 acp::StopReason::EndTurn => Ok(()),
                 acp::StopReason::Cancelled => Err(RunOutcome::Cancelled),

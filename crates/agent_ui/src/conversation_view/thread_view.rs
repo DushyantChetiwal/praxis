@@ -11055,8 +11055,10 @@ impl ThreadView {
     }
 
     fn tool_call_shows_raw_input(call: &ToolCall) -> bool {
-        !matches!(call.kind(), acp_v2::ToolKind::Execute | acp_v2::ToolKind::Edit)
-            && call.diffs().next().is_none()
+        !matches!(
+            call.kind(),
+            acp_v2::ToolKind::Execute | acp_v2::ToolKind::Edit
+        ) && call.diffs().next().is_none()
             && !call
                 .content()
                 .iter()

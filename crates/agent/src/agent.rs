@@ -11647,9 +11647,11 @@ mod internal_tests {
             .expect("mode selector");
 
         for initial_mode in [SessionMode::Plan, SessionMode::Architect] {
-            cx.update(|cx| modes.set_mode(acp_v2::SessionConfigValueId::new(initial_mode.id()), cx))
-                .await
-                .expect("select read-only mode");
+            cx.update(|cx| {
+                modes.set_mode(acp_v2::SessionConfigValueId::new(initial_mode.id()), cx)
+            })
+            .await
+            .expect("select read-only mode");
             let prompt = cx.update(|cx| {
                 connection.send_and_wait_for_completion(
                     acp_thread.clone(),
@@ -12879,12 +12881,12 @@ mod internal_tests {
             thread.respond_to_elicitation(
                 &elicitation_id,
                 acp_v2::CreateElicitationResponse::new(acp_v2::ElicitationAction::Accept(
-                    acp_v2::ElicitationAcceptAction::new().content(std::collections::BTreeMap::from(
-                        [(
+                    acp_v2::ElicitationAcceptAction::new().content(
+                        std::collections::BTreeMap::from([(
                             "answer".to_string(),
                             acp_v2::ElicitationContentValue::from("postgres"),
-                        )],
-                    )),
+                        )]),
+                    ),
                 )),
                 cx,
             );
