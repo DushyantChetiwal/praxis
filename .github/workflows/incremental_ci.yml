@@ -54,6 +54,7 @@ jobs:
         with:
           shared-key: incremental-comparison-${{ matrix.label }}
           workspaces: . -> target/incremental-comparison
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Measure initial, unchanged, and edited builds
         env:
           # rust-cache exports CARGO_INCREMENTAL=0; override it at the measured step.

@@ -32,10 +32,15 @@ EXPECTED_JOBS = {
     "Windows update helper tests": "Test the Windows update helper",
     "Clippy package checks": "Check the Architect packages with Clippy",
 }
-# Successful formatting deliberately skips the failure-only repair/upload steps.
-# Keep this scoped to exact non-validation steps, not arbitrary skipped commands.
+# Successful formatting deliberately skips the failure-only repair, upload, and
+# pull-request correction steps. Keep this scoped to exact non-validation
+# steps, not arbitrary skipped commands.
 ALLOWED_SKIPPED_STEPS = {
-    "Formatting": frozenset({"Prepare formatting corrections", "Upload formatting corrections"}),
+    "Formatting": frozenset({
+        "Prepare formatting corrections",
+        "Upload formatting corrections",
+        "Commit formatting corrections to this pull request",
+    }),
 }
 ACTIVE = {"queued", "in_progress", "waiting", "pending", "requested"}
 SCAN_SECONDS = 60

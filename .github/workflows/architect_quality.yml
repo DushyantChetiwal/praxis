@@ -83,6 +83,16 @@ jobs:
     name: Formatting
     env:
       SOURCE_REF: ${{ needs.prepare.outputs.source_sha }}
+      FORK_WORKFLOW_FILES: >-
+        .github/workflows/architect_quality.yml
+        .github/workflows/sync_upstream.yml
+        .github/workflows/bundle_fork.yml
+        .github/workflows/bundle_after_merge.yml
+        .github/workflows/android_remote.yml
+        .github/workflows/remote_relay_probe.yml
+        .github/workflows/incremental_ci.yml
+        .github/actions/rust-build-cache/action.yml
+        .github/actions/save-rust-build-cache/action.yml
     needs: prepare
     if: needs.prepare.outputs.validated != 'true'
     runs-on: ubuntu-24.04
@@ -121,26 +131,18 @@ jobs:
         run: ./script/prettier
 
       - name: Check the fork workflow formatting
-        run: >-
-          pnpm dlx prettier@3.5.0
-          .github/workflows/architect_quality.yml
-          .github/workflows/sync_upstream.yml
-          .github/workflows/bundle_fork.yml
-          .github/workflows/bundle_after_merge.yml
-          .github/workflows/android_remote.yml
-          .github/workflows/remote_relay_probe.yml
-          .github/workflows/incremental_ci.yml
-          .github/actions/rust-build-cache/action.yml
-          .github/actions/save-rust-build-cache/action.yml
-          --check
+        # Word splitting of the file list is intended.
+        run: pnpm dlx prettier@3.5.0 ${FORK_WORKFLOW_FILES} --check
 
       - name: Prepare formatting corrections
         if: failure()
         run: |
           cargo fmt --all
           if [ -f script/probe-praxis-relay.rs ]; then rustfmt --edition 2024 script/probe-praxis-relay.rs; fi
-          ./script/prettier --write
-          pnpm dlx prettier@3.5.0 .github/workflows/architect_quality.yml .github/workflows/android_remote.yml .github/workflows/remote_relay_probe.yml .github/workflows/incremental_ci.yml .github/workflows/bundle_fork.yml .github/actions/rust-build-cache/action.yml .github/actions/save-rust-build-cache/action.yml --write
+          if command -v pnpm >/dev/null; then
+            ./script/prettier --write
+            pnpm dlx prettier@3.5.0 ${FORK_WORKFLOW_FILES} --write
+          fi
           git --no-pager diff --binary > rust-format.patch
 
       - name: Upload formatting corrections
@@ -151,11 +153,62 @@ jobs:
           path: rust-format.patch
           if-no-files-found: ignore
 
+      # Formatters only run in CI, so unformatted pushes used to cost a full
+      # failed run plus a manual follow-up push that cancelled the next run.
+      - name: Commit formatting corrections to this pull request
+        if: >-
+          failure() &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          PUSH_TOKEN: ${{ secrets.PRAXIS_SYNC_TOKEN }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PUSH_TOKEN}" ]; then
+            echo "::notice::No push token is available; apply the rust-format artifact instead."
+            exit 0
+          fi
+          git fetch --no-tags --quiet --depth=2 origin "${HEAD_SHA}"
+          if [ "$(git log -1 --format=%s "${HEAD_SHA}")" = "Apply CI formatting" ]; then
+            echo "::warning::The automatic formatting commit still fails formatting; not pushing again."
+            exit 0
+          fi
+          git reset --hard --quiet
+          git checkout --quiet --detach "${HEAD_SHA}"
+          cargo fmt --all
+          if [ -f script/probe-praxis-relay.rs ]; then rustfmt --edition 2024 script/probe-praxis-relay.rs; fi
+          if command -v pnpm >/dev/null; then
+            ./script/prettier --write
+            pnpm dlx prettier@3.5.0 ${FORK_WORKFLOW_FILES} --write
+          fi
+          if git diff --quiet; then
+            echo "The pull request head is already formatted; nothing to push."
+            exit 0
+          fi
+          git -c user.name="praxis-format[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet --all --message "Apply CI formatting"
+          authorization="$(printf 'x-access-token:%s' "${PUSH_TOKEN}" | base64 | tr -d '\n')"
+          echo "::add-mask::${authorization}"
+          # A plain push refuses to overwrite a branch that moved meanwhile.
+          if git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${authorization}" \
+            push --quiet origin "HEAD:refs/heads/${HEAD_REF}"; then
+            echo "::notice::Pushed formatting corrections to ${HEAD_REF}; checks restart on that commit."
+          else
+            echo "::warning::Could not push formatting corrections; apply the rust-format artifact instead."
+          fi
+
   architect-tests:
     name: ${{ matrix.name }}
     env:
       SOURCE_REF: ${{ needs.prepare.outputs.source_sha }}
-    needs: prepare
+    # Unformatted commits are corrected and pushed again, so expensive jobs
+    # wait for formatting instead of running on a superseded commit.
+    needs:
+      - prepare
+      - formatting
     if: needs.prepare.outputs.validated != 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -181,6 +234,8 @@ jobs:
         with:
           shared-key: architect-tests
           cache-on-failure: true
+          # PR-scoped caches are unusable by other branches and evict main's.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Test the Architect graph and runner
         run: cargo test --locked -p architect --lib
@@ -192,7 +247,9 @@ jobs:
     name: Agent and canvas integration tests
     env:
       SOURCE_REF: ${{ needs.prepare.outputs.source_sha }}
-    needs: prepare
+    needs:
+      - prepare
+      - formatting
     if: needs.prepare.outputs.validated != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -211,6 +268,7 @@ jobs:
         with:
           shared-key: architect-agent-tests
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Test lossless history memory behavior
         run: |
@@ -369,7 +427,9 @@ jobs:
     name: Auto-update integrity tests
     env:
       SOURCE_REF: ${{ needs.prepare.outputs.source_sha }}
-    needs: prepare
+    needs:
+      - prepare
+      - formatting
     if: needs.prepare.outputs.validated != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -385,6 +445,7 @@ jobs:
         with:
           shared-key: architect-updater-tests
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Test the updater
         run: cargo test --locked -p auto_update --lib
@@ -402,7 +463,9 @@ jobs:
     name: Windows update helper tests
     env:
       SOURCE_REF: ${{ needs.prepare.outputs.source_sha }}
-    needs: prepare
+    needs:
+      - prepare
+      - formatting
     if: needs.prepare.outputs.validated != 'true'
     runs-on: windows-2022
     timeout-minutes: 90
@@ -423,6 +486,7 @@ jobs:
         with:
           shared-key: architect-windows-updater-tests
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Test the Windows update helper
         run: cargo test --locked -p auto_update_helper
@@ -435,7 +499,9 @@ jobs:
     name: Clippy package checks
     env:
       SOURCE_REF: ${{ needs.prepare.outputs.source_sha }}
-    needs: prepare
+    needs:
+      - prepare
+      - formatting
     if: needs.prepare.outputs.validated != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -454,6 +520,7 @@ jobs:
         with:
           shared-key: architect-clippy
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check the Architect packages with Clippy
         run: >-
