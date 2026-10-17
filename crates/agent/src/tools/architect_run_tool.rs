@@ -677,7 +677,13 @@ fn thread_activity(thread: &AcpThread) -> Value {
             .then(|| json!({"call_id": call.id, "liveness": liveness}))
         })
         .collect();
-    json!({"session_id": thread.session_id(), "waiting_for_user_input": thread.is_waiting_for_confirmation(), "calls": calls})
+    json!({"session_id": thread.session_id(), "waiting_for_user_input": waiting_for_user_input(thread), "calls": calls})
+}
+
+/// Receipt sessions report `RequiresAction` only once a running turn syncs its
+/// activity, after observers have already seen the pending request.
+fn waiting_for_user_input(thread: &AcpThread) -> bool {
+    thread.is_waiting_for_confirmation() || thread.has_pending_turn_action()
 }
 
 fn active_records(thread: &Thread, cx: &App) -> Vec<Value> {
@@ -1125,9 +1131,9 @@ fn observe_run_wait(
         }));
     }
     // Ignore the coordinator wait tool's own liveness, or it wakes itself.
-    let waiting = coordinator.read(cx).is_waiting_for_confirmation();
+    let waiting = waiting_for_user_input(coordinator.read(cx));
     observers.push(cx.observe(coordinator, move |thread, cx| {
-        if thread.read(cx).is_waiting_for_confirmation() != waiting {
+        if waiting_for_user_input(thread.read(cx)) != waiting {
             wake_wait(&sender, "user_input_changed");
         }
     }));
@@ -1149,8 +1155,8 @@ fn wait_snapshot(
         10,
         json!({
             "wait_reason": reason, "state": run_status(thread),
-            "waiting_for_user_input": coordinator.is_waiting_for_confirmation()
-                || active_threads(thread).iter().any(|thread| thread.read(cx).is_waiting_for_confirmation()),
+            "waiting_for_user_input": waiting_for_user_input(coordinator)
+                || active_threads(thread).iter().any(|thread| waiting_for_user_input(thread.read(cx))),
             "events": events["events"], "next_sequence": events["next_sequence"],
             "event_sequence": events["event_sequence"], "has_more": events["has_more"],
             "cursor_gap": events["cursor_gap"], "oldest_sequence": events["oldest_sequence"],
@@ -1195,8 +1201,8 @@ impl AgentTool for WaitArchitectRunTool {
                     ensure!(input.after_sequence <= owner.architect_event_sequence(), "Event cursor is ahead of this conversation.");
                     if owner.architect_event_sequence() > input.after_sequence {
                         wake_wait(&sender, "events_available");
-                    } else if coordinator.read(cx).is_waiting_for_confirmation()
-                        || active_threads(owner).iter().any(|active| active.read(cx).is_waiting_for_confirmation()) {
+                    } else if waiting_for_user_input(coordinator.read(cx))
+                        || active_threads(owner).iter().any(|active| waiting_for_user_input(active.read(cx))) {
                         wake_wait(&sender, "user_input");
                     } else if owner.architect_run().is_none_or(|run| !run.is_running()) {
                         wake_wait(&sender, "not_running");

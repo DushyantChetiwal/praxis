@@ -4403,7 +4403,7 @@ impl AcpThread {
         self.has_pending_turn_action()
     }
 
-    fn has_pending_turn_action(&self) -> bool {
+    pub fn has_pending_turn_action(&self) -> bool {
         if self
             .permission_requests
             .values()
