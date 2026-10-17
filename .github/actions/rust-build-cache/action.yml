@@ -1,22 +1,22 @@
 name: Restore incremental Rust build state
-description: Retain compatible workspace artifacts and incremental data without weakening validation
+description: Restore public-repository build checkpoints without consuming the Actions cache pool
 inputs:
   cache-name:
     description: Distinct platform, target architecture, desktop/server, and profile identity
     required: true
   legacy-key:
-    description: Optional dependency-cache key used before incremental builds were enabled
+    description: Optional dependency-cache key used before build checkpoints were enabled
     required: false
     default: ""
 outputs:
   primary-key:
-    description: Immutable key for saving this build
+    description: Immutable identity for saving this build's checkpoint
     value: ${{ steps.identity.outputs.key }}
   matched-key:
-    description: Compatible cache restored, or empty for a cold build
-    value: ${{ steps.restore.outputs.cache-matched-key }}
+    description: Successfully restored compatible checkpoint, or empty for a cold build
+    value: ${{ steps.unpack.outputs.restored == 'true' && steps.lookup.outputs.matched-key || '' }}
   cache-paths:
-    description: Cargo registry/git and build intermediates, excluding credentials and release packages
+    description: Compiler-state paths, excluding credentials and release packages
     value: ${{ steps.identity.outputs.paths }}
 runs:
   using: composite
@@ -27,22 +27,50 @@ runs:
       env:
         CARGO_INCREMENTAL: "1"
         CACHE_NAME: ${{ inputs.cache-name }}
-        CACHE_RECIPE: ${{ hashFiles('**/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'script/bundle-*', 'script/ci-incremental-cache.py', '.github/actions/rust-build-cache/action.yml') }}
+        CACHE_RECIPE: ${{ hashFiles('**/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'script/bundle-*', 'script/ci-incremental-cache.py', 'script/ci-build-checkpoint.py', '.github/actions/rust-build-cache/action.yml', '.github/actions/save-rust-build-cache/action.yml') }}
       run: python script/ci-incremental-cache.py
 
-    - name: Restore compatible workspace and incremental artifacts
-      id: restore
-      uses: actions/cache/restore@v5
+    - name: Find a compatible retained build checkpoint
+      id: lookup
       continue-on-error: true
-      with:
-        path: ${{ steps.identity.outputs.paths }}
-        key: ${{ steps.identity.outputs.key }}
-        restore-keys: ${{ steps.identity.outputs.prefix }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        CHECKPOINT_PREFIX: ${{ steps.identity.outputs.prefix }}
+        REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+      run: python script/ci-build-checkpoint.py find
 
-    # This fallback warms the first build from existing non-incremental dependencies.
-    # Never run its save hook: rust-cache removes target/*/incremental during cleanup.
-    - name: Restore legacy dependencies on a cache miss
-      if: steps.restore.outputs.cache-matched-key == '' && inputs.legacy-key != ''
+    - name: Download the retained build checkpoint
+      id: download
+      if: steps.lookup.outputs.artifact-id != ''
+      continue-on-error: true
+      uses: actions/download-artifact@v8
+      with:
+        artifact-ids: ${{ steps.lookup.outputs.artifact-id }}
+        run-id: ${{ steps.lookup.outputs.run-id }}
+        github-token: ${{ github.token }}
+        path: ${{ runner.temp }}/rust-build-checkpoint
+        merge-multiple: true
+
+    - name: Verify and restore the complete compiler state
+      id: unpack
+      if: steps.download.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        CHECKPOINT_KEY: ${{ steps.lookup.outputs.matched-key }}
+        REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+      run: python script/ci-build-checkpoint.py restore --directory "${{ runner.temp }}/rust-build-checkpoint"
+
+    - name: Remove the downloaded checkpoint archive
+      if: always()
+      continue-on-error: true
+      shell: bash
+      run: python -c 'import os, pathlib, shutil; directory = pathlib.Path(os.environ["RUNNER_TEMP"]) / "rust-build-checkpoint"; shutil.rmtree(directory) if directory.exists() else None'
+
+    # This fallback never saves: rust-cache's cleanup removes incremental data.
+    - name: Restore legacy dependencies on a checkpoint miss
+      if: steps.unpack.outputs.restored != 'true' && inputs.legacy-key != ''
       uses: Swatinem/rust-cache@v2
       continue-on-error: true
       env:
@@ -51,19 +79,19 @@ runs:
         shared-key: ${{ inputs.legacy-key }}
         save-if: "false"
 
-    - name: Enable incremental compilation after cache restoration
+    - name: Enable incremental compilation after state restoration
       shell: bash
       env:
         CARGO_INCREMENTAL: "1"
-        RESTORED_CACHE: ${{ steps.restore.outputs.cache-matched-key }}
+        RESTORED_CHECKPOINT: ${{ steps.unpack.outputs.restored == 'true' && steps.lookup.outputs.matched-key || '' }}
       run: |
         python - <<'PY'
         import os
         assert os.environ["CARGO_INCREMENTAL"] == "1"
         with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
             output.write("CARGO_INCREMENTAL=1\n")
-        restored = os.environ.get("RESTORED_CACHE") or "miss; using available dependencies or a cold build"
+        restored = os.environ.get("RESTORED_CHECKPOINT") or "miss; using available dependencies or a cold build"
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as output:
-            output.write(f"### Incremental Rust build\n\nCARGO_INCREMENTAL=1\n\nWorkspace cache: {restored}\n")
-        print(f"CARGO_INCREMENTAL=1; workspace cache: {restored}")
+            output.write(f"### Incremental Rust build\n\nCARGO_INCREMENTAL=1\n\nBuild checkpoint: {restored}\n")
+        print(f"CARGO_INCREMENTAL=1; build checkpoint: {restored}")
         PY

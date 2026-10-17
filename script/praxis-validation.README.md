@@ -52,6 +52,12 @@ running, or successful full bundle with the same immutable source and build
 configuration. Failed bundles can be dispatched again. Upstream sync is not a PR
 merge and retains its own dispatch, including its `rebuild` option.
 
+The daily upstream sync stages its merge on a `praxis-sync/` branch and
+dispatches `architect_quality.yml` directly on that branch with the staged SHA as
+`source_ref`. Because the dispatch ref head is the selected source, that run issues
+a receipt, and the promoted main push and the sync's bundle reuse it instead of
+validating the same tree twice more.
+
 Bundle prepare invokes `check` with its pinned checkout SHA and `GH_TOKEN`; both
 prepare and the reusable quality call need `actions: read` and `contents: read`.
 The bundle wait budget is `--wait-seconds 10800`, inside a 190-minute prepare job
@@ -95,13 +101,25 @@ it never accepts that main run's skipped jobs as evidence.
   write `receipt.json`, uploaded as
   `praxis-quality-full-RUN_ID-RUN_ATTEMPT` with 30-day retention. It independently
   checks the attempt's jobs through the API, including successful executed steps.
-  Missing provenance can prevent receipt issuance without invalidating a full
-  suite that actually passed. Upload failure still fails the aggregate.
+  The three failure-only formatting correction, upload, and pull-request commit
+  steps may be skipped on a successful run; no other skipped step is accepted. A recording error in a direct
+  run exits nonzero and fails the aggregate instead of silently leaving no receipt.
+  Reusable invocations and dispatches selecting a different event SHA explicitly
+  report `recorded=not_applicable`; their full checks still run, but they cannot
+  issue original evidence. Upload failure fails the aggregate.
 - A reused run uploads no receipt. A run with skipped tests is never evidence for
   another reuse, even if an artifact is present. Successful originals, not
   recursive skip chains, are the only authorization.
 - Only PR-number concurrency cancels superseded runs. Non-PR groups include run ID
   and attempt, avoiding cancellation between main, dispatch, and reusable runs.
+- Every test and Clippy job waits for Formatting. When formatting fails on a
+  same-repository pull request, Formatting commits `Apply CI formatting` to the
+  pull request branch with `PRAXIS_SYNC_TOKEN`, which restarts checks on the
+  corrected commit. It never force-pushes and never corrects its own commit
+  again. Pull before pushing to a branch that CI may have corrected.
+- Rust caches are saved only from `main`. Pull requests restore main's caches;
+  their own caches could not be restored by other branches and evicted main's
+  from the shared 10 GiB pool.
 - The Python unit tests run in Formatting. Older selected source without these
   scripts still runs the existing full suite but cannot issue a reusable receipt.
 
@@ -118,8 +136,12 @@ they lack the captured event provenance. Acceptance requires all of the followin
   size, and contains exactly one small regular `receipt.json` member. No paths,
   symlinks, duplicate members, or extra files are accepted.
 - The expected named jobs, including every native path matrix job, each succeeded in that exact attempt,
-  with successful steps and a known test step. Failed, cancelled, absent,
-  ambiguous, and skipped jobs are rejected.
+  with successful steps and a known test step. Only Formatting's exact
+  `Prepare formatting corrections`, `Upload formatting corrections`, and
+  `Commit formatting corrections to this pull request` steps may
+  have the expected `skipped` conclusion; failures or unfinished states are still
+  rejected. Failed, cancelled, absent, ambiguous, and skipped jobs or test steps
+  are rejected.
 - GitHub's actual tested commit tree equals the local target tree, including
   workflow files, scripts, toolchain, and all other tracked content.
 - The recorded executing workflow blob equals both the source definition and
@@ -147,9 +169,9 @@ prove which reusable definition executed. This conservative fallback also covers
 cross-ref/default-branch differences. Bundles can still reuse a verified original
 PR merge tree directly, and a main push can reuse that same tree even when its
 commit SHA differs from the synthetic PR merge SHA. Bundles can also wait for an
-original direct main push and reuse its final full receipt. Sync's reusable
-validation still issues no receipt: a later main or bundle may consequently need
-another full validation. This is an explicit safe fallback, not proof of reuse.
+original direct main push and reuse its final full receipt. The upstream sync
+does not use the reusable call: it dispatches quality directly on its staging
+branch, so its validation issues a receipt like any other direct run.
 
 History searches share a 60-second budget and at most 300 candidate inspections,
 inside the total deadline. Each pass lists at most the newest 300 quality runs;

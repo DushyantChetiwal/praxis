@@ -2,11 +2,14 @@ name: Sync Praxis with upstream Zed
 
 on:
   schedule:
+    # Daily merges keep each upstream delta small enough to merge cleanly.
+    # Only Monday's sync also rebuilds and publishes Praxis Dev.
     - cron: "17 3 * * 1"
+    - cron: "17 3 * * 0,2-6"
   workflow_dispatch:
     inputs:
       rebuild:
-        description: Rebuild Windows and macOS after a successful update
+        description: Rebuild every platform after a successful update
         required: false
         default: true
         type: boolean
@@ -14,10 +17,15 @@ on:
 permissions:
   actions: write
   contents: write
+  issues: write
+  pull-requests: read
 
 concurrency:
   group: sync-upstream
   cancel-in-progress: false
+
+env:
+  TRACKING_ISSUE_TITLE: Upstream Zed sync is blocked
 
 jobs:
   stage:
@@ -26,9 +34,12 @@ jobs:
     timeout-minutes: 30
     outputs:
       base_sha: ${{ steps.sync.outputs.base_sha }}
-      changed: ${{ steps.sync.outputs.changed }}
+      conflicts: ${{ steps.sync.outputs.conflicts }}
+      pending_pr: ${{ steps.sync.outputs.pending_pr }}
       staging_ref: ${{ steps.sync.outputs.staging_ref }}
       staging_sha: ${{ steps.sync.outputs.staging_sha }}
+      state: ${{ steps.sync.outputs.state }}
+      upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
     steps:
       - name: Check out the Praxis branch
         uses: actions/checkout@v7
@@ -42,6 +53,8 @@ jobs:
 
       - name: Merge upstream Zed and push staging ref
         id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -52,49 +65,117 @@ jobs:
           git fetch --no-tags upstream main
 
           base_sha="$(git rev-parse HEAD)"
+          upstream_sha="$(git rev-parse upstream/main)"
           echo "base_sha=${base_sha}" >> "${GITHUB_OUTPUT}"
+          echo "upstream_sha=${upstream_sha}" >> "${GITHUB_OUTPUT}"
           if git merge-base --is-ancestor upstream/main HEAD; then
-            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            echo "state=current" >> "${GITHUB_OUTPUT}"
             echo "Praxis is already current with upstream." >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
 
+          # A sync that needs fixes stays open as a praxis-sync/ pull request.
+          # Staging another merge underneath it would only duplicate that work.
+          pending="$(gh pr list --repo "${GITHUB_REPOSITORY}" --base main --state open \
+            --json number,headRefName \
+            --jq '[.[] | select(.headRefName | startswith("praxis-sync/"))][0].number // empty')"
+          if [ -n "${pending}" ]; then
+            echo "state=pending" >> "${GITHUB_OUTPUT}"
+            echo "pending_pr=${pending}" >> "${GITHUB_OUTPUT}"
+            echo "Upstream sync pull request #${pending} must merge first." >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+
           if ! git merge --no-ff --no-edit upstream/main; then
-            conflicts="$(git diff --name-only --diff-filter=U)"
+            delimiter="conflicts-${GITHUB_RUN_ID}-${RANDOM}${RANDOM}"
+            {
+              echo "conflicts<<${delimiter}"
+              git diff --name-only --diff-filter=U
+              echo "${delimiter}"
+            } >> "${GITHUB_OUTPUT}"
             {
               echo "## Upstream merge needs manual resolution"
               echo
               echo '```text'
-              echo "${conflicts}"
+              git diff --name-only --diff-filter=U
               echo '```'
             } >> "${GITHUB_STEP_SUMMARY}"
             git merge --abort
-            exit 1
+            echo "state=conflict" >> "${GITHUB_OUTPUT}"
+            exit 0
           fi
 
           staging_branch="praxis-sync/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           staging_sha="$(git rev-parse HEAD)"
           git push origin "HEAD:refs/heads/${staging_branch}"
-          echo "changed=true" >> "${GITHUB_OUTPUT}"
+          echo "state=staged" >> "${GITHUB_OUTPUT}"
           echo "staging_ref=${staging_branch}" >> "${GITHUB_OUTPUT}"
           echo "staging_sha=${staging_sha}" >> "${GITHUB_OUTPUT}"
-          echo "Staged upstream commit $(git rev-parse upstream/main) as ${staging_sha}." \
+          echo "Staged upstream commit ${upstream_sha} as ${staging_sha}." \
             >> "${GITHUB_STEP_SUMMARY}"
 
-  quality:
+  validate:
     name: Validate the staged merge
     needs: stage
-    if: needs.stage.outputs.changed == 'true'
-    uses: ./.github/workflows/architect_quality.yml
-    with:
-      source_ref: ${{ needs.stage.outputs.staging_sha }}
+    if: needs.stage.outputs.state == 'staged'
+    runs-on: ubuntu-24.04
+    # Outlasts the slowest quality job (180 minutes) plus runner queueing.
+    timeout-minutes: 300
+    outputs:
+      conclusion: ${{ steps.quality.outputs.conclusion }}
+      run_url: ${{ steps.quality.outputs.run_url }}
+    steps:
+      - name: Run direct quality validation on the staging ref
+        id: quality
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_REF: ${{ needs.stage.outputs.staging_ref }}
+          STAGING_SHA: ${{ needs.stage.outputs.staging_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A reusable call cannot issue a validation receipt, so the promoted
+          # main push and the bundle each repeated the full suite. A direct
+          # dispatch whose ref head is the selected source issues one.
+          gh workflow run architect_quality.yml --repo "${GITHUB_REPOSITORY}" \
+            --ref "${STAGING_REF}" -f source_ref="${STAGING_SHA}"
+          run_id=""
+          for _ in $(seq 1 60); do
+            sleep 10
+            run_id="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow architect_quality.yml \
+              --branch "${STAGING_REF}" --event workflow_dispatch --limit 10 \
+              --json databaseId,headSha \
+              --jq "[.[] | select(.headSha == \"${STAGING_SHA}\")][0].databaseId // empty" || true)"
+            if [ -n "${run_id}" ]; then
+              break
+            fi
+          done
+          if [ -z "${run_id}" ]; then
+            echo "::error::The dispatched quality run for ${STAGING_SHA} never appeared."
+            exit 1
+          fi
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+          echo "run_url=${run_url}" >> "${GITHUB_OUTPUT}"
+          echo "Validating the staged merge in ${run_url}." >> "${GITHUB_STEP_SUMMARY}"
+          while :; do
+            sleep 60
+            # Transient API failures are retried; the job timeout bounds the wait.
+            state="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" \
+              --jq '"\(.status) \(.conclusion // "none")"' || echo "unknown none")"
+            read -r status conclusion <<< "${state}"
+            if [ "${status}" = completed ]; then
+              break
+            fi
+          done
+          echo "conclusion=${conclusion}" >> "${GITHUB_OUTPUT}"
+          echo "Quality finished: ${conclusion}." >> "${GITHUB_STEP_SUMMARY}"
 
   promote:
     name: Promote the validated merge
     needs:
       - stage
-      - quality
-    if: needs.stage.outputs.changed == 'true' && needs.quality.result == 'success'
+      - validate
+    if: needs.stage.outputs.state == 'staged' && needs.validate.outputs.conclusion == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -120,6 +201,35 @@ jobs:
             "--force-with-lease=refs/heads/main:${BASE_SHA}"
           echo "Promoted validated source ${STAGING_SHA}." >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Rebuild every platform
+        if: github.event.schedule == '17 3 * * 1' || inputs.rebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_SHA: ${{ needs.stage.outputs.staging_sha }}
+        shell: bash
+        run: |
+          gh workflow run bundle_fork.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref main \
+            -f source_ref="${STAGING_SHA}" \
+            -f build_macos=true \
+            -f build_windows=true \
+            -f build_linux=true
+
+  report:
+    name: Report the sync state
+    needs:
+      - stage
+      - validate
+      - promote
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      keep_staging: ${{ steps.pull.outcome == 'success' }}
+    steps:
+      # Runs daily, so workflows that arrive through a manually merged sync
+      # pull request are switched off too, not only promoted merges.
       - name: Keep upstream's workflows switched off
         env:
           GH_TOKEN: ${{ github.token }}
@@ -142,28 +252,133 @@ jobs:
               fi
             done
 
-      - name: Rebuild Windows and macOS
-        if: github.event_name == 'schedule' || inputs.rebuild
+      - name: Open a pull request to fix the staged merge
+        id: pull
+        if: needs.stage.outputs.state == 'staged' && needs.validate.outputs.conclusion == 'failure'
         env:
-          GH_TOKEN: ${{ github.token }}
-          STAGING_SHA: ${{ needs.stage.outputs.staging_sha }}
+          # Pull requests opened with GITHUB_TOKEN never start their checks.
+          GH_TOKEN: ${{ secrets.PRAXIS_SYNC_TOKEN }}
+          BASE_SHA: ${{ needs.stage.outputs.base_sha }}
+          QUALITY_URL: ${{ needs.validate.outputs.run_url }}
+          STAGING_REF: ${{ needs.stage.outputs.staging_ref }}
+          UPSTREAM_SHA: ${{ needs.stage.outputs.upstream_sha }}
         shell: bash
         run: |
-          gh workflow run bundle_fork.yml \
-            --repo "${GITHUB_REPOSITORY}" \
-            --ref main \
-            -f source_ref="${STAGING_SHA}" \
-            -f build_macos=true \
-            -f build_windows=true \
-            -f build_linux=true
+          set -euo pipefail
+          body="$(mktemp)"
+          {
+            echo "Merges zed-industries/zed \`main\` (${UPSTREAM_SHA}) into Praxis \`main\` (${BASE_SHA})."
+            echo
+            echo "The daily sync staged this merge, but validation failed: ${QUALITY_URL}"
+            echo "Push fixes to this branch."
+            echo
+            echo "Merge this pull request with a merge commit, never a squash: later syncs need upstream history in \`main\`."
+            echo
+            echo "Release Notes:"
+            echo
+            echo "- N/A"
+          } > "${body}"
+          url="$(gh pr create --repo "${GITHUB_REPOSITORY}" --base main --head "${STAGING_REF}" \
+            --title "Merge upstream Zed" --body-file "${body}")"
+          echo "url=${url}" >> "${GITHUB_OUTPUT}"
+
+      - name: Update the tracking issue
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ needs.stage.outputs.base_sha }}
+          CONFLICTS: ${{ needs.stage.outputs.conflicts }}
+          PENDING_PR: ${{ needs.stage.outputs.pending_pr }}
+          PROMOTE_RESULT: ${{ needs.promote.result }}
+          PULL_URL: ${{ steps.pull.outputs.url }}
+          QUALITY_CONCLUSION: ${{ needs.validate.outputs.conclusion }}
+          QUALITY_URL: ${{ needs.validate.outputs.run_url }}
+          STAGING_REF: ${{ needs.stage.outputs.staging_ref }}
+          STAGING_SHA: ${{ needs.stage.outputs.staging_sha }}
+          STATE: ${{ needs.stage.outputs.state }}
+          UPSTREAM_SHA: ${{ needs.stage.outputs.upstream_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          issue="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --limit 200 \
+            --json number,title --jq '[.[] | select(.title == $ENV.TRACKING_ISSUE_TITLE)][0].number // empty')"
+          body="$(mktemp)"
+          resolution=""
+          note=""
+          case "${STATE}" in
+            current)
+              resolution="Praxis main already contains upstream Zed ${UPSTREAM_SHA}."
+              ;;
+            pending)
+              note="Waiting for upstream sync pull request #${PENDING_PR} to merge with a merge commit."
+              ;;
+            conflict)
+              {
+                echo "Upstream Zed ${UPSTREAM_SHA} conflicts with Praxis main ${BASE_SHA}:"
+                echo
+                echo '```text'
+                printf '%s\n' "${CONFLICTS}"
+                echo '```'
+                echo
+                echo "To resolve:"
+                echo
+                echo '1. `git fetch origin main`, then `git switch -c praxis-sync/manual-YYYY-MM-DD origin/main`.'
+                echo '2. `git fetch https://github.com/zed-industries/zed.git main`, then `git merge --no-ff FETCH_HEAD`.'
+                echo '3. Resolve the conflicts, commit, push the branch, and open a pull request into `main`.'
+                echo '4. Merge it with a merge commit. Squashing drops upstream history and makes every later sync conflict again.'
+              } > "${body}"
+              ;;
+            staged)
+              if [ "${PROMOTE_RESULT}" = success ]; then
+                resolution="Merged upstream Zed ${UPSTREAM_SHA} into main as ${STAGING_SHA}."
+              elif [ "${QUALITY_CONCLUSION}" = failure ]; then
+                {
+                  echo "Merging upstream Zed ${UPSTREAM_SHA} into Praxis main ${BASE_SHA} failed validation: ${QUALITY_URL}"
+                  echo
+                  if [ -n "${PULL_URL}" ]; then
+                    echo "Push fixes to ${PULL_URL}, then merge it with a merge commit. Squashing drops upstream history and makes every later sync conflict again."
+                  else
+                    echo "Opening a pull request from \`${STAGING_REF}\` failed. Open one manually, push fixes to it, and merge it with a merge commit."
+                  fi
+                } > "${body}"
+              else
+                note="Validation ended as '${QUALITY_CONCLUSION:-unknown}' or promotion was refused because main moved; the next sync retries."
+              fi
+              ;;
+            *)
+              note="The sync stopped before it could merge or report a blocker; the next sync retries."
+              ;;
+          esac
+          if [ -s "${body}" ]; then
+            {
+              echo
+              echo "Latest attempt: ${run_url}"
+            } >> "${body}"
+            if [ -n "${issue}" ]; then
+              gh issue edit "${issue}" --repo "${GITHUB_REPOSITORY}" --body-file "${body}"
+            else
+              gh issue create --repo "${GITHUB_REPOSITORY}" --title "${TRACKING_ISSUE_TITLE}" \
+                --body-file "${body}"
+            fi
+            cat "${body}" >> "${GITHUB_STEP_SUMMARY}"
+          elif [ -n "${resolution}" ]; then
+            echo "${resolution}" >> "${GITHUB_STEP_SUMMARY}"
+            if [ -n "${issue}" ]; then
+              gh issue close "${issue}" --repo "${GITHUB_REPOSITORY}" --comment "${resolution} ${run_url}"
+            fi
+          else
+            echo "${note}" >> "${GITHUB_STEP_SUMMARY}"
+          fi
 
   cleanup:
     name: Remove the staging ref
     needs:
       - stage
-      - quality
+      - validate
       - promote
-    if: always() && needs.stage.outputs.changed == 'true'
+      - report
+    if: always() && needs.stage.outputs.state == 'staged' && needs.report.outputs.keep_staging != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

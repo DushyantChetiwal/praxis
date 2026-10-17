@@ -1,0 +1,45 @@
+name: Retain incremental Rust build state
+description: Save a short-lived public-repository checkpoint without paid cache capacity
+inputs:
+  key:
+    description: Immutable identity returned by the restore action
+    required: true
+outputs:
+  artifact-id:
+    description: Retained checkpoint artifact, or empty when checkpoints are disabled
+    value: ${{ steps.upload.outputs.artifact-id }}
+runs:
+  using: composite
+  steps:
+    - name: Pack compiler state without workspace source or credentials
+      id: pack
+      if: github.event.repository.visibility == 'public'
+      shell: bash
+      env:
+        CHECKPOINT_KEY: ${{ inputs.key }}
+        REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+      run: python script/ci-build-checkpoint.py pack --directory "${{ runner.temp }}/rust-build-checkpoint-save"
+
+    - name: Retain the public build checkpoint for seven days
+      id: upload
+      if: steps.pack.outputs.archive-path != ''
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.key }}
+        path: |
+          ${{ steps.pack.outputs.archive-path }}
+          ${{ steps.pack.outputs.checksum-path }}
+        compression-level: 0
+        retention-days: 7
+        if-no-files-found: error
+
+    - name: Report private-repository checkpoint policy
+      if: github.event.repository.visibility != 'public'
+      shell: bash
+      run: echo "Build checkpoints are disabled for private repositories; no paid storage is enabled." >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Remove the local checkpoint archive
+      if: always()
+      continue-on-error: true
+      shell: bash
+      run: python -c 'import os, pathlib, shutil; directory = pathlib.Path(os.environ["RUNNER_TEMP"]) / "rust-build-checkpoint-save"; shutil.rmtree(directory) if directory.exists() else None'

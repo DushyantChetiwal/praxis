@@ -486,13 +486,20 @@ class IncrementalCacheIdentity(unittest.TestCase):
         self.assertNotIn("/fixture/cargo", paths)
         self.assertFalse(any("credentials" in path or path.endswith((".exe", ".zip", ".dmg", ".tar.gz")) for path in paths))
 
-    def test_legacy_cache_is_restore_only_and_cannot_prune_the_new_cache(self):
+    def test_checkpoints_replace_oversized_caches_and_legacy_restore_cannot_prune_them(self):
         action = (REPOSITORY / ".github/actions/rust-build-cache/action.yml").read_text(encoding="utf-8")
-        self.assertIn("uses: actions/cache/restore@v5", action)
+        save = (REPOSITORY / ".github/actions/save-rust-build-cache/action.yml").read_text(encoding="utf-8")
+        self.assertIn("uses: actions/download-artifact@v8", action)
+        self.assertNotIn("uses: actions/cache/", action + save)
         self.assertIn('save-if: "false"', action)
-        self.assertIn("steps.restore.outputs.cache-matched-key == ''", action)
-        self.assertLess(action.index("uses: Swatinem/rust-cache@v2"), action.index("Enable incremental compilation after cache restoration"))
+        self.assertIn("steps.unpack.outputs.restored != 'true'", action)
+        self.assertLess(action.index("uses: Swatinem/rust-cache@v2"), action.index("Enable incremental compilation after state restoration"))
         self.assertIn('output.write("CARGO_INCREMENTAL=1\\n")', action)
+        self.assertIn("uses: actions/upload-artifact@v7", save)
+        self.assertIn("if: github.event.repository.visibility == 'public'", save)
+        self.assertIn("retention-days: 7", save)
+        self.assertIn("compression-level: 0", save)
+        self.assertFalse(self.prefix().startswith("praxis-"))
 
 
 class BundleWorkflowWiring(unittest.TestCase):
@@ -655,15 +662,24 @@ class BundleWorkflowWiring(unittest.TestCase):
                 self.assertNotIn("continue-on-error", builds[0])
                 environment = workflow_fields(builds[0]["env"][1], 10)
                 self.assertEqual(workflow_value(environment, "CARGO_INCREMENTAL"), '"1"')
-                saves = self.action_steps(job, "actions/cache/save")
+                saves = [step for step in steps if step.get("uses", (None,))[0] == "./.github/actions/save-rust-build-cache"]
                 self.assertEqual(len(saves), 1)
                 options = workflow_fields(saves[0]["with"][1], 10)
                 self.assertEqual(workflow_value(options, "key"), "${{ steps.build-cache.outputs.primary-key }}")
-                self.assertEqual(workflow_value(options, "path"), "${{ steps.build-cache.outputs.cache-paths }}")
+                self.assertNotIn("path", options)
+                self.assertEqual(self.action_steps(job, "actions/cache/save"), [])
                 self.assertLess(steps.index(restore[0]), steps.index(builds[0]))
                 self.assertLess(steps.index(builds[0]), steps.index(saves[0]))
-                self.assertIn("!cancelled()", workflow_value(saves[0], "if"))
+                self.assertIn("success()", workflow_value(saves[0], "if"))
                 self.assertEqual(self.action_steps(job, "Swatinem/rust-cache"), [])
+
+    def test_checkpoint_archives_are_not_downloaded_as_release_assets(self):
+        import fnmatch
+        key = "rust-build-state-v2-bundle-linux-example"
+        for step in self.action_steps("publish", "actions/download-artifact"):
+            options = workflow_fields(step["with"][1], 10)
+            selection = workflow_value(options, "name" if "name" in options else "pattern")
+            self.assertFalse(fnmatch.fnmatch(key, selection), selection)
 
     def test_linux_remote_has_one_producer_and_no_desktop_compile(self):
         invocations = []
