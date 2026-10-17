@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import tempfile
@@ -133,6 +134,11 @@ class ProvenanceTests(unittest.TestCase):
             "name": name, "run_id": 10, "status": "completed", "conclusion": "success",
             "steps": [{"name": anchor, "status": "completed", "conclusion": "success"}],
         } for name, anchor in validation.EXPECTED_JOBS.items()]
+        self.jobs[0]["steps"].extend([
+            {"name": "Prepare formatting corrections", "status": "completed", "conclusion": "skipped"},
+            {"name": "Upload formatting corrections", "status": "completed", "conclusion": "skipped"},
+            {"name": "Commit formatting corrections to this pull request", "status": "completed", "conclusion": "skipped"},
+        ])
         self.artifact = {
             "id": 20, "name": validation.artifact_name(10, 1), "expired": False,
             "size_in_bytes": 1024,
@@ -370,6 +376,35 @@ class ProvenanceTests(unittest.TestCase):
         self.assertFalse(self.check()[0])
         self.jobs[0]["steps"] = []
         self.assertFalse(self.check()[0])
+
+    def test_successful_formatting_records_and_reuses_with_failure_only_steps_skipped(self):
+        self.set_execution_environment()
+        receipt = self.validator.record(MERGE)
+        self.assertEqual(receipt["source_tree"], TREE)
+        self.assertEqual(receipt["kind"], "original-full")
+        self.assertEqual(validation.read_receipt(archive_bytes(receipt)), receipt)
+        self.api.responses[ZIP_PATH] = archive_bytes(receipt)
+        os.environ.clear()
+        self.assertTrue(self.check()[0])
+
+    def test_skip_exceptions_do_not_apply_to_tests_or_other_jobs(self):
+        allowed = validation.ALLOWED_SKIPPED_STEPS["Formatting"]
+        for job in self.jobs:
+            for name in ("Additional validation", *sorted(allowed)):
+                if job["name"] == "Formatting" and name in allowed:
+                    continue
+                with self.subTest(job=job["name"], step=name):
+                    job["steps"].append({"name": name, "status": "completed", "conclusion": "skipped"})
+                    self.assertFalse(self.check()[0])
+                    job["steps"].pop()
+
+    def test_optional_formatting_diagnostics_must_not_fail_or_remain_active(self):
+        step = self.jobs[0]["steps"][1]
+        for status, conclusion in (("completed", "failure"), ("completed", "cancelled"),
+                                   ("completed", "timed_out"), ("in_progress", "skipped")):
+            with self.subTest(status=status, conclusion=conclusion):
+                step.update(status=status, conclusion=conclusion)
+                self.assertFalse(self.check()[0])
 
     def test_missing_or_duplicate_expected_job_rejected(self):
         removed = self.jobs.pop()
@@ -852,6 +887,16 @@ class ArchiveAndCliTests(unittest.TestCase):
                 self.assertEqual(output.read_text(), "validated=false\n")
                 self.assertIn("Cannot prove validation", printed.getvalue())
 
+    def test_record_failure_is_fatal_and_cannot_look_like_a_valid_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            with patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}, clear=True), patch.object(validation, "Validator", side_effect=validation.Unverified("missing test step")):
+                with contextlib.redirect_stdout(io.StringIO()) as printed:
+                    result = validation.main(["record", "--repository", REPOSITORY, "--source-sha", TARGET])
+            self.assertEqual(result, 1)
+            self.assertEqual(output.read_text(), "recorded=false\n")
+            self.assertIn("::error::Original validation receipt was not recorded", printed.getvalue())
+
     def test_check_success_output_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "output"
@@ -945,6 +990,39 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('assert all(job["result"] == "success"', self.workflow)
         self.assertIn('assert all(job["result"] == "skipped"', self.workflow)
         self.assertIn("run: python script/test-praxis-validation.py", self.workflow)
+
+    def test_receipt_skip_allowlist_matches_failure_only_workflow_steps(self):
+        formatting = self.workflow.split("  formatting:\n", 1)[1].split("  architect-tests:\n", 1)[0]
+        self.assertEqual(set(validation.ALLOWED_SKIPPED_STEPS), {"Formatting"})
+        for name in validation.ALLOWED_SKIPPED_STEPS["Formatting"]:
+            step = formatting.split(f"- name: {name}\n", 1)[1].split("\n      - name: ", 1)[0]
+            self.assertTrue(step.startswith("        if:"), step)
+            header, _, rest = step.removeprefix("        if:").partition("\n")
+            if header.strip() == ">-":
+                condition = " ".join(line.strip() for line in rest.split("\n        env:", 1)[0].splitlines())
+            else:
+                condition = header.strip()
+            with self.subTest(step=name):
+                self.assertTrue(condition.startswith("failure()"), condition)
+        # Expensive jobs wait for formatting, which pushes corrections itself.
+        for job in ("architect-tests", "agent-tests", "updater-tests", "windows-updater-tests", "clippy"):
+            body = self.workflow.split(f"  {job}:\n", 1)[1]
+            body = body[:body.index("    steps:\n")]
+            with self.subTest(job=job):
+                self.assertIn("      - prepare\n      - formatting\n", body)
+        self.assertEqual(self.workflow.count("save-if: ${{ github.ref == 'refs/heads/main' }}"), 5)
+        correction = formatting.split("- name: Commit formatting corrections to this pull request\n", 1)[1]
+        self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", correction)
+        self.assertIn('= "Apply CI formatting" ]', correction)
+        self.assertIn('echo "::add-mask::${authorization}"', correction)
+        self.assertNotIn("--force", correction)
+        self.assertNotIn("x-access-token:${PUSH_TOKEN}@", correction)
+        receipt = self.workflow.split("  full-receipt:\n", 1)[1].split("  source-validated:\n", 1)[0]
+        self.assertIn('case "$GITHUB_WORKFLOW_REF" in', receipt)
+        self.assertIn('"$GITHUB_REPOSITORY/.github/workflows/architect_quality.yml@"*)', receipt)
+        self.assertIn('echo "recorded=not_applicable"', receipt)
+        self.assertNotIn('echo "recorded=false"', receipt)
+        self.assertIn("if-no-files-found: error", receipt)
 
     def test_aggregate_rejects_failed_or_skipped_checks_without_verified_reuse(self):
         block = self.workflow.split("          python - <<'PY'\n", 1)[1].split("          PY\n", 1)[0]
@@ -1145,6 +1223,50 @@ class BundleAfterMergeTests(unittest.TestCase):
         keep = self.sync.split('          keep="', 1)[1].split('"', 1)[0]
         self.assertIn("bundle_after_merge.yml", keep.split())
         self.assertIn("gh workflow run bundle_fork.yml", self.sync)
+
+
+class SyncUpstreamTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.sync = (SCRIPT.parent.parent / ".github/workflows/sync_upstream.yml").read_text(encoding="utf-8")
+
+    def job(self, name):
+        body = self.sync.split(f"\n  {name}:\n", 1)[1]
+        following = re.search(r"\n  [a-z]+:\n", body)
+        return body[:following.start()] if following else body
+
+    def test_daily_attempts_rebuild_only_on_monday_or_request(self):
+        self.assertIn('- cron: "17 3 * * 1"', self.sync)
+        self.assertIn('- cron: "17 3 * * 0,2-6"', self.sync)
+        self.assertIn("if: github.event.schedule == '17 3 * * 1' || inputs.rebuild", self.job("promote"))
+
+    def test_staged_merge_gets_a_direct_quality_run_that_issues_a_receipt(self):
+        self.assertNotIn("uses: ./.github/workflows/architect_quality.yml", self.sync)
+        validate = self.job("validate")
+        self.assertIn("gh workflow run architect_quality.yml", validate)
+        self.assertIn('--ref "${STAGING_REF}" -f source_ref="${STAGING_SHA}"', validate)
+        self.assertIn('select(.headSha == \\"${STAGING_SHA}\\")', validate)
+
+    def test_promotion_requires_success_and_an_unchanged_main(self):
+        promote = self.job("promote")
+        self.assertIn("needs.validate.outputs.conclusion == 'success'", promote)
+        self.assertIn('"--force-with-lease=refs/heads/main:${BASE_SHA}"', promote)
+        self.assertIn('test "$(git rev-parse FETCH_HEAD)" = "${STAGING_SHA}"', promote)
+
+    def test_blockers_are_reported_once_and_fixable(self):
+        self.assertIn("  issues: write\n", self.sync)
+        report = self.job("report")
+        self.assertIn("if: always()", report)
+        self.assertIn("Keep upstream's workflows switched off", report)
+        self.assertIn("needs.validate.outputs.conclusion == 'failure'", report)
+        # Checks never start on pull requests opened with GITHUB_TOKEN.
+        pull = report.split("- name: Open a pull request to fix the staged merge\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("GH_TOKEN: ${{ secrets.PRAXIS_SYNC_TOKEN }}", pull)
+        self.assertIn("merge commit", pull)
+        self.assertIn('startswith("praxis-sync/")', self.job("stage"))
+        self.assertIn("gh issue edit", report)
+        self.assertIn("gh issue close", report)
+        self.assertIn("needs.report.outputs.keep_staging != 'true'", self.job("cleanup"))
 
 
 if __name__ == "__main__":

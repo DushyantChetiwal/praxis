@@ -38,7 +38,7 @@ def cache_prefix(name, compiler, recipe, environment):
         "environment": {key: environment.get(key, "") for key in COMPILER_ENVIRONMENT},
     }
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-    return f"praxis-incremental-v1-{name}-{digest}"
+    return f"rust-build-state-v2-{name}-{digest}"
 
 
 def cache_key(prefix, source, run_id, attempt):

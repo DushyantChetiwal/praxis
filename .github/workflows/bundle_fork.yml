@@ -198,11 +198,10 @@ jobs:
         run: ./script/bundle-mac --desktop-only ${{ matrix.target }}
 
       - name: Save incremental Rust build state
-        if: ${{ !cancelled() && steps.build-cache.outputs.primary-key != '' }}
+        if: ${{ success() && steps.build-cache.outputs.primary-key != '' }}
         continue-on-error: true
-        uses: actions/cache/save@v5
+        uses: ./.github/actions/save-rust-build-cache
         with:
-          path: ${{ steps.build-cache.outputs.cache-paths }}
           key: ${{ steps.build-cache.outputs.primary-key }}
 
       - name: Upload the disk image
@@ -252,11 +251,10 @@ jobs:
         run: ./script/bundle-mac --remote-server-only ${{ matrix.target }}
 
       - name: Save incremental Rust build state
-        if: ${{ !cancelled() && steps.build-cache.outputs.primary-key != '' }}
+        if: ${{ success() && steps.build-cache.outputs.primary-key != '' }}
         continue-on-error: true
-        uses: actions/cache/save@v5
+        uses: ./.github/actions/save-rust-build-cache
         with:
-          path: ${{ steps.build-cache.outputs.cache-paths }}
           key: ${{ steps.build-cache.outputs.primary-key }}
 
       - name: Upload the remote server
@@ -305,11 +303,10 @@ jobs:
         run: ./script/bundle-linux --remote-server-only
 
       - name: Save incremental Rust build state
-        if: ${{ !cancelled() && steps.build-cache.outputs.primary-key != '' }}
+        if: ${{ success() && steps.build-cache.outputs.primary-key != '' }}
         continue-on-error: true
-        uses: actions/cache/save@v5
+        uses: ./.github/actions/save-rust-build-cache
         with:
-          path: ${{ steps.build-cache.outputs.cache-paths }}
           key: ${{ steps.build-cache.outputs.primary-key }}
 
       - name: Upload the remote server
@@ -359,11 +356,10 @@ jobs:
         run: ./script/bundle-linux --desktop-only
 
       - name: Save incremental Rust build state
-        if: ${{ !cancelled() && steps.build-cache.outputs.primary-key != '' }}
+        if: ${{ success() && steps.build-cache.outputs.primary-key != '' }}
         continue-on-error: true
-        uses: actions/cache/save@v5
+        uses: ./.github/actions/save-rust-build-cache
         with:
-          path: ${{ steps.build-cache.outputs.cache-paths }}
           key: ${{ steps.build-cache.outputs.primary-key }}
 
       - name: Upload the desktop archive
@@ -428,11 +424,10 @@ jobs:
         shell: pwsh
 
       - name: Save incremental Rust build state
-        if: ${{ !cancelled() && steps.build-cache.outputs.primary-key != '' }}
+        if: ${{ success() && steps.build-cache.outputs.primary-key != '' }}
         continue-on-error: true
-        uses: actions/cache/save@v5
+        uses: ./.github/actions/save-rust-build-cache
         with:
-          path: ${{ steps.build-cache.outputs.cache-paths }}
           key: ${{ steps.build-cache.outputs.primary-key }}
 
       - name: Upload the installer
@@ -483,11 +478,10 @@ jobs:
         shell: pwsh
 
       - name: Save incremental Rust build state
-        if: ${{ !cancelled() && steps.build-cache.outputs.primary-key != '' }}
+        if: ${{ success() && steps.build-cache.outputs.primary-key != '' }}
         continue-on-error: true
-        uses: actions/cache/save@v5
+        uses: ./.github/actions/save-rust-build-cache
         with:
-          path: ${{ steps.build-cache.outputs.cache-paths }}
           key: ${{ steps.build-cache.outputs.primary-key }}
 
       - name: Upload the remote server
