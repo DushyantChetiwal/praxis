@@ -7215,13 +7215,17 @@ mod internal_tests {
             assert!(empty_child.messages.is_empty());
             let child_thread = cx.update(|cx| native_thread_for_session(&agent, &child_id, cx));
             child_thread.update(cx, |thread, cx| {
-                thread.push_acp_user_block(
-                    ClientUserMessageId::new(),
-                    [acp_v2::ContentBlock::from("Durable step transcript")],
-                    project.read(cx).path_style(cx),
-                    cx,
-                );
-                thread.push_acp_agent_block("Durable step response".into(), cx);
+                thread
+                    .push_acp_user_block(
+                        ClientUserMessageId::new(),
+                        [acp_v2::ContentBlock::from("Durable step transcript")],
+                        project.read(cx).path_style(cx),
+                        cx,
+                    )
+                    .expect("step transcript");
+                thread
+                    .push_acp_agent_block("Durable step response".into(), cx)
+                    .expect("step response");
             });
             let original_run = thread.update(cx, |thread, cx| {
                 thread.set_architect_run_step_thread(visit, &child, cx);
@@ -14428,7 +14432,10 @@ mod internal_tests {
                 .unwrap();
             thread.architect_run().unwrap().step_thread().unwrap()
         });
-        step_thread.update(cx, |thread, cx| thread.cancel(cx)).await;
+        step_thread
+            .update(cx, |thread, cx| thread.cancel(cx))
+            .await
+            .expect("cancellation succeeds");
         cx.run_until_parked();
         fake.end_stream(&model, &pending[0].0);
         thread.read_with(cx, |thread, _| {

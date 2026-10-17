@@ -943,6 +943,9 @@ mod tests {
             .expect("insert legacy row");
         }
 
+        // Legacy rows predate Praxis child kinds, so they restore as `legacy`.
+        let mut expected_context = legacy_json["subagent_context"].clone();
+        expected_context["kind"] = serde_json::json!("legacy");
         let restored = database
             .load_thread(thread_id.clone())
             .await
@@ -950,7 +953,7 @@ mod tests {
             .expect("legacy row exists");
         assert_eq!(
             serde_json::to_value(&restored.subagent_context).expect("encode restored context"),
-            legacy_json["subagent_context"]
+            expected_context
         );
         let entries = database.list_threads().await.expect("list legacy row");
         let metadata = entries.first().expect("legacy metadata exists");
@@ -978,10 +981,7 @@ mod tests {
             let saved_json: serde_json::Value =
                 serde_json::from_slice(&json).expect("decode saved JSON");
             assert_eq!(saved_json["version"], legacy_json["version"]);
-            assert_eq!(
-                saved_json["subagent_context"],
-                legacy_json["subagent_context"]
-            );
+            assert_eq!(saved_json["subagent_context"], expected_context);
         }
 
         database
