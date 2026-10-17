@@ -367,7 +367,12 @@ fn handle_paired(
             required(args, "session_id")?;
             let view = requested_root_view(workspace, args, cx)?;
             anyhow::ensure!(
-                view.read(cx).thread.read(cx).prompt_capabilities().image.is_some(),
+                view.read(cx)
+                    .thread
+                    .read(cx)
+                    .prompt_capabilities()
+                    .image
+                    .is_some(),
                 "This model does not accept images. Select a vision-capable model."
             );
             Ok(view.read(cx).session_id.to_string())
@@ -418,7 +423,12 @@ fn handle_paired(
                 anyhow::ensure!(!phone.is_empty(), "Images require an authenticated phone");
                 required(args, "session_id")?;
                 anyhow::ensure!(
-                    view.read(cx).thread.read(cx).prompt_capabilities().image.is_some(),
+                    view.read(cx)
+                        .thread
+                        .read(cx)
+                        .prompt_capabilities()
+                        .image
+                        .is_some(),
                     "This model does not accept images. Select a vision-capable model."
                 );
                 images::contents(phone, &session, args, cx)?
