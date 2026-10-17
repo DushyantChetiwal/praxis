@@ -278,7 +278,7 @@ pub(super) fn fingerprint(blocks: &[acp::ContentBlock]) -> Option<String> {
     digest.update(b"\0");
     for block in blocks {
         if let acp::ContentBlock::Image(image) = block {
-            digest.update(image.mime_type.as_bytes());
+            digest.update(image.mime_type.0.as_bytes());
             digest.update(b"\0");
             digest.update(
                 ring::digest::digest(&ring::digest::SHA256, image.data.as_bytes()).as_ref(),

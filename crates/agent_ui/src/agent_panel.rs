@@ -5949,7 +5949,7 @@ impl AgentPanel {
         let conversation_idle = self.active_thread_view(cx).is_some_and(|thread_view| {
             matches!(
                 thread_view.read(cx).thread.read(cx).status(),
-                ThreadStatus::Idle
+                acp_thread::ThreadStatus::Idle
             )
         });
         let ready_to_run = !running

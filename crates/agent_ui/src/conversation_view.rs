@@ -962,7 +962,7 @@ impl ConversationView {
             connected
                 .conversation
                 .read(cx)
-                .pending_tool_call_count_for_session(session_id)
+                .pending_tool_call_count_for_session(session_id, cx)
         })
     }
 
@@ -5120,7 +5120,7 @@ pub(crate) mod tests {
             view.send_text("first".into(), false, window, cx);
         });
         cx.run_until_parked();
-        let content = vec![png_image()];
+        let content = vec![acp_thread::content::from_v1(png_image()).expect("v2 image")];
         let queued = view.update_in(cx, |view, window, cx| {
             view.send_remote_content(content.clone(), false, window, cx)
                 .expect("image queued")

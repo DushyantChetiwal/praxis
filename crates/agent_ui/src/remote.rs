@@ -367,7 +367,7 @@ fn handle_paired(
             required(args, "session_id")?;
             let view = requested_root_view(workspace, args, cx)?;
             anyhow::ensure!(
-                view.read(cx).thread.read(cx).prompt_capabilities().image,
+                view.read(cx).thread.read(cx).prompt_capabilities().image.is_some(),
                 "This model does not accept images. Select a vision-capable model."
             );
             Ok(view.read(cx).session_id.to_string())
@@ -418,7 +418,7 @@ fn handle_paired(
                 anyhow::ensure!(!phone.is_empty(), "Images require an authenticated phone");
                 required(args, "session_id")?;
                 anyhow::ensure!(
-                    view.read(cx).thread.read(cx).prompt_capabilities().image,
+                    view.read(cx).thread.read(cx).prompt_capabilities().image.is_some(),
                     "This model does not accept images. Select a vision-capable model."
                 );
                 images::contents(phone, &session, args, cx)?
@@ -908,7 +908,7 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
         "send_now": true,
         "steering": view.as_native_thread(cx).is_some(),
         "queue_management": true,
-        "image_input": thread.prompt_capabilities().image,
+        "image_input": thread.prompt_capabilities().image.is_some(),
         "questions": questions,
         "question_count": question_count,
         "pending": pending_permissions(conversation_view.read(cx), cx),
@@ -2118,9 +2118,17 @@ mod tests {
                         cx,
                     );
                     if *thinking {
-                        acp_thread::AssistantMessageChunk::Thought { id: None, block }
+                        acp_thread::AssistantMessageChunk::Thought {
+                            identity: acp_thread::MessageIdentity::Legacy(None),
+                            meta: None,
+                            block,
+                        }
                     } else {
-                        acp_thread::AssistantMessageChunk::Message { id: None, block }
+                        acp_thread::AssistantMessageChunk::Message {
+                            identity: acp_thread::MessageIdentity::Legacy(None),
+                            meta: None,
+                            block,
+                        }
                     }
                 })
                 .collect(),
