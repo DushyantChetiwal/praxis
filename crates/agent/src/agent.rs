@@ -11507,7 +11507,7 @@ mod internal_tests {
             modes
                 .all_modes()
                 .iter()
-                .map(|mode| mode.id.0.to_string())
+                .map(|mode| mode.value.0.to_string())
                 .collect::<Vec<_>>(),
             vec![
                 crate::SessionMode::BUILD_ID.to_string(),
@@ -12000,9 +12000,8 @@ mod internal_tests {
             assert!(
                 authorization
                     .tool_call
-                    .fields
                     .title
-                    .as_deref()
+                    .value()
                     .unwrap()
                     .contains("locked")
             );
@@ -12900,8 +12899,14 @@ mod internal_tests {
         );
 
         let update = events.expect_update_fields().await;
-        assert_eq!(update.title.as_deref(), Some("User answered the question"));
-        let content = update.content.expect("the answer card must retain content");
+        assert_eq!(
+            update.title.value().map(String::as_str),
+            Some("User answered the question")
+        );
+        let content = update
+            .content
+            .take()
+            .expect("the answer card must retain content");
         assert!(content.iter().any(|block| {
             matches!(
                 block,

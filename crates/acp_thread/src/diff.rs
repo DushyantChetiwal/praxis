@@ -780,7 +780,7 @@ async fn build_buffer_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::TestAppContext;
     use indoc::indoc;
     use language::{Buffer, LanguageRegistry};
     use serde_json::json;

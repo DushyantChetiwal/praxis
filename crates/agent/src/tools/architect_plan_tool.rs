@@ -1114,7 +1114,7 @@ mod tests {
         let (events, mut receiver) = ToolCallEventStream::test();
         let task = cx.update(|cx| tool.run(apply_input(&preview), events, cx));
         let authorization = receiver.expect_authorization().await;
-        let title = authorization.tool_call.fields.title.as_deref().unwrap();
+        let title = authorization.tool_call.title.value().unwrap();
         assert!(title.contains("1 affected locks"));
         assert!(title.contains("1 invalidated step checkpoints"));
         assert!(title.contains("0 retained results"));

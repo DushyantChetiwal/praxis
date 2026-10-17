@@ -17731,8 +17731,8 @@ mod tests {
         let input = serde_json::json!({"content": "complete source\n".repeat(8192)});
         let mut call = cx.update(|cx| {
             ToolCall::from_acp(
-                acp_v2::ToolCall::new("large-input", "Historical tool").raw_input(input.clone()),
-                ToolCallStatus::Completed,
+                acp_v1::ToolCall::new("large-input", "Historical tool").raw_input(input.clone()),
+                Some(ToolCallStatus::Completed),
                 languages.clone(),
                 &HashMap::default(),
                 cx,
