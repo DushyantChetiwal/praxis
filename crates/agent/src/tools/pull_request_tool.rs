@@ -2,7 +2,7 @@ use std::{future::Future, sync::Arc};
 
 use crate::sandboxing::{NetworkRequest, SandboxRequest};
 use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
-use agent_client_protocol::schema::v1 as acp;
+use agent_client_protocol::schema::v2 as acp;
 use anyhow::{Context as _, anyhow, bail};
 use futures::{AsyncReadExt as _, FutureExt as _};
 use gpui::{App, SharedString, Task};

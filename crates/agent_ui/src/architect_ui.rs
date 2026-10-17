@@ -310,7 +310,7 @@ pub struct ArchitectPane {
     plan_drawer_shows_plan: bool,
     /// A past step visit whose thread the conversation drawer is showing, as
     /// opened from a step's run activity. `None` follows the running step.
-    inspected_step_session: Option<agent_client_protocol::schema::v1::SessionId>,
+    inspected_step_session: Option<agent_client_protocol::schema::v2::SessionId>,
     outline_width: Pixels,
     inspector_width: Pixels,
     search_editor: Entity<Editor>,
@@ -1863,7 +1863,7 @@ impl ArchitectPane {
     /// already, and redraws once it is so the drawer can show it.
     fn load_step_thread(
         &mut self,
-        session_id: agent_client_protocol::schema::v1::SessionId,
+        session_id: agent_client_protocol::schema::v2::SessionId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1884,7 +1884,7 @@ impl ArchitectPane {
     /// did can be read after the run.
     fn open_step_visit(
         &mut self,
-        session_id: agent_client_protocol::schema::v1::SessionId,
+        session_id: agent_client_protocol::schema::v2::SessionId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {

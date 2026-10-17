@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::v1 as acp;
+use agent_client_protocol::schema::v2 as acp;
 use anyhow::{Context as _, Result, bail, ensure};
 use gpui::{App, AppContext as _, Global, Task};
 use image::{ImageFormat, ImageReader};

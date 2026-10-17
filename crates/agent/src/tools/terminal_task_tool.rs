@@ -2,7 +2,8 @@ use super::terminal_tool::{
     COMMAND_OUTPUT_LIMIT, TerminalOutputSelection, process_content, select_terminal_output_lines,
 };
 use crate::{AgentTool, TerminalHandle, ToolCallEventStream, ToolCapability, ToolInput};
-use agent_client_protocol::schema::v1 as acp;
+use acp_thread::ProcessOutput;
+use agent_client_protocol::schema::v2 as acp;
 use anyhow::{Result, anyhow};
 use futures::{FutureExt as _, future::Shared};
 use gpui::{App, AsyncApp, SharedString, Task};
@@ -451,9 +452,9 @@ impl TerminalTask {
 }
 
 fn bounded_output(
-    mut output: acp::TerminalOutputResponse,
+    mut output: ProcessOutput,
     selection: TerminalOutputSelection,
-) -> acp::TerminalOutputResponse {
+) -> ProcessOutput {
     output.output = select_terminal_output_lines(&output.output, selection);
     if output.output.len() > COMMAND_OUTPUT_LIMIT as usize {
         let mut end = COMMAND_OUTPUT_LIMIT as usize;
@@ -514,19 +515,19 @@ async fn wait_with_countdown(
     let deadline = executor.now() + Duration::from_millis(wait_ms);
     let completion = task.wait(wait_ms, cx).fuse();
     futures::pin_mut!(completion);
-    event_stream.update_fields(
-        acp::ToolCallUpdateFields::new().title(terminal_wait_title(Duration::from_millis(wait_ms))),
-    );
+    event_stream.update_fields(|update| {
+        update.title(terminal_wait_title(Duration::from_millis(wait_ms)))
+    });
     loop {
         futures::select_biased! {
             _ = event_stream.cancelled_by_user().fuse() => return Err("Terminal wait cancelled".into()),
             _ = completion => break,
             _ = executor.timer(Duration::from_secs(1)).fuse() => {
-                event_stream.update_fields(acp::ToolCallUpdateFields::new().title(terminal_wait_title(deadline.saturating_duration_since(executor.now()))));
+                event_stream.update_fields(|update| update.title(terminal_wait_title(deadline.saturating_duration_since(executor.now()))));
             },
         }
     }
-    event_stream.update_fields(acp::ToolCallUpdateFields::new().title("Finished waiting"));
+    event_stream.update_fields(|update| update.title("Finished waiting"));
     Ok(())
 }
 
@@ -771,7 +772,7 @@ mod tests {
         let other = Rc::new(TerminalTaskRegistry::default());
         let terminal = Rc::new(cx.update(|cx| {
             FakeTerminalHandle::new_never_exits(cx)
-                .with_output(acp::TerminalOutputResponse::new("日".repeat(30_000), false))
+                .with_output(ProcessOutput::new("日".repeat(30_000), false))
         }));
         let task = start(&registry, terminal.clone(), None, cx);
         let (stream, _events) = ToolCallEventStream::test();
@@ -843,18 +844,18 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(
-            events.expect_update_fields().await.title.as_deref(),
+            events.expect_update_fields().await.title.value().map(String::as_str),
             Some("Waiting · 0:30 remaining")
         );
         advance(cx, 1000);
         assert_eq!(
-            events.expect_update_fields().await.title.as_deref(),
+            events.expect_update_fields().await.title.value().map(String::as_str),
             Some("Waiting · 0:29 remaining")
         );
         terminal.signal_exit();
         cx.run_until_parked();
         assert_eq!(
-            events.expect_update_fields().await.title.as_deref(),
+            events.expect_update_fields().await.title.value().map(String::as_str),
             Some("Finished waiting")
         );
         assert!(wait.await.expect("wait").contains("still_running: false"));
@@ -1211,7 +1212,7 @@ mod tests {
 
     #[test]
     fn terminal_tasks_output_selection_precedes_cap() {
-        let output = acp::TerminalOutputResponse::new(
+        let output = ProcessOutput::new(
             format!("first\n{}\nlast", "middle\n".repeat(10_000)),
             false,
         );

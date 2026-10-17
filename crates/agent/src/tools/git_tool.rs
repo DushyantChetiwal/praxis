@@ -1,7 +1,7 @@
 use std::{fmt::Write as _, sync::Arc};
 
 use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
-use agent_client_protocol::schema::v1 as acp;
+use agent_client_protocol::schema::v2 as acp;
 use git::{
     repository::DiffType,
     status::{FileStatus, StatusCode},

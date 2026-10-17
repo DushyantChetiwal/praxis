@@ -608,6 +608,7 @@ fn supported_thinking_effort_levels(model: &open_ai::Model) -> Vec<LanguageModel
                 name: effort.label().into(),
                 value: effort.value().into(),
                 is_default: Some(effort) == default_effort,
+                supports_disabling_thinking: None,
             })
         })
         .collect()
@@ -680,6 +681,7 @@ fn language_model(model: &open_ai::Model) -> LanguageModel {
         | Model::SixAstra
         | Model::SixSol
         | Model::SixLuna
+        | Model::SixPointOneSol
         | Model::O3 => true,
         Model::Four => false,
         Model::Custom {

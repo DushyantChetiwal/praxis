@@ -66,12 +66,16 @@ elif command == "generate-licenses":
 elif command == "cargo":
     if arguments[:3] == ["-q", "bundle", "--help"]:
         print("cargo-bundle v0.6.1-zed")
-    elif "build" in arguments:
+    elif arguments[2:3] in (["build"], ["rustc"]):
         assert arguments[:2] == ["--config", ".cargo/bundle-config.toml"]
         profile = "release" if "--release" in arguments else "debug"
         directory = root / os.environ.get("CARGO_TARGET_DIR", "target") / value("--target") / profile
         packages = [arguments[index + 1] for index, argument in enumerate(arguments) if argument == "--package"]
-        assert packages in (["zed", "cli"], ["remote_server"])
+        if arguments[2] == "rustc":
+            # Release editors pass their link arguments to the final binary only.
+            assert packages == ["zed"] and value("--bin") == "zed" and "--" in arguments, arguments
+        else:
+            assert packages in (["zed", "cli"], ["cli"], ["remote_server"]), arguments
         for package in packages:
             create(directory / package)
     elif arguments[0] == "bundle":
@@ -98,11 +102,16 @@ elif command == "llvm-objcopy":
         assert Path(arguments[1]).is_file()
         create(arguments[2], b"symbols")
     else:
-        binary = Path(arguments[-1])
-        assert binary.is_file(), binary
-        if binary.name != "cli":
-            assert Path(str(binary) + ".dbg").is_file()
-        binary.write_bytes(binary.read_bytes() + b"-stripped")
+        # Either strips in place or writes a stripped copy to a second path.
+        paths = [Path(argument) for argument in arguments if not argument.startswith("-")]
+        source, destination = paths[0], paths[-1]
+        assert source.is_file(), source
+        if source.name != "cli":
+            assert Path(str(source) + ".dbg").is_file()
+        create(destination, source.read_bytes() + b"-stripped")
+elif command == "ld.lld":
+    assert arguments == ["--version"], arguments
+    print("LLD 18.1.3 (compatible with GNU linkers)")
 elif command == "sentry-cli":
     assert arguments[:8] == ["debug-files", "upload", "--include-sources", "--wait", "-p", "zed", "-o", "zed-dev"]
     for name in arguments[8:]:
@@ -176,7 +185,7 @@ class BundleSplitModes(unittest.TestCase):
             "cargo", "rustc", "rustup", "git", "uname", "dsymutil", "strip",
             "llvm-objcopy", "sentry-cli", "ldd", "gzip", "tar", "codesign",
             "hdiutil", "xcode-select", "envsubst", "curl", "npm", "dmg-license",
-            "security", "open",
+            "security", "open", "ld.lld",
         ):
             (self.root / "bin" / command).symlink_to(driver)
         for command in ("generate-licenses", "get-crate-version"):
@@ -207,6 +216,7 @@ class BundleSplitModes(unittest.TestCase):
             "MOCK_HOST": "aarch64-apple-darwin" if platform == "mac" else "x86_64-unknown-linux-gnu",
             "SENTRY_AUTH_TOKEN": "mock-token",
             "CC": "clang",
+            "LLD": str(self.root / "bin" / "ld.lld"),
         })
         env.update(environment or {})
         (self.root / "commands.jsonl").write_text("")
@@ -223,12 +233,14 @@ class BundleSplitModes(unittest.TestCase):
         return [entry for entry in self.commands if entry["command"] == command]
 
     def assert_mode(self, desktop, remote):
-        builds = [entry for entry in self.calls("cargo") if "build" in entry["arguments"]]
+        builds = [entry for entry in self.calls("cargo") if entry["arguments"][2:3] in (["build"], ["rustc"])]
         packages = [
-            [arguments[index + 1] for index, argument in enumerate(arguments) if argument == "--package"]
+            arguments[index + 1]
             for arguments in (entry["arguments"] for entry in builds)
+            for index, argument in enumerate(arguments)
+            if argument == "--package"
         ]
-        self.assertEqual(packages, ([["zed", "cli"]] if desktop else []) + ([["remote_server"]] if remote else []))
+        self.assertEqual(packages, (["zed", "cli"] if desktop else []) + (["remote_server"] if remote else []))
         for entry in builds:
             self.assertEqual(entry["bundle"], "true")
             self.assertEqual(entry["arguments"][:2], ["--config", ".cargo/bundle-config.toml"])
@@ -351,10 +363,33 @@ class BundleSplitModes(unittest.TestCase):
         self.assertEqual(len(self.calls("sentry-cli")), 3)
         self.assertEqual(self.calls("gzip"), [])
 
-    def test_linux_sentry_failure_preserves_existing_nonfatal_policy(self):
-        self.run_bundle("linux", "--remote-server-only", environment={"FAIL_TOOL": "sentry-cli"})
+    def test_linux_sentry_failure_is_fatal(self):
+        self.run_bundle("linux", "--remote-server-only", environment={"FAIL_TOOL": "sentry-cli"}, succeeds=False)
         self.assertEqual(len(self.calls("sentry-cli")), 3)
-        self.assertEqual(len(self.calls("gzip")), 1)
+        self.assertEqual(self.calls("gzip"), [])
+
+    def test_linux_sentry_flags(self):
+        self.run_bundle("linux", "--remote-server-only", "--skip-sentry")
+        self.assertEqual(self.calls("sentry-cli"), [])
+        result = self.run_bundle("linux", "--remote-server-only", "--require-sentry",
+                                 environment={"SENTRY_AUTH_TOKEN": ""}, succeeds=False)
+        self.assertIn("require SENTRY_AUTH_TOKEN", result.stderr)
+        result = self.run_bundle("linux", "--require-sentry", "--skip-sentry", succeeds=False)
+        self.assertIn("cannot be used together", result.stderr)
+        self.assertEqual(self.calls("cargo"), [])
+
+    def test_linux_desktop_links_with_validated_lld(self):
+        self.run_bundle("linux", "--desktop-only")
+        editor = [entry["arguments"] for entry in self.calls("cargo") if entry["arguments"][2:3] == ["rustc"]]
+        self.assertEqual(len(editor), 1)
+        self.assertIn("link-arg=--ld-path=" + str(self.root / "bin" / "ld.lld"), editor[0])
+        self.assertIn("link-arg=-Wl,--icf=safe", editor[0])
+        result = self.run_bundle("linux", "--desktop-only", environment={"LLD": "ld.lld"}, succeeds=False)
+        self.assertIn("absolute executable linker path", result.stderr)
+        self.assertEqual(self.calls("cargo"), [])
+        # The remote server is not linked with LLD.
+        self.run_bundle("linux", "--remote-server-only", environment={"LLD": "ld.lld"})
+        self.assert_mode(desktop=False, remote=True)
 
     def test_mac_extraction_failure_is_fatal(self):
         self.run_bundle("mac", "--remote-server-only", environment={"FAIL_TOOL": "dsymutil"}, succeeds=False)

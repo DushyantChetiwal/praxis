@@ -1,10 +1,12 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use acp_thread::{AcpThread, AgentConnection as _, AgentThreadEntry, AssistantMessageChunk};
-use agent_client_protocol::schema::v1 as acp;
+use acp_thread::{
+    AcpThread, AgentConnection as _, AgentThreadEntry, AssistantMessageChunk, SubmissionResponse,
+};
+use agent_client_protocol::schema::{v1 as acp_v1, v2 as acp};
 use anyhow::Context as _;
 use architect::{
     ArchitectGraph, Branch, Decision, MAX_NODE_VISITS, MAX_PLAN_DEPTH, MAX_RUN_STEPS, NodePath,
@@ -760,7 +762,7 @@ fn lexical_file_surface_graph(graph: &ArchitectGraph, roots: &FileSurfaceRoots) 
                         (absolute, *path_style)
                     } else if let Some((_, path_style)) = roots
                         .values()
-                        .find(|(_, path_style)| path_style.is_absolute(file))
+                        .find(|(_, path_style)| path_style.is_absolute(Path::new(file.as_str())))
                     {
                         (PathBuf::from(file.as_str()), *path_style)
                     } else {
@@ -3024,26 +3026,43 @@ async fn send_and_wait(
     prompt: String,
     cx: &mut AsyncApp,
 ) -> Result<(), RunOutcome> {
-    let send = thread.update(cx, |thread, cx| {
-        thread.send(
-            vec![acp::ContentBlock::Text(acp::TextContent::new(prompt))],
-            cx,
-        )
-    });
-    match send.await {
-        Ok(Some(response)) => match response.stop_reason {
-            acp::StopReason::EndTurn => Ok(()),
-            acp::StopReason::Cancelled => Err(RunOutcome::Cancelled),
-            reason => Err(RunOutcome::Failed {
-                message: format!(
-                    "The step ended without completing ({reason:?}). Check its conversation and resume the run."
-                ),
-            }),
-        },
-        Ok(None) => Err(RunOutcome::Cancelled),
-        Err(error) => Err(RunOutcome::Failed {
-            message: format!("{error:#}. Check the model's configuration and resume the run."),
-        }),
+    let content = vec![acp::ContentBlock::Text(acp::TextContent::new(prompt))];
+    let connection = thread.read_with(cx, |thread, _| thread.connection().clone());
+    let incomplete = |reason: &dyn std::fmt::Debug| RunOutcome::Failed {
+        message: format!(
+            "The step ended without completing ({reason:?}). Check its conversation and resume the run."
+        ),
+    };
+    let failed = |error: anyhow::Error| RunOutcome::Failed {
+        message: format!("{error:#}. Check the model's configuration and resume the run."),
+    };
+    match connection.downcast::<NativeAgentConnection>() {
+        // Native sessions accept the message first and report the end of the
+        // turn separately, so the send itself does not wait for the step.
+        Some(connection) => {
+            let completion = cx.update(|cx| {
+                connection.send_and_wait_for_completion(thread.clone(), content, cx)
+            });
+            match completion.await.map_err(failed)? {
+                acp::StopReason::EndTurn => Ok(()),
+                acp::StopReason::Cancelled => Err(RunOutcome::Cancelled),
+                reason => Err(incomplete(&reason)),
+            }
+        }
+        None => {
+            let send = thread.update(cx, |thread, cx| thread.send(content, cx));
+            match send.await.map_err(failed)? {
+                Some(SubmissionResponse::LegacyCompleted(response)) => match response.stop_reason {
+                    acp_v1::StopReason::EndTurn => Ok(()),
+                    acp_v1::StopReason::Cancelled => Err(RunOutcome::Cancelled),
+                    reason => Err(incomplete(&reason)),
+                },
+                Some(SubmissionResponse::Accepted(_)) => Err(RunOutcome::Failed {
+                    message: "This agent reports the end of a turn asynchronously, which Architect runs do not support. Choose the Praxis Agent and resume the run.".into(),
+                }),
+                None => Err(RunOutcome::Cancelled),
+            }
+        }
     }
 }
 

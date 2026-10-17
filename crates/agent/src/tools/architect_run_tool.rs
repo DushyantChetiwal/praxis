@@ -1,7 +1,7 @@
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 use acp_thread::AcpThread;
-use agent_client_protocol::schema::v1 as acp;
+use agent_client_protocol::schema::v2 as acp;
 use anyhow::{Context as _, Result, ensure};
 use architect::{NodePath, StepModel};
 use futures::{FutureExt as _, channel::oneshot};
@@ -1521,11 +1521,8 @@ mod tests {
         let call_id = acp::ToolCallId::new("opaque-active-call");
         let permission = child
             .update(cx, |thread, cx| {
-                thread.request_tool_call_authorization(
-                    acp::ToolCallUpdate::new(
-                        call_id.clone(),
-                        acp::ToolCallUpdateFields::new().title("Needs approval"),
-                    ),
+                thread.request_tool_call_update_authorization(
+                    acp::ToolCallUpdate::new(call_id.clone()).title("Needs approval"),
                     acp_thread::PermissionOptions::Dropdown(vec![]),
                     acp_thread::AuthorizationKind::PermissionGrant,
                     cx,

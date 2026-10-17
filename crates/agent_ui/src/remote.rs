@@ -37,7 +37,7 @@ use std::sync::Arc;
 use acp_thread::{
     AgentThreadEntry, PermissionOptions, SelectedPermissionOutcome, ThreadStatus, ToolCallStatus,
 };
-use agent_client_protocol::schema::v1 as acp;
+use agent_client_protocol::schema::v2 as acp;
 use anyhow::{Context as _, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
@@ -882,7 +882,7 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
             let available: Vec<Value> = modes
                 .all_modes()
                 .into_iter()
-                .map(|mode| json!({ "id": mode.id.0.as_ref(), "name": mode.name }))
+                .map(|mode| json!({ "id": mode.value.0.as_ref(), "name": mode.name }))
                 .collect();
             json!({ "current": modes.current_mode().0.as_ref(), "available": available })
         });
@@ -978,7 +978,7 @@ fn permission_choices(
             for option in options {
                 push(
                     option,
-                    SelectedPermissionOutcome::new(option.option_id.clone(), option.kind),
+                    SelectedPermissionOutcome::new(option.option_id.clone(), option.kind.clone()),
                 );
             }
         }
@@ -1036,14 +1036,15 @@ fn pending_permissions(view: &ConversationView, cx: &App) -> Vec<Value> {
     };
     conversation
         .read(cx)
-        .pending_tool_calls()
+        .pending_tool_calls(cx)
         .into_iter()
         .filter_map(|(thread, tool_call_id)| {
             let thread = thread.read(cx);
             let (_, call) = thread.tool_call(&tool_call_id)?;
-            let ToolCallStatus::WaitingForConfirmation { options, .. } = &call.status else {
-                return None;
-            };
+            let options = call
+                .authorization_id()
+                .and_then(|id| thread.permission_request(id))
+                .and_then(|request| request.legacy_options())?;
             let options: Vec<Value> = permission_choices(options)
                 .into_iter()
                 .map(|(option, _)| {
@@ -1075,8 +1076,8 @@ fn answer_permission(workspace: &Entity<Workspace>, args: &Value, cx: &mut App) 
         .cloned()
         .context("the conversation is not connected")?;
 
-    let (session, tool_call, outcome) = {
-        let pending = conversation.read(cx).pending_tool_calls();
+    let (session, request_id, outcome) = {
+        let pending = conversation.read(cx).pending_tool_calls(cx);
         let (thread, tool_call) = pending
             .into_iter()
             .find(|(thread, id)| {
@@ -1088,17 +1089,20 @@ fn answer_permission(workspace: &Entity<Workspace>, args: &Value, cx: &mut App) 
         let (_, call) = thread
             .tool_call(&tool_call)
             .context("that request is no longer waiting for an answer")?;
-        let ToolCallStatus::WaitingForConfirmation { options, .. } = &call.status else {
+        let Some((request_id, options)) = call.authorization_id().and_then(|id| {
+            let options = thread.permission_request(id)?.legacy_options()?;
+            Some((id, options))
+        }) else {
             bail!("that request is no longer waiting for an answer");
         };
         let (_, outcome) = permission_choices(options)
             .into_iter()
             .find(|(option, _)| option.option_id.0.as_ref() == option_id)
             .with_context(|| format!("that request has no option {option_id:?}"))?;
-        (thread.session_id().clone(), tool_call, outcome)
+        (thread.session_id().clone(), request_id, outcome)
     };
     conversation.update(cx, |conversation, cx| {
-        conversation.authorize_tool_call(session, tool_call, outcome, cx);
+        conversation.authorize_permission_request(session, request_id, outcome, cx);
     });
     Ok(json!({ "answered": true }))
 }
@@ -1113,9 +1117,9 @@ fn set_mode(workspace: &Entity<Workspace>, mode: &str, cx: &mut App) -> Result<V
     let id = modes
         .all_modes()
         .into_iter()
-        .find(|candidate| candidate.id.0.as_ref() == mode)
+        .find(|candidate| candidate.value.0.as_ref() == mode)
         .with_context(|| format!("this agent has no {mode:?} mode"))?
-        .id;
+        .value;
     modes.set_mode(id, cx).detach_and_log_err(cx);
     Ok(json!({ "mode": mode }))
 }
@@ -1844,9 +1848,9 @@ fn describe_entry(
             ("assistant", text, None)
         }
         AgentThreadEntry::ToolCall(call) => {
-            let status = match call.status {
+            let status = match call.status() {
                 ToolCallStatus::Pending => "pending",
-                ToolCallStatus::WaitingForConfirmation { .. } => "waiting",
+                ToolCallStatus::WaitingForConfirmation => "waiting",
                 ToolCallStatus::InProgress => "running",
                 ToolCallStatus::Completed => "completed",
                 ToolCallStatus::Failed => "failed",
@@ -2436,7 +2440,7 @@ mod tests {
         session.update(cx, |thread, cx| {
             thread
                 .upsert_tool_call(
-                    acp::ToolCall::new("remote-tool", "Read a file")
+                    agent_client_protocol::schema::v1::ToolCall::new("remote-tool", "Read a file")
                         .raw_output(json!({ "output": "tool output body" })),
                     cx,
                 )
