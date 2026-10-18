@@ -558,11 +558,11 @@ class ProvenanceTests(unittest.TestCase):
 
     def test_invalid_event_head_base_number_and_fork_prevent_receipt(self):
         original = copy.deepcopy(self.event)
-        for field in ("head", "base", "number", "fork", "repository"):
+        for field in ("head", "number", "fork", "repository"):
             with self.subTest(field=field):
                 self.event = copy.deepcopy(original)
-                if field in ("head", "base"):
-                    self.event["pull_request"][field]["sha"] = OTHER
+                if field == "head":
+                    self.event["pull_request"]["head"]["sha"] = OTHER
                 elif field == "number":
                     self.event["number"] = 12
                 elif field == "fork":
@@ -572,6 +572,34 @@ class ProvenanceTests(unittest.TestCase):
                 self.set_execution_environment()
                 with self.assertRaises(validation.Unverified):
                     self.validator.record(MERGE)
+
+    def test_record_uses_the_tested_merge_base_when_the_event_base_is_stale(self):
+        # The event's base SHA can lag the base branch that GitHub merged.
+        self.event["pull_request"]["base"]["sha"] = OTHER
+        self.api.responses[f"{ROOT}/commits/main"] = {"sha": BASE}
+        self.set_execution_environment()
+        self.assertEqual(self.validator.record(MERGE), self.receipt)
+
+    def test_record_accepts_a_tested_merge_base_behind_the_default_branch(self):
+        self.event["pull_request"]["base"]["sha"] = OTHER
+        self.api.responses[f"{ROOT}/compare/{BASE}...{TARGET}?per_page=1"] = {"status": "ahead"}
+        self.set_execution_environment()
+        self.assertEqual(self.validator.record(MERGE), self.receipt)
+
+    def test_record_rejects_a_tested_merge_base_off_the_default_branch(self):
+        self.event["pull_request"]["base"]["sha"] = OTHER
+        for status in ("behind", "diverged", "identical"):
+            with self.subTest(status=status):
+                self.api.responses[f"{ROOT}/compare/{BASE}...{TARGET}?per_page=1"] = {"status": status}
+                self.set_execution_environment()
+                with self.assertRaises(validation.Unverified):
+                    self.validator.record(MERGE)
+
+    def test_record_rejects_a_tested_merge_without_the_run_head(self):
+        self.api.responses[f"{ROOT}/git/commits/{MERGE}"]["parents"][1]["sha"] = OTHER
+        self.set_execution_environment()
+        with self.assertRaisesRegex(validation.Unverified, "wrong head"):
+            self.validator.record(MERGE)
 
     def test_record_requires_all_successful_jobs(self):
         self.set_execution_environment()

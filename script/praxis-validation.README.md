@@ -93,10 +93,13 @@ it never accepts that main run's skipped jobs as evidence.
 - `Quality source validated` runs even after failures/skips. It requires either
   verified reuse with all full jobs skipped, or success from every full job and
   the receipt job. Consider requiring this aggregate for non-PR protection.
-- `record` captures PR number, base SHA, and head SHA from `GITHUB_EVENT_PATH`,
-  validating event repository ownership and the immutable run head. API
-  `run.pull_requests` associations are used only for PR number and ownership:
-  their head/base SHAs can advance after the run, just like the live PR.
+- `record` captures the PR number and head SHA from `GITHUB_EVENT_PATH`,
+  validating event repository ownership and the immutable run head. The
+  recorded base is the tested merge's first parent. The event's base SHA can
+  lag the base branch that GitHub merged, so a different merge base is accepted
+  only when it is on the default branch. API `run.pull_requests` associations are used only for PR
+  number and ownership: their head/base SHAs can advance after the run, just
+  like the live PR.
 - `record` is internal to the receipt job. Only after all required jobs succeed can it
   write `receipt.json`, uploaded as
   `praxis-quality-full-RUN_ID-RUN_ATTEMPT` with 30-day retention. It independently
@@ -127,7 +130,7 @@ it never accepts that main run's skipped jobs as evidence.
 
 A schema-2 receipt records repository name/ID, source commit/tree, run
 ID/attempt/event/head, workflow ID/path/execution commit/blob, and PR number plus
-event base/head SHAs where applicable. Schema-1 receipts are not accepted because
+PR base/head SHAs where applicable. Schema-1 receipts are not accepted because
 they lack the captured event provenance. Acceptance requires all of the following:
 
 - The run belongs to this repository and this workflow, completed successfully,
@@ -148,7 +151,7 @@ they lack the captured event provenance. Acceptance requires all of the followin
   the consumer's expected executing definition. Comparing only the source tree
   is insufficient for a workflow dispatched with a different `source_ref`.
 - A PR's tested commit is the synthetic merge: its two parents must equal the
-  receipt's event base and the immutable run head SHA. The recorded event head
+  receipt's recorded base and the immutable run head SHA. The recorded event head
   must equal that same run head. The workflow execution SHA must be this tested
   merge SHA. The run's association supplies only PR number and repository
   ownership, corroborated against the live PR. GitHub can clear that association
