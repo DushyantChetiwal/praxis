@@ -3374,6 +3374,8 @@ mod checkpoint_tests {
                 .id();
             project.update(cx, |project, cx| project.remove_worktree(id, cx));
         });
+        // Native step turns observe cancellation asynchronously.
+        cx.run_until_parked();
         let requests_before = fake.pending_completions();
         assert_preflight_preserves_execution(&thread, &acp_thread, "Open a project folder", cx)
             .await;
