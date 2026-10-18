@@ -6489,13 +6489,10 @@ impl ThreadView {
                             }),
                         )
                         .item(
-                            ContextMenuEntry::new(stop_everything).handler({
-                                let weak_self = weak_self.clone();
-                                move |_window, cx| {
-                                    weak_self
-                                        .update(cx, |this, cx| this.cancel_generation(cx))
-                                        .log_err();
-                                }
+                            ContextMenuEntry::new(stop_everything).handler(move |_window, cx| {
+                                weak_self
+                                    .update(cx, |this, cx| this.cancel_generation(cx))
+                                    .log_err();
                             }),
                         )
                     }))
