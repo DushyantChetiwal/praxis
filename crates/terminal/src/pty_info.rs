@@ -72,6 +72,31 @@ pub(crate) struct ProcessInfo {
     pub(crate) argv: Vec<String>,
 }
 
+/// `root` and its descendants, each parent before its children, from
+/// `(pid, parent, start time)` records. A child cannot start before its parent,
+/// which keeps leftovers of an earlier process that had the same pid out.
+#[cfg(any(not(unix), test))]
+fn process_tree(processes: &[(Pid, Option<Pid>, u64)], root: Pid) -> Vec<Pid> {
+    let mut tree = vec![root];
+    let mut index = 0;
+    while let Some(&parent) = tree.get(index) {
+        let parent_started = processes
+            .iter()
+            .find(|(pid, ..)| *pid == parent)
+            .map(|(_, _, started)| *started);
+        for (pid, process_parent, started) in processes {
+            if *process_parent == Some(parent)
+                && parent_started.is_none_or(|parent_started| *started >= parent_started)
+                && !tree.contains(pid)
+            {
+                tree.push(*pid);
+            }
+        }
+        index += 1;
+    }
+    tree
+}
+
 /// Fetches Zed-relevant Pseudo-Terminal (PTY) process information
 pub(crate) struct PtyProcessInfo {
     system: RwLock<System>,
@@ -154,9 +179,30 @@ impl PtyProcessInfo {
         unsafe { libc::killpg(pid.as_u32() as i32, libc::SIGKILL) == 0 }
     }
 
+    /// Windows has no process groups, and terminating the shell leaves the
+    /// builds and servers it started running, so this kills its whole tree.
     #[cfg(not(unix))]
     pub(crate) fn kill_current_process(&self) -> bool {
-        self.refresh().is_some_and(|process| process.kill())
+        let Some(root) = self.pid_getter.pid() else {
+            return false;
+        };
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        let processes = system
+            .processes()
+            .iter()
+            .map(|(pid, process)| (*pid, process.parent(), process.start_time()))
+            .collect::<Vec<_>>();
+        let mut killed = false;
+        // Children first, so none is left running after the shell that owned it.
+        for pid in process_tree(&processes, root).into_iter().rev() {
+            killed |= system.process(pid).is_some_and(|process| process.kill());
+        }
+        killed
     }
 
     pub(crate) fn kill_child_process(&self) -> bool {
@@ -288,5 +334,28 @@ mod tests {
             churned_len <= 2,
             "foreground process churn retained {churned_len} process entries"
         );
+    }
+}
+
+#[cfg(test)]
+mod process_tree_tests {
+    use super::*;
+
+    #[test]
+    fn process_tree_includes_descendants_but_not_reused_pid_leftovers() {
+        let pid = Pid::from_u32;
+        let processes = [
+            (pid(10), Some(pid(1)), 100),
+            (pid(11), Some(pid(10)), 101),
+            (pid(12), Some(pid(11)), 102),
+            (pid(13), Some(pid(10)), 101),
+            (pid(14), Some(pid(10)), 50),
+            (pid(15), Some(pid(2)), 103),
+        ];
+        assert_eq!(
+            process_tree(&processes, pid(10)),
+            vec![pid(10), pid(11), pid(13), pid(12)]
+        );
+        assert_eq!(process_tree(&processes, pid(99)), vec![pid(99)]);
     }
 }

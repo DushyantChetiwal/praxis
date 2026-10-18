@@ -54,9 +54,10 @@ const BACKGROUND_CAPTURE_LIMIT: u64 = 100 * 1024;
 /// - Always prepend `GIT_EDITOR=true ` to any git command that may invoke an editor, including `git rebase`, `git commit`, `git merge`, and `git tag`. Example: `GIT_EDITOR=true git rebase origin/main` (NOT `git rebase origin/main`).
 /// - For other commands that may open a pager or editor, set `PAGER=cat` and/or `EDITOR=true` similarly.
 ///
-/// Background-capable execution captures at most the first 100 KiB of terminal
+/// Background-capable execution captures at most the last 100 KiB of terminal
 /// history. Head/tail selections apply to that bounded capture, not the entire
-/// command output; selected output is further capped at 16 KiB. Truncation is reported.
+/// command output; selected output is further capped to its last 16 KiB.
+/// Truncation is reported.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct TerminalToolInput {
     /// The one-liner command to execute. Do not include shell substitutions or interpolations such as `$VAR`, `${VAR}`, `$(...)`, backticks, `$((...))`, `<(...)`, or `>(...)`; resolve those values first or ask the user for the literal value to use.
@@ -109,9 +110,10 @@ pub struct TerminalToolInput {
 /// - Always prepend `GIT_EDITOR=true ` to any git command that may invoke an editor, including `git rebase`, `git commit`, `git merge`, and `git tag`. Example: `GIT_EDITOR=true git rebase origin/main` (NOT `git rebase origin/main`).
 /// - For other commands that may open a pager or editor, set `PAGER=cat` and/or `EDITOR=true` similarly.
 ///
-/// Background-capable execution captures at most the first 100 KiB of terminal
+/// Background-capable execution captures at most the last 100 KiB of terminal
 /// history. Head/tail selections apply to that bounded capture, not the entire
-/// command output; selected output is further capped at 16 KiB. Truncation is reported.
+/// command output; selected output is further capped to its last 16 KiB.
+/// Truncation is reported.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SandboxedTerminalToolInput {
     /// The one-liner command to execute. Do not include shell substitutions or interpolations such as `$VAR`, `${VAR}`, `$(...)`, backticks, `$((...))`, `<(...)`, or `>(...)`; resolve those values first or ask the user for the literal value to use.
@@ -982,7 +984,7 @@ async fn prepare_terminal_tool(
     check_terminal_launch(reservation, event_stream).map_err(|error| error.to_string())?;
     let output_byte_limit = if reservation.is_some() {
         // Bound backend capture as well as the model-facing selected output.
-        // Head/tail refer to this captured prefix, not an unbounded history.
+        // Head/tail refer to this captured tail, not an unbounded history.
         Some(BACKGROUND_CAPTURE_LIMIT)
     } else if selection.is_enabled() {
         None
@@ -1467,7 +1469,7 @@ pub(super) fn process_content(
     let content = format!("```\n{content}\n```");
     let content = if output.truncated {
         format!(
-            "Command output too long. The first {} bytes:\n\n{content}",
+            "Command output too long. The last {} bytes:\n\n{content}",
             content.len(),
         )
     } else {

@@ -180,6 +180,13 @@ impl crate::TerminalHandle for FakeTerminalHandle {
         Ok(())
     }
 
+    fn kill_now(&self, _cx: &mut App) {
+        self.killed.store(true, Ordering::SeqCst);
+        if self.exit_on_kill {
+            self.signal_exit();
+        }
+    }
+
     fn was_stopped_by_user(&self, _cx: &AsyncApp) -> Result<bool> {
         Ok(self.stopped_by_user.load(Ordering::SeqCst))
     }
@@ -787,6 +794,98 @@ async fn test_background_terminal_new_prompt_cancels_foreground_launch(cx: &mut 
         .unwrap();
     cx.run_until_parked();
     assert!(handle.was_killed());
+}
+
+#[gpui::test]
+async fn test_background_terminal_survives_send_now(cx: &mut TestAppContext) {
+    let fake = init_test(cx);
+    always_allow_tools(cx);
+    disable_sandboxing(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/", json!({ "a": {} })).await;
+    let project = Project::test(fs.clone(), [path!("/a").as_ref()], cx).await;
+    let thread_store = cx.new(|cx| ThreadStore::new(cx));
+    let agent =
+        cx.update(|cx| NativeAgent::new(thread_store.clone(), Templates::new(), fs.clone(), cx));
+    let connection = Rc::new(NativeAgentConnection(agent.clone()));
+    let acp_thread = cx
+        .update(|cx| {
+            connection
+                .clone()
+                .new_session(project.clone(), PathList::new(&[Path::new("")]), cx)
+        })
+        .await
+        .unwrap();
+    let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+    let thread = agent.read_with(cx, |agent, _| {
+        agent.sessions.get(&session_id).unwrap().thread.clone()
+    });
+    let model = fake.model("thread");
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    let handle = environment.terminal_handle.clone().unwrap();
+    thread.update(cx, |thread, cx| {
+        thread.set_model(model.clone(), cx);
+        thread.add_default_tools(environment.clone(), cx);
+    });
+    cx.run_until_parked();
+
+    let first = cx.update(|cx| {
+        connection.send_and_wait_for_completion(acp_thread.clone(), vec!["Start a build".into()], cx)
+    });
+    cx.run_until_parked();
+    fake.send_last_event(
+        &model,
+        LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+            id: "background".into(),
+            name: TerminalTool::NAME.into(),
+            raw_input: r#"{"command":"cargo build","cd":".","yield_ms":0}"#.into(),
+            input: language_model::LanguageModelToolUseInput::Json(
+                json!({"command": "cargo build", "cd": ".", "yield_ms": 0}),
+            ),
+            is_input_complete: true,
+            thought_signature: None,
+        }),
+    );
+    fake.end_last(&model);
+    cx.run_until_parked();
+    assert_eq!(environment.terminal_spawns.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fake.pending_completions_for(&model).len(),
+        1,
+        "the turn should continue while the command runs in the background"
+    );
+
+    // Send Now ends the turn for the follow-up, not the command it started.
+    acp_thread
+        .update(cx, |thread, cx| thread.interrupt(cx))
+        .await
+        .expect("interrupting succeeds");
+    assert_eq!(
+        first.await.expect("the interrupted turn settles"),
+        acp_v2::StopReason::Cancelled
+    );
+    cx.run_until_parked();
+    assert!(
+        !handle.was_killed(),
+        "Send Now must not stop background commands"
+    );
+
+    let second = cx.update(|cx| {
+        connection.send_and_wait_for_completion(acp_thread.clone(), vec!["Keep going".into()], cx)
+    });
+    cx.run_until_parked();
+    acp_thread
+        .update(cx, |thread, cx| thread.cancel(cx))
+        .await
+        .expect("cancelling succeeds");
+    assert_eq!(
+        second.await.expect("the stopped turn settles"),
+        acp_v2::StopReason::Cancelled
+    );
+    cx.run_until_parked();
+    assert!(handle.was_killed(), "Stop must stop background commands");
 }
 
 #[gpui::test]

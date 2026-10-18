@@ -693,9 +693,10 @@ impl PlatformWindow for WindowsWindow {
         let scale_factor = self.scale_factor();
         let point = unsafe {
             let mut point: POINT = std::mem::zeroed();
-            GetCursorPos(&mut point)
-                .context("unable to get cursor position")
-                .log_err();
+            // This fails while the session is locked, which needs no report.
+            if let Err(error) = GetCursorPos(&mut point) {
+                log::debug!("unable to get cursor position: {error}");
+            }
             ScreenToClient(self.0.hwnd, &mut point).ok().log_err();
             point
         };

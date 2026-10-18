@@ -243,6 +243,12 @@ pub trait AgentConnection {
     /// Requests cancellation; success does not establish that execution stopped.
     fn cancel(&self, session_id: &acp_v2::SessionId, cx: &mut App) -> Result<()>;
 
+    /// Ends the running turn so a follow-up can start. Unlike [`Self::cancel`],
+    /// agents may keep work the turn handed off, such as background commands.
+    fn interrupt(&self, session_id: &acp_v2::SessionId, cx: &mut App) -> Result<()> {
+        self.cancel(session_id, cx)
+    }
+
     /// Request-scoped elicitations are connection-level because they can arrive before a session
     /// thread exists. Session-scoped elicitations stay in the thread timeline, but use
     /// `ElicitationStore` for shared processing.
@@ -969,6 +975,7 @@ mod test_support {
         next_close_responses: Arc<Mutex<VecDeque<oneshot::Receiver<Result<()>>>>>,
         set_title_calls: Arc<Mutex<Vec<(acp_v2::SessionId, SharedString)>>>,
         cancel_calls: Arc<Mutex<Vec<acp_v2::SessionId>>>,
+        interrupt_calls: Arc<Mutex<Vec<acp_v2::SessionId>>>,
         next_cancel_error: Arc<Mutex<Option<anyhow::Error>>>,
         supports_receipt_submissions: bool,
         supports_retry: bool,
@@ -1012,6 +1019,7 @@ mod test_support {
                 next_close_responses: Default::default(),
                 set_title_calls: Default::default(),
                 cancel_calls: Default::default(),
+                interrupt_calls: Default::default(),
                 next_cancel_error: Default::default(),
                 permission_requests: HashMap::default(),
                 sessions: Arc::default(),
@@ -1091,6 +1099,29 @@ mod test_support {
 
         pub fn take_cancel_calls(&self) -> Vec<acp_v2::SessionId> {
             std::mem::take(&mut *self.cancel_calls.lock())
+        }
+
+        pub fn take_interrupt_calls(&self) -> Vec<acp_v2::SessionId> {
+            std::mem::take(&mut *self.interrupt_calls.lock())
+        }
+
+        fn end_turn_cancelled(&self, session_id: &acp_v2::SessionId) -> Result<()> {
+            if let Some(error) = self.next_cancel_error.lock().take() {
+                return Err(error);
+            }
+            if let Some(end_turn_tx) = self
+                .sessions
+                .lock()
+                .get_mut(session_id)
+                .ok_or_else(|| anyhow::anyhow!("Session not found"))?
+                .response_tx
+                .take()
+            {
+                end_turn_tx
+                    .send(acp_v1::StopReason::Cancelled)
+                    .map_err(|_| anyhow::anyhow!("Prompt observer was released"))?;
+            }
+            Ok(())
         }
 
         pub fn set_next_cancel_error(&self, error: anyhow::Error) {
@@ -1427,22 +1458,12 @@ mod test_support {
 
         fn cancel(&self, session_id: &acp_v2::SessionId, _cx: &mut App) -> Result<()> {
             self.cancel_calls.lock().push(session_id.clone());
-            if let Some(error) = self.next_cancel_error.lock().take() {
-                return Err(error);
-            }
-            if let Some(end_turn_tx) = self
-                .sessions
-                .lock()
-                .get_mut(session_id)
-                .ok_or_else(|| anyhow::anyhow!("Session not found"))?
-                .response_tx
-                .take()
-            {
-                end_turn_tx
-                    .send(acp_v1::StopReason::Cancelled)
-                    .map_err(|_| anyhow::anyhow!("Prompt observer was released"))?;
-            }
-            Ok(())
+            self.end_turn_cancelled(session_id)
+        }
+
+        fn interrupt(&self, session_id: &acp_v2::SessionId, _cx: &mut App) -> Result<()> {
+            self.interrupt_calls.lock().push(session_id.clone());
+            self.end_turn_cancelled(session_id)
         }
 
         fn set_title(

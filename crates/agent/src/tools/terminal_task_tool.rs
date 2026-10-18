@@ -12,9 +12,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
+    hash::{Hash as _, Hasher as _},
     rc::{Rc, Weak},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use util::ResultExt as _;
 
@@ -22,7 +23,26 @@ const MAX_ACTIVE_TASKS: usize = 8;
 const MAX_RETAINED_TASKS: usize = 32;
 pub(super) const DEFAULT_YIELD_MS: u64 = 10_000;
 pub(super) const MAX_YIELD_MS: u64 = 30_000;
+const DEFAULT_WAIT_MS: u64 = 30_000;
+/// Long enough to wait out a build or CI job in one call. Each expiry costs a
+/// model round trip and grows the context.
+const MAX_WAIT_MS: u64 = 30 * 60 * 1000;
 const TRUNCATION_NOTE: &str = "Output was truncated. Head/tail selections apply to the bounded terminal capture, not the complete command history.";
+/// Status checks that see the same output this far apart flag the command as
+/// possibly waiting for input or hung.
+const STALLED_OUTPUT_NOTE_AFTER: Duration = Duration::from_secs(10 * 60);
+
+/// A terminal command an agent thread started, as listed for people rather
+/// than for the model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerminalTaskSummary {
+    pub id: String,
+    pub command: String,
+    pub running: bool,
+    /// Whether the command outlived its tool call and kept running on its own.
+    pub in_background: bool,
+    pub elapsed: Duration,
+}
 
 #[derive(Clone, Copy, Debug)]
 enum StopReason {
@@ -129,6 +149,71 @@ impl TerminalTaskRegistry {
         });
     }
 
+    pub(crate) fn summaries(&self, now: Instant) -> Vec<TerminalTaskSummary> {
+        self.tasks
+            .borrow()
+            .iter()
+            .map(|task| TerminalTaskSummary {
+                id: task.id.clone(),
+                command: task.state.command.clone(),
+                running: !task.is_complete(),
+                in_background: task.state.backgrounded.get(),
+                elapsed: now.saturating_duration_since(task.state.started_at),
+            })
+            .collect()
+    }
+
+    /// Commands that outlived their tool call and are still running.
+    pub(crate) fn running_in_background(&self) -> usize {
+        self.tasks
+            .borrow()
+            .iter()
+            .filter(|task| task.state.backgrounded.get() && !task.is_complete())
+            .count()
+    }
+
+    /// Kills every running command right away. When Praxis quits, the tasks
+    /// that would act on a stop request never run.
+    pub(crate) fn kill_all_now(&self, cx: &mut App) {
+        for task in self.tasks.borrow().iter() {
+            if let Some(terminal) = task.state.terminal.borrow().as_ref() {
+                terminal.kill_now(cx);
+            }
+        }
+        for child in self.children.borrow().iter() {
+            if let Some(child) = child.upgrade() {
+                child.kill_all_now(cx);
+            }
+        }
+    }
+
+    /// Stops one command for a person, who the model is then told stopped it.
+    pub(crate) fn stop_task(&self, task_id: &str) -> Result<(), String> {
+        self.get(task_id)?.request_stop(StopReason::Cancelled);
+        Ok(())
+    }
+
+    /// The command's output for a person: the live capture while it runs, or
+    /// the final result once it exits. Reading a live capture needs an async
+    /// context that is not inside an update.
+    pub(crate) fn task_output(&self, task_id: &str, cx: &AsyncApp) -> Result<String, String> {
+        let task = self.get(task_id)?;
+        if let Some(result) = task.state.result.borrow().as_ref() {
+            return result
+                .as_ref()
+                .map(|result| result.content.clone())
+                .map_err(Clone::clone);
+        }
+        let terminal = task.state.terminal.borrow();
+        let terminal = terminal
+            .as_ref()
+            .ok_or_else(|| "Terminal task has no output handle".to_string())?;
+        terminal
+            .current_output(cx)
+            .map(|output| output.output)
+            .map_err(|error| error.to_string())
+    }
+
     fn get(&self, task_id: &str) -> Result<TerminalTask, String> {
         self.tasks.borrow().iter().find(|task| task.id == task_id).cloned()
             .ok_or_else(|| format!("Unknown terminal task {task_id}. Tasks belong only to this thread; old completed tasks may have been evicted."))
@@ -148,9 +233,16 @@ impl TerminalTaskRegistry {
         let guard = TerminalCleanup::new(terminal.clone(), cx);
         reservation.check()?;
         let (stop_tx, mut stop_rx) = watch::channel(None);
+        let started_at = cx.background_executor().now();
         let state = Rc::new(TerminalTaskState {
             terminal: RefCell::new(Some(terminal.clone())),
             result: RefCell::new(None),
+            command: command.clone(),
+            started_at,
+            output_progress: Cell::new(OutputProgress {
+                fingerprint: output_fingerprint(""),
+                changed_at: started_at,
+            }),
             selection,
             note,
             stop_tx: RefCell::new(stop_tx),
@@ -368,10 +460,25 @@ struct CompletedTerminalTask {
 struct TerminalTaskState {
     terminal: RefCell<Option<Rc<dyn TerminalHandle>>>,
     result: RefCell<Option<Result<CompletedTerminalTask, String>>>,
+    command: String,
+    started_at: Instant,
+    output_progress: Cell<OutputProgress>,
     selection: TerminalOutputSelection,
     note: Option<String>,
     stop_tx: RefCell<watch::Sender<Option<StopReason>>>,
     backgrounded: Cell<bool>,
+}
+
+#[derive(Clone, Copy)]
+struct OutputProgress {
+    fingerprint: u64,
+    changed_at: Instant,
+}
+
+fn output_fingerprint(output: &str) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    output.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl TerminalTaskState {
@@ -380,6 +487,21 @@ impl TerminalTaskState {
             Some(note) => format!("{note}\n\n{content}"),
             None => content,
         }
+    }
+
+    /// How long the output has gone unchanged across status checks. Compares
+    /// content rather than length, which stops growing once the capture is full.
+    fn unchanged_output_for(&self, output: &str, now: Instant) -> Duration {
+        let fingerprint = output_fingerprint(output);
+        let mut progress = self.output_progress.get();
+        if progress.fingerprint != fingerprint {
+            progress = OutputProgress {
+                fingerprint,
+                changed_at: now,
+            };
+            self.output_progress.set(progress);
+        }
+        now.saturating_duration_since(progress.changed_at)
     }
 }
 
@@ -436,29 +558,39 @@ impl TerminalTask {
         let terminal = terminal
             .as_ref()
             .ok_or_else(|| "Terminal task has no output handle".to_string())?;
-        let output = bounded_output(
-            terminal
-                .current_output(cx)
-                .map_err(|error| error.to_string())?,
-            self.state.selection,
-        );
+        let output = terminal
+            .current_output(cx)
+            .map_err(|error| error.to_string())?;
+        let unchanged_for = self
+            .state
+            .unchanged_output_for(&output.output, cx.background_executor().now());
+        let stalled = if unchanged_for >= STALLED_OUTPUT_NOTE_AFTER {
+            format!(
+                "No new output for {} minutes. If the command is waiting for input or hung, stop it with terminal_stop and rerun it non-interactively.\n",
+                unchanged_for.as_secs() / 60
+            )
+        } else {
+            String::new()
+        };
+        let output = bounded_output(output, self.state.selection);
         let truncated = if output.truncated {
             TRUNCATION_NOTE
         } else {
             ""
         };
-        Ok(self.state.with_note(format!("task_id: {}\nstill_running: true\nCommand is still running; no final exit status yet.\n{truncated}\n\n```\n{}\n```\nContinue useful independent work. When nothing useful remains, use terminal_wait; do not shell sleep or busy-poll terminal_status.", self.id, output.output)))
+        Ok(self.state.with_note(format!("task_id: {}\nstill_running: true\nCommand is still running; no final exit status yet.\n{stalled}{truncated}\n\n```\n{}\n```\nContinue useful independent work. When nothing useful remains, use terminal_wait; do not shell sleep or busy-poll terminal_status.", self.id, output.output)))
     }
 }
 
 fn bounded_output(mut output: ProcessOutput, selection: TerminalOutputSelection) -> ProcessOutput {
     output.output = select_terminal_output_lines(&output.output, selection);
     if output.output.len() > COMMAND_OUTPUT_LIMIT as usize {
-        let mut end = COMMAND_OUTPUT_LIMIT as usize;
-        while !output.output.is_char_boundary(end) {
-            end -= 1;
+        // Keep the end, where commands report their results.
+        let mut start = output.output.len() - COMMAND_OUTPUT_LIMIT as usize;
+        while !output.output.is_char_boundary(start) {
+            start += 1;
         }
-        output.output.truncate(end);
+        output.output.drain(..start);
         output.truncated = true;
     }
     output
@@ -482,10 +614,11 @@ pub struct TerminalStatusToolInput {
 pub struct TerminalWaitToolInput {
     /// Task id returned by terminal in this thread.
     pub task_id: String,
-    /// Wait duration in milliseconds, from 1 through 60000 inclusive. Defaults
-    /// to 30000 when omitted or null. This is NOT a process runtime limit.
+    /// Wait duration in milliseconds, from 1 through 1800000 (30 minutes)
+    /// inclusive. Defaults to 30000 when omitted or null. Exit wakes the wait
+    /// early. This is NOT a process runtime limit.
     #[serde(default)]
-    #[schemars(range(min = 1, max = 60000))]
+    #[schemars(range(min = 1, max = 1800000))]
     pub timeout_ms: Option<u64>,
 }
 
@@ -619,9 +752,9 @@ terminal_management_tool!(
     ReadOnly,
     true,
     |_task: &TerminalTask, input: &TerminalWaitToolInput| {
-        let timeout = input.timeout_ms.unwrap_or(30_000);
-        if !(1..=60_000).contains(&timeout) {
-            return Err("timeout_ms must be between 1 and 60000".to_string());
+        let timeout = input.timeout_ms.unwrap_or(DEFAULT_WAIT_MS);
+        if !(1..=MAX_WAIT_MS).contains(&timeout) {
+            return Err(format!("timeout_ms must be between 1 and {MAX_WAIT_MS}"));
         }
         Ok(timeout)
     }
@@ -874,6 +1007,67 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn terminal_tasks_wait_accepts_long_waits_and_ends_on_cancel(cx: &mut TestAppContext) {
+        let registry = Rc::new(TerminalTaskRegistry::default());
+        let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
+        let task = start(&registry, terminal.clone(), None, cx);
+        let (stream, _events, mut cancellation_tx) = ToolCallEventStream::test_with_cancellation();
+        let mut wait = cx.update(|cx| {
+            Arc::new(TerminalWaitTool::new(&registry)).run(
+                ToolInput::resolved(TerminalWaitToolInput {
+                    task_id: task.id.clone(),
+                    timeout_ms: Some(MAX_WAIT_MS),
+                }),
+                stream,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        advance(cx, 10 * 60 * 1000);
+        assert!((&mut wait).now_or_never().is_none());
+
+        ToolCallEventStream::signal_cancellation_with_sender(&mut cancellation_tx);
+        cx.run_until_parked();
+        let result = (&mut wait)
+            .now_or_never()
+            .expect("cancelling the turn must end the wait immediately");
+        assert!(result.is_err());
+        assert!(!terminal.was_killed());
+    }
+
+    #[gpui::test]
+    async fn terminal_tasks_flag_output_that_stops_changing(cx: &mut TestAppContext) {
+        let registry = Rc::new(TerminalTaskRegistry::default());
+        let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
+        let task = start(&registry, terminal.clone(), None, cx);
+        task.background(&cx.to_async());
+        let summaries = registry.summaries(cx.executor().now());
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].command, "test command");
+        assert!(summaries[0].running && summaries[0].in_background);
+        assert_eq!(registry.running_in_background(), 1);
+
+        let response = task.response(false, &cx.to_async()).unwrap();
+        assert!(!response.contains("No new output"));
+        advance(cx, 5 * 60 * 1000);
+        let response = task.response(false, &cx.to_async()).unwrap();
+        assert!(!response.contains("No new output"));
+        advance(cx, 6 * 60 * 1000);
+        let response = task.response(false, &cx.to_async()).unwrap();
+        assert!(
+            response.contains("No new output for 11 minutes"),
+            "a command whose output stopped changing should be flagged: {response}"
+        );
+
+        registry.stop_task(&task.id).unwrap();
+        task.completion.clone().await;
+        assert!(terminal.was_killed());
+        assert_eq!(registry.running_in_background(), 0);
+        assert!(!registry.summaries(cx.executor().now())[0].running);
+        assert!(registry.stop_task("missing").is_err());
+    }
+
+    #[gpui::test]
     async fn terminal_tasks_wait_wakes_on_exit(cx: &mut TestAppContext) {
         let registry = Rc::new(TerminalTaskRegistry::default());
         let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
@@ -906,7 +1100,7 @@ mod tests {
         let registry = Rc::new(TerminalTaskRegistry::default());
         let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
         let task = start(&registry, terminal.clone(), None, cx);
-        for timeout in [Some(0), Some(60_001)] {
+        for timeout in [Some(0), Some(MAX_WAIT_MS + 1)] {
             let (stream, _events) = ToolCallEventStream::test();
             let result = cx
                 .update(|cx| {
@@ -920,7 +1114,7 @@ mod tests {
                     )
                 })
                 .await;
-            assert!(result.unwrap_err().contains("between 1 and 60000"));
+            assert!(result.unwrap_err().contains("between 1 and 1800000"));
         }
         let (stream, _events) = ToolCallEventStream::test();
         let mut wait = cx.update(|cx| {

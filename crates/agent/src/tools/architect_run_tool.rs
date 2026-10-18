@@ -1053,8 +1053,9 @@ impl AgentTool for ControlArchitectRunTool {
 }
 
 /// Subscribe once to run transitions or active ACP tool/user-input changes.
-/// Uses observers, not polling. timeout_ms is capped at 30000 (zero snapshots
-/// immediately). after_sequence is the last next_sequence you consumed. Drain
+/// Uses observers, not polling. timeout_ms is capped at 1800000 (30 minutes;
+/// zero snapshots immediately). after_sequence is the last next_sequence you
+/// consumed. Drain
 /// has_more pages before waiting. User-input/liveness changes can wake this tool
 /// with an unchanged cursor; inspect wait_reason and active records, not just
 /// event_sequence. This does not run, resume, or approve anything.
@@ -1069,6 +1070,10 @@ pub struct WaitArchitectRunToolInput {
 fn default_wait_timeout() -> u64 {
     30_000
 }
+
+/// Long enough to sleep through a long step instead of waking the model every
+/// few seconds. Any run transition or user-input change still wakes it early.
+const MAX_WAIT_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 
 pub struct WaitArchitectRunTool {
     thread: WeakEntity<Thread>,
@@ -1183,7 +1188,7 @@ impl AgentTool for WaitArchitectRunTool {
     fn run(
         self: Arc<Self>,
         input: ToolInput<Self::Input>,
-        _events: ToolCallEventStream,
+        events: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
         cx.spawn(async move |cx| {
@@ -1210,10 +1215,13 @@ impl AgentTool for WaitArchitectRunTool {
                     let observers = observe_run_wait(&thread, &coordinator, sender, cx);
                     Ok::<_, anyhow::Error>((thread, coordinator, observers))
                 })?;
-                let timer = cx.background_executor().timer(Duration::from_millis(input.timeout_ms.min(30_000))).fuse();
+                let timer = cx.background_executor().timer(Duration::from_millis(input.timeout_ms.min(MAX_WAIT_TIMEOUT_MS))).fuse();
                 let receiver = receiver.fuse();
-                futures::pin_mut!(timer, receiver);
+                // A cancelled turn waits for its running tools, so Stop must end the wait.
+                let cancelled = events.cancelled_by_user().fuse();
+                futures::pin_mut!(timer, receiver, cancelled);
                 let reason = futures::select_biased! {
+                    _ = cancelled => anyhow::bail!("The wait was cancelled."),
                     result = receiver => result.context("Run observer closed before a transition.")?,
                     _ = timer => "timeout",
                 };
@@ -1598,6 +1606,45 @@ mod tests {
         };
         assert_eq!(data["wait_reason"], "timeout");
         assert_eq!(data["next_sequence"], after_sequence);
+    }
+
+    #[gpui::test]
+    async fn wait_ends_when_the_turn_is_cancelled(cx: &mut gpui::TestAppContext) {
+        let (_connection, _agent, thread, coordinator) = architect_tool_test_session(cx).await;
+        thread.update(cx, |thread, cx| {
+            thread.start_architect_run(
+                NodePath::root("step".into()),
+                "Step".into(),
+                Task::ready(()),
+                cx,
+            );
+        });
+        let tool = Arc::new(WaitArchitectRunTool::new(
+            thread.downgrade(),
+            coordinator.downgrade(),
+        ));
+        let after_sequence = thread.read_with(cx, |thread, _| thread.architect_event_sequence());
+        let (events, _receiver, mut cancellation_tx) =
+            ToolCallEventStream::test_with_cancellation();
+        let mut task = cx.update(|cx| {
+            tool.run(
+                ToolInput::resolved(WaitArchitectRunToolInput {
+                    after_sequence,
+                    timeout_ms: MAX_WAIT_TIMEOUT_MS,
+                }),
+                events,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!((&mut task).now_or_never().is_none());
+
+        ToolCallEventStream::signal_cancellation_with_sender(&mut cancellation_tx);
+        cx.run_until_parked();
+        let result = (&mut task)
+            .now_or_never()
+            .expect("cancelling the turn must end the wait without advancing the clock");
+        assert!(result.is_err());
     }
 
     #[gpui::test]

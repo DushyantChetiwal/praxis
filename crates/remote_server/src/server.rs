@@ -396,6 +396,9 @@ fn init_logging_server(log_file_path: &Path) -> Result<Receiver<Vec<u8>>> {
     }));
     env_logger::Builder::new()
         .filter_level(log::LevelFilter::Info)
+        // inotify warns for every watch already removed along with its
+        // directory; the file watcher handles that case itself.
+        .filter_module("notify::inotify", log::LevelFilter::Error)
         .parse_default_env()
         .target(env_logger::Target::Pipe(target))
         .format(|buf, record| {

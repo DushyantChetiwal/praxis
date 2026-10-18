@@ -2528,9 +2528,10 @@ impl Terminal {
     }
 
     /// Returns terminal text and whether output was omitted. With a byte limit,
-    /// extraction stops at the UTF-8 budget (plus one character of lookahead),
-    /// without allocating the full scrollback. Tabs are represented by their
-    /// displayed spaces. `None` preserves `get_content` behavior exactly.
+    /// this is the end of the text: extraction walks back from the bottom and
+    /// stops at the UTF-8 budget (plus one character of lookahead), without
+    /// allocating the full scrollback. Tabs are represented by their displayed
+    /// spaces. `None` preserves `get_content` behavior exactly.
     pub fn get_content_with_limit(&self, byte_limit: Option<usize>) -> (String, bool) {
         match byte_limit {
             Some(limit) => content_text_bounded(&self.term.lock_unfair(), limit),
@@ -4987,7 +4988,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn test_bounded_content_matches_utf8_prefix_without_changing_scrollback(
+    fn test_bounded_content_keeps_the_utf8_suffix_without_changing_scrollback(
         cx: &mut TestAppContext,
     ) {
         for text in [
@@ -5004,11 +5005,11 @@ mod tests {
                 let full = terminal.get_content();
                 for limit in [0, 1, 2, 3, 5, 31, 100, full.len(), full.len() + 1] {
                     let (bounded, truncated) = terminal.get_content_with_limit(Some(limit));
-                    let mut end = limit.min(full.len());
-                    while !full.is_char_boundary(end) {
-                        end -= 1;
+                    let mut start = full.len().saturating_sub(limit);
+                    while !full.is_char_boundary(start) {
+                        start += 1;
                     }
-                    assert_eq!(bounded, full[..end]);
+                    assert_eq!(bounded, full[start..]);
                     assert_eq!(truncated, full.len() > limit);
                     assert!(bounded.len() <= limit);
                 }

@@ -6,8 +6,8 @@ use crate::{
     GitShowTool, GitStatusTool, GoToDefinitionTool, GrepTool, ListAgentsAndModelsTool,
     ListDirectoryTool, MovePathTool, ProjectSnapshot, PullRequestTool, ReadFileTool, RenameTool,
     SandboxedTerminalTool, SetStepLocksTool, SpawnAgentTool, SystemPromptTemplate, Template,
-    Templates, TerminalStatusTool, TerminalStopTool, TerminalTaskRegistry, TerminalTool,
-    TerminalWaitTool, ToolPermissionDecision, WebSearchTool, WriteFileTool,
+    Templates, TerminalStatusTool, TerminalStopTool, TerminalTaskRegistry, TerminalTaskSummary,
+    TerminalTool, TerminalWaitTool, ToolPermissionDecision, WebSearchTool, WriteFileTool,
     decide_permission_from_settings,
 };
 use acp_thread::{AgentModelId, ClientUserMessageId, MentionUri, ProcessOutput};
@@ -907,10 +907,16 @@ impl std::fmt::Display for PromptId {
 
 pub(crate) const MAX_RETRY_ATTEMPTS: u8 = 4;
 pub(crate) const BASE_RETRY_DELAY: Duration = Duration::from_secs(5);
+/// Backing off from 5 to 40 seconds, this keeps retrying for about ten minutes.
+pub(crate) const MAX_NETWORK_RETRY_ATTEMPTS: u8 = 18;
 
 #[derive(Debug, Clone, PartialEq)]
 enum RetryStrategy {
     ExponentialBackoff,
+    /// For requests that never reached the provider, such as DNS failures while
+    /// the network is down. An autonomous turn should outlast a short outage
+    /// instead of ending until someone notices.
+    NetworkBackoff,
     FixedDelay { delay: Duration, max_attempts: u8 },
 }
 
@@ -923,6 +929,9 @@ impl RetryStrategy {
             RetryStrategy::ExponentialBackoff => (attempt <= MAX_RETRY_ATTEMPTS)
                 .then(|| error.retry_delay(attempt as usize))
                 .flatten(),
+            RetryStrategy::NetworkBackoff => (attempt <= MAX_NETWORK_RETRY_ATTEMPTS)
+                .then(|| error.retry_delay(attempt as usize))
+                .flatten(),
             RetryStrategy::FixedDelay {
                 delay,
                 max_attempts,
@@ -933,6 +942,7 @@ impl RetryStrategy {
     fn max_attempts(&self) -> u8 {
         match self {
             RetryStrategy::ExponentialBackoff => MAX_RETRY_ATTEMPTS,
+            RetryStrategy::NetworkBackoff => MAX_NETWORK_RETRY_ATTEMPTS,
             RetryStrategy::FixedDelay { max_attempts, .. } => *max_attempts,
         }
     }
@@ -1519,6 +1529,9 @@ pub trait TerminalHandle {
     fn current_output(&self, cx: &AsyncApp) -> Result<ProcessOutput>;
     fn wait_for_exit(&self, cx: &AsyncApp) -> Result<Shared<Task<acp_v2::TerminalExitStatus>>>;
     fn kill(&self, cx: &AsyncApp) -> Result<()>;
+    /// Kills the process from synchronous code that holds the app, such as a
+    /// quit handler, where [`Self::kill`] cannot run.
+    fn kill_now(&self, cx: &mut App);
     fn was_stopped_by_user(&self, cx: &AsyncApp) -> Result<bool>;
     fn show_in_terminal_panel(&self, _cx: &AsyncApp) -> Result<()> {
         Ok(())
@@ -2087,6 +2100,9 @@ pub struct Thread {
 
     pub(crate) tools: BTreeMap<SharedString, Arc<dyn AnyAgentTool>>,
     request_token_usage: HashMap<ClientUserMessageId, language_model::TokenUsage>,
+    /// The user message whose usage was measured last, and the latest
+    /// compaction that measured request already contained.
+    measured_usage_compaction: Option<(ClientUserMessageId, Option<Arc<Message>>)>,
     cumulative_token_usage: TokenUsage,
     /// The per-field maximum usage snapshot already added to
     /// `cumulative_token_usage` for the in-flight completion request. Reset at
@@ -2326,6 +2342,7 @@ impl Thread {
             pending_message: None,
             tools: BTreeMap::default(),
             request_token_usage: HashMap::default(),
+            measured_usage_compaction: None,
             cumulative_token_usage: TokenUsage::default(),
             current_request_token_usage: TokenUsage::default(),
             pending_compaction_telemetry: None,
@@ -2589,7 +2606,11 @@ impl Thread {
                 self.sandbox_grants.clone(),
                 Some(cx.weak_entity()),
             );
-            tool.replay(input, output, tool_event_stream, cx).log_err();
+            if let Err(error) = tool.replay(input, output, tool_event_stream, cx) {
+                // Old threads can hold inputs from earlier tool versions. The saved
+                // result still renders below; only the rich card is lost.
+                log::debug!("Could not replay a {} tool call: {error:#}", tool_use.name);
+            }
         }
 
         stream.update_tool_call_fields(&tool_call_id, |update| {
@@ -2769,6 +2790,7 @@ impl Thread {
             pending_message: None,
             tools: BTreeMap::default(),
             request_token_usage: db_thread.request_token_usage.clone(),
+            measured_usage_compaction: None,
             cumulative_token_usage: db_thread.cumulative_token_usage,
             current_request_token_usage: TokenUsage::default(),
             pending_compaction_telemetry: None,
@@ -3880,6 +3902,41 @@ impl Thread {
         }
     }
 
+    /// Terminal commands this thread started, oldest first.
+    pub fn terminal_tasks(&self, cx: &App) -> Vec<TerminalTaskSummary> {
+        self.terminal_tasks.summaries(cx.background_executor().now())
+    }
+
+    /// Commands that outlived their tool call and are still running. Stop
+    /// stops them too; a follow-up message leaves them running.
+    pub fn running_background_terminal_count(&self) -> usize {
+        self.terminal_tasks.running_in_background()
+    }
+
+    /// The command's output for a person: the live capture while it runs, or
+    /// the final result. Call it from an async context, outside any update.
+    pub fn read_terminal_task_output(
+        this: &Entity<Self>,
+        task_id: &str,
+        cx: &AsyncApp,
+    ) -> Result<String> {
+        let tasks = this.read_with(cx, |thread, _| thread.terminal_tasks.clone());
+        tasks
+            .task_output(task_id, cx)
+            .map_err(|error| anyhow!(error))
+    }
+
+    /// Kills the commands right away, for when Praxis quits.
+    pub(crate) fn kill_terminal_tasks_now(&self, cx: &mut App) {
+        self.terminal_tasks.kill_all_now(cx);
+    }
+
+    pub fn stop_terminal_task(&self, task_id: &str) -> Result<()> {
+        self.terminal_tasks
+            .stop_task(task_id)
+            .map_err(|error| anyhow!(error))
+    }
+
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> Task<()> {
         // Signal only: monitors kill outside this entity update, avoiding re-entry.
         // This also applies when the launching turn has already finished.
@@ -3889,7 +3946,7 @@ impl Thread {
 
     // Replacing a turn cancels its foreground tools, not jobs that already
     // yielded. Only explicit Stop (or thread teardown) cancels those jobs.
-    fn cancel_turn(&mut self, cx: &mut Context<Self>) -> Task<()> {
+    pub(crate) fn cancel_turn(&mut self, cx: &mut Context<Self>) -> Task<()> {
         for subagent in self.running_subagents.drain(..) {
             if let Some(subagent) = subagent.upgrade() {
                 subagent
@@ -3919,14 +3976,14 @@ impl Thread {
 
     pub(crate) fn request_cancel(&mut self, cx: &mut Context<Self>) -> Task<()> {
         // A native session can own work before there is a model turn to cancel.
-        cx.emit(CancellationRequested);
+        cx.emit(CancellationRequested::Stop);
         self.cancel(cx)
     }
 
     // Subagents follow their parent's turn: their sessions stop the current
     // turn, but background terminal jobs keep running until an explicit Stop.
     fn request_cancel_turn(&mut self, cx: &mut Context<Self>) -> Task<()> {
-        cx.emit(CancellationRequested);
+        cx.emit(CancellationRequested::Turn);
         self.cancel_turn(cx)
     }
 
@@ -3975,14 +4032,58 @@ impl Thread {
     fn update_token_usage(&mut self, update: language_model::TokenUsage, cx: &mut Context<Self>) {
         self.accumulate_token_usage(update);
 
-        let Some(last_user_message) = self.last_user_message() else {
+        let Some(user_message_id) = self.last_user_message_id() else {
             return;
         };
 
-        self.request_token_usage
-            .insert(last_user_message.id.clone(), update);
+        self.record_request_token_usage(user_message_id, update);
         cx.emit(TokenUsageUpdated(self.latest_token_usage()));
         cx.notify();
+    }
+
+    fn record_request_token_usage(
+        &mut self,
+        user_message_id: ClientUserMessageId,
+        usage: language_model::TokenUsage,
+    ) {
+        let latest_compaction =
+            latest_compaction_message_ix_before(&self.messages, self.messages.len())
+                .and_then(|compaction_ix| self.messages.get(compaction_ix).cloned());
+        self.request_token_usage.insert(user_message_id.clone(), usage);
+        self.measured_usage_compaction = Some((user_message_id, latest_compaction));
+    }
+
+    /// Whether the usage recorded for the user message at `usage_ix` was
+    /// measured before the latest compaction, so it still counts the history
+    /// that compaction summarized.
+    fn usage_predates_latest_compaction(&self, usage_ix: usize) -> bool {
+        let Some(latest_compaction_ix) =
+            latest_compaction_message_ix_before(&self.messages, self.messages.len())
+        else {
+            return false;
+        };
+        let usage_user_message_id = match self.messages.get(usage_ix).map(|message| &**message) {
+            Some(Message::User(user_message)) => Some(&user_message.id),
+            _ => None,
+        };
+        match &self.measured_usage_compaction {
+            // Every request of a turn records usage under the turn's user
+            // message, so a compaction partway through the turn always sits
+            // after that message. Usage measured since this thread loaded
+            // knows which compaction its request already contained.
+            Some((user_message_id, measured_compaction))
+                if usage_user_message_id == Some(user_message_id) =>
+            {
+                !measured_compaction.as_ref().is_some_and(|measured_compaction| {
+                    self.messages
+                        .get(latest_compaction_ix)
+                        .is_some_and(|latest_compaction| {
+                            Arc::ptr_eq(measured_compaction, latest_compaction)
+                        })
+                })
+            }
+            _ => latest_compaction_ix > usage_ix,
+        }
     }
 
     /// Records that the last request overflowed the model's context window so
@@ -3995,12 +4096,12 @@ impl Thread {
             return;
         };
         let input_tokens = tokens.unwrap_or(0).max(model.max_token_count());
-        let Some(last_user_message) = self.last_user_message() else {
+        let Some(user_message_id) = self.last_user_message_id() else {
             return;
         };
 
-        self.request_token_usage.insert(
-            last_user_message.id.clone(),
+        self.record_request_token_usage(
+            user_message_id,
             language_model::TokenUsage {
                 input_tokens,
                 ..Default::default()
@@ -4468,8 +4569,9 @@ impl Thread {
     ) -> Result<()> {
         let mut attempt = 0;
 
-        // Whether this turn has already compacted because a request overflowed
-        // the context window, so a turn that overflows again gives up.
+        // Set when a request overflowed the context window and the history was
+        // compacted to recover. A successful request clears it, so only an
+        // overflow that compaction could not fix ends the turn.
         let mut compacted_for_overflow = false;
         let mut intent = CompletionIntent::UserPrompt;
         // Set when a refusal fallback occurs so subsequent iterations use the fallback model.
@@ -4835,8 +4937,8 @@ impl Thread {
                     let tokens = *tokens;
                     log::info!("Request overflowed the context window; compacting and retrying");
                     // Compacted directly rather than through the usual
-                    // threshold, which does not fire again when this turn has
-                    // already compacted once.
+                    // threshold: the overflowing request reported no usage of
+                    // its own to measure.
                     let compaction = this.update(cx, |this, cx| {
                         this.mark_token_limit_exceeded(tokens, cx);
                         let insertion_ix = this.forced_compaction_target_ix()?;
@@ -4899,6 +5001,7 @@ impl Thread {
                 }
                 intent = CompletionIntent::ToolResults;
                 attempt = 0;
+                compacted_for_overflow = false;
             }
         }
     }
@@ -5208,8 +5311,14 @@ impl Thread {
 
         log::debug!("Retry attempt {attempt} with delay {delay:?}");
 
+        let last_error = match &error {
+            LanguageModelCompletionError::HttpSend { host, .. } => {
+                format!("Can't reach {host}. Check your network connection.")
+            }
+            _ => error.to_string(),
+        };
         Ok(acp_thread::RetryStatus {
-            last_error: error.to_string().into(),
+            last_error: last_error.into(),
             attempt: attempt as usize,
             max_attempts: strategy.max_attempts() as usize,
             started_at: Instant::now(),
@@ -6357,9 +6466,7 @@ impl Thread {
                         .map(|usage| (ix, usage))
                 })
         }?;
-        if latest_compaction_message_ix_before(&self.messages, self.messages.len())
-            .is_some_and(|compaction_ix| compaction_ix > usage_ix)
-        {
+        if self.usage_predates_latest_compaction(usage_ix) {
             return None;
         }
 
@@ -6510,12 +6617,11 @@ impl Thread {
                     None => RetryStrategy::ExponentialBackoff,
                 })
             }
-            ApiReadResponseError { .. } | HttpSend { .. } | DeserializeResponse { .. } => {
-                Some(RetryStrategy::FixedDelay {
-                    delay: BASE_RETRY_DELAY,
-                    max_attempts: 3,
-                })
-            }
+            ApiReadResponseError { .. } | HttpSend { .. } => Some(RetryStrategy::NetworkBackoff),
+            DeserializeResponse { .. } => Some(RetryStrategy::FixedDelay {
+                delay: BASE_RETRY_DELAY,
+                max_attempts: 3,
+            }),
             // Retrying these errors definitely shouldn't help.
             NoApiKey { .. } => None,
             // These errors might be transient, so retry them
@@ -7107,7 +7213,12 @@ pub struct TokenUsageUpdated(pub Option<acp_thread::TokenUsage>);
 
 impl EventEmitter<TokenUsageUpdated> for Thread {}
 
-pub(crate) struct CancellationRequested;
+pub(crate) enum CancellationRequested {
+    /// An explicit Stop, which also stops background terminal commands.
+    Stop,
+    /// The turn ended early, but its background terminal commands keep running.
+    Turn,
+}
 
 impl EventEmitter<CancellationRequested> for Thread {}
 
@@ -10133,6 +10244,42 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_compaction_threshold_fires_again_within_a_turn(cx: &mut TestAppContext) {
+        let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
+        let model = fake.model("fake");
+        let user_message_id = ClientUserMessageId::new();
+        let usage = language_model::TokenUsage {
+            input_tokens: 960_000,
+            ..Default::default()
+        };
+
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.set_model(model.clone(), cx);
+                thread
+                    .messages
+                    .push(user_text_message(user_message_id.clone(), "long task"));
+                thread.messages.push(agent_text_message("first round"));
+                thread.record_request_token_usage(user_message_id.clone(), usage);
+                assert_eq!(thread.compaction_message_target_ix(cx), Some(2));
+
+                // The usage measured before the compaction is stale.
+                thread.messages.push(summary_compaction("first summary"));
+                assert_eq!(thread.compaction_message_target_ix(cx), None);
+
+                // Later requests of the same turn record usage under the same
+                // user message, and the threshold applies to them again.
+                thread.messages.push(agent_text_message("second round"));
+                thread.record_request_token_usage(user_message_id.clone(), usage);
+                assert_eq!(thread.compaction_message_target_ix(cx), Some(4));
+
+                thread.messages.push(summary_compaction("second summary"));
+                assert_eq!(thread.compaction_message_target_ix(cx), None);
+            });
+        });
+    }
+
+    #[gpui::test]
     async fn test_manual_compact_forces_summary(cx: &mut TestAppContext) {
         let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
         // A context window below the minimum and no recorded token usage would
@@ -11563,6 +11710,34 @@ mod tests {
             Some(retry_after)
         );
         assert_eq!(strategy.delay_after(&error, MAX_RETRY_ATTEMPTS + 1), None);
+    }
+
+    #[test]
+    fn test_retry_strategy_outlasts_a_short_network_outage() {
+        let error = LanguageModelCompletionError::HttpSend {
+            provider: language_model::ANTHROPIC_PROVIDER_NAME,
+            host: "api.anthropic.com".to_string(),
+            error: anyhow!("dns error: No such host is known. (os error 11001)"),
+        };
+        let strategy = Thread::retry_strategy_for(&error).expect("connection failures retry");
+        assert_eq!(strategy, RetryStrategy::NetworkBackoff);
+        assert_eq!(strategy.max_attempts(), MAX_NETWORK_RETRY_ATTEMPTS);
+
+        let total_delay = (1..=MAX_NETWORK_RETRY_ATTEMPTS)
+            .map(|attempt| {
+                strategy
+                    .delay_after(&error, attempt)
+                    .expect("every network retry waits before the next attempt")
+            })
+            .sum::<Duration>();
+        assert!(
+            total_delay >= Duration::from_secs(10 * 60),
+            "a network outage should be retried for about ten minutes, not {total_delay:?}"
+        );
+        assert_eq!(
+            strategy.delay_after(&error, MAX_NETWORK_RETRY_ATTEMPTS + 1),
+            None
+        );
     }
 
     #[gpui::test]

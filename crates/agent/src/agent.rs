@@ -70,7 +70,10 @@ use settings::{LanguageModelSelection, Settings as _, update_settings_file};
 use std::any::Any;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::{Arc, LazyLock};
+use std::sync::{
+    Arc, LazyLock,
+    atomic::{self, AtomicBool},
+};
 use std::time::Duration;
 use util::ResultExt;
 use util::path_list::PathList;
@@ -245,6 +248,8 @@ struct Session {
     /// Latest snapshot to persist. Overwritten in place on every save request;
     /// the single save worker drains it, coalescing bursts into one write.
     pending_save: Arc<Mutex<Option<PendingThreadSave>>>,
+    /// Set while the save worker writes a snapshot, and left set if it fails.
+    unconfirmed_save: Arc<AtomicBool>,
     last_streaming_save_key: Option<StreamingSaveKey>,
     last_draft_prompt_revision: Option<usize>,
     save_wake: watch::Sender<()>,
@@ -402,6 +407,17 @@ impl Session {
         self.acp_thread
             .upgrade()
             .map(|acp_thread| acp_thread.read(cx).draft_prompt_revision())
+    }
+
+    /// Whether the database may lack this session's latest state: a save is
+    /// queued, still writing, or failed, or the thread or its draft changed
+    /// since the last one was queued.
+    fn has_unsaved_changes(&self, cx: &App) -> bool {
+        self.pending_save.lock().is_some()
+            || self.unconfirmed_save.load(atomic::Ordering::Acquire)
+            || self.last_streaming_save_key.as_ref()
+                != Some(&self.thread.read(cx).streaming_save_key())
+            || self.last_draft_prompt_revision != self.draft_prompt_revision(cx)
     }
 
     fn can_skip_save_while_streaming(&self, cx: &App) -> bool {
@@ -1046,8 +1062,16 @@ impl NativeAgent {
             cx.subscribe(&thread_handle, Self::handle_thread_token_usage_updated),
             cx.subscribe(
                 &thread_handle,
-                |this, thread, _: &crate::thread::CancellationRequested, cx| {
-                    this.cancel_session(thread.read(cx).id());
+                |this, thread, event: &crate::thread::CancellationRequested, cx| {
+                    let cancellation = match event {
+                        crate::thread::CancellationRequested::Stop => {
+                            NativeCancellation::Cancelled
+                        }
+                        crate::thread::CancellationRequested::Turn => {
+                            NativeCancellation::InterruptedByFollowUp
+                        }
+                    };
+                    this.cancel_session(thread.read(cx).id(), cancellation);
                 },
             ),
             cx.observe(&thread_handle, {
@@ -1092,16 +1116,19 @@ impl NativeAgent {
 
         let (save_wake, save_wake_rx) = watch::channel(());
         let pending_save: Arc<Mutex<Option<PendingThreadSave>>> = Arc::new(Mutex::new(None));
+        let unconfirmed_save = Arc::new(AtomicBool::new(false));
         let database_future = ThreadsDatabase::connect(cx);
         let thread_store = self.thread_store.clone();
         let save_worker = cx.spawn({
             let pending_save = pending_save.clone();
+            let unconfirmed_save = unconfirmed_save.clone();
             let session_id = session_id.clone();
             async move |_this, cx| {
                 Self::run_save_worker(
                     session_id,
                     save_wake_rx,
                     pending_save,
+                    unconfirmed_save,
                     database_future,
                     thread_store,
                     cx,
@@ -1109,6 +1136,9 @@ impl NativeAgent {
                 .await
             }
         });
+        // A restored thread is already in the database, and a new one is empty.
+        let saved_key = thread_handle.read(cx).streaming_save_key();
+        let saved_draft_revision = acp_thread.read(cx).draft_prompt_revision();
 
         self.sessions.insert(
             session_id,
@@ -1120,8 +1150,9 @@ impl NativeAgent {
                 subagents: Vec::new(),
                 project_id,
                 pending_save,
-                last_streaming_save_key: None,
-                last_draft_prompt_revision: None,
+                unconfirmed_save,
+                last_streaming_save_key: Some(saved_key),
+                last_draft_prompt_revision: Some(saved_draft_revision),
                 save_wake,
                 save_worker,
                 _subscriptions: subscriptions,
@@ -1133,7 +1164,11 @@ impl NativeAgent {
         acp_thread
     }
 
-    fn cancel_session(&mut self, session_id: &acp_v2::SessionId) {
+    fn cancel_session(
+        &mut self,
+        session_id: &acp_v2::SessionId,
+        cancellation: NativeCancellation,
+    ) {
         let Some(session) = self.sessions.get_mut(session_id) else {
             return;
         };
@@ -1142,7 +1177,7 @@ impl NativeAgent {
         }
         if let Some(execution) = session.execution.as_mut()
             && let Some(sender) = execution.cancellation.take()
-            && sender.send(NativeCancellation::Cancelled).is_err()
+            && sender.send(cancellation).is_err()
         {
             log::debug!("Native execution already completed");
         }
@@ -2095,6 +2130,7 @@ impl NativeAgent {
         id: acp_v2::SessionId,
         mut wake: watch::Receiver<()>,
         pending_save: Arc<Mutex<Option<PendingThreadSave>>>,
+        unconfirmed_save: Arc<AtomicBool>,
         database_future: Shared<Task<Result<Arc<ThreadsDatabase>, Arc<anyhow::Error>>>>,
         thread_store: Entity<ThreadStore>,
         cx: &mut AsyncApp,
@@ -2106,18 +2142,25 @@ impl NativeAgent {
                 folder_paths,
                 db_thread,
             }) = payload
-                && let Some(database) = database_future
+            {
+                unconfirmed_save.store(true, atomic::Ordering::Release);
+                if let Some(database) = database_future
                     .clone()
                     .await
                     .map_err(|err| anyhow!(err))
                     .log_err()
-            {
-                let db_thread = db_thread.await;
-                database
-                    .save_thread(id.clone(), db_thread, folder_paths)
-                    .await
-                    .log_err();
-                thread_store.update(cx, |store, cx| store.reload(cx));
+                {
+                    let db_thread = db_thread.await;
+                    let saved = database
+                        .save_thread(id.clone(), db_thread, folder_paths)
+                        .await
+                        .log_err()
+                        .is_some();
+                    thread_store.update(cx, |store, cx| store.reload(cx));
+                    if saved {
+                        unconfirmed_save.store(false, atomic::Ordering::Release);
+                    }
+                }
             }
             if closed {
                 break;
@@ -2166,8 +2209,23 @@ impl NativeAgent {
     ) -> impl Future<Output = ()> + use<> {
         let database_future = ThreadsDatabase::connect(cx);
 
+        // Commands agents started must not outlive Praxis.
+        let threads = self
+            .sessions
+            .values()
+            .map(|session| session.thread.clone())
+            .collect::<Vec<_>>();
+        for thread in threads {
+            thread.update(cx, |thread, cx| thread.kill_terminal_tasks_now(cx));
+        }
+
         let mut saves = Vec::new();
         for session in self.sessions.values() {
+            // The save worker already wrote the rest. Rewriting every history
+            // would overrun the shutdown deadline and drop the saves that matter.
+            if !session.has_unsaved_changes(cx) {
+                continue;
+            }
             let draft_prompt = session.draft_prompt(cx);
             saves.extend(self.thread_save_payload(session, draft_prompt, cx));
         }
@@ -2891,7 +2949,11 @@ impl NativeAgentConnection {
                     let model_started = !thread.read_with(cx, |thread, _cx| thread.is_turn_complete());
                     // Tools may ignore cancellation. Their native cleanup must not
                     // delay the bridge's Stop event or the next accepted prompt.
-                    thread.update(cx, |thread, cx| thread.cancel(cx)).detach();
+                    // Only an explicit Stop also stops background terminal commands.
+                    thread.update(cx, |thread, cx| match cancellation {
+                        NativeCancellation::Cancelled => thread.cancel(cx),
+                        NativeCancellation::InterruptedByFollowUp => thread.cancel_turn(cx),
+                    }).detach();
                     if model_started {
                         // Drain cancellation updates (including compaction terminalization)
                         // before publishing Idle or allowing another submission to insert.
@@ -2917,7 +2979,8 @@ impl NativeAgentConnection {
                 acp_thread.update(cx, |thread, cx| {
                     thread.cancel_local_actions(acp_thread::RequestPermissionOutcome::Cancelled, cx);
                 }).log_err();
-                thread.update(cx, |thread, cx| thread.cancel(cx)).detach();
+                // A failed turn is not a Stop, so its background commands keep running.
+                thread.update(cx, |thread, cx| thread.cancel_turn(cx)).detach();
             }
             let result = match result {
                 Ok(reason) => {
@@ -3652,7 +3715,15 @@ impl acp_thread::AgentConnection for NativeAgentConnection {
     fn cancel(&self, session_id: &acp_v2::SessionId, cx: &mut App) -> Result<()> {
         log::info!("Cancelling on session: {}", session_id);
         self.0.update(cx, |agent, _cx| {
-            agent.cancel_session(session_id);
+            agent.cancel_session(session_id, NativeCancellation::Cancelled);
+        });
+        Ok(())
+    }
+
+    fn interrupt(&self, session_id: &acp_v2::SessionId, cx: &mut App) -> Result<()> {
+        log::info!("Interrupting session for a follow-up: {}", session_id);
+        self.0.update(cx, |agent, _cx| {
+            agent.cancel_session(session_id, NativeCancellation::InterruptedByFollowUp);
         });
         Ok(())
     }
@@ -4459,12 +4530,14 @@ impl TerminalHandle for AcpTerminalHandle {
     }
 
     fn kill(&self, cx: &AsyncApp) -> Result<()> {
-        cx.update(|cx| {
-            self.terminal.update(cx, |terminal, cx| {
-                terminal.kill(cx);
-            });
-        });
+        cx.update(|cx| self.kill_now(cx));
         Ok(())
+    }
+
+    fn kill_now(&self, cx: &mut App) {
+        self.terminal.update(cx, |terminal, cx| {
+            terminal.kill(cx);
+        });
     }
 
     fn was_stopped_by_user(&self, cx: &AsyncApp) -> Result<bool> {
@@ -4654,29 +4727,34 @@ fn combine_skills(
     (skills, errors)
 }
 
-/// Emit a warning for each name collision between skills. Called once
-/// per skill load (not per query), so the log isn't spammed by repeated
-/// catalog rebuilds.
+/// Emit a warning for each name collision between skills. Skills reload on
+/// every scan of every project, so each collision is logged once per run.
 fn log_skill_conflicts(skills: &[Skill]) {
+    static LOGGED_CONFLICTS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+    let log_once = |message: String| {
+        if LOGGED_CONFLICTS.lock().insert(message.clone()) {
+            log::warn!("{message}");
+        }
+    };
     let mut by_name: HashMap<&str, &Skill> = HashMap::default();
     for skill in skills {
         match by_name.get(skill.name.as_str()) {
             Some(existing) => {
                 if skill.source.precedence() > existing.source.precedence() {
-                    log::warn!(
+                    log_once(format!(
                         "Skill '{}' at '{}' overrides skill at '{}' for the model; both appear in the slash-command popup with their source",
                         skill.name,
                         skill.skill_file_path.display(),
                         existing.skill_file_path.display(),
-                    );
+                    ));
                     by_name.insert(skill.name.as_str(), skill);
                 } else {
-                    log::warn!(
+                    log_once(format!(
                         "Skill '{}' at '{}' conflicts with skill at '{}'; the model will see the first one, but both appear in the slash-command popup with their source",
                         skill.name,
                         skill.skill_file_path.display(),
                         existing.skill_file_path.display(),
-                    );
+                    ));
                 }
             }
             None => {
@@ -8101,9 +8179,17 @@ mod internal_tests {
 
         // Reproduce the orphaned state from the bug: the sidebar metadata and
         // serialized panel still reference the session, but the per-session
-        // async content save never landed, so the content row is absent.
+        // async content save was still writing at quit, so the row is absent.
         let database = cx.update(|cx| ThreadsDatabase::connect(cx)).await.unwrap();
         database.delete_thread(session_id.clone()).await.unwrap();
+        agent.read_with(cx, |agent, _| {
+            agent
+                .sessions
+                .get(&session_id)
+                .expect("session")
+                .unconfirmed_save
+                .store(true, atomic::Ordering::Release);
+        });
         assert!(
             database
                 .load_thread(session_id.clone())
@@ -8139,6 +8225,69 @@ mod internal_tests {
                 .unwrap()
                 .is_none(),
             "empty threads should not be persisted by the quit flush"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_quit_flush_rewrites_only_unsaved_threads(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (connection, agent, project, saved_acp_thread) = setup_native_agent_session(cx).await;
+        let edited_acp_thread = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new("/a")]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+        for acp_thread in [&saved_acp_thread, &edited_acp_thread] {
+            let session_id = cx.update(|cx| acp_thread.read(cx).session_id().clone());
+            let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+            cx.update(|cx| {
+                let path_style = project.read(cx).path_style(cx);
+                thread.update(cx, |thread, cx| {
+                    thread
+                        .push_acp_user_block(
+                            ClientUserMessageId::new(),
+                            [acp_v2::ContentBlock::from("hello from the user")],
+                            path_style,
+                            cx,
+                        )
+                        .expect("user content should be supported");
+                });
+            });
+        }
+        cx.run_until_parked();
+
+        // A draft typed after the last save only reaches the database at quit.
+        cx.update(|cx| {
+            edited_acp_thread.update(cx, |acp_thread, cx| {
+                acp_thread.set_draft_prompt(
+                    Some(vec![acp_v2::ContentBlock::from("unsaved draft")]),
+                    cx,
+                );
+            });
+        });
+        let database = cx.update(|cx| ThreadsDatabase::connect(cx)).await.unwrap();
+        let saves_before_quit = database.save_count();
+        cx.update(|cx| cx.shutdown());
+
+        assert_eq!(
+            database.save_count(),
+            saves_before_quit + 1,
+            "the quit flush should rewrite only the thread with unsaved changes"
+        );
+        let edited_session_id = cx.update(|cx| edited_acp_thread.read(cx).session_id().clone());
+        assert_eq!(
+            database
+                .load_thread(edited_session_id)
+                .await
+                .unwrap()
+                .expect("edited thread")
+                .draft_prompt,
+            Some(vec![acp_v2::ContentBlock::from("unsaved draft")])
         );
     }
 
