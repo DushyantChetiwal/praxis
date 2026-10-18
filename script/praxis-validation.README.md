@@ -39,17 +39,23 @@ but the target commit/tree must exist locally. No ZIP paths are extracted.
 
 ### Bundle integration
 
-Merging a PR into `main` now starts the full bundle automatically after the
-post-merge `Architect quality` run succeeds. `bundle_after_merge.yml` dispatches
-`bundle_fork.yml` with the exact validated merge SHA and every platform enabled.
-The bundle publishes the Praxis Dev self-update release only after all desktop
-and remote-server builds succeed. Manual dispatch remains available.
+Merging a PR into `main` starts a Windows and Linux bundle automatically after
+the post-merge `Architect quality` run succeeds. `bundle_after_merge.yml`
+dispatches `bundle_fork.yml` with the exact validated merge SHA. Every Monday it
+also dispatches a bundle of every platform, macOS included, for `main`'s head
+unless one already exists, so macOS runners are not spent on every merge. A
+bundle publishes the Praxis Dev self-update release only after every requested
+desktop and remote-server build succeeds. A release without macOS builds keeps
+the latest macOS update manifests and disk images, so macOS installs stay on the
+weekly build. Its macOS remote servers are omitted because a development remote
+server accepts only a client from its own commit. Manual dispatch remains
+available.
 
 The dispatcher does not check out source code. It accepts only successful quality
 runs from a push to this repository's `main`, confirms the source is still the
 current main tip and belongs to a merged main PR, and skips an already queued,
-running, or successful full bundle with the same immutable source and build
-configuration. Failed bundles can be dispatched again. Upstream sync is not a PR
+running, or successful bundle with the same immutable source and build
+configuration, or a full bundle of that source. Failed bundles can be dispatched again. Upstream sync is not a PR
 merge and retains its own dispatch, including its `rebuild` option.
 
 The daily upstream sync stages its merge on a `praxis-sync/` branch and

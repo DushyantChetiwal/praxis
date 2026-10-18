@@ -68,6 +68,9 @@ repository's GitHub releases:
 - macOS Intel: `Praxis-x86_64.dmg`
 - Linux x86_64: `praxis-linux-x86_64.tar.gz`
 
+Windows and Linux builds publish after every merged change. macOS builds refresh
+weekly, so the latest release carries the most recent weekly macOS packages.
+
 Download the latest build from [Releases](https://github.com/DushyantChetiwal/praxis/releases/latest).
 
 Installed **Praxis Dev** builds poll the repository's signed-hash update

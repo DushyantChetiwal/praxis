@@ -1105,9 +1105,10 @@ class BundleAfterMergeTests(unittest.TestCase):
             self.pulls_path: [[self.pull]],
             self.bundles_path: [{"workflow_runs": []}],
         }
-        self.title = f"Bundle Praxis {TARGET} (macOS=true, Windows=true, Linux=true, test=false)"
+        self.title = f"Bundle Praxis {TARGET} (macOS=false, Windows=true, Linux=true, test=false)"
+        self.full_title = f"Bundle Praxis {TARGET} (macOS=true, Windows=true, Linux=true, test=false)"
 
-    def execute(self, source=TARGET):
+    def execute(self, source=TARGET, weekly=False):
         def run(command, **kwargs):
             self.calls.append(command)
             self.assertTrue(kwargs["check"])
@@ -1123,18 +1124,22 @@ class BundleAfterMergeTests(unittest.TestCase):
             self.assertEqual(command[:3], ["gh", "workflow", "run"])
             return subprocess.CompletedProcess(command, 0)
 
-        with patch.dict(os.environ, {"GITHUB_REPOSITORY": REPOSITORY, "SOURCE_SHA": source}, clear=True):
+        environment = {"GITHUB_REPOSITORY": REPOSITORY, "SOURCE_SHA": source}
+        if weekly:
+            # A schedule has no triggering run, so its head SHA renders empty.
+            environment.update(SOURCE_SHA="", WEEKLY="true")
+        with patch.dict(os.environ, environment, clear=True):
             with patch.object(subprocess, "run", side_effect=run), contextlib.redirect_stdout(io.StringIO()):
                 exec(self.code, {})
 
     def dispatches(self):
         return [command for command in self.calls if command[:3] == ["gh", "workflow", "run"]]
 
-    def test_validated_merge_dispatches_all_platforms_at_immutable_source(self):
+    def test_validated_merge_dispatches_windows_and_linux_at_immutable_source(self):
         self.execute()
         self.assertEqual(self.dispatches(), [[
             "gh", "workflow", "run", "bundle_fork.yml", "--repo", REPOSITORY, "--ref", "main",
-            "-f", f"source_ref={TARGET}", "-f", "build_macos=true", "-f", "build_windows=true",
+            "-f", f"source_ref={TARGET}", "-f", "build_macos=false", "-f", "build_windows=true",
             "-f", "build_linux=true", "-f", "test_build=false",
         ]])
 
@@ -1191,11 +1196,23 @@ class BundleAfterMergeTests(unittest.TestCase):
                 self.execute()
                 self.assertEqual(len(self.dispatches()), 1)
 
-    def test_partial_test_and_other_source_bundles_do_not_suppress_full_build(self):
+    def test_a_full_bundle_of_the_same_source_covers_the_merge(self):
+        for status, conclusion in [("in_progress", None), ("completed", "success")]:
+            with self.subTest(status=status):
+                self.calls.clear()
+                self.responses[self.bundles_path] = [{"workflow_runs": [
+                    {"display_title": self.full_title, "status": status, "conclusion": conclusion},
+                ]}]
+                self.execute()
+                self.assertFalse(self.dispatches())
+
+    def test_partial_test_and_other_source_bundles_do_not_suppress_the_merge_build(self):
         for title in [
             self.title.replace("test=false", "test=true"),
-            self.title.replace("macOS=true", "macOS=false"),
+            self.title.replace("Linux=true", "Linux=false"),
+            self.title.replace("Windows=true", "Windows=false"),
             self.title.replace(TARGET, OTHER),
+            self.full_title.replace(TARGET, OTHER),
         ]:
             with self.subTest(title=title):
                 self.calls.clear()
@@ -1231,6 +1248,7 @@ class BundleAfterMergeTests(unittest.TestCase):
             "github.event.workflow_run.head_repository.full_name == github.repository",
         ]:
             self.assertIn(guard, self.workflow)
+        self.assertIn("github.event_name == 'schedule' || (", self.workflow)
         self.assertIn("workflows: [Architect quality]", self.workflow)
         self.assertIn("branches: [main]", self.workflow)
         self.assertIn("types: [completed]", self.workflow)
@@ -1240,17 +1258,55 @@ class BundleAfterMergeTests(unittest.TestCase):
         self.assertNotIn("actions/checkout@", self.workflow)
 
     def test_bundle_identity_formatting_and_sync_allowlist_stay_connected(self):
-        title = " ".join(line.strip() for line in self.bundle.split("run-name: >-\n", 1)[1].split("\n\n", 1)[0].splitlines())
-        for name, value in {
-            "source_ref": TARGET, "build_macos": "true", "build_windows": "true",
-            "build_linux": "true", "test_build": "false",
-        }.items():
-            title = title.replace("${{ inputs." + name + " }}", value)
-        self.assertEqual(title, self.title)
+        template = " ".join(line.strip() for line in self.bundle.split("run-name: >-\n", 1)[1].split("\n\n", 1)[0].splitlines())
+        for macos, expected in (("false", self.title), ("true", self.full_title)):
+            title = template
+            for name, value in {
+                "source_ref": TARGET, "build_macos": macos, "build_windows": "true",
+                "build_linux": "true", "test_build": "false",
+            }.items():
+                title = title.replace("${{ inputs." + name + " }}", value)
+            self.assertEqual(title, expected)
         self.assertIn(".github/workflows/bundle_after_merge.yml", self.quality)
         keep = self.sync.split('          keep="', 1)[1].split('"', 1)[0]
         self.assertIn("bundle_after_merge.yml", keep.split())
         self.assertIn("gh workflow run bundle_fork.yml", self.sync)
+
+
+    def test_weekly_schedule_builds_every_platform_for_main(self):
+        self.execute(weekly=True)
+        self.assertEqual(self.dispatches(), [[
+            "gh", "workflow", "run", "bundle_fork.yml", "--repo", REPOSITORY, "--ref", "main",
+            "-f", f"source_ref={TARGET}", "-f", "build_macos=true", "-f", "build_windows=true",
+            "-f", "build_linux=true", "-f", "test_build=false",
+        ]])
+        endpoints = [command[2] for command in self.calls if command[:2] == ["gh", "api"]]
+        self.assertNotIn(self.pulls_path, endpoints)
+        self.assertIn('cron: "0 9 * * 1"', self.workflow)
+        self.assertIn("WEEKLY: ${{ github.event_name == 'schedule' }}", self.workflow)
+
+    def test_weekly_schedule_skips_a_main_that_already_has_a_full_bundle(self):
+        for status, conclusion in [("in_progress", None), ("completed", "success")]:
+            with self.subTest(status=status):
+                self.calls.clear()
+                self.responses[self.bundles_path] = [{"workflow_runs": [
+                    {"display_title": self.full_title, "status": status, "conclusion": conclusion},
+                ]}]
+                self.execute(weekly=True)
+                self.assertFalse(self.dispatches())
+
+    def test_weekly_schedule_rebuilds_a_main_with_only_a_merge_bundle(self):
+        self.responses[self.bundles_path] = [{"workflow_runs": [
+            {"display_title": self.title, "status": "completed", "conclusion": "success"},
+        ]}]
+        self.execute(weekly=True)
+        self.assertEqual(len(self.dispatches()), 1)
+
+    def test_weekly_schedule_fails_closed_without_main(self):
+        self.responses[self.main_path] = subprocess.CalledProcessError(1, ["gh", "api", self.main_path])
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.execute(weekly=True)
+        self.assertFalse(self.dispatches())
 
 
 class SyncUpstreamTests(unittest.TestCase):

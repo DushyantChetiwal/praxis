@@ -7,6 +7,7 @@ wiring without a YAML dependency. No Rust builds or network access occur.
 """
 
 import gzip
+import hashlib
 import importlib.util
 import json
 import os
@@ -467,6 +468,25 @@ def workflow_value(fields, name):
     return value
 
 
+def parse_github_output(text):
+    """Read `name=value` and `name<<DELIMITER` entries from a GITHUB_OUTPUT file."""
+    outputs = {}
+    lines = iter(text.splitlines())
+    for line in lines:
+        if "<<" in line:
+            name, delimiter = line.split("<<", 1)
+            values = []
+            for value in lines:
+                if value == delimiter:
+                    break
+                values.append(value)
+            outputs[name] = values
+        else:
+            name, value = line.split("=", 1)
+            outputs[name] = value
+    return outputs
+
+
 class IncrementalCacheIdentity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -803,12 +823,19 @@ class BundleWorkflowWiring(unittest.TestCase):
                     "!cancelled() && needs.validated.result == 'success' && " + selector,
                 )
 
-    def test_publish_requires_every_producer_to_succeed(self):
+    def publish_steps(self):
+        return {workflow_value(step, "name"): step for step in self.steps("publish")}
+
+    def test_publish_requires_built_producers_and_keeps_weekly_macos(self):
         self.assertEqual(self.needs("publish"), {"prepare", *self.PRODUCERS})
+        every_merge = [job for job in self.PRODUCERS if not job.startswith("macos")]
         self.assert_expression(workflow_value(self.jobs["publish"], "if"), " && ".join([
-            "always()", "!inputs.test_build", "inputs.build_macos",
-            "inputs.build_windows", "inputs.build_linux",
-            *("needs." + job + ".result == 'success'" for job in self.PRODUCERS),
+            "always()", "!inputs.test_build", "inputs.build_windows", "inputs.build_linux",
+            *("needs." + job + ".result == 'success'" for job in every_merge),
+            "((inputs.build_macos && needs.macos.result == 'success'"
+            " && needs.macos_remote_server.result == 'success')"
+            " || (!inputs.build_macos && needs.macos.result == 'skipped'"
+            " && needs.macos_remote_server.result == 'skipped'))",
         ]))
         downloads = []
         for step in self.action_steps("publish", "actions/download-artifact"):
@@ -826,7 +853,114 @@ class BundleWorkflowWiring(unittest.TestCase):
             ("name", "praxis-linux-x86_64-archive"),
             ("pattern", "praxis-remote-server-*"),
         ])
+        steps = self.publish_steps()
+        self.assertEqual(workflow_value(steps["Download the macOS disk images"], "if"), "inputs.build_macos")
+        keep = steps["Keep the weekly macOS release"]
+        self.assertEqual(workflow_value(keep, "if"), "${{ !inputs.build_macos }}")
+        command = workflow_value(keep, "run")
+        self.assertIn("gh release download", command)
+        self.assertIn("--pattern 'praxis-update-macos-*.json'", command)
+        self.assertIn("--pattern 'Praxis-*.dmg'", command)
+        # Development remote servers only accept a client from their own commit.
+        self.assertNotIn("zed-remote-server", command)
+        attestations = self.action_steps("publish", "actions/attest-build-provenance")
+        self.assertEqual(len(attestations), 1)
+        options = workflow_fields(attestations[0]["with"][1], 10)
+        self.assertEqual(workflow_value(options, "subject-path"), "${{ steps.release.outputs.built }}")
 
+    def run_manifest_step(self, build_macos, missing=None):
+        step = self.publish_steps()["Create update manifests"]
+        environment = workflow_fields(step["env"][1], 10)
+        self.assertEqual(workflow_value(environment, "BUILD_MACOS"), "${{ inputs.build_macos }}")
+        lines = step["run"][1]
+        indentation = min(len(line) - len(line.lstrip()) for line in lines if line.strip())
+        script = "\n".join(line[indentation:] for line in lines) + "\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "crates/zed").mkdir(parents=True)
+            (root / "crates/zed/Cargo.toml").write_text(
+                '[package]\nname = "zed"\nversion = "1.2.3"\n', encoding="utf-8"
+            )
+            git = ["git", "-c", "user.name=Praxis", "-c", "user.email=praxis@example.com"]
+            subprocess.run([*git, "init", "--quiet"], cwd=root, check=True)
+            subprocess.run([*git, "commit", "--quiet", "--allow-empty", "--message", "Fixture"], cwd=root, check=True)
+            source = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+            ).stdout.strip()
+            assets = root / "release-assets"
+            assets.mkdir()
+            built = [
+                "Praxis-x86_64.exe", "praxis-linux-x86_64.tar.gz",
+                "zed-remote-server-windows-x86_64.zip", "zed-remote-server-linux-x86_64.gz",
+            ]
+            if build_macos:
+                built += [
+                    "Praxis-aarch64.dmg", "Praxis-x86_64.dmg",
+                    "zed-remote-server-macos-aarch64.gz", "zed-remote-server-macos-x86_64.gz",
+                ]
+            else:
+                for architecture in ("aarch64", "x86_64"):
+                    (assets / f"praxis-update-macos-{architecture}.json").write_text(
+                        '{"version": "weekly"}', encoding="utf-8"
+                    )
+                    (assets / f"Praxis-{architecture}.dmg").write_bytes(b"weekly")
+            for name in built:
+                if name != missing:
+                    (assets / name).write_bytes(name.encode())
+            output = root / "github-output"
+            result = subprocess.run(["bash", "-c", script], cwd=root, capture_output=True, text=True, env=dict(
+                os.environ,
+                BUILD_MACOS="true" if build_macos else "false",
+                GITHUB_OUTPUT=str(output),
+                GITHUB_REPOSITORY="owner/praxis",
+                GITHUB_RUN_ATTEMPT="2",
+                GITHUB_RUN_NUMBER="7",
+            ))
+            if missing:
+                return result, None, None, None
+            self.assertEqual(result.returncode, 0, result.stderr)
+            outputs = parse_github_output(output.read_text(encoding="utf-8"))
+            manifests = {
+                path.name: json.loads(path.read_text(encoding="utf-8"))
+                for path in assets.glob("praxis-update-*.json")
+            }
+            return result, outputs, manifests, source
+
+    def test_weekly_macos_release_regenerates_every_manifest(self):
+        _, outputs, manifests, source = self.run_manifest_step(build_macos=True)
+        self.assertEqual(outputs["tag"], "praxis-dev-7-2")
+        self.assertEqual(outputs["version"], f"1.2.3+praxis.7.{source}")
+        self.assertEqual(len(outputs["built"]), 12)
+        self.assertEqual(outputs["uploads"], outputs["built"])
+        platforms = ("windows-x86_64", "linux-x86_64", "macos-aarch64", "macos-x86_64")
+        self.assertEqual(set(manifests), {f"praxis-update-{platform}.json" for platform in platforms})
+        for manifest in manifests.values():
+            self.assertEqual(manifest["version"], outputs["version"])
+            prefix = "https://github.com/owner/praxis/releases/download/praxis-dev-7-2/"
+            self.assertTrue(manifest["url"].startswith(prefix), manifest["url"])
+            asset = manifest["url"].removeprefix(prefix)
+            self.assertEqual(manifest["sha256"], hashlib.sha256(asset.encode()).hexdigest())
+        self.assertNotIn("weekly", outputs["notes"])
+
+    def test_merge_release_keeps_the_weekly_macos_manifests(self):
+        _, outputs, manifests, _ = self.run_manifest_step(build_macos=False)
+        self.assertEqual(len(outputs["built"]), 6)
+        self.assertFalse(any("macos" in path for path in outputs["built"]))
+        self.assertEqual(outputs["uploads"], outputs["built"] + [
+            "release-assets/praxis-update-macos-aarch64.json",
+            "release-assets/praxis-update-macos-x86_64.json",
+            "release-assets/Praxis-aarch64.dmg",
+            "release-assets/Praxis-x86_64.dmg",
+        ])
+        for architecture in ("aarch64", "x86_64"):
+            self.assertEqual(manifests[f"praxis-update-macos-{architecture}.json"], {"version": "weekly"})
+        self.assertIn("macOS packages build weekly", outputs["notes"])
+
+    def test_a_missing_built_asset_fails_the_manifest_step(self):
+        for build_macos, missing in ((False, "Praxis-x86_64.exe"), (True, "Praxis-aarch64.dmg")):
+            with self.subTest(missing=missing):
+                result, *_ = self.run_manifest_step(build_macos, missing)
+                self.assertNotEqual(result.returncode, 0)
 
 if __name__ == "__main__":
     unittest.main()
