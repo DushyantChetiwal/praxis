@@ -2140,9 +2140,19 @@ impl ThreadView {
         self.thread_feedback.clear();
         self.editing_message.take();
         self.message_queue.resume();
+        // A command such as `/compact` runs as a command turn, as it does when
+        // typed in the composer, instead of being sent as a message.
+        let is_native_command = match content.first() {
+            Some(acp_v2::ContentBlock::Text(text)) => leading_native_command(
+                &text.text,
+                self.session_capabilities.read().available_commands(),
+            )
+            .is_some(),
+            _ => false,
+        };
         self.send_content(
             Task::ready(Ok(Some((content, Vec::new())))),
-            false,
+            is_native_command,
             window,
             cx,
         );
@@ -2354,7 +2364,8 @@ impl ThreadView {
         let thread = self.thread.clone();
         self.message_queue.pause();
 
-        let cancelled = thread.update(cx, |thread, cx| thread.cancel(cx));
+        // Sending now replaces the turn, not the background commands it started.
+        let cancelled = thread.update(cx, |thread, cx| thread.interrupt(cx));
 
         cx.spawn_in(window, async move |this, cx| {
             if let Err(error) = cancelled.await {
@@ -2382,94 +2393,112 @@ impl ThreadView {
         cx.notify();
     }
 
+    /// The error that ended the last turn, as its kind and a description.
+    pub(crate) fn thread_error_description(
+        &self,
+        cx: &App,
+    ) -> Option<(&'static str, SharedString)> {
+        let error = self.thread_error.as_ref()?;
+        let (kind, _, message) = self.describe_thread_error(error, cx);
+        Some((kind, message))
+    }
+
+    /// The kind, ACP error code, and plain description of a thread error, as
+    /// reported to telemetry and to Praxis Remote.
+    fn describe_thread_error(
+        &self,
+        error: &ThreadError,
+        cx: &App,
+    ) -> (&'static str, Option<SharedString>, SharedString) {
+        match error {
+            ThreadError::ZedPaymentRequired => (
+                "payment_required",
+                None,
+                "You reached your free usage limit. Upgrade to Zed Pro for more prompts.".into(),
+            ),
+            ThreadError::Refusal => {
+                let model_or_agent_name = self.current_model_name(cx);
+                let message = format!(
+                    "{} refused to respond to this prompt. This can happen when a model believes the prompt violates its content policy or safety guidelines, so rephrasing it can sometimes address the issue.",
+                    model_or_agent_name
+                );
+                ("refusal", None, message.into())
+            }
+            ThreadError::DataRetentionConsentRequired => {
+                let message = format!(
+                    "{} is not available with Zero Data Retention.",
+                    self.current_model_name(cx)
+                );
+                ("data_retention_consent_required", None, message.into())
+            }
+            ThreadError::AuthenticationRequired(message) => {
+                ("authentication_required", None, message.clone())
+            }
+            ThreadError::RateLimitExceeded { provider } => (
+                "rate_limit_exceeded",
+                None,
+                format!("{provider}'s rate limit was reached.").into(),
+            ),
+            ThreadError::ServerOverloaded { provider } => (
+                "server_overloaded",
+                None,
+                format!("{provider}'s servers are temporarily unavailable.").into(),
+            ),
+            ThreadError::PromptTooLarge => (
+                "prompt_too_large",
+                None,
+                "Context too large for the model's context window.".into(),
+            ),
+            ThreadError::NoCredentials { provider } => (
+                "no_api_key",
+                None,
+                format!("No credentials configured for {provider}.").into(),
+            ),
+            ThreadError::StreamError { provider } => (
+                "stream_error",
+                None,
+                format!("Connection to {provider}'s API was interrupted.").into(),
+            ),
+            ThreadError::AuthenticationFailed { provider } => (
+                "invalid_api_key",
+                None,
+                format!("Authentication with {provider} failed.").into(),
+            ),
+            ThreadError::PermissionDenied { provider, message } => (
+                "permission_denied",
+                None,
+                message.clone().unwrap_or_else(|| {
+                    format!(
+                        "{provider}'s API rejected the request due to insufficient permissions."
+                    )
+                    .into()
+                }),
+            ),
+            ThreadError::ProviderRejection { message } => {
+                ("provider_rejection", None, message.clone())
+            }
+            ThreadError::MaxOutputTokens => (
+                "max_output_tokens",
+                None,
+                "Model reached its maximum output length.".into(),
+            ),
+            ThreadError::NoModelSelected => {
+                ("no_model_selected", None, "No model selected.".into())
+            }
+            ThreadError::ApiError { provider } => (
+                "api_error",
+                None,
+                format!("{provider}'s API returned an unexpected error.").into(),
+            ),
+            ThreadError::Other {
+                acp_error_code,
+                message,
+            } => ("other", acp_error_code.clone(), message.clone()),
+        }
+    }
+
     fn emit_thread_error_telemetry(&self, error: &ThreadError, cx: &mut Context<Self>) {
-        let (error_kind, acp_error_code, message): (&str, Option<SharedString>, SharedString) =
-            match error {
-                ThreadError::ZedPaymentRequired => (
-                    "payment_required",
-                    None,
-                    "You reached your free usage limit. Upgrade to Zed Pro for more prompts."
-                        .into(),
-                ),
-                ThreadError::Refusal => {
-                    let model_or_agent_name = self.current_model_name(cx);
-                    let message = format!(
-                        "{} refused to respond to this prompt. This can happen when a model believes the prompt violates its content policy or safety guidelines, so rephrasing it can sometimes address the issue.",
-                        model_or_agent_name
-                    );
-                    ("refusal", None, message.into())
-                }
-                ThreadError::DataRetentionConsentRequired => {
-                    let message = format!(
-                        "{} is not available with Zero Data Retention.",
-                        self.current_model_name(cx)
-                    );
-                    ("data_retention_consent_required", None, message.into())
-                }
-                ThreadError::AuthenticationRequired(message) => {
-                    ("authentication_required", None, message.clone())
-                }
-                ThreadError::RateLimitExceeded { provider } => (
-                    "rate_limit_exceeded",
-                    None,
-                    format!("{provider}'s rate limit was reached.").into(),
-                ),
-                ThreadError::ServerOverloaded { provider } => (
-                    "server_overloaded",
-                    None,
-                    format!("{provider}'s servers are temporarily unavailable.").into(),
-                ),
-                ThreadError::PromptTooLarge => (
-                    "prompt_too_large",
-                    None,
-                    "Context too large for the model's context window.".into(),
-                ),
-                ThreadError::NoCredentials { provider } => (
-                    "no_api_key",
-                    None,
-                    format!("No credentials configured for {provider}.").into(),
-                ),
-                ThreadError::StreamError { provider } => (
-                    "stream_error",
-                    None,
-                    format!("Connection to {provider}'s API was interrupted.").into(),
-                ),
-                ThreadError::AuthenticationFailed { provider } => (
-                    "invalid_api_key",
-                    None,
-                    format!("Authentication with {provider} failed.").into(),
-                ),
-                ThreadError::PermissionDenied { provider, message } => (
-                    "permission_denied",
-                    None,
-                    message.clone().unwrap_or_else(|| {
-                        format!(
-                            "{provider}'s API rejected the request due to insufficient permissions."
-                        )
-                        .into()
-                    }),
-                ),
-                ThreadError::ProviderRejection { message } => {
-                    ("provider_rejection", None, message.clone())
-                }
-                ThreadError::MaxOutputTokens => (
-                    "max_output_tokens",
-                    None,
-                    "Model reached its maximum output length.".into(),
-                ),
-                ThreadError::NoModelSelected => {
-                    ("no_model_selected", None, "No model selected.".into())
-                }
-                ThreadError::ApiError { provider } => (
-                    "api_error",
-                    None,
-                    format!("{provider}'s API returned an unexpected error.").into(),
-                ),
-                ThreadError::Other {
-                    acp_error_code,
-                    message,
-                } => ("other", acp_error_code.clone(), message.clone()),
-            };
+        let (error_kind, acp_error_code, message) = self.describe_thread_error(error, cx);
 
         let agent_telemetry_id = self.thread.read(cx).connection().telemetry_id();
         let session_id = self.thread.read(cx).session_id().clone();
@@ -2497,6 +2526,29 @@ impl ThreadView {
         self._cancel_task = Some(self.cancel_thread(&self.thread, cx));
         self.sync_generating_indicator(cx);
         cx.notify();
+    }
+
+    /// Stops the agent but leaves the background commands it started running.
+    pub fn stop_agent_only(&mut self, cx: &mut Context<Self>) {
+        self.thread_retry_status.take();
+        self.thread_error.take();
+        self.message_queue.pause();
+        let interruption = self.thread.update(cx, |thread, cx| thread.interrupt(cx));
+        self._cancel_task = Some(cx.spawn(async move |this, cx| {
+            if let Err(error) = interruption.await {
+                this.update(cx, |this, cx| this.handle_thread_error(error, cx))
+                    .log_err();
+            }
+        }));
+        self.sync_generating_indicator(cx);
+        cx.notify();
+    }
+
+    /// Background commands the native agent started that are still running.
+    pub(crate) fn running_background_commands(&self, cx: &App) -> usize {
+        self.as_native_thread(cx).map_or(0, |thread| {
+            thread.read(cx).running_background_terminal_count()
+        })
     }
 
     fn cancel_thread(&self, thread: &Entity<AcpThread>, cx: &mut Context<Self>) -> Task<()> {
@@ -2890,7 +2942,8 @@ impl ThreadView {
             })
             .is_some();
 
-        let cancelled = self.thread.update(cx, |thread, cx| thread.cancel(cx));
+        // Sending now replaces the turn, not the background commands it started.
+        let cancelled = self.thread.update(cx, |thread, cx| thread.interrupt(cx));
 
         let workspace = self.workspace.clone();
 
@@ -6396,13 +6449,54 @@ impl ThreadView {
                 .child(loading_contents_spinner(IconSize::default()))
                 .into_any_element()
         } else if is_generating && is_editor_empty {
-            IconButton::new("stop-generation", IconName::Stop)
+            let stop_button = IconButton::new("stop-generation", IconName::Stop)
                 .icon_color(Color::Error)
-                .style(ButtonStyle::Tinted(TintColor::Error))
-                .tooltip(move |_window, cx| {
+                .style(ButtonStyle::Tinted(TintColor::Error));
+            let background_commands = self.running_background_commands(cx);
+            if background_commands == 0 {
+                return stop_button
+                    .tooltip(move |_window, cx| {
+                        Tooltip::for_action("Stop Generation", &editor::actions::Cancel, cx)
+                    })
+                    .on_click(cx.listener(|this, _event, _, cx| this.cancel_generation(cx)))
+                    .into_any_element();
+            }
+            // Stopping everything would also kill builds and servers the agent
+            // left running, so ask which the user means.
+            let weak_self = cx.entity().downgrade();
+            let stop_everything = if background_commands == 1 {
+                "Stop Agent and 1 Background Command".to_string()
+            } else {
+                format!("Stop Agent and {background_commands} Background Commands")
+            };
+            PopoverMenu::new("stop-generation-menu")
+                .trigger_with_tooltip(stop_button, move |_window, cx| {
                     Tooltip::for_action("Stop Generation", &editor::actions::Cancel, cx)
                 })
-                .on_click(cx.listener(|this, _event, _, cx| this.cancel_generation(cx)))
+                .anchor(gpui::Anchor::BottomRight)
+                .menu(move |window, cx| {
+                    let weak_self = weak_self.clone();
+                    let stop_everything = stop_everything.clone();
+                    Some(ContextMenu::build(window, cx, move |menu, _window, _cx| {
+                        menu.item(
+                            ContextMenuEntry::new("Stop Agent, Keep Commands Running").handler({
+                                let weak_self = weak_self.clone();
+                                move |_window, cx| {
+                                    weak_self
+                                        .update(cx, |this, cx| this.stop_agent_only(cx))
+                                        .log_err();
+                                }
+                            }),
+                        )
+                        .item(
+                            ContextMenuEntry::new(stop_everything).handler(move |_window, cx| {
+                                weak_self
+                                    .update(cx, |this, cx| this.cancel_generation(cx))
+                                    .log_err();
+                            }),
+                        )
+                    }))
+                })
                 .into_any_element()
         } else {
             let send_icon = if is_generating {
@@ -8930,7 +9024,7 @@ impl ThreadView {
                 if output_line_count + 10 > terminal::MAX_SCROLL_HISTORY_LINES {
                     format!(
                         "Output exceeded terminal max lines and was \
-                         truncated, the model received the first {}.",
+                         truncated, the model received the last {}.",
                         format_file_size(output.content.len() as u64, true)
                     )
                 } else {

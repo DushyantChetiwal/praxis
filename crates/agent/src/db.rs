@@ -429,6 +429,8 @@ struct GlobalThreadsDatabase(Shared<Task<Result<Arc<ThreadsDatabase>, Arc<anyhow
 
 impl Global for GlobalThreadsDatabase {}
 
+const LIST_THREADS_QUERY: &str = "SELECT id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at FROM threads ORDER BY updated_at DESC, created_at DESC";
+
 impl ThreadsDatabase {
     pub fn connect(cx: &mut App) -> Shared<Task<Result<Arc<ThreadsDatabase>, Arc<anyhow::Error>>>> {
         if cx.has_global::<GlobalThreadsDatabase>() {
@@ -508,6 +510,22 @@ impl ThreadsDatabase {
                 "})?()?;
             }
         }
+
+        // `created_at` was added after `data`, so listing threads from the table
+        // reads every history blob to reach it. This index answers the listing
+        // by itself, in order.
+        connection.exec(indoc! {"
+            CREATE INDEX IF NOT EXISTS threads_listing ON threads (
+                updated_at DESC,
+                created_at DESC,
+                id,
+                parent_id,
+                folder_paths,
+                folder_paths_order,
+                summary
+            )
+        "})?()
+        .map_err(|e| e.context("Failed to index the thread list"))?;
 
         let db = Self {
             executor,
@@ -605,15 +623,29 @@ impl ThreadsDatabase {
         self.executor.spawn(async move {
             let connection = connection.lock();
 
-            let mut select = connection
-                .select_bound::<(), (Arc<str>, Option<Arc<str>>, Option<String>, Option<String>, String, String, Option<String>)>(indoc! {"
-                SELECT id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at FROM threads ORDER BY updated_at DESC, created_at DESC
-            "})?;
+            let mut select = connection.select_bound::<(), (
+                Arc<str>,
+                Option<Arc<str>>,
+                Option<String>,
+                Option<String>,
+                String,
+                String,
+                Option<String>,
+            )>(LIST_THREADS_QUERY)?;
 
             let rows = select(())?;
             let mut threads = Vec::new();
 
-            for (id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at) in rows {
+            for (
+                id,
+                parent_id,
+                folder_paths,
+                folder_paths_order,
+                summary,
+                updated_at,
+                created_at,
+            ) in rows
+            {
                 let folder_paths = folder_paths
                     .map(|paths| {
                         PathList::deserialize(&util::path_list::SerializedPathList {
@@ -841,6 +873,21 @@ mod tests {
     use collections::HashMap;
     use gpui::TestAppContext;
     use std::sync::Arc;
+
+    #[gpui::test]
+    async fn test_listing_threads_skips_their_history_blobs(cx: &mut TestAppContext) {
+        let database = ThreadsDatabase::new(cx.executor()).expect("database");
+        let connection = database.connection.lock();
+        let plan = connection
+            .select::<(i64, i64, i64, String)>(&format!("EXPLAIN QUERY PLAN {LIST_THREADS_QUERY}"))
+            .expect("prepare the query plan")()
+        .expect("query plan");
+        assert!(
+            plan.iter()
+                .any(|(.., detail)| detail.contains("COVERING INDEX threads_listing")),
+            "listing threads must not read their history blobs: {plan:?}"
+        );
+    }
 
     #[gpui::test]
     async fn test_large_thread_streaming_roundtrip_preserves_full_content(cx: &mut TestAppContext) {

@@ -7450,6 +7450,31 @@ impl AcpThread {
         }
     }
 
+    /// Ends the running turn for a follow-up message, such as Send Now. Unlike
+    /// [`Self::cancel`], the agent keeps work the turn handed off, such as
+    /// background terminal commands.
+    pub fn interrupt(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
+        match self.request_cancellation(RequestPermissionOutcome::InterruptedByFollowUp, cx) {
+            Ok(task) => task,
+            Err(error) => Task::ready(Err(error)),
+        }
+    }
+
+    fn cancel_connection_turn(
+        &self,
+        permission_outcome: &RequestPermissionOutcome,
+        cx: &mut App,
+    ) -> Result<()> {
+        match permission_outcome {
+            RequestPermissionOutcome::InterruptedByFollowUp => {
+                self.connection.interrupt(self.session_id(), cx)
+            }
+            RequestPermissionOutcome::Cancelled | RequestPermissionOutcome::Selected(_) => {
+                self.connection.cancel(self.session_id(), cx)
+            }
+        }
+    }
+
     fn request_cancellation(
         &mut self,
         permission_outcome: RequestPermissionOutcome,
@@ -7461,7 +7486,7 @@ impl AcpThread {
             if self.foreground_activity() != ForegroundActivity::Idle
                 || self.has_unsettled_submissions()
             {
-                self.connection.cancel(self.session_id(), cx)?;
+                self.cancel_connection_turn(&permission_outcome, cx)?;
             }
             self.cancel_generic_permission_requests(cx);
             let receiver = self.activity.wait_for_idle()?;
@@ -7475,7 +7500,7 @@ impl AcpThread {
             }));
         }
         if self.running_turn.is_some() {
-            self.connection.cancel(self.session_id(), cx)?;
+            self.cancel_connection_turn(&permission_outcome, cx)?;
         }
         self.cancel_outstanding_elicitations(cx);
 
@@ -10588,6 +10613,10 @@ mod tests {
             let cached = terminal.output().unwrap();
             assert_eq!(cached.original_content_len, 129);
             assert!(cached.content.capacity() <= 128);
+            assert_eq!(
+                cached.content, "LAST_VISIBLE_MARKER",
+                "the capture keeps the end of the output, starting at a complete line"
+            );
             assert!(lower.read(cx).get_content().contains("LAST_VISIBLE_MARKER"));
         });
     }

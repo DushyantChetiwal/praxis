@@ -271,7 +271,69 @@ data class ThreadSummary(
     val questions: List<QuestionHeader> = emptyList(),
     val questionCount: Int = 0,
     val imageInput: Boolean = false,
+    /** The error that ended the last turn, until the next one starts. */
+    val error: TurnError? = null,
+    /** A failed request the agent is waiting to retry. */
+    val retrying: RetryInfo? = null,
+    val compact: Boolean = false,
+    val terminals: Boolean = false,
+    /** Commands that outlived their tool call and are still running. */
+    val backgroundCommands: Int = 0,
 )
+
+data class TurnError(val kind: String, val message: String, val retryable: Boolean)
+
+data class RetryInfo(val attempt: Int, val maxAttempts: Int, val message: String?)
+
+data class TerminalTask(
+    val id: String,
+    val command: String,
+    val running: Boolean,
+    val inBackground: Boolean,
+    val elapsedMillis: Long,
+)
+
+fun parseTerminals(result: JSONObject): List<TerminalTask> = result.arr("terminals")?.objects()?.mapNotNull { t ->
+    TerminalTask(
+        id = t.str("id") ?: return@mapNotNull null,
+        command = t.str("command").orEmpty(),
+        running = t.bool("running"),
+        inBackground = t.bool("in_background"),
+        elapsedMillis = t.long("elapsed_ms") ?: 0L,
+    )
+}.orEmpty()
+
+/** One page of a command's output, ending at [end] bytes into the [total]. */
+data class TerminalOutputPage(val text: String, val start: Long, val end: Long, val total: Long, val running: Boolean)
+
+fun parseTerminalOutput(result: JSONObject): TerminalOutputPage? {
+    val start = result.long("start") ?: return null
+    val end = result.long("end") ?: return null
+    if (start < 0 || end < start) return null
+    return TerminalOutputPage(
+        text = result.str("text").orEmpty(),
+        start = start,
+        end = end,
+        total = result.long("total") ?: end,
+        running = result.bool("running"),
+    )
+}
+
+/**
+ * The loaded part of a command's output: the latest page first, then earlier
+ * pages in front of it as they are requested. Nothing is fetched twice.
+ */
+data class TerminalOutput(val text: String = "", val start: Long = 0L, val total: Long = 0L, val running: Boolean = false) {
+    val hasEarlier: Boolean get() = start > 0L
+
+    /** The output with [page] in place, or a fresh start when the output moved on. */
+    fun with(page: TerminalOutputPage): TerminalOutput =
+        if (page.end == start && page.total == total && text.isNotEmpty()) {
+            copy(text = page.text + text, start = page.start, running = page.running)
+        } else {
+            TerminalOutput(page.text, page.start, page.total, page.running)
+        }
+}
 
 data class Architect(
     val steps: Int,
@@ -460,6 +522,15 @@ private fun parseThreadSummary(o: JSONObject): ThreadSummary = ThreadSummary(
     steering = o.bool("steering"),
     queueManagement = o.bool("queue_management"),
     imageInput = o.bool("image_input"),
+    error = o.obj("error")?.let { e ->
+        e.str("message")?.let { message -> TurnError(e.str("kind").orEmpty(), message, e.bool("retryable")) }
+    },
+    retrying = o.obj("retrying")?.let { r ->
+        RetryInfo(r.int("attempt") ?: 0, r.int("max_attempts") ?: 0, r.str("message"))
+    },
+    compact = o.bool("compact"),
+    terminals = o.bool("terminals"),
+    backgroundCommands = o.int("background_commands") ?: 0,
     questions = parseQuestionHeaders(o.arr("questions")),
     questionCount = o.index("question_count") ?: 0,
     mode = o.obj("mode")?.let { m ->

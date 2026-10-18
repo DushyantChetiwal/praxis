@@ -135,6 +135,10 @@ def safe_root(name):
     return len(path.parts) >= 3 and path.parts[0] == "target" and path.parts[-1] in ROOT_NAMES
 
 
+def restored_path(workspace, cargo_home, name):
+    return cargo_home / name.removeprefix("cargo/") if name.startswith("cargo/") else workspace / name
+
+
 def digest(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -159,8 +163,12 @@ def pack(workspace, cargo_home, destination, key):
             )
             source = source_root / PurePosixPath(member.name).relative_to(archive_root)
             target = source.resolve()
-            for candidate, target_root in paths:
-                if target.is_relative_to(candidate.resolve()) and target_root.split("/")[0] == member.name.split("/")[0]:
+            # A root restored under the same base keeps the relative link valid.
+            # Build scripts such as cxx's also link into Cargo's sources, which
+            # restore elsewhere, so those links are recreated on restore.
+            same_base_first = sorted(paths, key=lambda item: item[1].split("/")[0] != member.name.split("/")[0])
+            for candidate, target_root in same_base_first:
+                if target.is_relative_to(candidate.resolve()):
                     target_name = PurePosixPath(target_root) / target.relative_to(candidate.resolve()).as_posix()
                     member.linkname = posixpath.relpath(target_name.as_posix(), PurePosixPath(member.name).parent.as_posix())
                     break
@@ -220,6 +228,8 @@ def restore(workspace, cargo_home, directory, key):
                 raise ValueError("Unexpected build-checkpoint paths")
             if len(paths) != len(set(paths)) or any(name.startswith(other + "/") for name in paths for other in paths if name != other):
                 raise ValueError("Overlapping build-checkpoint paths")
+            cross_base_links = []
+
             def filter_member(member, destination):
                 if member.name == MANIFEST:
                     if member is not first:
@@ -240,10 +250,14 @@ def restore(workspace, cargo_home, directory, key):
                         posixpath.join(posixpath.dirname(member.name), member.linkname)
                         if member.issym() else member.linkname
                     )
-                    if target.split("/")[0] != member.name.split("/")[0] or not any(
-                        target == name or target.startswith(name + "/") for name in paths
-                    ):
+                    if not any(target == name or target.startswith(name + "/") for name in paths):
                         raise ValueError("Checkpoint link leaves compiler-state roots")
+                    if target.split("/")[0] != member.name.split("/")[0]:
+                        if not member.issym():
+                            raise ValueError("Checkpoint hard link crosses compiler-state bases")
+                        # The two roots restore under different bases.
+                        cross_base_links.append((member.name, target))
+                        return None
                 return tarfile.data_filter(member, destination)
 
             archive.extractall(staging, members=archive, filter=filter_member)
@@ -272,6 +286,20 @@ def restore(workspace, cargo_home, directory, key):
             elif destination.exists():
                 destination.unlink()
             shutil.move(str(source), str(destination))
+        for name, target in cross_base_links:
+            link = restored_path(workspace, cargo_home, name)
+            linked = restored_path(workspace, cargo_home, target)
+            if not linked.exists():
+                raise ValueError("Checkpoint link target was not restored")
+            link.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                link.symlink_to(linked, target_is_directory=linked.is_dir())
+            except OSError:
+                # Windows refuses symlinks without Developer Mode; a copy builds the same.
+                if linked.is_dir():
+                    shutil.copytree(linked, link, symlinks=True)
+                else:
+                    shutil.copy2(linked, link)
     report(f"Restored complete build checkpoint: {key}; restore seconds: {time.monotonic() - started:.1f}.")
     output("restored", "true")
 

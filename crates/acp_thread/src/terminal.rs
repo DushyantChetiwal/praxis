@@ -852,9 +852,9 @@ impl Terminal {
             content.len()
         };
         if truncated {
-            // Preserve the existing preference for complete lines.
-            if let Some(end) = content.rfind('\n') {
-                content.truncate(end);
+            // The capture keeps the end of the output, so start at a complete line.
+            if let Some(start) = content.find('\n') {
+                content.drain(..=start);
             }
             content.shrink_to_fit();
         }

@@ -241,6 +241,27 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "symlink leaves"):
             self.pack()
 
+    def test_links_into_cargo_sources_are_recreated_on_restore(self):
+        checkout = self.cargo / "git/checkouts/sdk/abc/webrtc-sys"
+        checkout.mkdir(parents=True)
+        (checkout / "bridge.rs").write_text("bridge source")
+        link = self.workspace / "target/release/build/helper/out/cxxbridge/crate/webrtc-sys"
+        link.parent.mkdir(parents=True)
+        try:
+            link.symlink_to(checkout, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"Symlinks are unavailable on this runner: {error}")
+        self.pack()
+        fresh = self.root / "bridged-workspace"
+        cargo = self.root / "bridged-cargo"
+        fresh.mkdir()
+        cargo.mkdir()
+        self.restore(fresh, cargo)
+        restored = fresh / "target/release/build/helper/out/cxxbridge/crate/webrtc-sys"
+        self.assertEqual((restored / "bridge.rs").read_text(), "bridge source")
+        self.assertTrue(restored.is_symlink())
+        self.assertTrue(restored.resolve().is_relative_to(cargo.resolve()))
+
     def test_destination_symlinks_cannot_redirect_a_restore_into_source(self):
         self.pack()
         fresh = self.root / "unsafe-workspace"

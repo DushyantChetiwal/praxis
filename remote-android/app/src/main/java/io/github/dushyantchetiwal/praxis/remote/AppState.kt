@@ -13,6 +13,8 @@ import io.github.dushyantchetiwal.praxis.remote.data.ONLINE_THRESHOLD_MS
 import io.github.dushyantchetiwal.praxis.remote.data.Permission
 import io.github.dushyantchetiwal.praxis.remote.data.Snapshot
 import io.github.dushyantchetiwal.praxis.remote.data.Status
+import io.github.dushyantchetiwal.praxis.remote.data.TerminalOutput
+import io.github.dushyantchetiwal.praxis.remote.data.TerminalTask
 import io.github.dushyantchetiwal.praxis.remote.data.ThreadItem
 import io.github.dushyantchetiwal.praxis.remote.data.ThreadView
 import io.github.dushyantchetiwal.praxis.remote.data.TranscriptHistory
@@ -198,6 +200,19 @@ data class QueueState(
     val error: String? = null,
 )
 
+/** Background commands, loaded when the list opens and kept until refreshed. */
+data class TerminalsState(
+    val session: String? = null,
+    val visible: Boolean = false,
+    val loading: Boolean = false,
+    val tasks: List<TerminalTask>? = null,
+    /** Output of the commands opened so far, by task id. */
+    val outputs: Map<String, TerminalOutput> = emptyMap(),
+    val loadingOutput: Set<String> = emptySet(),
+    val busy: Set<String> = emptySet(),
+    val error: String? = null,
+)
+
 data class FolderBrowserState(
     val visible: Boolean = false,
     val loading: Boolean = false,
@@ -226,6 +241,7 @@ data class DeviceUi(
     val models: ModelsState = ModelsState(),
     val folderBrowser: FolderBrowserState = FolderBrowserState(),
     val queue: QueueState = QueueState(),
+    val terminals: TerminalsState = TerminalsState(),
     val question: QuestionState = QuestionState(),
     val questionList: QuestionListState = QuestionListState(),
     val answeredQuestions: Set<String> = emptySet(),
@@ -240,6 +256,10 @@ data class DeviceUi(
     val liveTransport: Boolean = false,
     val banners: Map<String, Banner> = emptyMap(),
     val stopping: Boolean = false,
+    /** Whether the phone is asking how to stop while commands run in the background. */
+    val confirmingStop: Boolean = false,
+    val retrying: Boolean = false,
+    val compacting: Boolean = false,
     val startingThread: Boolean = false,
 ) {
     val thread: ThreadView? get() = history.thread

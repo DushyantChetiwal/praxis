@@ -318,4 +318,39 @@
     <string name="error_switched_device">Switched computer.</string>
     <string name="error_op_failed">Praxis couldn’t run “%1$s”.</string>
     <string name="error_no_browser">No app can open this link.</string>
+    <string name="turn_failed">The agent stopped with an error</string>
+    <string name="turn_retrying">Retrying, attempt %1$d of %2$d</string>
+    <string name="action_compact">Compact conversation</string>
+    <string name="compact_help">Summarizes the conversation so the agent can keep working in a long thread.</string>
+    <string name="toast_compacting">Compacting the conversation…</string>
+    <string name="toast_stopping_agent_only">Stopping the agent. Background commands keep running.</string>
+    <string name="label_could_not_retry">Couldn’t retry</string>
+    <string name="label_could_not_compact">Couldn’t compact</string>
+    <string name="label_could_not_stop_command">Couldn’t stop the command</string>
+    <string name="stop_choice_title">Stop the agent?</string>
+    <plurals name="stop_choice_body">
+        <item quantity="one">%d command it started is still running in the background.</item>
+        <item quantity="other">%d commands it started are still running in the background.</item>
+    </plurals>
+    <string name="stop_agent_only">Stop agent only</string>
+    <string name="stop_agent_and_commands">Stop all</string>
+    <string name="terminals_title">Background commands</string>
+    <plurals name="terminals_running">
+        <item quantity="one">Background commands · %d running</item>
+        <item quantity="other">Background commands · %d running</item>
+    </plurals>
+    <string name="terminals_loading">Loading commands…</string>
+    <string name="terminals_empty">The agent hasn’t run any commands in this conversation.</string>
+    <string name="terminals_failed">Couldn’t load the commands.</string>
+    <string name="terminals_output_failed">Couldn’t load the command’s output.</string>
+    <string name="terminal_running">Running for %1$s</string>
+    <string name="terminal_finished">Finished · ran %1$s</string>
+    <string name="terminal_stop">Stop command</string>
+    <string name="terminal_load_earlier">Show earlier output</string>
+    <string name="terminal_refresh_output">Refresh output</string>
+    <string name="terminal_loading_output">Loading output…</string>
+    <string name="terminal_no_output">No output yet.</string>
+    <string name="elapsed_seconds">%1$ds</string>
+    <string name="elapsed_minutes">%1$d min</string>
+    <string name="elapsed_hours">%1$d h %2$d min</string>
 </resources>

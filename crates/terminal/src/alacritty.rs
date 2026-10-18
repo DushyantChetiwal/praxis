@@ -100,7 +100,9 @@ impl PtySender {
             .0
             .send(Msg::Resize(window_size_from_terminal_bounds(bounds)))
         {
-            log::error!("failed to resize alacritty pty: {error}");
+            // The event loop stops when the process exits, and a finished
+            // terminal can still be laid out again.
+            log::debug!("skipped resizing a closed pty: {error}");
         }
     }
 
@@ -957,16 +959,20 @@ pub(super) fn content_text(term: &Term<ZedListener>) -> String {
     term.bounds_to_string(start, end)
 }
 
+/// The end of the terminal text within `byte_limit`, and whether earlier text
+/// was left out. Long commands report their results last, so the capture keeps
+/// the latest output rather than the first.
 pub(super) fn content_text_bounded(term: &Term<ZedListener>, byte_limit: usize) -> (String, bool) {
     let grid = term.grid();
     let bottom = grid.bottommost_line().0;
-    let characters = (grid.topmost_line().0..=bottom).flat_map(|line| {
+    let characters_from_end = (grid.topmost_line().0..=bottom).rev().flat_map(|line| {
         let row = &grid[Line(line)];
         let length = row.line_length().0;
         let wrapped = length > 0 && row[Column(length - 1)].flags.contains(Flags::WRAPLINE);
         let newline = (line < bottom && !wrapped).then_some('\n');
-        (0..length)
-            .flat_map(move |column| {
+        newline
+            .into_iter()
+            .chain((0..length).rev().flat_map(move |column| {
                 let cell = &row[Column(column)];
                 let visible = !cell
                     .flags
@@ -975,17 +981,17 @@ pub(super) fn content_text_bounded(term: &Term<ZedListener>, byte_limit: usize) 
                 // copying a whole row through bounds_to_string would also copy an
                 // unbounded number of combining characters attached to one cell.
                 let character = if cell.c == '\t' { ' ' } else { cell.c };
-                visible.then_some(character).into_iter().chain(
-                    cell.zerowidth()
-                        .filter(|_| visible)
-                        .into_iter()
-                        .flatten()
-                        .copied(),
-                )
-            })
-            .chain(newline)
+                cell.zerowidth()
+                    .filter(|_| visible)
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .copied()
+                    .chain(visible.then_some(character))
+            }))
     });
-    collect_content_prefix(characters, byte_limit)
+    let (reversed, truncated) = collect_content_prefix(characters_from_end, byte_limit);
+    (reversed.chars().rev().collect(), truncated)
 }
 
 fn collect_content_prefix(

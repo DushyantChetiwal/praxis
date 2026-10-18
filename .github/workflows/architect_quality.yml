@@ -377,6 +377,13 @@ jobs:
           cargo test --locked -p agent --lib prompt_too_large
           cargo test --locked -p agent --lib an_oversized_tool_result
 
+      - name: Test turn recovery and shutdown
+        run: |
+          cargo test --locked -p agent --lib test_retry_strategy_
+          cargo test --locked -p agent --lib test_threads_flushed_to_database_on_app_quit
+          cargo test --locked -p agent --lib test_quit_flush_rewrites_only_unsaved_threads
+          cargo test --locked -p agent_ui --lib test_send_now_and_stop_agent_only_
+
       - name: Test loading-thread selection retention
         run: |
           cargo test --locked -p agent_ui --lib test_add_selection_to_loading_thread
@@ -398,6 +405,7 @@ jobs:
           cargo test --locked -p agent --lib test_background_terminal_
           cargo test --locked -p agent --lib test_native_terminal_registration_handoff_is_cancellation_safe
           cargo test --locked -p terminal --lib bounded_content
+          cargo test --locked -p terminal --lib process_tree
           cargo test --locked -p acp_thread --lib test_terminal_bounded_capture_reports_live_and_cached_truncation
           cargo test --locked -p agent --lib terminal_tool
           cargo test --locked -p agent --lib built_in_tool_schemas_are_normalized
@@ -490,6 +498,12 @@ jobs:
 
       - name: Test the Windows update helper
         run: cargo test --locked -p auto_update_helper
+
+      # Builds the Windows-only terminal and window code that Linux checks skip.
+      - name: Test Windows terminal process cleanup
+        run: |
+          cargo test --locked -p terminal --lib process_tree
+          cargo check --locked -p gpui_windows
 
       - name: Check the Windows update helper with Clippy
         shell: bash

@@ -5049,6 +5049,52 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
+    async fn test_send_now_and_stop_agent_only_keep_background_commands(cx: &mut TestAppContext) {
+        init_test(cx);
+        let connection = StubAgentConnection::new();
+        let (conversation, cx) =
+            setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
+        add_to_workspace(conversation.clone(), cx);
+        let view = active_thread(&conversation, cx);
+
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.send_text("first".into(), false, window, cx).is_none());
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.send_text("now".into(), true, window, cx).is_none());
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            connection.take_interrupt_calls().len(),
+            1,
+            "Send Now should interrupt the running turn"
+        );
+        assert!(
+            connection.take_cancel_calls().is_empty(),
+            "Send Now must not stop the agent's background commands"
+        );
+
+        view.update(cx, |view, cx| view.stop_agent_only(cx));
+        cx.run_until_parked();
+        assert_eq!(connection.take_interrupt_calls().len(), 1);
+        assert!(connection.take_cancel_calls().is_empty());
+
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.send_text("again".into(), false, window, cx).is_none());
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| view.cancel_generation(cx));
+        cx.run_until_parked();
+        assert_eq!(
+            connection.take_cancel_calls().len(),
+            1,
+            "Stop still stops everything"
+        );
+        assert!(connection.take_interrupt_calls().is_empty());
+    }
+
+    #[gpui::test]
     async fn test_remote_send_now_preserves_the_other_queued_messages(cx: &mut TestAppContext) {
         init_test(cx);
         let connection = StubAgentConnection::new();

@@ -85,12 +85,20 @@ pub fn init(cx: &mut App) {
     remote.update(cx, |remote, cx| remote.start(false, cx));
 
     cx.background_spawn(async {
-        if store::legacy_config_path().is_file() {
-            log::warn!(
-                "Praxis Remote no longer uses {}; sign in from \"Praxis Remote…\" and pair \
-                 your phone again",
-                store::legacy_config_path().display()
-            );
+        let legacy_config = store::legacy_config_path();
+        if legacy_config.is_file() {
+            // Nothing has read this file since Praxis Remote moved to GitHub
+            // sign-in, so remove it once instead of warning on every launch.
+            match std::fs::remove_file(&legacy_config) {
+                Ok(()) => log::info!(
+                    "Removed {}, which Praxis Remote no longer uses",
+                    legacy_config.display()
+                ),
+                Err(error) => log::warn!(
+                    "Could not remove {}, which Praxis Remote no longer uses: {error}",
+                    legacy_config.display()
+                ),
+            }
         }
     })
     .detach();
@@ -602,7 +610,90 @@ fn handle_paired(
         }
         "stop" => with_workspace(window, cx, |workspace, _, cx| {
             let view = root_thread_view(workspace, cx)?;
-            view.update(cx, |view, cx| view.cancel_generation(cx));
+            let keep_commands = args.get("keep_commands").and_then(Value::as_bool) == Some(true);
+            view.update(cx, |view, cx| {
+                if keep_commands {
+                    view.stop_agent_only(cx);
+                } else {
+                    view.cancel_generation(cx);
+                }
+            });
+            Ok(json!({ "stopped": true, "kept_commands": keep_commands }))
+        }),
+        "retry" => with_workspace(window, cx, |workspace, _, cx| {
+            required(args, "session_id")?;
+            let view = requested_root_view(workspace, args, cx)?;
+            anyhow::ensure!(
+                view.read(cx).thread.read(cx).can_retry(cx),
+                "There is nothing to retry. Send a message to continue."
+            );
+            view.update(cx, |view, cx| view.retry_generation(cx));
+            Ok(json!({ "retrying": true }))
+        }),
+        "compact" => with_workspace(window, cx, |workspace, window, cx| {
+            required(args, "session_id")?;
+            let view = requested_root_view(workspace, args, cx)?;
+            anyhow::ensure!(
+                view.read(cx).as_native_thread(cx).is_some(),
+                "This agent cannot compact its conversation"
+            );
+            let command = format!("/{}", agent::COMPACT_COMMAND_NAME);
+            let queue_id = view
+                .update(cx, |view, cx| view.send_text(command, false, window, cx))
+                .map(|id| id.to_string());
+            Ok(json!({ "queued": queue_id.is_some(), "queue_id": queue_id }))
+        }),
+        "terminals" => with_workspace(window, cx, |workspace, _, cx| {
+            let thread = requested_native_thread(workspace, args, cx)?;
+            let terminals: Vec<Value> = thread
+                .read(cx)
+                .terminal_tasks(cx)
+                .into_iter()
+                .rev()
+                .map(|task| {
+                    json!({
+                        "id": task.id,
+                        "command": truncate(&task.command, MAX_TERMINAL_COMMAND_BYTES),
+                        "running": task.running,
+                        "in_background": task.in_background,
+                        "elapsed_ms": u64::try_from(task.elapsed.as_millis()).unwrap_or(u64::MAX),
+                    })
+                })
+                .collect();
+            Ok(json!({ "terminals": terminals }))
+        }),
+        "terminal_output" => {
+            let task_id = match required(args, "task_id") {
+                Ok(task_id) => task_id.to_string(),
+                Err(error) => return Task::ready(Err(error)),
+            };
+            let before = args
+                .get("before")
+                .and_then(Value::as_u64)
+                .and_then(|before| usize::try_from(before).ok());
+            let thread = match with_workspace(window, cx, |workspace, _, cx| {
+                requested_native_thread(workspace, args, cx)
+            }) {
+                Ok(thread) => thread,
+                Err(error) => return Task::ready(Err(error)),
+            };
+            // Reading a live capture must happen outside this update.
+            return cx.spawn(async move |cx| {
+                let running = thread.read_with(cx, |thread, cx| {
+                    thread
+                        .terminal_tasks(cx)
+                        .iter()
+                        .any(|task| task.id == task_id && task.running)
+                });
+                let output = agent::Thread::read_terminal_task_output(&thread, &task_id, cx)?;
+                Ok(terminal_output_page(&output, before, running))
+            });
+        }
+        "terminal_stop" => with_workspace(window, cx, |workspace, _, cx| {
+            let thread = requested_native_thread(workspace, args, cx)?;
+            thread
+                .read(cx)
+                .stop_terminal_task(required(args, "task_id")?)?;
             Ok(json!({ "stopped": true }))
         }),
         "new_thread" => with_workspace(window, cx, |workspace, window, cx| {
@@ -905,6 +996,24 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
             .active_model(cx)
             .map(|model| model.name.to_string())
     });
+    let error = view
+        .thread_error_description(cx)
+        .map(|(kind, message)| {
+            json!({ "kind": kind, "message": message, "retryable": thread.can_retry(cx) })
+        });
+    // The retry callout, without a refusal's model fallback, which has no countdown.
+    let retrying = view
+        .thread_retry_status
+        .as_ref()
+        .filter(|status| acp_thread::refusal_fallback_model_from_meta(&status.meta).is_none())
+        .map(|status| {
+            json!({
+                "attempt": status.attempt,
+                "max_attempts": status.max_attempts,
+                "message": status.last_error,
+            })
+        });
+    let native_thread = view.as_native_thread(cx);
     Some(json!({
         "session_id": thread.session_id().0.as_ref(),
         "title": thread.title().map(|title| title.to_string()),
@@ -919,10 +1028,53 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
         "steering": view.as_native_thread(cx).is_some(),
         "queue_management": true,
         "image_input": thread.prompt_capabilities().image.is_some(),
+        "error": error,
+        "retrying": retrying,
+        "compact": native_thread.is_some(),
+        "terminals": native_thread.is_some(),
+        "background_commands": native_thread
+            .as_ref()
+            .map_or(0, |thread| thread.read(cx).running_background_terminal_count()),
         "questions": questions,
         "question_count": question_count,
         "pending": pending_permissions(conversation_view.read(cx), cx),
     }))
+}
+
+/// Commands are listed for recognition; the full text is in the output.
+const MAX_TERMINAL_COMMAND_BYTES: usize = 300;
+const TERMINAL_OUTPUT_PAGE_BYTES: usize = 16 * 1024;
+
+fn requested_native_thread(
+    workspace: &Entity<Workspace>,
+    args: &Value,
+    cx: &App,
+) -> Result<Entity<agent::Thread>> {
+    required(args, "session_id")?;
+    requested_root_view(workspace, args, cx)?
+        .read(cx)
+        .as_native_thread(cx)
+        .context("This agent does not run background commands")
+}
+
+/// The page of a command's output that ends at `before`, or at the end. The
+/// phone shows the latest output first and asks for earlier pages on demand.
+fn terminal_output_page(output: &str, before: Option<usize>, running: bool) -> Value {
+    let mut end = before.unwrap_or(output.len()).min(output.len());
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut start = end.saturating_sub(TERMINAL_OUTPUT_PAGE_BYTES);
+    while !output.is_char_boundary(start) {
+        start += 1;
+    }
+    json!({
+        "text": &output[start..end],
+        "start": start,
+        "end": end,
+        "total": output.len(),
+        "running": running,
+    })
 }
 
 fn status_name(status: ThreadStatus) -> &'static str {
@@ -2255,6 +2407,29 @@ mod tests {
         let last = model_page(models, "provider/model/0", 200).expect("last page");
         assert_eq!(last["available"].as_array().expect("models").len(), 1);
         assert_eq!(last["next_offset"], Value::Null);
+    }
+
+    #[test]
+    fn terminal_output_pages_start_from_the_latest_output() {
+        let output = format!("{}tail", "日".repeat(10_000));
+        let page = terminal_output_page(&output, None, true);
+        let text = page["text"].as_str().expect("text");
+        assert!(text.ends_with("tail"));
+        assert!(text.len() <= TERMINAL_OUTPUT_PAGE_BYTES);
+        assert_eq!(page["end"].as_u64(), Some(output.len() as u64));
+        assert_eq!(page["total"].as_u64(), Some(output.len() as u64));
+        assert_eq!(page["running"], true);
+
+        let start = page["start"].as_u64().expect("start");
+        let earlier = terminal_output_page(&output, usize::try_from(start).ok(), true);
+        assert_eq!(earlier["end"].as_u64(), Some(start));
+        let earlier_start = earlier["start"].as_u64().expect("start");
+        assert!(output.is_char_boundary(earlier_start as usize));
+        assert!(earlier_start < start);
+
+        let empty = terminal_output_page("", Some(10), false);
+        assert_eq!(empty["text"], "");
+        assert_eq!(empty["end"].as_u64(), Some(0));
     }
 
     #[test]

@@ -354,6 +354,37 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_streaming_write_creates_missing_folders(cx: &mut TestAppContext) {
+        let (write_tool, _project, _action_log, fs, _thread) =
+            setup_test(cx, json!({"dir": {}})).await;
+        let result = cx
+            .update(|cx| {
+                write_tool.clone().run(
+                    ToolInput::resolved(WriteFileToolInput {
+                        path: "root/dir/new_folder/nested/new_file.txt".into(),
+                        content: "Hello, World!".into(),
+                    }),
+                    ToolCallEventStream::test().0,
+                    cx,
+                )
+            })
+            .await;
+
+        let EditSessionOutput::Success { new_text, .. } = result.unwrap() else {
+            panic!("expected success");
+        };
+        assert_eq!(new_text, "Hello, World!");
+        cx.run_until_parked();
+        assert_eq!(
+            fs.load(path!("/root/dir/new_folder/nested/new_file.txt").as_ref())
+                .await
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "Hello, World!"
+        );
+    }
+
+    #[gpui::test]
     async fn test_streaming_write_overwrite_file(cx: &mut TestAppContext) {
         let (write_tool, _project, _action_log, _fs, _thread) =
             setup_test(cx, json!({"file.txt": "old content"})).await;
@@ -569,9 +600,21 @@ mod tests {
         );
 
         let result = test_resolve_path(&mode, "root/dir/nonexistent_dir/new.txt", cx);
+        assert_resolved_path_eq(result.await, rel_path("dir/nonexistent_dir/new.txt"));
+
+        let result = test_resolve_path(&mode, "new_dir/nested/new.txt", cx);
+        assert_resolved_path_eq(result.await, rel_path("new_dir/nested/new.txt"));
+
+        let result = test_resolve_path(&mode, "root/dir/subdir/existing.txt/new.txt", cx);
         assert_eq!(
             result.await.unwrap_err(),
-            "Can't create file: parent directory doesn't exist"
+            "Can't create file: parent is not a directory"
+        );
+
+        let result = test_resolve_path(&mode, "root/dir/", cx);
+        assert_eq!(
+            result.await.unwrap_err(),
+            "Can't write to file: path is a directory"
         );
     }
 

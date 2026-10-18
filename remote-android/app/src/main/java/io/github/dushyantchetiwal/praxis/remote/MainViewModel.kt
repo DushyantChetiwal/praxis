@@ -58,6 +58,9 @@ import io.github.dushyantchetiwal.praxis.remote.data.viewScopedAction
 import io.github.dushyantchetiwal.praxis.remote.data.Snapshot
 import io.github.dushyantchetiwal.praxis.remote.data.Status
 import io.github.dushyantchetiwal.praxis.remote.data.Store
+import io.github.dushyantchetiwal.praxis.remote.data.TerminalOutput
+import io.github.dushyantchetiwal.praxis.remote.data.parseTerminalOutput
+import io.github.dushyantchetiwal.praxis.remote.data.parseTerminals
 import io.github.dushyantchetiwal.praxis.remote.data.ThreadItem
 import io.github.dushyantchetiwal.praxis.remote.data.TranscriptHistory
 import io.github.dushyantchetiwal.praxis.remote.data.parseThreadView
@@ -105,6 +108,7 @@ private const val UPDATE_INTERVAL_MS = 6 * 60 * 60_000L
 // Right after pairing, the computer's praxis-remote.json may not list this
 // phone yet; it is rewritten at least every minute.
 private const val PAIR_GRACE_MS = 3 * 60_000L
+private const val TERMINAL_STOP_SETTLE_MS = 750L
 /** Screens that show computers, whose list is refreshed in the background. */
 private val LISTING_SCREENS = setOf(Screen.Devices, Screen.Pair, Screen.Device)
 
@@ -270,6 +274,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var viewRevision = 0L
     private var folderRequest = 0L
     private var queueRequest = 0L
+    private var terminalsRequest = 0L
     private var questionRequest = 0L
     private var questionListRequest = 0L
     private var questionReadJob: Job? = null
@@ -799,6 +804,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 models = ModelsState(),
                 folderBrowser = FolderBrowserState(),
                 queue = QueueState(),
+                terminals = TerminalsState(),
+                confirmingStop = false,
                 question = QuestionState(),
                 questionList = QuestionListState(),
                 answeredQuestions = emptySet(),
@@ -1362,13 +1369,136 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
     }
 
-    fun stopGenerating() {
+    /**
+     * Stops the agent. While it has commands running in the background, the
+     * user first chooses whether those keep running; [keepCommands] is that choice.
+     */
+    fun stopGenerating(keepCommands: Boolean? = null) {
         if (d.stopping) return
+        if (keepCommands == null && (d.currentWindow()?.thread?.backgroundCommands ?: 0) > 0) {
+            edit { copy(confirmingStop = true) }
+            return
+        }
         viewModelScope.launch {
-            edit { copy(stopping = true) }
-            val ok = act("stop", windowArgs(), str(R.string.label_could_not_stop))
+            edit { copy(stopping = true, confirmingStop = false) }
+            val args = windowArgs { put("keep_commands", keepCommands == true) }
+            val ok = act("stop", args, str(R.string.label_could_not_stop))
             edit { copy(stopping = false) }
-            if (ok) message(str(R.string.toast_stopping))
+            if (ok) message(str(if (keepCommands == true) R.string.toast_stopping_agent_only else R.string.toast_stopping))
+        }
+    }
+
+    fun dismissStopChoice() {
+        edit { copy(confirmingStop = false) }
+    }
+
+    /** Runs the turn that failed again, as the desktop's Retry does. */
+    fun retryTurn() {
+        val session = d.currentWindow()?.thread?.sessionId ?: return
+        if (d.retrying) return
+        viewModelScope.launch {
+            edit { copy(retrying = true) }
+            act("retry", windowArgs { put("session_id", session) }, str(R.string.label_could_not_retry))
+            edit { copy(retrying = false) }
+        }
+    }
+
+    /** Summarizes the conversation so the agent can keep working in a long thread. */
+    fun compactConversation() {
+        val session = d.currentWindow()?.thread?.sessionId ?: return
+        if (d.compacting) return
+        viewModelScope.launch {
+            edit { copy(compacting = true) }
+            val ok = act("compact", windowArgs { put("session_id", session) }, str(R.string.label_could_not_compact))
+            edit { copy(compacting = false) }
+            if (ok) message(str(R.string.toast_compacting))
+        }
+    }
+
+    /** Shows the background commands, loading the list the first time only. */
+    fun openTerminals() {
+        val session = d.currentWindow()?.thread?.sessionId ?: return
+        val cached = d.terminals.takeIf { it.session == session }
+        edit { copy(terminals = (cached ?: TerminalsState(session = session)).copy(visible = true, error = null)) }
+        if (cached?.tasks == null) loadTerminals()
+    }
+
+    fun dismissTerminals() {
+        terminalsRequest++
+        edit { copy(terminals = terminals.copy(visible = false, loading = false)) }
+    }
+
+    fun loadTerminals() {
+        val session = d.terminals.session ?: return
+        if (d.terminals.loading) return
+        val request = ++terminalsRequest
+        val scope = requestScope()
+        edit { copy(terminals = terminals.copy(loading = true, error = null)) }
+        viewModelScope.launch {
+            try {
+                val result = praxis("terminals", windowArgs { put("session_id", session) }, scope)
+                    ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+                if (request != terminalsRequest || scope != requestScope() || d.terminals.session != session) return@launch
+                edit { copy(terminals = terminals.copy(loading = false, tasks = parseTerminals(result))) }
+            } catch (error: ApiException) {
+                if (request == terminalsRequest && scope == requestScope() && d.terminals.session == session) {
+                    edit { copy(terminals = terminals.copy(loading = false, error = error.message ?: str(R.string.terminals_failed))) }
+                }
+            }
+        }
+    }
+
+    /**
+     * Loads a command's latest output, replacing what was loaded, or with
+     * [earlier] the page before it. Opening a command again reuses its output.
+     */
+    fun loadTerminalOutput(taskId: String, earlier: Boolean = false) {
+        val session = d.terminals.session ?: return
+        if (taskId in d.terminals.loadingOutput) return
+        val before = if (earlier) d.terminals.outputs[taskId]?.takeIf { it.hasEarlier }?.start ?: return else null
+        val scope = requestScope()
+        edit { copy(terminals = terminals.copy(loadingOutput = terminals.loadingOutput + taskId)) }
+        viewModelScope.launch {
+            try {
+                val args = windowArgs {
+                    put("session_id", session)
+                    put("task_id", taskId)
+                    before?.let { put("before", it) }
+                }
+                val page = praxis("terminal_output", args, scope)?.let(::parseTerminalOutput)
+                    ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
+                if (scope != requestScope() || d.terminals.session != session) return@launch
+                edit {
+                    val loaded = if (earlier) terminals.outputs[taskId] ?: TerminalOutput() else TerminalOutput()
+                    copy(terminals = terminals.copy(
+                        outputs = terminals.outputs + (taskId to loaded.with(page)),
+                        loadingOutput = terminals.loadingOutput - taskId,
+                    ))
+                }
+            } catch (error: ApiException) {
+                if (scope == requestScope() && d.terminals.session == session) {
+                    edit { copy(terminals = terminals.copy(
+                        loadingOutput = terminals.loadingOutput - taskId,
+                        error = error.message ?: str(R.string.terminals_output_failed),
+                    )) }
+                }
+            }
+        }
+    }
+
+    fun stopTerminal(taskId: String) {
+        val session = d.terminals.session ?: return
+        if (taskId in d.terminals.busy) return
+        val scope = requestScope()
+        edit { copy(terminals = terminals.copy(busy = terminals.busy + taskId)) }
+        viewModelScope.launch {
+            val args = windowArgs { put("session_id", session); put("task_id", taskId) }
+            val ok = act("terminal_stop", args, str(R.string.label_could_not_stop_command), scope)
+            // The command exits shortly after the request; its final output replaces the live one.
+            if (ok) delay(TERMINAL_STOP_SETTLE_MS)
+            if (scope != requestScope() || d.terminals.session != session) return@launch
+            edit { copy(terminals = terminals.copy(busy = terminals.busy - taskId, outputs = terminals.outputs - taskId)) }
+            if (ok) loadTerminals()
         }
     }
 

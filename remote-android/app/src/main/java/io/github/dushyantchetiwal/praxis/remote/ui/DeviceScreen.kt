@@ -266,11 +266,20 @@ private fun ConversationControlsSheet(ui: DeviceUi, vm: MainViewModel, onDismiss
                     }
                 }
             }
-            ConversationControls(ui, vm) {
-                onDismiss()
-                vm.switchTab(Tab.Chat)
-                vm.loadQueue()
-            }
+            ConversationControls(
+                ui,
+                vm,
+                onOpenQueue = {
+                    onDismiss()
+                    vm.switchTab(Tab.Chat)
+                    vm.loadQueue()
+                },
+                onOpenTerminals = {
+                    onDismiss()
+                    vm.switchTab(Tab.Chat)
+                    vm.openTerminals()
+                },
+            )
         }
     }
 }
