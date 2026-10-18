@@ -24,7 +24,7 @@ pub use run::{
 };
 pub use spec::compile_spec;
 
-use agent_client_protocol::schema::v1 as acp;
+use agent_client_protocol::schema::v2 as acp;
 use collections::{HashMap, HashSet};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

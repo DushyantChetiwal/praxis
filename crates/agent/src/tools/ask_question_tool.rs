@@ -1,5 +1,5 @@
 use acp_thread::AcpThread;
-use agent_client_protocol::schema::v1 as acp;
+use agent_client_protocol::schema::v2 as acp;
 use futures::FutureExt as _;
 use gpui::{App, SharedString, Task, WeakEntity};
 use language_model::LanguageModelToolResultContent;
@@ -386,11 +386,7 @@ impl AskQuestionTool {
             ),
         };
 
-        event_stream.update_fields(
-            acp::ToolCallUpdateFields::new()
-                .title(title)
-                .content(vec![result.into()]),
-        );
+        event_stream.update_fields(|update| update.title(title).content(vec![result.into()]));
     }
 }
 
@@ -803,10 +799,10 @@ mod tests {
         });
         let fields = events.expect_update_fields().await;
         assert_eq!(
-            fields.title.as_deref(),
+            fields.title.value().map(String::as_str),
             Some("Question timed out; used model recommendation")
         );
-        assert!(fields.content.unwrap().iter().any(|block| matches!(
+        assert!(fields.content.take().unwrap().iter().any(|block| matches!(
             block,
             acp::ToolCallContent::Content(content) if matches!(&content.content,
                 acp::ContentBlock::Text(text) if text.text.contains("not a user answer")

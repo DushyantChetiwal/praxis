@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::v1 as acp;
+use agent_client_protocol::schema::v2 as acp;
 use anyhow::{Context as _, Result, bail, ensure};
 use gpui::{App, AppContext as _, Global, Task};
 use image::{ImageFormat, ImageReader};
@@ -278,7 +278,7 @@ pub(super) fn fingerprint(blocks: &[acp::ContentBlock]) -> Option<String> {
     digest.update(b"\0");
     for block in blocks {
         if let acp::ContentBlock::Image(image) = block {
-            digest.update(image.mime_type.as_bytes());
+            digest.update(image.mime_type.0.as_bytes());
             digest.update(b"\0");
             digest.update(
                 ring::digest::digest(&ring::digest::SHA256, image.data.as_bytes()).as_ref(),

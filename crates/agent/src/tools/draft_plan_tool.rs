@@ -1,10 +1,11 @@
-use agent_client_protocol::schema::v1 as acp;
+use agent_client_protocol::schema::v2 as acp;
 use anyhow::{Context as _, Result};
 use architect::{ArchitectGraph, ProposedEdge, ProposedGraph, ProposedNode, StepModel};
 use gpui::{App, Entity, SharedString, Task, WeakEntity};
 use language_model::{LanguageModelRegistry, LanguageModelToolResultContent};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
@@ -249,7 +250,7 @@ pub(crate) fn resolve_file_surface(
                 .collect::<Vec<_>>()
                 .join("/");
             anyhow::ensure!(
-                !path_style.is_absolute(&relative),
+                !path_style.is_absolute(Path::new(&relative)),
                 "Use a project-relative file assignment, not absolute host path {file:?}"
             );
             let qualified: Vec<_> = roots

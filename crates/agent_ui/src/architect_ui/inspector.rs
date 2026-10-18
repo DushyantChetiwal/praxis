@@ -1,5 +1,5 @@
 use acp_thread::AcpThread;
-use agent_client_protocol::schema::v1 as acp;
+use agent_client_protocol::schema::v2 as acp;
 use architect::{
     ArchitectEdge, ArchitectGraph, ArchitectNode, EdgeCondition, EdgeId, GraphProblem, NodeId,
     NodePath, StepModel,

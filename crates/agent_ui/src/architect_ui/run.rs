@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 
-use agent_client_protocol::schema::v1 as acp;
+use agent_client_protocol::schema::v2 as acp;
 use architect::{NodeId, NodePath};
 use gpui::{App, Context, Entity, SharedString};
 

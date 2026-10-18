@@ -188,7 +188,7 @@ class Validator:
             require(pull[side]["repo"]["id"] == self.metadata["id"], "fork PR")
         return association
 
-    def pr_event(self, run):
+    def pr_event(self, run, source):
         require(os.environ["GITHUB_EVENT_NAME"] == "pull_request", "recording event mismatch")
         event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
         require(event["repository"]["id"] == self.metadata["id"]
@@ -198,9 +198,21 @@ class Validator:
         require(event["number"] == pull["number"] == association["number"], "event PR mismatch")
         for side in ("base", "head"):
             require(pull[side]["repo"]["id"] == self.metadata["id"], "fork PR event")
-        base = sha(pull["base"]["sha"])
         head = sha(pull["head"]["sha"])
         require(head == run["head_sha"], "event head differs from immutable run head")
+        parents = [parent["sha"] for parent in self.api.commit(source)["parents"]]
+        require(len(parents) == 2 and parents[1] == head,
+                "tested commit is not the event's PR merge (wrong head)")
+        base = sha(parents[0])
+        if base != sha(pull["base"]["sha"]):
+            # The event's base SHA can lag the base branch, while GitHub tests
+            # the merge against the branch as it is now.
+            branch = quote(self.metadata["default_branch"], safe="")
+            tip = sha(self.api.get(f"{self.api.root}/commits/{branch}")["sha"])
+            if base != tip:
+                comparison = self.api.get(f"{self.api.root}/compare/{base}...{tip}?per_page=1")
+                require(comparison["status"] == "ahead",
+                        "tested merge base is not on the default branch")
         return {"pr_number": pull["number"], "pr_base_sha": base, "pr_head_sha": head}
 
     def provenance(self, run, receipt):
@@ -477,7 +489,7 @@ class Validator:
         require(os.environ["GITHUB_WORKFLOW_REF"].startswith(f"{self.repository}/{WORKFLOW}@"),
                 "unverified workflow ref")
         tree, blob = self.target(source)
-        pr = self.pr_event(run) if run["event"] == "pull_request" else {
+        pr = self.pr_event(run, source) if run["event"] == "pull_request" else {
             "pr_number": None, "pr_base_sha": None, "pr_head_sha": None,
         }
         receipt = {

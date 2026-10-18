@@ -1,6 +1,6 @@
 use acp_thread::{AcpThread, AgentThreadEntry, Elicitation, ElicitationEntryId, ElicitationStatus};
 use agent::{AskQuestionOption, AskQuestionTool, AskQuestionToolInput};
-use agent_client_protocol::schema::v1 as acp;
+use agent_client_protocol::schema::v2 as acp;
 use anyhow::{Context as _, Result, anyhow, bail};
 use gpui::{App, Entity};
 use serde_json::{Value, json};
