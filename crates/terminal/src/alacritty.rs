@@ -970,23 +970,25 @@ pub(super) fn content_text_bounded(term: &Term<ZedListener>, byte_limit: usize) 
         let length = row.line_length().0;
         let wrapped = length > 0 && row[Column(length - 1)].flags.contains(Flags::WRAPLINE);
         let newline = (line < bottom && !wrapped).then_some('\n');
-        newline.into_iter().chain((0..length).rev().flat_map(move |column| {
-            let cell = &row[Column(column)];
-            let visible = !cell
-                .flags
-                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
-            // The grid already contains tab padding. Emit its visible spaces;
-            // copying a whole row through bounds_to_string would also copy an
-            // unbounded number of combining characters attached to one cell.
-            let character = if cell.c == '\t' { ' ' } else { cell.c };
-            cell.zerowidth()
-                .filter(|_| visible)
-                .into_iter()
-                .flatten()
-                .rev()
-                .copied()
-                .chain(visible.then_some(character))
-        }))
+        newline
+            .into_iter()
+            .chain((0..length).rev().flat_map(move |column| {
+                let cell = &row[Column(column)];
+                let visible = !cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
+                // The grid already contains tab padding. Emit its visible spaces;
+                // copying a whole row through bounds_to_string would also copy an
+                // unbounded number of combining characters attached to one cell.
+                let character = if cell.c == '\t' { ' ' } else { cell.c };
+                cell.zerowidth()
+                    .filter(|_| visible)
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .copied()
+                    .chain(visible.then_some(character))
+            }))
     });
     let (reversed, truncated) = collect_content_prefix(characters_from_end, byte_limit);
     (reversed.chars().rev().collect(), truncated)

@@ -1790,8 +1790,22 @@ mod tests {
         assert!(publish_due(false, false, true, false, long_ago, gap));
         assert!(!publish_due(false, false, true, true, long_ago, gap));
         assert!(publish_due(false, true, false, true, long_ago, gap));
-        assert!(publish_due(true, false, false, true, Some(Duration::ZERO), gap));
-        assert!(!publish_due(false, false, true, false, Some(Duration::from_secs(1)), gap));
+        assert!(publish_due(
+            true,
+            false,
+            false,
+            true,
+            Some(Duration::ZERO),
+            gap
+        ));
+        assert!(!publish_due(
+            false,
+            false,
+            true,
+            false,
+            Some(Duration::from_secs(1)),
+            gap
+        ));
         assert!(!publish_due(false, false, false, false, long_ago, gap));
     }
 

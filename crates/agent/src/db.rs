@@ -623,13 +623,29 @@ impl ThreadsDatabase {
         self.executor.spawn(async move {
             let connection = connection.lock();
 
-            let mut select = connection
-                .select_bound::<(), (Arc<str>, Option<Arc<str>>, Option<String>, Option<String>, String, String, Option<String>)>(LIST_THREADS_QUERY)?;
+            let mut select = connection.select_bound::<(), (
+                Arc<str>,
+                Option<Arc<str>>,
+                Option<String>,
+                Option<String>,
+                String,
+                String,
+                Option<String>,
+            )>(LIST_THREADS_QUERY)?;
 
             let rows = select(())?;
             let mut threads = Vec::new();
 
-            for (id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at) in rows {
+            for (
+                id,
+                parent_id,
+                folder_paths,
+                folder_paths_order,
+                summary,
+                updated_at,
+                created_at,
+            ) in rows
+            {
                 let folder_paths = folder_paths
                     .map(|paths| {
                         PathList::deserialize(&util::path_list::SerializedPathList {
@@ -863,9 +879,7 @@ mod tests {
         let database = ThreadsDatabase::new(cx.executor()).expect("database");
         let connection = database.connection.lock();
         let plan = connection
-            .select::<(i64, i64, i64, String)>(&format!(
-                "EXPLAIN QUERY PLAN {LIST_THREADS_QUERY}"
-            ))
+            .select::<(i64, i64, i64, String)>(&format!("EXPLAIN QUERY PLAN {LIST_THREADS_QUERY}"))
             .expect("prepare the query plan")()
         .expect("query plan");
         assert!(

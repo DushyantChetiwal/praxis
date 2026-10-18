@@ -5049,9 +5049,7 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    async fn test_send_now_and_stop_agent_only_keep_background_commands(
-        cx: &mut TestAppContext,
-    ) {
+    async fn test_send_now_and_stop_agent_only_keep_background_commands(cx: &mut TestAppContext) {
         init_test(cx);
         let connection = StubAgentConnection::new();
         let (conversation, cx) =

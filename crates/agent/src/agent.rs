@@ -1064,9 +1064,7 @@ impl NativeAgent {
                 &thread_handle,
                 |this, thread, event: &crate::thread::CancellationRequested, cx| {
                     let cancellation = match event {
-                        crate::thread::CancellationRequested::Stop => {
-                            NativeCancellation::Cancelled
-                        }
+                        crate::thread::CancellationRequested::Stop => NativeCancellation::Cancelled,
                         crate::thread::CancellationRequested::Turn => {
                             NativeCancellation::InterruptedByFollowUp
                         }
@@ -1164,11 +1162,7 @@ impl NativeAgent {
         acp_thread
     }
 
-    fn cancel_session(
-        &mut self,
-        session_id: &acp_v2::SessionId,
-        cancellation: NativeCancellation,
-    ) {
+    fn cancel_session(&mut self, session_id: &acp_v2::SessionId, cancellation: NativeCancellation) {
         let Some(session) = self.sessions.get_mut(session_id) else {
             return;
         };
@@ -8264,10 +8258,8 @@ mod internal_tests {
         // A draft typed after the last save only reaches the database at quit.
         cx.update(|cx| {
             edited_acp_thread.update(cx, |acp_thread, cx| {
-                acp_thread.set_draft_prompt(
-                    Some(vec![acp_v2::ContentBlock::from("unsaved draft")]),
-                    cx,
-                );
+                acp_thread
+                    .set_draft_prompt(Some(vec![acp_v2::ContentBlock::from("unsaved draft")]), cx);
             });
         });
         let database = cx.update(|cx| ThreadsDatabase::connect(cx)).await.unwrap();

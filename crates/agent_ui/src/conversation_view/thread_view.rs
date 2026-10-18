@@ -2414,8 +2414,7 @@ impl ThreadView {
             ThreadError::ZedPaymentRequired => (
                 "payment_required",
                 None,
-                "You reached your free usage limit. Upgrade to Zed Pro for more prompts."
-                    .into(),
+                "You reached your free usage limit. Upgrade to Zed Pro for more prompts.".into(),
             ),
             ThreadError::Refusal => {
                 let model_or_agent_name = self.current_model_name(cx);
@@ -2547,8 +2546,9 @@ impl ThreadView {
 
     /// Background commands the native agent started that are still running.
     pub(crate) fn running_background_commands(&self, cx: &App) -> usize {
-        self.as_native_thread(cx)
-            .map_or(0, |thread| thread.read(cx).running_background_terminal_count())
+        self.as_native_thread(cx).map_or(0, |thread| {
+            thread.read(cx).running_background_terminal_count()
+        })
     }
 
     fn cancel_thread(&self, thread: &Entity<AcpThread>, cx: &mut Context<Self>) -> Task<()> {
@@ -6488,14 +6488,16 @@ impl ThreadView {
                                 }
                             }),
                         )
-                        .item(ContextMenuEntry::new(stop_everything).handler({
-                            let weak_self = weak_self.clone();
-                            move |_window, cx| {
-                                weak_self
-                                    .update(cx, |this, cx| this.cancel_generation(cx))
-                                    .log_err();
-                            }
-                        }))
+                        .item(
+                            ContextMenuEntry::new(stop_everything).handler({
+                                let weak_self = weak_self.clone();
+                                move |_window, cx| {
+                                    weak_self
+                                        .update(cx, |this, cx| this.cancel_generation(cx))
+                                        .log_err();
+                                }
+                            }),
+                        )
                     }))
                 })
                 .into_any_element()

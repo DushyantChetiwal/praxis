@@ -832,7 +832,11 @@ async fn test_background_terminal_survives_send_now(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     let first = cx.update(|cx| {
-        connection.send_and_wait_for_completion(acp_thread.clone(), vec!["Start a build".into()], cx)
+        connection.send_and_wait_for_completion(
+            acp_thread.clone(),
+            vec!["Start a build".into()],
+            cx,
+        )
     });
     cx.run_until_parked();
     fake.send_last_event(

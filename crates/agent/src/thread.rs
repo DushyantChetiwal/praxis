@@ -917,7 +917,10 @@ enum RetryStrategy {
     /// the network is down. An autonomous turn should outlast a short outage
     /// instead of ending until someone notices.
     NetworkBackoff,
-    FixedDelay { delay: Duration, max_attempts: u8 },
+    FixedDelay {
+        delay: Duration,
+        max_attempts: u8,
+    },
 }
 
 impl RetryStrategy {
@@ -3904,7 +3907,8 @@ impl Thread {
 
     /// Terminal commands this thread started, oldest first.
     pub fn terminal_tasks(&self, cx: &App) -> Vec<TerminalTaskSummary> {
-        self.terminal_tasks.summaries(cx.background_executor().now())
+        self.terminal_tasks
+            .summaries(cx.background_executor().now())
     }
 
     /// Commands that outlived their tool call and are still running. Stop
@@ -4049,7 +4053,8 @@ impl Thread {
         let latest_compaction =
             latest_compaction_message_ix_before(&self.messages, self.messages.len())
                 .and_then(|compaction_ix| self.messages.get(compaction_ix).cloned());
-        self.request_token_usage.insert(user_message_id.clone(), usage);
+        self.request_token_usage
+            .insert(user_message_id.clone(), usage);
         self.measured_usage_compaction = Some((user_message_id, latest_compaction));
     }
 
@@ -4074,13 +4079,15 @@ impl Thread {
             Some((user_message_id, measured_compaction))
                 if usage_user_message_id == Some(user_message_id) =>
             {
-                !measured_compaction.as_ref().is_some_and(|measured_compaction| {
-                    self.messages
-                        .get(latest_compaction_ix)
-                        .is_some_and(|latest_compaction| {
-                            Arc::ptr_eq(measured_compaction, latest_compaction)
-                        })
-                })
+                !measured_compaction
+                    .as_ref()
+                    .is_some_and(|measured_compaction| {
+                        self.messages
+                            .get(latest_compaction_ix)
+                            .is_some_and(|latest_compaction| {
+                                Arc::ptr_eq(measured_compaction, latest_compaction)
+                            })
+                    })
             }
             _ => latest_compaction_ix > usage_ix,
         }
