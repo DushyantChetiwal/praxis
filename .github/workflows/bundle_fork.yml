@@ -14,8 +14,11 @@
 #             `xattr -d com.apple.quarantine /Applications/Praxis\ Dev.app`.
 #   Windows — SmartScreen warns about an unknown publisher.
 #
-# It runs automatically after a main PR merge passes Architect quality, after
-# a successful upstream sync, or manually from the Actions tab.
+# A merged main PR that passes Architect quality builds Windows and Linux.
+# Every platform, macOS included, builds weekly and after Monday's upstream
+# sync, or manually from the Actions tab. A release without macOS packages keeps
+# the previous macOS update manifests, so macOS installs stay on the weekly
+# build.
 #
 # Kept as short as hosted runners allow:
 #   - source trees with verified original quality receipts are not validated again;
@@ -496,15 +499,18 @@ jobs:
     if: >-
       always() &&
       !inputs.test_build &&
-      inputs.build_macos &&
       inputs.build_windows &&
       inputs.build_linux &&
-      needs.macos.result == 'success' &&
-      needs.macos_remote_server.result == 'success' &&
       needs.windows.result == 'success' &&
       needs.windows_remote_server.result == 'success' &&
       needs.linux.result == 'success' &&
-      needs.linux_remote_server.result == 'success'
+      needs.linux_remote_server.result == 'success' &&
+      ((inputs.build_macos &&
+      needs.macos.result == 'success' &&
+      needs.macos_remote_server.result == 'success') ||
+      (!inputs.build_macos &&
+      needs.macos.result == 'skipped' &&
+      needs.macos_remote_server.result == 'skipped'))
     needs:
       - prepare
       - macos
@@ -527,6 +533,7 @@ jobs:
           path: release-assets
 
       - name: Download the macOS disk images
+        if: inputs.build_macos
         uses: actions/download-artifact@v8
         with:
           pattern: praxis-macos-*-dmg
@@ -546,8 +553,26 @@ jobs:
           path: release-assets
           merge-multiple: true
 
+      # macOS builds weekly. Its manifests keep pointing at the weekly release,
+      # so macOS installs neither break nor reinstall, and the disk images stay
+      # downloadable from the latest release. Development remote servers must
+      # match their client's commit, so macOS ones are not carried forward.
+      - name: Keep the weekly macOS release
+        if: ${{ !inputs.build_macos }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release download --repo "${GITHUB_REPOSITORY}" --dir release-assets \
+            --pattern 'praxis-update-macos-*.json' --pattern 'Praxis-*.dmg'; then
+            echo "::warning::The latest release has no macOS packages; macOS installs wait for the weekly build"
+          fi
+
       - name: Create update manifests
         id: release
+        env:
+          BUILD_MACOS: ${{ inputs.build_macos }}
         shell: bash
         run: |
           set -euo pipefail
@@ -557,67 +582,84 @@ jobs:
           tag="praxis-dev-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
           release_version="${version}+praxis.${GITHUB_RUN_NUMBER}.${source_sha}"
           repository_url="https://github.com/${GITHUB_REPOSITORY}"
-          windows_sha256="$(sha256sum release-assets/Praxis-x86_64.exe | cut -d ' ' -f 1)"
-          macos_aarch64_sha256="$(sha256sum release-assets/Praxis-aarch64.dmg | cut -d ' ' -f 1)"
-          macos_x86_64_sha256="$(sha256sum release-assets/Praxis-x86_64.dmg | cut -d ' ' -f 1)"
-          linux_x86_64_sha256="$(sha256sum release-assets/praxis-linux-x86_64.tar.gz | cut -d ' ' -f 1)"
 
-          jq -n \
-            --arg version "${release_version}" \
-            --arg url "${repository_url}/releases/download/${tag}/Praxis-x86_64.exe" \
-            --arg sha256 "${windows_sha256}" \
-            '{version: $version, url: $url, sha256: $sha256}' \
-            > release-assets/praxis-update-windows-x86_64.json
+          # Assigned rather than inlined, so a missing asset fails the step.
+          manifest() {
+            local digest
+            digest="$(sha256sum "release-assets/$2" | cut -d ' ' -f 1)"
+            jq -n \
+              --arg version "${release_version}" \
+              --arg url "${repository_url}/releases/download/${tag}/$2" \
+              --arg sha256 "${digest}" \
+              '{version: $version, url: $url, sha256: $sha256}' \
+              > "release-assets/praxis-update-$1.json"
+          }
 
-          jq -n \
-            --arg version "${release_version}" \
-            --arg url "${repository_url}/releases/download/${tag}/Praxis-aarch64.dmg" \
-            --arg sha256 "${macos_aarch64_sha256}" \
-            '{version: $version, url: $url, sha256: $sha256}' \
-            > release-assets/praxis-update-macos-aarch64.json
+          manifest windows-x86_64 Praxis-x86_64.exe
+          manifest linux-x86_64 praxis-linux-x86_64.tar.gz
+          built=(
+            release-assets/Praxis-x86_64.exe
+            release-assets/praxis-linux-x86_64.tar.gz
+            release-assets/zed-remote-server-windows-x86_64.zip
+            release-assets/zed-remote-server-linux-x86_64.gz
+            release-assets/praxis-update-windows-x86_64.json
+            release-assets/praxis-update-linux-x86_64.json
+          )
+          kept=()
+          if [[ "${BUILD_MACOS}" == "true" ]]; then
+            manifest macos-aarch64 Praxis-aarch64.dmg
+            manifest macos-x86_64 Praxis-x86_64.dmg
+            built+=(
+              release-assets/Praxis-aarch64.dmg
+              release-assets/Praxis-x86_64.dmg
+              release-assets/zed-remote-server-macos-aarch64.gz
+              release-assets/zed-remote-server-macos-x86_64.gz
+              release-assets/praxis-update-macos-aarch64.json
+              release-assets/praxis-update-macos-x86_64.json
+            )
+            notes="Automated Praxis build from ${source_sha}. Desktop packages are unsigned."
+          else
+            for kept_asset in release-assets/praxis-update-macos-*.json release-assets/Praxis-*.dmg; do
+              if [[ -f "${kept_asset}" ]]; then
+                kept+=("${kept_asset}")
+              fi
+            done
+            notes="Automated Praxis build from ${source_sha}. Desktop packages are unsigned. macOS packages build weekly; macOS installs keep the latest weekly build."
+          fi
 
-          jq -n \
-            --arg version "${release_version}" \
-            --arg url "${repository_url}/releases/download/${tag}/Praxis-x86_64.dmg" \
-            --arg sha256 "${macos_x86_64_sha256}" \
-            '{version: $version, url: $url, sha256: $sha256}' \
-            > release-assets/praxis-update-macos-x86_64.json
-
-          jq -n \
-            --arg version "${release_version}" \
-            --arg url "${repository_url}/releases/download/${tag}/praxis-linux-x86_64.tar.gz" \
-            --arg sha256 "${linux_x86_64_sha256}" \
-            '{version: $version, url: $url, sha256: $sha256}' \
-            > release-assets/praxis-update-linux-x86_64.json
-
-          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
-          echo "version=${release_version}" >> "${GITHUB_OUTPUT}"
-          echo "source_sha=${source_sha}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "tag=${tag}"
+            echo "version=${release_version}"
+            echo "source_sha=${source_sha}"
+            echo "notes=${notes}"
+            echo "built<<ASSETS"
+            printf '%s\n' "${built[@]}"
+            echo "ASSETS"
+            echo "uploads<<ASSETS"
+            printf '%s\n' "${built[@]}" "${kept[@]}"
+            echo "ASSETS"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Attest release asset provenance
         uses: actions/attest-build-provenance@v4
         with:
-          subject-path: |
-            release-assets/Praxis-x86_64.exe
-            release-assets/Praxis-aarch64.dmg
-            release-assets/Praxis-x86_64.dmg
-            release-assets/praxis-linux-x86_64.tar.gz
-            release-assets/zed-remote-server-windows-x86_64.zip
-            release-assets/zed-remote-server-macos-aarch64.gz
-            release-assets/zed-remote-server-macos-x86_64.gz
-            release-assets/zed-remote-server-linux-x86_64.gz
-            release-assets/praxis-update-windows-x86_64.json
-            release-assets/praxis-update-macos-aarch64.json
-            release-assets/praxis-update-macos-x86_64.json
-            release-assets/praxis-update-linux-x86_64.json
+          subject-path: ${{ steps.release.outputs.built }}
 
       - name: Publish the latest Praxis Dev release
         env:
           GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ steps.release.outputs.notes }}
+          UPLOADS: ${{ steps.release.outputs.uploads }}
         shell: bash
         run: |
           set -euo pipefail
 
+          uploads=()
+          while IFS= read -r upload; do
+            if [[ -n "${upload}" ]]; then
+              uploads+=("${upload}")
+            fi
+          done <<< "${UPLOADS}"
           # The release tag is created on the default branch. GITHUB_TOKEN is
           # refused a ref at a product commit whose workflow files differ from
           # the default branch, and the updater reads only the manifests, so the
@@ -626,20 +668,9 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --target "${{ github.event.repository.default_branch }}" \
             --title "Praxis Dev ${{ steps.release.outputs.version }}" \
-            --notes "Automated Praxis build from ${{ steps.release.outputs.source_sha }}. Desktop packages are unsigned." \
+            --notes "${NOTES}" \
             --draft \
-            release-assets/Praxis-x86_64.exe \
-            release-assets/Praxis-aarch64.dmg \
-            release-assets/Praxis-x86_64.dmg \
-            release-assets/praxis-linux-x86_64.tar.gz \
-            release-assets/zed-remote-server-windows-x86_64.zip \
-            release-assets/zed-remote-server-macos-aarch64.gz \
-            release-assets/zed-remote-server-macos-x86_64.gz \
-            release-assets/zed-remote-server-linux-x86_64.gz \
-            release-assets/praxis-update-windows-x86_64.json \
-            release-assets/praxis-update-macos-aarch64.json \
-            release-assets/praxis-update-macos-x86_64.json \
-            release-assets/praxis-update-linux-x86_64.json
+            "${uploads[@]}"
 
           gh release edit "${{ steps.release.outputs.tag }}" \
             --repo "${GITHUB_REPOSITORY}" \
