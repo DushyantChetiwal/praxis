@@ -833,35 +833,27 @@ async fn test_background_terminal_survives_send_now(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
+    // A command an earlier turn left running in the background.
+    let launch = run_terminal_lifecycle_tool(
+        &thread,
+        TerminalTool::NAME,
+        json!({"command": "cargo build", "cd": ".", "yield_ms": 0}),
+        cx,
+    )
+    .await
+    .expect("the command starts");
+    assert!(launch.contains("still_running: true"), "{launch}");
+    assert_eq!(environment.terminal_spawns.load(Ordering::SeqCst), 1);
+
     let first = cx.update(|cx| {
         connection.send_and_wait_for_completion(
             acp_thread.clone(),
-            vec!["Start a build".into()],
+            vec!["Check on the build".into()],
             cx,
         )
     });
     cx.run_until_parked();
-    fake.send_last_event(
-        &model,
-        LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
-            id: "background".into(),
-            name: TerminalTool::NAME.into(),
-            raw_input: r#"{"command":"cargo build","cd":".","yield_ms":0}"#.into(),
-            input: language_model::LanguageModelToolUseInput::Json(
-                json!({"command": "cargo build", "cd": ".", "yield_ms": 0}),
-            ),
-            is_input_complete: true,
-            thought_signature: None,
-        }),
-    );
-    fake.end_last(&model);
-    cx.run_until_parked();
-    assert_eq!(environment.terminal_spawns.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        fake.pending_completions_for(&model).len(),
-        1,
-        "the turn should continue while the command runs in the background"
-    );
+    assert_eq!(fake.pending_completions_for(&model).len(), 1);
 
     // Send Now ends the turn for the follow-up, not the command it started.
     acp_thread
