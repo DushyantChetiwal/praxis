@@ -827,6 +827,8 @@ async fn test_background_terminal_survives_send_now(cx: &mut TestAppContext) {
     let handle = environment.terminal_handle.clone().unwrap();
     thread.update(cx, |thread, cx| {
         thread.set_model(model.clone(), cx);
+        // Swap the session's tools for ones whose terminals are fakes.
+        thread.tools.clear();
         thread.add_default_tools(environment.clone(), cx);
     });
     cx.run_until_parked();
