@@ -66,6 +66,22 @@ const GISTS_PER_PAGE: usize = 100;
 const GIST_PAGES: usize = 3;
 const REFUSED_SIGN_IN: &str = "GitHub no longer accepts this computer's sign-in; sign in again";
 
+/// Whether the gist needs rewriting now. Phones the live relay reaches get
+/// every snapshot from it, so for them only the heartbeat and replies write:
+/// each write counts against GitHub limits shared with the user's other tools.
+fn publish_due(
+    publish_now: bool,
+    heartbeat_due: bool,
+    changed: bool,
+    live: bool,
+    since_published: Option<Duration>,
+    gap: Duration,
+) -> bool {
+    publish_now
+        || heartbeat_due
+        || (!live && changed && since_published.is_none_or(|elapsed| elapsed >= gap))
+}
+
 fn recovery_delay(error: &anyhow::Error, failures: u32) -> Duration {
     if let Some(delay) = github::retry_after(error) {
         return delay.max(POLL_INTERVAL);
@@ -978,10 +994,18 @@ impl Channel {
             // the phone's reads. Preserve headroom before the quota is empty.
             self.api.passive_publish_interval(WATCHED_PUBLISH_INTERVAL)
         };
-        let due = self.publish_now
-            || heartbeat_due
-            || (changed && since_published.is_none_or(|elapsed| elapsed >= gap));
-        if !due {
+        let live = self
+            .relay
+            .as_ref()
+            .is_some_and(|relay| relay.all_connected());
+        if !publish_due(
+            self.publish_now,
+            heartbeat_due,
+            changed,
+            live,
+            since_published,
+            gap,
+        ) {
             return Ok(());
         }
 
@@ -1757,6 +1781,18 @@ mod tests {
 
     fn minutes(minutes: i64) -> chrono::Duration {
         chrono::Duration::minutes(minutes)
+    }
+
+    #[test]
+    fn live_phones_need_only_the_gist_heartbeat() {
+        let gap = WATCHED_PUBLISH_INTERVAL;
+        let long_ago = Some(gap * 2);
+        assert!(publish_due(false, false, true, false, long_ago, gap));
+        assert!(!publish_due(false, false, true, true, long_ago, gap));
+        assert!(publish_due(false, true, false, true, long_ago, gap));
+        assert!(publish_due(true, false, false, true, Some(Duration::ZERO), gap));
+        assert!(!publish_due(false, false, true, false, Some(Duration::from_secs(1)), gap));
+        assert!(!publish_due(false, false, false, false, long_ago, gap));
     }
 
     #[test]

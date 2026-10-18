@@ -37,7 +37,9 @@ import org.nostrdevkit.sdk.Tag
 
 internal const val RELAY_KIND: UShort = 21761u
 internal const val RELAY_PACKET_LIMIT = 96_000
-private val RELAYS = listOf("wss://relay.damus.io", "wss://relay.primal.net")
+// relay.damus.io reset connections every few minutes. A Praxis on the older
+// list still shares relay.primal.net with this one.
+private val RELAYS = listOf("wss://relay.primal.net", "wss://nos.lol")
 
 internal fun relayAad(link: Link, direction: String): String =
     "$PROTOCOL/nostr/${link.channel}/${link.phoneId}/$direction"

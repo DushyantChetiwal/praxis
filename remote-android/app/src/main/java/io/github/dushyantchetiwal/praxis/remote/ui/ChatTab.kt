@@ -97,6 +97,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -128,6 +129,8 @@ import io.github.dushyantchetiwal.praxis.remote.data.transcriptItemKeys
 import kotlinx.coroutines.flow.first
 import io.github.dushyantchetiwal.praxis.remote.data.ModeInfo
 import io.github.dushyantchetiwal.praxis.remote.data.Permission
+import io.github.dushyantchetiwal.praxis.remote.data.TerminalTask
+import io.github.dushyantchetiwal.praxis.remote.TerminalsState
 import io.github.dushyantchetiwal.praxis.remote.ui.theme.OnlineGreen
 
 @Composable
@@ -155,14 +158,193 @@ fun ChatTab(ui: DeviceUi, vm: MainViewModel) {
         Box(Modifier.weight(1f)) {
             Transcript(ui, vm)
         }
+        TurnStatus(ui, vm, generating)
         Composer(ui, vm, generating)
     }
     if (ui.queue.visible) QueueDialog(ui, vm)
+    if (ui.terminals.visible) TerminalsDialog(ui, vm)
+    if (ui.confirmingStop) StopChoiceDialog(ui, vm)
     QuestionDialogs(ui, vm)
 }
 
+/** Why the last turn ended, or that a failed request is about to be retried. */
 @Composable
-internal fun ConversationControls(ui: DeviceUi, vm: MainViewModel, onOpenQueue: () -> Unit) {
+private fun TurnStatus(ui: DeviceUi, vm: MainViewModel, generating: Boolean) {
+    val summary = ui.currentWindow()?.thread ?: return
+    val retrying = summary.retrying
+    if (generating && retrying != null) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Filled.HourglassTop, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(8.dp))
+            val attempt = stringResource(R.string.turn_retrying, retrying.attempt, retrying.maxAttempts)
+            Text(
+                listOfNotNull(attempt, retrying.message?.takeIf { it.isNotBlank() }).joinToString(" · "),
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        return
+    }
+    val error = summary.error?.takeIf { !generating } ?: return
+    val scheme = MaterialTheme.colorScheme
+    Card(
+        colors = CardDefaults.cardColors(containerColor = scheme.errorContainer, contentColor = scheme.onErrorContainer),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.ErrorOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.turn_failed), style = MaterialTheme.typography.labelLarge)
+            }
+            Text(error.message, style = MaterialTheme.typography.bodySmall, maxLines = 4, overflow = TextOverflow.Ellipsis)
+            Row {
+                if (error.retryable) TextButton(onClick = vm::retryTurn, enabled = !ui.retrying) {
+                    Text(stringResource(R.string.action_retry))
+                }
+                if (error.kind == "prompt_too_large" && summary.compact) {
+                    TextButton(onClick = vm::compactConversation, enabled = !ui.compacting) {
+                        Text(stringResource(R.string.action_compact))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StopChoiceDialog(ui: DeviceUi, vm: MainViewModel) {
+    val count = ui.currentWindow()?.thread?.backgroundCommands ?: 0
+    AlertDialog(
+        onDismissRequest = vm::dismissStopChoice,
+        icon = { Icon(Icons.Filled.Stop, contentDescription = null) },
+        title = { Text(stringResource(R.string.stop_choice_title)) },
+        text = { Text(pluralStringResource(R.plurals.stop_choice_body, count, count)) },
+        confirmButton = {
+            TextButton(onClick = { vm.stopGenerating(keepCommands = true) }) {
+                Text(stringResource(R.string.stop_agent_only))
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = vm::dismissStopChoice) { Text(stringResource(R.string.action_cancel)) }
+                TextButton(
+                    onClick = { vm.stopGenerating(keepCommands = false) },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text(stringResource(R.string.stop_agent_and_commands)) }
+            }
+        },
+    )
+}
+
+/** The commands the agent started; each one's output loads when it is opened. */
+@Composable
+private fun TerminalsDialog(ui: DeviceUi, vm: MainViewModel) {
+    val terminals = ui.terminals
+    val expanded = remember(terminals.session) { mutableStateMapOf<String, Boolean>() }
+    AlertDialog(
+        onDismissRequest = vm::dismissTerminals,
+        title = { Text(stringResource(R.string.terminals_title)) },
+        confirmButton = { TextButton(onClick = vm::dismissTerminals) { Text(stringResource(R.string.action_close)) } },
+        dismissButton = {
+            TextButton(onClick = vm::loadTerminals, enabled = !terminals.loading) { Text(stringResource(R.string.action_refresh)) }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (terminals.loading) LoadingRow(stringResource(R.string.terminals_loading))
+                terminals.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                val tasks = terminals.tasks
+                if (tasks != null && tasks.isEmpty() && !terminals.loading) Text(stringResource(R.string.terminals_empty))
+                LazyColumn(Modifier.heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(tasks.orEmpty(), key = { it.id }) { task ->
+                        TerminalRow(task, expanded[task.id] == true, terminals, vm) { open ->
+                            expanded[task.id] = open
+                            if (open && task.id !in terminals.outputs) vm.loadTerminalOutput(task.id)
+                        }
+                    }
+                }
+            }
+        },
+    )
+}
+
+@Composable
+private fun TerminalRow(task: TerminalTask, expanded: Boolean, terminals: TerminalsState, vm: MainViewModel, onToggle: (Boolean) -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    Column {
+        TextButton(onClick = { onToggle(!expanded) }, contentPadding = PaddingValues(horizontal = 4.dp)) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    task.command,
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                val elapsed = elapsedText(task.elapsedMillis)
+                Text(
+                    stringResource(if (task.running) R.string.terminal_running else R.string.terminal_finished, elapsed),
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+            Icon(
+                if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = stringResource(if (expanded) R.string.action_collapse else R.string.action_expand),
+            )
+        }
+        if (task.running) {
+            TextButton(
+                onClick = { vm.stopTerminal(task.id) },
+                enabled = task.id !in terminals.busy,
+                colors = ButtonDefaults.textButtonColors(contentColor = scheme.error),
+            ) { Text(stringResource(R.string.terminal_stop)) }
+        }
+        if (expanded) {
+            val output = terminals.outputs[task.id]
+            val loading = task.id in terminals.loadingOutput
+            if (output?.hasEarlier == true && !output.running) {
+                TextButton(onClick = { vm.loadTerminalOutput(task.id, earlier = true) }, enabled = !loading) {
+                    Text(stringResource(R.string.terminal_load_earlier))
+                }
+            }
+            if (loading) LoadingRow(stringResource(R.string.terminal_loading_output))
+            output?.let {
+                Surface(color = scheme.surfaceContainerHigh, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    SelectionContainer {
+                        Text(
+                            it.text.ifEmpty { stringResource(R.string.terminal_no_output) },
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(8.dp),
+                        )
+                    }
+                }
+            }
+            if (task.running && output != null) {
+                TextButton(onClick = { vm.loadTerminalOutput(task.id) }, enabled = !loading) {
+                    Text(stringResource(R.string.terminal_refresh_output))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun elapsedText(millis: Long): String {
+    val seconds = millis / 1000
+    return when {
+        seconds < 60 -> stringResource(R.string.elapsed_seconds, seconds.toInt())
+        seconds < 3600 -> stringResource(R.string.elapsed_minutes, (seconds / 60).toInt())
+        else -> stringResource(R.string.elapsed_hours, (seconds / 3600).toInt(), ((seconds % 3600) / 60).toInt())
+    }
+}
+
+@Composable
+internal fun ConversationControls(ui: DeviceUi, vm: MainViewModel, onOpenQueue: () -> Unit, onOpenTerminals: () -> Unit) {
     val window = ui.currentWindow()
     val summary = window?.thread
     val now = rememberNow(5_000L)
@@ -170,8 +352,31 @@ internal fun ConversationControls(ui: DeviceUi, vm: MainViewModel, onOpenQueue: 
     Text(stringResource(if (ui.liveTransport) R.string.transport_live else R.string.transport_github),
         style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 12.dp))
     if (ui.isGenerating() && window?.architect?.running == true) {
-        TextButton(onClick = vm::stopGenerating, enabled = !ui.stopping, modifier = Modifier.padding(horizontal = 8.dp)) {
+        TextButton(onClick = { vm.stopGenerating() }, enabled = !ui.stopping, modifier = Modifier.padding(horizontal = 8.dp)) {
             Text(stringResource(R.string.action_stop_agent))
+        }
+    }
+    summary?.takeIf { it.terminals }?.let { thread ->
+        TextButton(onClick = onOpenTerminals, modifier = Modifier.padding(horizontal = 8.dp)) {
+            Text(
+                if (thread.backgroundCommands > 0) {
+                    pluralStringResource(R.plurals.terminals_running, thread.backgroundCommands, thread.backgroundCommands)
+                } else {
+                    stringResource(R.string.terminals_title)
+                },
+            )
+        }
+    }
+    if (summary?.compact == true) {
+        Column(Modifier.padding(horizontal = 8.dp)) {
+            TextButton(onClick = vm::compactConversation, enabled = !ui.compacting) {
+                Text(stringResource(R.string.action_compact))
+            }
+            Text(
+                stringResource(R.string.compact_help),
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(horizontal = 12.dp),
+            )
         }
     }
     if (summary?.modelSelection == true) ModelPicker(ui, vm)

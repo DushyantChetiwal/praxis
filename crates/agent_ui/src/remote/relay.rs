@@ -19,7 +19,12 @@ use super::{Watch, channel, handle_paired, snapshot, status};
 
 // Application-specific ephemeral events: never public notes or stored DMs.
 const PACKET_KIND: u16 = 21761;
-const RELAYS: [&str; 2] = ["wss://relay.damus.io", "wss://relay.primal.net"];
+// relay.damus.io reset this connection every few minutes, so it was dropped.
+// Phones on an older list still share relay.primal.net with this one.
+const RELAYS: [&str; 2] = ["wss://relay.primal.net", "wss://nos.lol"];
+/// Reconnect a dropped relay quickly instead of backing off toward a minute;
+/// a phone waits on whichever relay carries its request.
+const RELAY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_PACKET_BYTES: usize = 96_000;
 const MAX_RECEIPTS: usize = 4096;
 const MAX_RECEIPT_BYTES: usize = 8 * 1024 * 1024;
@@ -161,7 +166,11 @@ async fn network(
     let client = Client::default();
     let result = until_stopped(&stopped, async {
     for relay in RELAYS {
-        client.add_relay(relay).await?;
+        client
+            .add_relay(relay)
+            .retry_interval(RELAY_RETRY_INTERVAL)
+            .adjust_retry_interval(false)
+            .await?;
     }
     let mut notifications = client.notifications();
     client.connect().await;
