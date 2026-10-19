@@ -148,10 +148,11 @@ const COMPACTION_RETAINED_AGENT_MESSAGES_BYTE_BUDGET: usize = 60_000;
 /// a document and the outcome of a command usually are.
 const MAX_TOOL_RESULT_BYTES: usize = 100_000;
 
-/// A deliberately low estimate of bytes per token when sizing a compaction
-/// request for a history that overflowed, since code and JSON tokenize far
-/// more densely than prose.
-const COMPACTION_BYTES_PER_TOKEN: u64 = 3;
+/// Bytes per token assumed when sizing a compaction request for a history
+/// that overflowed. A token never stands for less than a byte, so a request
+/// sized this way fits however densely it tokenizes; hashes, base64 and
+/// escaped JSON in tool output come close to one byte per token.
+const COMPACTION_BYTES_PER_TOKEN: u64 = 1;
 
 /// Above this many bytes per token of capacity a history cannot fit the model
 /// however it tokenizes, even before the provider has said so.
@@ -1032,9 +1033,13 @@ impl Message {
     }
 
     pub fn to_markdown(&self) -> String {
+        self.render_markdown(true)
+    }
+
+    fn render_markdown(&self, include_debug_output: bool) -> String {
         match self {
             Message::User(message) => message.to_markdown(),
-            Message::Agent(message) => message.to_markdown(),
+            Message::Agent(message) => message.render_markdown(include_debug_output),
             Message::Resume => "[resume]\n".into(),
             Message::Compaction(CompactionInfo::Summary(summary)) => {
                 format!("## Context Compaction (Completed)\n\n{summary}\n\n")
@@ -1380,6 +1385,10 @@ fn codeblock_tag(full_path: &Path, line_range: Option<&RangeInclusive<u32>>) -> 
 
 impl AgentMessage {
     pub fn to_markdown(&self) -> String {
+        self.render_markdown(true)
+    }
+
+    fn render_markdown(&self, include_debug_output: bool) -> String {
         let mut markdown = String::new();
 
         for content in &self.content {
@@ -1432,7 +1441,8 @@ impl AgentMessage {
                 }
             }
 
-            if let Some(output) = tool_result.output.as_ref()
+            if include_debug_output
+                && let Some(output) = tool_result.output.as_ref()
                 && let Ok(output) = serde_json::to_string_pretty(output)
             {
                 writeln!(markdown, "**Debug Output**:\n\n```json\n{output}\n```\n").ok();
@@ -6549,10 +6559,15 @@ impl Thread {
             model.max_output_tokens(),
         );
         let history_bytes: usize = history.iter().map(request_message_byte_len).sum();
+        // Images are billed by their dimensions, not by the length of their
+        // base64, so a few screenshots can make a history that fits the model
+        // megabytes long.
+        let image_bytes: usize = history.iter().map(request_message_image_byte_len).sum();
+        let text_bytes = history_bytes.saturating_sub(image_bytes);
         let overflowed = self
             .latest_request_token_usage()
             .is_some_and(|usage| total_input_tokens(usage) >= capacity)
-            || u64::try_from(history_bytes).unwrap_or(u64::MAX)
+            || u64::try_from(text_bytes).unwrap_or(u64::MAX)
                 > capacity.saturating_mul(OVERFLOW_BYTES_PER_TOKEN);
         let messages = if overflowed {
             let end_ix = insertion_ix.min(self.messages.len());
@@ -6561,7 +6576,7 @@ impl Thread {
             let start_ix = latest_compaction_message_ix_before(&self.messages, end_ix).unwrap_or(0);
             fit_compaction_history(
                 history,
-                || messages_to_markdown(&self.messages[start_ix..end_ix]),
+                || messages_to_transcript(&self.messages[start_ix..end_ix]),
                 compaction_request_byte_budget(model),
             )
         } else {
@@ -6818,6 +6833,31 @@ fn request_message_byte_len(message: &LanguageModelRequestMessage) -> usize {
         .sum()
 }
 
+/// Bytes of base64 image data in a request message, which providers bill by
+/// the image's dimensions rather than by its length.
+fn request_message_image_byte_len(message: &LanguageModelRequestMessage) -> usize {
+    message
+        .content
+        .iter()
+        .map(|content| match content {
+            MessageContent::Image(image) => image.len(),
+            MessageContent::ToolResult(tool_result) => tool_result
+                .content
+                .iter()
+                .map(|content| match content {
+                    LanguageModelToolResultContent::Image(image) => image.len(),
+                    LanguageModelToolResultContent::Text(_) => 0,
+                })
+                .sum(),
+            MessageContent::Text(_)
+            | MessageContent::Thinking { .. }
+            | MessageContent::RedactedThinking(_)
+            | MessageContent::ToolUse(_)
+            | MessageContent::Compaction(_) => 0,
+        })
+        .sum()
+}
+
 fn truncate_user_message_to_byte_budget(
     mut message: LanguageModelRequestMessage,
     byte_budget: usize,
@@ -6937,6 +6977,17 @@ impl RunningTurn {
 }
 
 pub(crate) fn messages_to_markdown(messages: &[Arc<Message>]) -> String {
+    render_messages_markdown(messages, true)
+}
+
+/// The history as the model was shown it, for summarizing one too long to
+/// send whole. Tool debug output only feeds the UI: the model never sees it,
+/// and for an image it is the whole image again, as base64 text.
+fn messages_to_transcript(messages: &[Arc<Message>]) -> String {
+    render_messages_markdown(messages, false)
+}
+
+fn render_messages_markdown(messages: &[Arc<Message>], include_debug_output: bool) -> String {
     let mut markdown = String::new();
     for (ix, message) in messages.iter().enumerate() {
         if ix > 0 {
@@ -6947,7 +6998,7 @@ pub(crate) fn messages_to_markdown(messages: &[Arc<Message>]) -> String {
             Message::Agent(_) => markdown.push_str("## Assistant\n\n"),
             Message::Resume | Message::Compaction(_) | Message::LoopGuard(_) => {}
         }
-        markdown.push_str(&message.to_markdown());
+        markdown.push_str(&message.render_markdown(include_debug_output));
     }
     markdown
 }
@@ -11150,6 +11201,152 @@ mod tests {
         assert!(
             has_tool_use && has_tool_result,
             "tool use and tool result must both be replayed"
+        );
+    }
+
+    /// An agent turn that called one tool: what the model was shown of the
+    /// result, and the debug output the tool kept for the UI.
+    fn tool_call_message(
+        id: &str,
+        content: LanguageModelToolResultContent,
+        output: Option<serde_json::Value>,
+    ) -> Arc<Message> {
+        let tool_use_id = LanguageModelToolUseId::from(id);
+        let tool_use = LanguageModelToolUse {
+            id: tool_use_id.clone(),
+            name: "read_file".into(),
+            raw_input: "{}".to_string(),
+            input: language_model::LanguageModelToolUseInput::Json(json!({})),
+            is_input_complete: true,
+            thought_signature: None,
+        };
+        let tool_result = LanguageModelToolResult {
+            tool_use_id: tool_use_id.clone(),
+            tool_name: tool_use.name.clone(),
+            is_error: false,
+            content: vec![content],
+            output,
+        };
+        Arc::new(Message::Agent(AgentMessage {
+            content: vec![AgentMessageContent::ToolUse(tool_use)],
+            tool_results: IndexMap::from_iter([(tool_use_id, tool_result)]),
+            reasoning_details: None,
+        }))
+    }
+
+    /// A screenshot as `read_file` records it: the image the model was shown,
+    /// and the same image again, as base64 text, in its debug output.
+    fn screenshot_message(id: &str, image_bytes: usize) -> Arc<Message> {
+        let source = "A".repeat(image_bytes);
+        let image = LanguageModelImage {
+            source: source.clone().into(),
+        };
+        tool_call_message(
+            id,
+            LanguageModelToolResultContent::Image(image),
+            Some(json!({ "Image": { "source": source } })),
+        )
+    }
+
+    /// Images are billed by their dimensions, so a few screenshots can make a
+    /// history that fits the model megabytes long. It is summarized as it is,
+    /// not reduced to a transcript.
+    #[gpui::test]
+    async fn test_compaction_sends_a_fitting_history_with_large_images_whole(
+        cx: &mut TestAppContext,
+    ) {
+        let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
+        let model = fake.update_model("fake", |model| {
+            model.max_token_count = 100_000;
+            model.max_input_tokens = 100_000;
+            model.max_output_tokens = None;
+        });
+        let user_message_id = ClientUserMessageId::new();
+
+        let request = cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.set_model(model.clone(), cx);
+                thread
+                    .messages
+                    .push(user_text_message(user_message_id.clone(), "screen"));
+                thread.messages.push(screenshot_message("shot", 600_000));
+                thread.request_token_usage.insert(
+                    user_message_id.clone(),
+                    language_model::TokenUsage {
+                        input_tokens: 20_000,
+                        ..Default::default()
+                    },
+                );
+                thread.build_compaction_request(thread.messages.len(), &model, cx)
+            })
+        });
+
+        let image_bytes: usize = request
+            .messages
+            .iter()
+            .map(request_message_image_byte_len)
+            .sum();
+        assert_eq!(image_bytes, 600_000, "the image is sent whole");
+        let request_text = request_texts(&request.messages).join("\n");
+        assert!(!request_text.contains("too long to send in full"));
+    }
+
+    /// A history that overflowed is summarized from a transcript sized to fit
+    /// however densely it tokenizes. The transcript holds what the model was
+    /// shown, not the debug output tools keep for the UI.
+    #[gpui::test]
+    async fn test_compaction_transcript_of_an_overflowed_history_fits_the_model(
+        cx: &mut TestAppContext,
+    ) {
+        let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
+        let model = fake.update_model("fake", |model| {
+            model.max_token_count = 100_000;
+            model.max_input_tokens = 100_000;
+            model.max_output_tokens = None;
+        });
+        let user_message_id = ClientUserMessageId::new();
+        let hashes = "0123456789abcdef".repeat(10_000);
+
+        let (request, markdown) = cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.set_model(model.clone(), cx);
+                thread
+                    .messages
+                    .push(user_text_message(user_message_id.clone(), "TASK"));
+                thread.messages.push(screenshot_message("shot", 200_000));
+                thread.messages.push(tool_call_message(
+                    "hashes",
+                    LanguageModelToolResultContent::Text(hashes.into()),
+                    None,
+                ));
+                thread.messages.push(agent_text_message("LATEST"));
+                thread.request_token_usage.insert(
+                    user_message_id.clone(),
+                    language_model::TokenUsage {
+                        input_tokens: 150_000,
+                        ..Default::default()
+                    },
+                );
+                (
+                    thread.build_compaction_request(thread.messages.len(), &model, cx),
+                    thread.to_markdown(),
+                )
+            })
+        });
+
+        let request_text = request_texts(&request.messages).join("\n");
+        assert!(request_text.contains("too long to send in full"));
+        assert!(request_text.contains("TASK"));
+        assert!(request_text.contains("LATEST"));
+        assert!(
+            !request_text.contains("Debug Output"),
+            "the transcript should hold only what the model was shown"
+        );
+        assert!(markdown.contains("**Debug Output**"));
+        let request_bytes: usize = request.messages.iter().map(request_message_byte_len).sum();
+        assert!(
+            request_bytes <= 100_000,
+            "a token never stands for less than a byte, so {request_bytes} bytes fit"
         );
     }
 
