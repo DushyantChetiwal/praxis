@@ -583,6 +583,7 @@ mod tests {
     async fn steps_run_side_by_side_and_keep_the_checklist(cx: &mut gpui::TestAppContext) {
         let (_connection, _agent, thread, _session) =
             super::super::architect_run_tool::architect_tool_test_session(cx).await;
+        #[allow(clippy::arc_with_non_send_sync)]
         let tool = Arc::new(RunStepsTool::new(
             thread.downgrade(),
             Rc::new(FakeEnvironment),
