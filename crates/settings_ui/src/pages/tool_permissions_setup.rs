@@ -1561,6 +1561,7 @@ mod tests {
             // tool calls inside the spawned thread, not the spawning itself.
             "create_thread",
             "spawn_agent",
+            "run_steps",
             // Architect tools only write to the plan on the canvas, which the
             // user then reshapes, locks and runs deliberately. Nothing happens
             // to the project until they do.

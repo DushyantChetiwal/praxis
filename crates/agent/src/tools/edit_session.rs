@@ -714,6 +714,11 @@ impl EditSession {
             project_path,
         } = target;
 
+        context
+            .thread
+            .read_with(cx, |thread, _| thread.claim_file(&abs_path))
+            .unwrap_or(Ok(()))?;
+
         event_stream.update_fields(|update| {
             update.locations(vec![acp::ToolCallLocation::new(abs_path.clone())])
         });

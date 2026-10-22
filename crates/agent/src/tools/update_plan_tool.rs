@@ -13,7 +13,7 @@ use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 pub const AGENT_PLAN_ID: &str = "praxis-agent-plan";
 
 const MAX_PLAN_STEPS: usize = 50;
-const MAX_STEP_LENGTH: usize = 300;
+pub(super) const MAX_STEP_LENGTH: usize = 300;
 
 /// Keep a short checklist of the steps in your current task. The user sees it
 /// above the message box, on the desktop and on their phone.
@@ -31,6 +31,10 @@ const MAX_STEP_LENGTH: usize = 300;
 ///   `cancelled` instead of silently removing it.
 /// - Write each step as a short, user-facing action, such as "Add the retry
 ///   setting" or "Run the agent tests".
+///
+/// When `run_steps` is available and several pending steps are independent of
+/// each other, carry them out at the same time with it; it keeps this checklist
+/// up to date for you.
 ///
 /// This checklist is separate from the Architect canvas. Use `draft_plan` only
 /// when the user wants to review, reshape or run a plan as a flowchart.
@@ -124,7 +128,7 @@ fn validate(steps: &[PlanStep]) -> Result<(), String> {
     Ok(())
 }
 
-fn plan_entries(steps: &[PlanStep]) -> Vec<acp::PlanEntry> {
+pub(super) fn plan_entries(steps: &[PlanStep]) -> Vec<acp::PlanEntry> {
     steps
         .iter()
         .map(|step| {

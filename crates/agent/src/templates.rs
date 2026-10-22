@@ -306,7 +306,10 @@ mod tests {
 
         let with_tool = render(vec!["update_plan".into()]);
         assert!(with_tool.contains("keep a checklist with `update_plan`"));
+        assert!(!with_tool.contains("run_steps"));
         assert!(!render(Vec::new()).contains("update_plan"));
+        let parallel = render(vec!["update_plan".into(), "run_steps".into()]);
+        assert!(parallel.contains("at the same time with `run_steps`"));
     }
 
     #[test]

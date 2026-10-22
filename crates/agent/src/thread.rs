@@ -81,6 +81,14 @@ const TOOL_CALL_INTERRUPTED_BY_FOLLOW_UP_MESSAGE: &str =
 pub(crate) const FOLLOW_UP_PERMISSION_DENIED_OPTION_ID: &str = "follow_up_permission_denied";
 pub const MAX_TOOL_NAME_LENGTH: usize = 64;
 pub const MAX_SUBAGENT_DEPTH: u8 = 1;
+const ARCHITECT_STATE_TOOLS: [&str; 6] = [
+    crate::InspectArchitectPlanTool::NAME,
+    crate::EditArchitectPlanTool::NAME,
+    crate::InspectArchitectRunTool::NAME,
+    crate::WaitArchitectRunTool::NAME,
+    crate::ControlArchitectRunTool::NAME,
+    crate::SetStepLocksTool::NAME,
+];
 
 pub(crate) fn provider_compatible_tool_name(tool_name: &str) -> String {
     let mut sanitized = String::new();
@@ -1559,6 +1567,8 @@ pub trait SubagentHandle {
     fn num_entries(&self, cx: &App) -> usize;
     /// Runs a turn for a given message and returns both the response and the index of that output message.
     fn send(&self, message: String, cx: &AsyncApp) -> Task<Result<String>>;
+    /// Stops this subagent from changing a file another parallel step changed.
+    fn set_file_claim(&self, _claim: crate::FileClaim, _cx: &mut App) {}
 }
 
 pub trait ThreadEnvironment {
@@ -2148,6 +2158,9 @@ pub struct Thread {
     ui_scroll_position: Option<gpui::ListOffset>,
     /// Weak references to running subagent threads for cancellation propagation
     running_subagents: Vec<WeakEntity<Thread>>,
+    /// Set while this thread carries out one of several steps running side by
+    /// side, so it cannot change a file another step has already changed.
+    file_claim: Option<crate::FileClaim>,
     inherits_parent_model_settings: bool,
     /// The Architect plan drafted in this thread. The conversation governs the
     /// plan, so the two live and die together.
@@ -2384,6 +2397,7 @@ impl Thread {
             draft_prompt: None,
             ui_scroll_position: None,
             running_subagents: Vec::new(),
+            file_claim: None,
             inherits_parent_model_settings: true,
             architect_graph: None,
             architect_revision_baseline: None,
@@ -2831,6 +2845,7 @@ impl Thread {
                 offset_in_item: gpui::px(sp.offset_in_item),
             }),
             running_subagents: Vec::new(),
+            file_claim: None,
             inherits_parent_model_settings: true,
             architect_revision_baseline: architect_graph.clone(),
             architect_graph,
@@ -3016,6 +3031,27 @@ impl Thread {
         self.draft_prompt = prompt;
     }
 
+    pub(crate) fn set_file_claim(&mut self, claim: Option<crate::FileClaim>) {
+        self.file_claim = claim;
+    }
+
+    /// Refuses a file that a step running alongside this one already changed.
+    pub(crate) fn claim_file(&self, path: &std::path::Path) -> Result<(), String> {
+        self.file_claim
+            .as_ref()
+            .map_or(Ok(()), |claim| claim.claim(path))
+    }
+
+    /// The checklist as the agent last left it.
+    pub(crate) fn agent_checklist(&self) -> Vec<crate::PlanStep> {
+        let saved = self
+            .messages
+            .iter()
+            .rev()
+            .filter_map(|message| message.as_agent_message());
+        crate::latest_checklist(self.pending_message.iter().chain(saved))
+    }
+
     pub fn architect_graph(&self) -> Option<&architect::ArchitectGraph> {
         self.architect_graph.as_ref()
     }
@@ -3186,6 +3222,7 @@ impl Thread {
         self.archive_current_architect_run();
         self.architect_graph = graph;
         self.archive_architect_revision();
+        self.refresh_turn_tools(cx);
         self.record_architect_event("graph_replaced", None, cx);
     }
 
@@ -3828,6 +3865,10 @@ impl Thread {
 
         if self.depth() < MAX_SUBAGENT_DEPTH {
             self.add_tool(SpawnAgentTool::new(environment.clone()));
+            self.add_tool(crate::RunStepsTool::new(
+                cx.weak_entity(),
+                environment.clone(),
+            ));
         }
 
         // Sibling-thread tools are exposed at every depth: a subagent should
@@ -6170,10 +6211,19 @@ impl Thread {
         // capabilities that are mechanically read-only.
         let mode = self.session_mode.get();
 
+        // Plan and run tools mean nothing until a plan exists, so they stay out
+        // of the model's way until one is drafted.
+        let has_architect_state = self.architect_graph.is_some()
+            || self.architect_run.is_some()
+            || !self.persistent_architect.archive.is_empty();
+
         let mut tools = self
             .tools
             .iter()
             .filter(|(_, tool)| tool.capability().is_allowed_in(mode))
+            .filter(|(tool_name, _)| {
+                has_architect_state || !ARCHITECT_STATE_TOOLS.contains(&tool_name.as_ref())
+            })
             .filter(|(_, tool)| !is_restricted || tool.allow_in_restricted_mode())
             .filter_map(|(tool_name, tool)| {
                 let terminal_variant = matches!(

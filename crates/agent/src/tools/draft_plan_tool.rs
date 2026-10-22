@@ -16,6 +16,8 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 /// chat, and lock once they are satisfied with it. Each connection says when
 /// one step leads to another. Nothing is carried out by this tool: the plan is
 /// a proposal the user reshapes, and they run it when they are ready.
+/// Drafting keeps the conversation in its current mode. Unless the user asked
+/// you to carry the plan out, stop after drafting and let them review it.
 ///
 /// ### Choose the right tool
 /// Use draft_plan to create a plan or deliberately replace the whole graph, not
@@ -506,11 +508,6 @@ impl AgentTool for DraftPlanTool {
             self.thread
                 .update(cx, |thread, cx| {
                     thread.set_architect_graph(Some(graph), cx);
-                    // Drawing a plan is the act that says this task is being
-                    // planned on the canvas rather than carried out, so it is
-                    // what puts the thread into Architect. Nothing else has to
-                    // be asked or set.
-                    thread.set_session_mode(crate::SessionMode::Architect, cx);
                 })
                 .map_err(|error| DraftPlanToolOutput::Error {
                     error: format!("The thread this plan belongs to is gone: {error}"),
@@ -873,6 +870,7 @@ mod tests {
     ) {
         let (_connection, _agent, thread, _session) =
             super::super::architect_run_tool::architect_tool_test_session(cx).await;
+        let mode_before = thread.read_with(cx, |thread, _| thread.session_mode());
         for (surface, expected_problem) in [
             (json!(["../outside.rs"]), "invalid file surface"),
             (json!(["a/shared.rs"]), "may run concurrently"),
@@ -906,7 +904,7 @@ mod tests {
                 "{problems:?}"
             );
             thread.read_with(cx, |thread, _| {
-                assert_eq!(thread.session_mode(), crate::SessionMode::Architect);
+                assert_eq!(thread.session_mode(), mode_before, "drafting keeps the mode");
                 let mut graph = thread.architect_graph().expect("retained draft").clone();
                 assert_eq!(
                     json!(graph.node(&"left".into()).expect("left").file_surface),
