@@ -3075,6 +3075,11 @@ impl NativeAgentConnection {
                                     thread.push_loop_guard_notice(notice, cx)
                                 })?;
                             }
+                            ThreadEvent::Plan(plan) => {
+                                acp_thread.update(cx, |thread, cx| {
+                                    thread.upsert_plan_items(plan, None, cx)
+                                })?;
+                            }
                             ThreadEvent::AgentText(text) => {
                                 acp_thread.update(cx, |thread, cx| {
                                     thread.push_assistant_content_block(text.into(), false, cx)
@@ -12757,6 +12762,76 @@ mod internal_tests {
             assert!(!tools.contains_key(TerminalTool::NAME));
         });
         drop(restored_acp_thread);
+    }
+
+    /// The agent's checklist reaches the plan card that external agents' plans
+    /// already use, without a separate mode or canvas.
+    #[gpui::test]
+    async fn test_update_plan_shows_the_checklist_in_build_mode(cx: &mut TestAppContext) {
+        use language_model::{LanguageModelToolUse, LanguageModelToolUseInput};
+
+        let fake = init_test(cx);
+        let (connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let model = fake.model("thread");
+        thread.update(cx, |thread, cx| {
+            thread.set_model(model.clone(), cx);
+            thread.set_session_mode(crate::SessionMode::Build, cx);
+        });
+        thread.read_with(cx, |thread, cx| {
+            let tools = thread.enabled_tools(cx);
+            assert!(tools.contains_key(UpdatePlanTool::NAME));
+        });
+
+        let prompt_task = cx.update(|cx| {
+            connection.send_and_wait_for_completion(
+                acp_thread.clone(),
+                vec!["Add a retry setting".into()],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let request = fake
+            .pending_completions_for(&model)
+            .pop()
+            .expect("the prompt should reach the model");
+        let input = json!({"steps": [
+            {"step": "Read the config loader", "status": "completed"},
+            {"step": "Add the retry setting", "status": "in_progress"},
+            {"step": "Run the tests", "status": "pending"},
+        ]});
+        let tool_use = LanguageModelToolUse {
+            id: "checklist".into(),
+            name: UpdatePlanTool::NAME.into(),
+            raw_input: input.to_string(),
+            input: LanguageModelToolUseInput::Json(input),
+            is_input_complete: true,
+            thought_signature: None,
+        };
+        fake.send_event(
+            &model,
+            &request,
+            LanguageModelCompletionEvent::ToolUse(tool_use),
+        );
+        fake.end_stream(&model, &request);
+        cx.run_until_parked();
+        let request = fake
+            .pending_completions_for(&model)
+            .pop()
+            .expect("the checklist result should reach the model");
+        fake.send_text(&model, &request, "Working on it");
+        fake.end_stream(&model, &request);
+        cx.run_until_parked();
+        prompt_task.await.expect("the turn should complete");
+
+        acp_thread.read_with(cx, |thread, cx| {
+            let plan = thread.plan().expect("the checklist should be visible");
+            assert_eq!(plan.entries.len(), 3);
+            let current = plan.stats().in_progress_entry.expect("a step in progress");
+            assert_eq!(current.content.read(cx).source(), "Add the retry setting");
+            assert_eq!(plan.stats().completed, 1);
+        });
     }
 
     #[gpui::test]

@@ -1702,6 +1702,7 @@ pub enum ThreadEvent {
     ContextCompaction(acp_thread::ContextCompaction),
     ContextCompactionUpdate(acp_thread::ContextCompactionUpdate),
     LoopGuardNotice(acp_thread::LoopGuardNotice),
+    Plan(acp_v2::PlanItems),
     Stop(acp_v2::StopReason),
 }
 
@@ -3810,6 +3811,7 @@ impl Thread {
         self.add_tool(DraftPlanTool::new(cx.weak_entity()));
         self.add_tool(SetStepLocksTool::new(cx.weak_entity()));
         self.add_tool(ExitPlanModeTool::new(cx.weak_entity()));
+        self.add_tool(crate::UpdatePlanTool);
 
         let code_action_store: CodeActionStore = cx.new(|_cx| None);
         self.add_tool(FindReferencesTool::new(self.project.clone()));
@@ -8049,6 +8051,15 @@ impl ToolCallEventStream {
         self.stream
             .sender
             .unbounded_send(Ok(ThreadEvent::SubagentSpawned(id)))
+            .ok();
+    }
+
+    /// Replaces the conversation's checklist with the given id.
+    pub fn update_plan(&self, plan_id: &str, entries: Vec<acp_v2::PlanEntry>) {
+        let plan = acp_v2::PlanItems::new(plan_id, entries);
+        self.stream
+            .sender
+            .unbounded_send(Ok(ThreadEvent::Plan(plan)))
             .ok();
     }
 

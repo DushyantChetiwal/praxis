@@ -1325,6 +1325,8 @@
           "set_step_locks": true,
           // Presenting a plan for approval ends Plan mode.
           "exit_plan_mode": true,
+          // The agent's own checklist for the task it is working on.
+          "update_plan": true,
           "complete_step": true,
           "ask_question": true,
           "apply_code_action": true,

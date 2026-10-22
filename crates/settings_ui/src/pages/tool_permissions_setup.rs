@@ -1575,6 +1575,9 @@ mod tests {
             // Presenting a plan always waits for the user's decision, so it has
             // no settings-driven permission rules.
             "exit_plan_mode",
+            // Only shows the agent's checklist above the message box; it
+            // changes nothing in the project.
+            "update_plan",
         ];
 
         let tool_info_ids: Vec<&str> = TOOLS.iter().map(|t| t.id).collect();

@@ -279,7 +279,12 @@ data class ThreadSummary(
     val terminals: Boolean = false,
     /** Commands that outlived their tool call and are still running. */
     val backgroundCommands: Int = 0,
+    /** The agent's checklist for the task it is working on. */
+    val plan: List<PlanStep> = emptyList(),
 )
+
+/** One checklist step; [status] is `pending`, `in_progress`, `completed` or `cancelled`. */
+data class PlanStep(val step: String, val status: String)
 
 data class TurnError(val kind: String, val message: String, val retryable: Boolean)
 
@@ -531,6 +536,9 @@ private fun parseThreadSummary(o: JSONObject): ThreadSummary = ThreadSummary(
     compact = o.bool("compact"),
     terminals = o.bool("terminals"),
     backgroundCommands = o.int("background_commands") ?: 0,
+    plan = o.arr("plan")?.objects()?.mapNotNull { p ->
+        p.str("step")?.let { step -> PlanStep(step, p.str("status") ?: "pending") }
+    }.orEmpty(),
     questions = parseQuestionHeaders(o.arr("questions")),
     questionCount = o.index("question_count") ?: 0,
     mode = o.obj("mode")?.let { m ->

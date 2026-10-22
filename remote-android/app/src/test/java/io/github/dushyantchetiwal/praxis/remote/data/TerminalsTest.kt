@@ -31,6 +31,29 @@ class TerminalsTest {
     }
 
     @Test
+    fun aThreadSummaryCarriesTheAgentChecklist() {
+        val status = parseStatus(JSONObject("""{"windows":[{"window":1,"projects":[],"thread":{
+            "session_id":"s","queued":0,"pending":[],"plan":[
+            {"step":"Read the loader","status":"completed"},
+            {"step":"Add the setting","status":"in_progress"},
+            {"status":"pending"},
+            {"step":"Run the tests"}]}}]}"""))
+        val plan = status.windows.single().thread!!.plan
+        assertEquals(
+            listOf(
+                PlanStep("Read the loader", "completed"),
+                PlanStep("Add the setting", "in_progress"),
+                PlanStep("Run the tests", "pending"),
+            ),
+            plan,
+        )
+
+        // An older Praxis sends no checklist and the phone shows none.
+        val older = parseStatus(JSONObject("""{"windows":[{"window":1,"projects":[],"thread":{"session_id":"s","queued":0,"pending":[]}}]}"""))
+        assertTrue(older.windows.single().thread!!.plan.isEmpty())
+    }
+
+    @Test
     fun terminalsParseAndSkipEntriesWithoutAnId() {
         val tasks = parseTerminals(JSONObject("""{"terminals":[
             {"id":"a","command":"cargo build","running":true,"in_background":true,"elapsed_ms":61000},

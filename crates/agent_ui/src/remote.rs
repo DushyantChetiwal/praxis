@@ -1014,6 +1014,7 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
             })
         });
     let native_thread = view.as_native_thread(cx);
+    let plan = plan_summary(thread);
     Some(json!({
         "session_id": thread.session_id().0.as_ref(),
         "title": thread.title().map(|title| title.to_string()),
@@ -1038,7 +1039,40 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
         "questions": questions,
         "question_count": question_count,
         "pending": pending_permissions(conversation_view.read(cx), cx),
+        "plan": plan,
     }))
+}
+
+/// A checklist is short by design, so the phone receives it whole with the
+/// summary instead of loading it on demand.
+const MAX_PLAN_STEPS: usize = 50;
+const MAX_PLAN_STEP_BYTES: usize = 300;
+
+/// The checklist the desktop shows above the message box, or none when the
+/// user dismissed it.
+fn plan_summary(thread: &acp_thread::AcpThread) -> Vec<Value> {
+    let Some(plan) = thread.plan() else {
+        return Vec::new();
+    };
+    plan.entries
+        .iter()
+        .take(MAX_PLAN_STEPS)
+        .map(|entry| {
+            json!({
+                "step": truncate(&entry.source.content, MAX_PLAN_STEP_BYTES),
+                "status": plan_status_name(&entry.source.status),
+            })
+        })
+        .collect()
+}
+
+fn plan_status_name(status: &acp::PlanEntryStatus) -> &'static str {
+    match status {
+        acp::PlanEntryStatus::InProgress => "in_progress",
+        acp::PlanEntryStatus::Completed => "completed",
+        acp::PlanEntryStatus::Cancelled => "cancelled",
+        _ => "pending",
+    }
 }
 
 /// Commands are listed for recognition; the full text is in the output.
