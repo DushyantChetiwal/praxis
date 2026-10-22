@@ -124,6 +124,7 @@ data class LoadedDetail(val body: DetailBody, val blocks: List<MdBlock>) {
             is MdBlock.Code -> block.code
             is MdBlock.Item -> block.text
             is MdBlock.Quote -> block.text
+            is MdBlock.Table -> (block.rows + listOf(block.header)).joinToString("") { it.joinToString("") }
             MdBlock.Rule -> ""
         }
         text.length.toLong() * 2 + 96
