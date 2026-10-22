@@ -4312,6 +4312,11 @@ impl SubagentHandle for NativeSubagentHandle {
         self.acp_thread.read(cx).entries().len()
     }
 
+    fn set_file_claim(&self, claim: FileClaim, cx: &mut App) {
+        self.subagent_thread
+            .update(cx, |thread, _| thread.set_file_claim(Some(claim)));
+    }
+
     fn send(&self, message: String, cx: &AsyncApp) -> Task<Result<String>> {
         let thread = self.subagent_thread.clone();
         let acp_thread = self.acp_thread.clone();
@@ -11928,7 +11933,17 @@ mod internal_tests {
             let (connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
             let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
             let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
-            thread.update(cx, |thread, cx| thread.set_model(fake.model("fake"), cx));
+            thread.update(cx, |thread, cx| {
+                thread.set_model(fake.model("fake"), cx);
+                thread.set_session_mode(SessionMode::Build, cx);
+            });
+            thread.read_with(cx, |thread, cx| {
+                let tools = thread.enabled_tools(cx);
+                assert!(tools.contains_key(DraftPlanTool::NAME));
+                assert!(!tools.contains_key(InspectArchitectRunTool::NAME));
+                assert!(!tools.contains_key(ControlArchitectRunTool::NAME));
+            });
+            plan(&thread, cx);
             for mode in [
                 SessionMode::Plan,
                 SessionMode::Architect,
@@ -12756,7 +12771,8 @@ mod internal_tests {
             let tools = thread.enabled_tools(cx);
             assert!(tools.contains_key(ReadFileTool::NAME));
             assert!(tools.contains_key(DraftPlanTool::NAME));
-            assert!(tools.contains_key(SetStepLocksTool::NAME));
+            // Nothing has been drafted, so there is nothing to lock yet.
+            assert!(!tools.contains_key(SetStepLocksTool::NAME));
             assert!(!tools.contains_key(ExitPlanModeTool::NAME));
             assert!(!tools.contains_key(EditFileTool::NAME));
             assert!(!tools.contains_key(TerminalTool::NAME));

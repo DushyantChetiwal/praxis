@@ -752,6 +752,48 @@ mod tests {
         );
     }
 
+    /// Steps running side by side must not both change one file, so the second
+    /// step to reach it is refused before anything is written.
+    #[gpui::test]
+    async fn test_edit_refuses_a_file_another_parallel_step_changed(cx: &mut TestAppContext) {
+        let (edit_tool, _project, _action_log, fs, thread) =
+            setup_test(cx, json!({"file.txt": "hello world"})).await;
+        let claims = crate::FileClaims::default();
+        claims
+            .claim_for("Other step")
+            .claim(path!("/root/file.txt").as_ref())
+            .expect("the other step changes the file first");
+        thread.update(cx, |thread, _| {
+            thread.set_file_claim(Some(claims.claim_for("This step")));
+        });
+        let result = cx
+            .update(|cx| {
+                edit_tool.clone().run(
+                    ToolInput::resolved(EditFileToolInput {
+                        path: "root/file.txt".into(),
+                        edits: vec![Edit {
+                            old_text: "hello".into(),
+                            new_text: "goodbye".into(),
+                        }],
+                    }),
+                    ToolCallEventStream::test().0,
+                    cx,
+                )
+            })
+            .await;
+
+        let EditFileToolOutput::Error { error, .. } = result.unwrap_err() else {
+            panic!("expected error");
+        };
+        assert!(error.contains("\"Other step\""), "{error}");
+        assert_eq!(
+            fs.load(path!("/root/file.txt").as_ref())
+                .await
+                .expect("current file"),
+            "hello world"
+        );
+    }
+
     #[gpui::test]
     async fn test_streaming_edit_rejects_overlapping_matches(cx: &mut TestAppContext) {
         let (edit_tool, _project, _action_log, _fs, _thread) =

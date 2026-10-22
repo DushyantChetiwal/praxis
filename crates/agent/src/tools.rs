@@ -30,6 +30,7 @@ mod pull_request_tool;
 mod read_file_tool;
 mod refine_step_tool;
 mod rename_tool;
+mod run_steps_tool;
 mod set_step_locks_tool;
 mod skill_tool;
 mod spawn_agent_tool;
@@ -111,6 +112,7 @@ pub use pull_request_tool::*;
 pub use read_file_tool::*;
 pub use refine_step_tool::*;
 pub use rename_tool::*;
+pub use run_steps_tool::*;
 pub use set_step_locks_tool::*;
 pub use skill_tool::*;
 pub use spawn_agent_tool::*;
@@ -256,6 +258,7 @@ tools! {
     ReadFileTool,
     RefineStepTool,
     RenameTool,
+    RunStepsTool,
     SetStepLocksTool,
     SkillTool,
     SpawnAgentTool,
@@ -382,6 +385,10 @@ mod tests {
         );
         assert_eq!(
             SpawnAgentTool::capability(),
+            crate::ToolCapability::ArbitraryExecution
+        );
+        assert_eq!(
+            RunStepsTool::capability(),
             crate::ToolCapability::ArbitraryExecution
         );
         assert_eq!(
