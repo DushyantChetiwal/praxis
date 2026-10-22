@@ -904,7 +904,11 @@ mod tests {
                 "{problems:?}"
             );
             thread.read_with(cx, |thread, _| {
-                assert_eq!(thread.session_mode(), mode_before, "drafting keeps the mode");
+                assert_eq!(
+                    thread.session_mode(),
+                    mode_before,
+                    "drafting keeps the mode"
+                );
                 let mut graph = thread.architect_graph().expect("retained draft").clone();
                 assert_eq!(
                     json!(graph.node(&"left".into()).expect("left").file_surface),

@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use super::update_plan_tool::{MAX_STEP_LENGTH, plan_entries};
 use crate::{
     AGENT_PLAN_ID, AgentMessage, AgentMessageContent, AgentTool, PlanStep, PlanStepStatus, Thread,
     ThreadEnvironment, ToolCallEventStream, ToolCapability, ToolInput, UpdatePlanTool,
     UpdatePlanToolInput,
 };
-use super::update_plan_tool::{MAX_STEP_LENGTH, plan_entries};
 
 const MIN_PARALLEL_STEPS: usize = 2;
 const MAX_PARALLEL_STEPS: usize = 6;
@@ -218,7 +218,9 @@ fn validate(steps: &[ParallelStep]) -> Result<(), String> {
             return Err("Every step needs a name and instructions.".into());
         }
         if name.chars().count() > MAX_STEP_LENGTH {
-            return Err(format!("Keep each step name under {MAX_STEP_LENGTH} characters."));
+            return Err(format!(
+                "Keep each step name under {MAX_STEP_LENGTH} characters."
+            ));
         }
         let repeated = steps
             .iter()
