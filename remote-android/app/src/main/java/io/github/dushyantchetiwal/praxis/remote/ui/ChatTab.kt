@@ -89,6 +89,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -117,7 +118,9 @@ import io.github.dushyantchetiwal.praxis.remote.data.ApiException
 import io.github.dushyantchetiwal.praxis.remote.data.DetailRequest
 import io.github.dushyantchetiwal.praxis.remote.data.DetailBody
 import io.github.dushyantchetiwal.praxis.remote.data.ErrorKind
+import androidx.compose.ui.text.TextStyle
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import io.github.dushyantchetiwal.praxis.remote.data.HistoryScrollAnchor
 import io.github.dushyantchetiwal.praxis.remote.data.HistoryScrollGate
@@ -976,7 +979,14 @@ private fun TranscriptEntry(entry: Entry, session: String?, expanded: MutableMap
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (entry.parts.isEmpty()) {
             EntryView(entry, expanded[entryKey] == true, { expanded[entryKey] = expanded[entryKey] != true }) {
-                EntryDetails(entry.text, entry.detailsPending, session?.let { DetailRequest(it, entry.index) }, vm)
+                EntryDetails(
+                    entry.text,
+                    entry.detailsPending,
+                    session?.let { DetailRequest(it, entry.index) },
+                    vm,
+                    if (entry.role == "user" || entry.role == "assistant") MaterialTheme.typography.bodyMedium
+                    else MaterialTheme.typography.bodySmall,
+                )
             }
         } else {
             entry.parts.forEach { part ->
@@ -1060,9 +1070,21 @@ private fun ThinkingRow(expanded: Boolean, onToggle: () -> Unit, details: @Compo
 }
 
 @Composable
-private fun EntryDetails(text: String, pending: Boolean, request: DetailRequest?, vm: MainViewModel) {
+private fun EntryDetails(
+    text: String,
+    pending: Boolean,
+    request: DetailRequest?,
+    vm: MainViewModel,
+    style: TextStyle = MaterialTheme.typography.bodySmall,
+) {
+    val copyText = rememberCopyText()
     if (!pending || request == null) {
-        SelectionContainer { Markdown(text, style = MaterialTheme.typography.bodySmall) }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            SelectionContainer { Markdown(text, style = style) }
+            if (text.isNotBlank()) {
+                TextButton(onClick = { copyText(text) }) { Text(stringResource(R.string.action_copy)) }
+            }
+        }
         return
     }
     val identity = vm.detailIdentity(request)
@@ -1073,6 +1095,32 @@ private fun EntryDetails(text: String, pending: Boolean, request: DetailRequest?
     var attempt by remember(identity) { mutableStateOf(0) }
     var loading by remember(identity) { mutableStateOf(retained == null) }
     val failure = stringResource(R.string.details_failed)
+    val scope = rememberCoroutineScope()
+    // Copying always copies the whole text, so it first loads what is not shown yet.
+    fun copyAll() {
+        scope.launch {
+            loading = true
+            error = null
+            try {
+                var current = body
+                while (!current.complete) {
+                    val chunk = vm.loadDetail(request, current)
+                    current = current.append(chunk) ?: throw ApiException(ErrorKind.State, failure)
+                }
+                if (current !== body) {
+                    val parsed = withContext(Dispatchers.Default) { parseMarkdown(current.chunks.joinToString("") { it.text }) }
+                    vm.rememberDetail(identity, LoadedDetail(current, parsed))
+                    body = current
+                    blocks = parsed
+                }
+                copyText(current.chunks.joinToString("") { it.text })
+            } catch (exception: ApiException) {
+                error = exception.message ?: failure
+            } finally {
+                loading = false
+            }
+        }
+    }
     LaunchedEffect(identity, attempt) {
         if (attempt == 0 && body.version != null) { loading = false; return@LaunchedEffect }
         error = null
@@ -1102,7 +1150,7 @@ private fun EntryDetails(text: String, pending: Boolean, request: DetailRequest?
         if (loading) LoadingRow(stringResource(R.string.details_loading))
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            items(blocks) { block -> SelectionContainer { MarkdownBlock(block, style = MaterialTheme.typography.bodySmall) } }
+            items(blocks) { block -> SelectionContainer { MarkdownBlock(block, style = style) } }
         }
         body.totalBytes?.let {
             Text(stringResource(R.string.details_progress, body.nextOffset, it), style = MaterialTheme.typography.labelSmall)
@@ -1115,6 +1163,9 @@ private fun EntryDetails(text: String, pending: Boolean, request: DetailRequest?
             }
             TextButton(onClick = { vm.invalidateDetail(identity); body = DetailBody(); blocks = emptyList(); loading = true; attempt++ }, enabled = !loading) {
                 Text(stringResource(R.string.details_refresh))
+            }
+            if (!body.complete || blocks.isNotEmpty()) {
+                TextButton(onClick = { copyAll() }, enabled = !loading) { Text(stringResource(R.string.action_copy)) }
             }
         }
     }
