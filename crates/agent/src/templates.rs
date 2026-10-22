@@ -282,6 +282,33 @@ mod tests {
         assert!(rendered.contains("never lock or unlock a step on your own initiative"));
     }
 
+    /// The checklist is something the model reaches for on its own, so the
+    /// prompt says when, but only to a thread that has the tool.
+    #[test]
+    fn test_system_prompt_suggests_a_checklist_only_with_the_tool() {
+        let project = prompt_store::ProjectContext::default();
+        let render = |available_tools: Vec<SharedString>| {
+            SystemPromptTemplate {
+                project: &project,
+                available_tools,
+                model_name: Some("test-model".to_string()),
+                date: "2026-01-01".to_string(),
+                user_agents_md: None,
+                sandboxing: false,
+                is_linux: false,
+                is_windows: false,
+                plan_mode: false,
+                plan: None,
+            }
+            .render(&Templates::new())
+            .unwrap()
+        };
+
+        let with_tool = render(vec!["update_plan".into()]);
+        assert!(with_tool.contains("keep a checklist with `update_plan`"));
+        assert!(!render(Vec::new()).contains("update_plan"));
+    }
+
     #[test]
     fn test_system_prompt_explains_plan_mode_only_in_plan_mode() {
         let project = prompt_store::ProjectContext::default();

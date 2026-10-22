@@ -100,6 +100,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.dushyantchetiwal.praxis.remote.DeviceUi
@@ -129,6 +130,7 @@ import io.github.dushyantchetiwal.praxis.remote.data.transcriptItemKeys
 import kotlinx.coroutines.flow.first
 import io.github.dushyantchetiwal.praxis.remote.data.ModeInfo
 import io.github.dushyantchetiwal.praxis.remote.data.Permission
+import io.github.dushyantchetiwal.praxis.remote.data.PlanStep
 import io.github.dushyantchetiwal.praxis.remote.data.TerminalTask
 import io.github.dushyantchetiwal.praxis.remote.TerminalsState
 import io.github.dushyantchetiwal.praxis.remote.ui.theme.OnlineGreen
@@ -158,6 +160,7 @@ fun ChatTab(ui: DeviceUi, vm: MainViewModel) {
         Box(Modifier.weight(1f)) {
             Transcript(ui, vm)
         }
+        PlanStrip(ui)
         TurnStatus(ui, vm, generating)
         Composer(ui, vm, generating)
     }
@@ -165,6 +168,75 @@ fun ChatTab(ui: DeviceUi, vm: MainViewModel) {
     if (ui.terminals.visible) TerminalsDialog(ui, vm)
     if (ui.confirmingStop) StopChoiceDialog(ui, vm)
     QuestionDialogs(ui, vm)
+}
+
+/** The agent's checklist: one line until tapped, so the transcript keeps its space. */
+@Composable
+private fun PlanStrip(ui: DeviceUi) {
+    val summary = ui.currentWindow()?.thread ?: return
+    val plan = summary.plan
+    if (plan.isEmpty()) return
+    var expanded by remember(summary.sessionId) { mutableStateOf(false) }
+    val done = plan.count { it.status == "completed" }
+    val current = plan.firstOrNull { it.status == "in_progress" }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+    ) {
+        Column {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    stringResource(R.string.plan_progress, done, plan.size) + (current?.let { " · ${it.step}" } ?: ""),
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Icon(
+                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = stringResource(if (expanded) R.string.action_collapse else R.string.action_expand),
+                )
+            }
+            if (expanded) {
+                Column(
+                    Modifier
+                        .heightIn(max = 240.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    plan.forEach { step -> PlanStepRow(step) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlanStepRow(step: PlanStep) {
+    val scheme = MaterialTheme.colorScheme
+    val (icon, tint, label) = when (step.status) {
+        "completed" -> Triple(Icons.Filled.CheckCircle, OnlineGreen, R.string.plan_status_completed)
+        "in_progress" -> Triple(Icons.Filled.HourglassTop, scheme.primary, R.string.plan_status_in_progress)
+        "cancelled" -> Triple(Icons.Filled.RemoveCircleOutline, scheme.outline, R.string.plan_status_cancelled)
+        else -> Triple(Icons.Filled.Schedule, scheme.outline, R.string.plan_status_pending)
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, contentDescription = stringResource(label), tint = tint, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(
+            step.step,
+            style = MaterialTheme.typography.bodySmall,
+            textDecoration = if (step.status == "cancelled") TextDecoration.LineThrough else null,
+        )
+    }
 }
 
 /** Why the last turn ended, or that a failed request is about to be retried. */

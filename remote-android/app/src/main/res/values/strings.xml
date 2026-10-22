@@ -203,6 +203,11 @@
     <string name="chat_active_step">Active step · %1$s</string>
     <string name="chat_step_history">Step history · %1$s</string>
     <string name="chat_truncated">Message shortened to fit the remote view.</string>
+    <string name="plan_progress">Checklist · %1$d of %2$d done</string>
+    <string name="plan_status_pending">Not started</string>
+    <string name="plan_status_in_progress">In progress</string>
+    <string name="plan_status_completed">Done</string>
+    <string name="plan_status_cancelled">Cancelled</string>
     <string name="architect_title">Architect plan</string>
     <plurals name="architect_step">
         <item quantity="one">Visit %1$s · %2$d step in plan</item>
