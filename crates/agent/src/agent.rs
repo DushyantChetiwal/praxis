@@ -12787,7 +12787,7 @@ mod internal_tests {
         use language_model::{LanguageModelToolUse, LanguageModelToolUseInput};
 
         let fake = init_test(cx);
-        let (connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let (connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
         let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
         let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
         let model = fake.model("thread");
@@ -12847,6 +12847,36 @@ mod internal_tests {
             let current = plan.stats().in_progress_entry.expect("a step in progress");
             assert_eq!(current.content.read(cx).source(), "Add the retry setting");
             assert_eq!(plan.stats().completed, 1);
+        });
+
+        // The checklist is saved with the conversation, not only replayed.
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.agent_checklist().len(), 3)
+        });
+        agent.update(cx, |agent, cx| agent.save_thread(thread.clone(), cx));
+        cx.run_until_parked();
+        drop(thread);
+        drop(acp_thread);
+        release_dropped_entities(cx);
+        let _restored_acp_thread = cx
+            .update(|cx| {
+                connection.clone().load_session(
+                    session_id.clone(),
+                    project,
+                    PathList::new(&[Path::new("/a")]),
+                    None,
+                    cx,
+                )
+            })
+            .await
+            .expect("the conversation should reload");
+        cx.run_until_parked();
+        let restored = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        restored.read_with(cx, |thread, _| {
+            let checklist = thread.agent_checklist();
+            assert_eq!(checklist.len(), 3);
+            assert_eq!(checklist[1].step, "Add the retry setting");
+            assert_eq!(checklist[1].status, crate::PlanStepStatus::InProgress);
         });
     }
 

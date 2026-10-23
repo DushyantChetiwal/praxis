@@ -97,6 +97,10 @@ pub struct DbThread {
     /// [`crate::sandboxing::ThreadSandboxGrants`].
     #[serde(default)]
     pub sandbox_grants: DbSandboxGrants,
+    /// The agent's checklist. Older saved threads have none and rebuild it
+    /// from their history.
+    #[serde(default)]
+    pub checklist: Option<Vec<crate::PlanStep>>,
 }
 
 /// Serialized form of the sandbox permissions the user granted "for the rest of
@@ -183,6 +187,7 @@ impl SharedThread {
             session_mode: crate::SessionMode::default(),
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
+            checklist: None,
         }
     }
 
@@ -378,6 +383,7 @@ impl DbThread {
             session_mode: crate::SessionMode::default(),
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
+            checklist: None,
         })
     }
 }
@@ -1066,6 +1072,7 @@ mod tests {
             session_mode: crate::SessionMode::default(),
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
+            checklist: None,
         }
     }
 
@@ -1269,6 +1276,17 @@ mod tests {
             db_thread.draft_prompt.is_none(),
             "Legacy threads without draft_prompt field should default to None"
         );
+    }
+
+    #[test]
+    fn test_checklist_defaults_to_none_for_legacy_threads() {
+        let json = r#"{
+            "title": "Old Thread",
+            "messages": [],
+            "updated_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let db_thread: DbThread = serde_json::from_str(json).expect("Failed to deserialize");
+        assert!(db_thread.checklist.is_none());
     }
 
     #[gpui::test]

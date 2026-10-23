@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use util::ResultExt as _;
 
 use super::update_plan_tool::{MAX_STEP_LENGTH, plan_entries};
 use crate::{
@@ -291,6 +292,14 @@ impl RunStepsTool {
             environment,
         }
     }
+
+    fn store_checklist(&self, checklist: &[PlanStep], cx: &mut gpui::AsyncApp) {
+        self.thread
+            .update(cx, |thread, _| {
+                thread.set_agent_checklist(checklist.to_vec())
+            })
+            .log_err();
+    }
 }
 
 impl AgentTool for RunStepsTool {
@@ -334,7 +343,7 @@ impl AgentTool for RunStepsTool {
             validate(&input.steps).map_err(|error| RunStepsToolOutput::Error { error })?;
             let mut checklist = self
                 .thread
-                .read_with(cx, |thread, _| thread.agent_checklist())
+                .read_with(cx, |thread, _| thread.agent_checklist().to_vec())
                 .map_err(|error| RunStepsToolOutput::Error {
                     error: format!("The conversation these steps belong to is gone: {error}"),
                 })?;
@@ -346,6 +355,7 @@ impl AgentTool for RunStepsTool {
             for name in &names {
                 set_status(&mut checklist, name, PlanStepStatus::InProgress);
             }
+            self.store_checklist(&checklist, cx);
             event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&checklist));
 
             let claims = FileClaims::default();
@@ -392,6 +402,7 @@ impl AgentTool for RunStepsTool {
                     output,
                 });
             }
+            self.store_checklist(&checklist, cx);
             event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&checklist));
             let text = outcome_text(&outcomes);
             event_stream.update_fields(|update| update.content(vec![text.into()]));
@@ -653,5 +664,8 @@ mod tests {
             steps[2].session_id,
             Some(acp_v2::SessionId::new("session-Gamma"))
         );
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.agent_checklist(), checklist.as_slice());
+        });
     }
 }

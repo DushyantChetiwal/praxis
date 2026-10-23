@@ -2097,6 +2097,7 @@ pub(crate) struct StreamingSaveKey {
     thinking_effort: Option<String>,
     sandboxed_terminal_temp_dir: Option<PathBuf>,
     sandbox_grants: crate::db::DbSandboxGrants,
+    checklist: Vec<crate::PlanStep>,
 }
 
 pub struct Thread {
@@ -2161,6 +2162,9 @@ pub struct Thread {
     /// Set while this thread carries out one of several steps running side by
     /// side, so it cannot change a file another step has already changed.
     file_claim: Option<crate::FileClaim>,
+    /// The agent's checklist, kept here rather than read back from the
+    /// history so that compaction cannot lose it.
+    checklist: Vec<crate::PlanStep>,
     inherits_parent_model_settings: bool,
     /// The Architect plan drafted in this thread. The conversation governs the
     /// plan, so the two live and die together.
@@ -2398,6 +2402,7 @@ impl Thread {
             ui_scroll_position: None,
             running_subagents: Vec::new(),
             file_claim: None,
+            checklist: Vec::new(),
             inherits_parent_model_settings: true,
             architect_graph: None,
             architect_revision_baseline: None,
@@ -2714,6 +2719,14 @@ impl Thread {
             .profile
             .unwrap_or_else(|| settings.default_profile.clone());
         let mut subagent_context = db_thread.subagent_context;
+        let checklist = db_thread.checklist.unwrap_or_else(|| {
+            let agent_messages = db_thread
+                .messages
+                .iter()
+                .rev()
+                .filter_map(|message| message.as_agent_message());
+            crate::latest_checklist(agent_messages)
+        });
         if let Some(context) = &mut subagent_context {
             context.restore_kind(&profile_id);
         }
@@ -2846,6 +2859,7 @@ impl Thread {
             }),
             running_subagents: Vec::new(),
             file_claim: None,
+            checklist,
             inherits_parent_model_settings: true,
             architect_revision_baseline: architect_graph.clone(),
             architect_graph,
@@ -2962,6 +2976,7 @@ impl Thread {
             session_mode: self.session_mode(),
             sandboxed_terminal_temp_dir: self.sandboxed_terminal_temp_dir.clone(),
             sandbox_grants: self.sandbox_grants.borrow().to_db(),
+            checklist: Some(self.checklist.clone()),
         };
 
         cx.background_spawn(async move {
@@ -2988,6 +3003,7 @@ impl Thread {
             thinking_effort: self.thinking_effort.clone(),
             sandboxed_terminal_temp_dir: self.sandboxed_terminal_temp_dir.clone(),
             sandbox_grants: self.sandbox_grants.borrow().to_db(),
+            checklist: self.checklist.clone(),
         }
     }
 
@@ -3043,13 +3059,12 @@ impl Thread {
     }
 
     /// The checklist as the agent last left it.
-    pub(crate) fn agent_checklist(&self) -> Vec<crate::PlanStep> {
-        let saved = self
-            .messages
-            .iter()
-            .rev()
-            .filter_map(|message| message.as_agent_message());
-        crate::latest_checklist(self.pending_message.iter().chain(saved))
+    pub fn agent_checklist(&self) -> &[crate::PlanStep] {
+        &self.checklist
+    }
+
+    pub(crate) fn set_agent_checklist(&mut self, checklist: Vec<crate::PlanStep>) {
+        self.checklist = checklist;
     }
 
     pub fn architect_graph(&self) -> Option<&architect::ArchitectGraph> {
@@ -3848,7 +3863,7 @@ impl Thread {
         self.add_tool(DraftPlanTool::new(cx.weak_entity()));
         self.add_tool(SetStepLocksTool::new(cx.weak_entity()));
         self.add_tool(ExitPlanModeTool::new(cx.weak_entity()));
-        self.add_tool(crate::UpdatePlanTool);
+        self.add_tool(crate::UpdatePlanTool::new(cx.weak_entity()));
 
         let code_action_store: CodeActionStore = cx.new(|_cx| None);
         self.add_tool(FindReferencesTool::new(self.project.clone()));
@@ -5226,6 +5241,13 @@ impl Thread {
             );
 
             this.update(cx, |this, cx| {
+                // The summary is all the model keeps of the history, so the
+                // checklist travels with it rather than depending on whether
+                // the summary happened to mention it.
+                let summary = match crate::checklist_for_summary(&this.checklist) {
+                    Some(checklist) => format!("{summary}\n\n{checklist}"),
+                    None => summary,
+                };
                 let compaction =
                     Arc::new(Message::Compaction(CompactionInfo::Summary(summary.into())));
                 match insertion {
@@ -10475,6 +10497,67 @@ mod tests {
                 assert_eq!(thread.messages.len(), 2);
                 assert!(matches!(&*thread.messages[0], Message::User(_)));
                 assert!(matches!(&*thread.messages[1], Message::Agent(_)));
+            });
+        });
+    }
+
+    /// The agent's checklist survives compaction: the summary carries it, so
+    /// the model still sees it after the history that built it is dropped.
+    #[gpui::test]
+    async fn test_compaction_summary_carries_the_checklist(cx: &mut TestAppContext) {
+        let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
+        let model = fake.update_model("fake", |model| {
+            model.max_token_count = MIN_COMPACTION_CONTEXT_WINDOW - 1;
+            model.max_input_tokens = MIN_COMPACTION_CONTEXT_WINDOW - 1;
+        });
+        let checklist = vec![
+            crate::PlanStep {
+                step: "Read the loader".into(),
+                status: crate::PlanStepStatus::Completed,
+            },
+            crate::PlanStep {
+                step: "Add the setting".into(),
+                status: crate::PlanStepStatus::InProgress,
+            },
+        ];
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.set_model(model.clone(), cx);
+                thread
+                    .messages
+                    .push(user_text_message(ClientUserMessageId::new(), "old user"));
+                thread.messages.push(agent_text_message("old assistant"));
+                thread.set_agent_checklist(checklist.clone());
+            });
+        });
+
+        let _events = cx
+            .update(|cx| {
+                thread.update(cx, |thread, cx| {
+                    thread.compact(ClientUserMessageId::new(), cx)
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let compaction_request = fake.pending_completions().pop().unwrap();
+        fake.send_text(&model, &compaction_request, "summary of old context");
+        fake.end_stream(&model, &compaction_request);
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            thread.read_with(cx, |thread, _cx| {
+                let Some(Message::Compaction(CompactionInfo::Summary(summary))) =
+                    thread.messages.last().map(|message| &**message)
+                else {
+                    panic!("expected a compaction summary");
+                };
+                let expected = format!(
+                    "summary of old context\n\n{}",
+                    crate::checklist_for_summary(&checklist).expect("a checklist")
+                );
+                assert_eq!(summary.as_ref(), expected);
+                assert!(summary.contains("- [in_progress] Add the setting"));
+                assert_eq!(thread.agent_checklist(), checklist.as_slice());
             });
         });
     }
