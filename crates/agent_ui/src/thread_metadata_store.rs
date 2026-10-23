@@ -1856,6 +1856,7 @@ mod tests {
             session_mode: agent::SessionMode::default(),
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Default::default(),
+            checklist: None,
         }
     }
 

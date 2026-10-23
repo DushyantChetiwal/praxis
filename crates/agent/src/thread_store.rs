@@ -174,6 +174,7 @@ mod tests {
             session_mode: crate::SessionMode::default(),
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Default::default(),
+            checklist: None,
         }
     }
 

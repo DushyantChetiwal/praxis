@@ -1,12 +1,13 @@
 use agent_client_protocol::schema::v2 as acp;
 use anyhow::Result;
-use gpui::{App, SharedString, Task};
+use gpui::{App, SharedString, Task, WeakEntity};
 use language_model::LanguageModelToolResultContent;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use util::ResultExt as _;
 
-use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
+use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 
 /// The id of the checklist this tool keeps. One per conversation: each update
 /// replaces it, so the card above the message box always shows the latest.
@@ -96,7 +97,15 @@ impl From<UpdatePlanToolOutput> for LanguageModelToolResultContent {
 ///
 /// The checklist lives in the conversation, not the project, and is rendered
 /// by the plan card that external agents' plans already use.
-pub struct UpdatePlanTool;
+pub struct UpdatePlanTool {
+    thread: WeakEntity<Thread>,
+}
+
+impl UpdatePlanTool {
+    pub fn new(thread: WeakEntity<Thread>) -> Self {
+        Self { thread }
+    }
+}
 
 fn validate(steps: &[PlanStep]) -> Result<(), String> {
     if steps.len() > MAX_PLAN_STEPS {
@@ -139,6 +148,32 @@ pub(super) fn plan_entries(steps: &[PlanStep]) -> Vec<acp::PlanEntry> {
             )
         })
         .collect()
+}
+
+fn status_name(status: PlanStepStatus) -> &'static str {
+    match status {
+        PlanStepStatus::Pending => "pending",
+        PlanStepStatus::InProgress => "in_progress",
+        PlanStepStatus::Completed => "completed",
+        PlanStepStatus::Cancelled => "cancelled",
+    }
+}
+
+/// The checklist as a compaction summary carries it, so the agent still has
+/// it after the history that built it is gone.
+pub(crate) fn checklist_for_summary(steps: &[PlanStep]) -> Option<String> {
+    if steps.is_empty() {
+        return None;
+    }
+    let lines = steps
+        .iter()
+        .map(|step| format!("- [{}] {}", status_name(step.status), step.step.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "## Checklist\n\nThe checklist you keep with `update_plan`, as it stood when the \
+         conversation was compacted. The user still sees it, so keep updating it:\n\n{lines}"
+    ))
 }
 
 fn summarize(steps: &[PlanStep]) -> UpdatePlanToolOutput {
@@ -191,7 +226,7 @@ impl AgentTool for UpdatePlanTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output, Self::Output>> {
-        cx.spawn(async move |_cx| {
+        cx.spawn(async move |cx| {
             let input = input
                 .recv()
                 .await
@@ -199,6 +234,9 @@ impl AgentTool for UpdatePlanTool {
                     error: format!("Failed to receive tool input: {error}"),
                 })?;
             validate(&input.steps).map_err(|error| UpdatePlanToolOutput::Error { error })?;
+            self.thread
+                .update(cx, |thread, _| thread.set_agent_checklist(input.steps.clone()))
+                .log_err();
             event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&input.steps));
             Ok(summarize(&input.steps))
         })
@@ -304,9 +342,10 @@ mod tests {
     #[gpui::test]
     async fn running_shows_the_checklist(cx: &mut gpui::TestAppContext) {
         let (stream, mut events) = ToolCallEventStream::test();
-        let task = cx.update(|cx| {
-            Arc::new(UpdatePlanTool).run(ToolInput::resolved(checklist()), stream, cx)
-        });
+        let (_connection, _agent, thread, _session) =
+            super::super::architect_run_tool::architect_tool_test_session(cx).await;
+        let tool = Arc::new(UpdatePlanTool::new(thread.downgrade()));
+        let task = cx.update(|cx| tool.run(ToolInput::resolved(checklist()), stream, cx));
         let output = task.await.expect("a valid checklist");
         assert!(matches!(
             output,
@@ -321,6 +360,19 @@ mod tests {
         assert_eq!(plan.entries.len(), 2);
         assert_eq!(plan.entries[1].content, "Add the setting");
         assert_eq!(plan.entries[1].status, acp::PlanEntryStatus::InProgress);
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.agent_checklist(), checklist().steps.as_slice());
+        });
+    }
+
+    #[test]
+    fn the_checklist_reads_well_in_a_compaction_summary() {
+        assert_eq!(checklist_for_summary(&[]), None);
+        let summary = checklist_for_summary(&checklist().steps).expect("a checklist");
+        assert!(summary.starts_with("## Checklist"), "{summary}");
+        assert!(summary.ends_with(
+            "- [completed] Read the loader\n- [in_progress] Add the setting"
+        ));
     }
 
     /// Reopening a conversation replays its tool calls, which has to bring the
@@ -332,7 +384,8 @@ mod tests {
             completed: 1,
             total: 2,
         };
-        cx.update(|cx| UpdatePlanTool.replay(checklist(), accepted, stream, cx))
+        let tool = UpdatePlanTool::new(WeakEntity::new_invalid());
+        cx.update(|cx| tool.replay(checklist(), accepted, stream, cx))
             .expect("replay");
         assert_eq!(next_plan(&mut events).await.entries.len(), 2);
 
@@ -340,7 +393,7 @@ mod tests {
         let refused = UpdatePlanToolOutput::Error {
             error: "refused".into(),
         };
-        cx.update(|cx| UpdatePlanTool.replay(checklist(), refused, stream, cx))
+        cx.update(|cx| tool.replay(checklist(), refused, stream, cx))
             .expect("replay");
         assert!(
             !matches!(events.try_recv(), Ok(Ok(ThreadEvent::Plan(_)))),
