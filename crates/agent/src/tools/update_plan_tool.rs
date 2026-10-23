@@ -235,7 +235,9 @@ impl AgentTool for UpdatePlanTool {
                 })?;
             validate(&input.steps).map_err(|error| UpdatePlanToolOutput::Error { error })?;
             self.thread
-                .update(cx, |thread, _| thread.set_agent_checklist(input.steps.clone()))
+                .update(cx, |thread, _| {
+                    thread.set_agent_checklist(input.steps.clone())
+                })
                 .log_err();
             event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&input.steps));
             Ok(summarize(&input.steps))
@@ -370,9 +372,9 @@ mod tests {
         assert_eq!(checklist_for_summary(&[]), None);
         let summary = checklist_for_summary(&checklist().steps).expect("a checklist");
         assert!(summary.starts_with("## Checklist"), "{summary}");
-        assert!(summary.ends_with(
-            "- [completed] Read the loader\n- [in_progress] Add the setting"
-        ));
+        assert!(
+            summary.ends_with("- [completed] Read the loader\n- [in_progress] Add the setting")
+        );
     }
 
     /// Reopening a conversation replays its tool calls, which has to bring the

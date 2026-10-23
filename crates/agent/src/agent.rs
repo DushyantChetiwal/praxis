@@ -12850,7 +12850,9 @@ mod internal_tests {
         });
 
         // The checklist is saved with the conversation, not only replayed.
-        thread.read_with(cx, |thread, _| assert_eq!(thread.agent_checklist().len(), 3));
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.agent_checklist().len(), 3)
+        });
         agent.update(cx, |agent, cx| agent.save_thread(thread.clone(), cx));
         cx.run_until_parked();
         drop(thread);

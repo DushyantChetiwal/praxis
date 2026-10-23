@@ -295,7 +295,9 @@ impl RunStepsTool {
 
     fn store_checklist(&self, checklist: &[PlanStep], cx: &mut gpui::AsyncApp) {
         self.thread
-            .update(cx, |thread, _| thread.set_agent_checklist(checklist.to_vec()))
+            .update(cx, |thread, _| {
+                thread.set_agent_checklist(checklist.to_vec())
+            })
             .log_err();
     }
 }
