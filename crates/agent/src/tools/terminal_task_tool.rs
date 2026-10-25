@@ -5,7 +5,7 @@ use crate::{AgentTool, TerminalHandle, ToolCallEventStream, ToolCapability, Tool
 use acp_thread::ProcessOutput;
 use agent_client_protocol::schema::v2 as acp;
 use anyhow::{Result, anyhow};
-use futures::{FutureExt as _, future::Shared};
+use futures::{FutureExt as _, channel::mpsc, future::Shared};
 use gpui::{App, AsyncApp, SharedString, Task};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,7 @@ const TRUNCATION_NOTE: &str = "Output was truncated. Head/tail selections apply 
 /// Status checks that see the same output this far apart flag the command as
 /// possibly waiting for input or hung.
 const STALLED_OUTPUT_NOTE_AFTER: Duration = Duration::from_secs(10 * 60);
+const NOTICE_COMMAND_CHARS: usize = 120;
 
 /// A terminal command an agent thread started, as listed for people rather
 /// than for the model.
@@ -56,6 +57,8 @@ pub(crate) struct TerminalTaskRegistry {
     tasks: RefCell<VecDeque<TerminalTask>>,
     reservations: RefCell<Vec<Weak<TerminalLaunchCancellation>>>,
     children: RefCell<Vec<Weak<TerminalTaskRegistry>>>,
+    /// Told whenever a task exits, so the thread can report or wake on it.
+    completion_signal: RefCell<Option<mpsc::UnboundedSender<()>>>,
 }
 
 struct TerminalLaunchCancellation {
@@ -118,6 +121,59 @@ impl TerminalTaskRegistry {
             registry: Rc::downgrade(self),
             cancellation,
         })
+    }
+
+    /// A stream that receives an item whenever one of this thread's tasks
+    /// exits. A later call replaces the earlier stream.
+    pub(crate) fn completion_signals(&self) -> mpsc::UnboundedReceiver<()> {
+        let (sender, receiver) = mpsc::unbounded();
+        self.completion_signal.replace(Some(sender));
+        receiver
+    }
+
+    /// Whether a command that kept running on its own has exited without the
+    /// model having seen its result.
+    pub(crate) fn has_unreported_completions(&self) -> bool {
+        self.tasks.borrow().iter().any(TerminalTask::is_unreported)
+    }
+
+    /// One line for each background command that exited since the model last
+    /// heard about it, marking each as reported.
+    pub(crate) fn take_finished_notices(&self) -> Vec<String> {
+        self.tasks
+            .borrow()
+            .iter()
+            .filter(|task| task.is_unreported())
+            .map(|task| {
+                task.state.reported.set(true);
+                task.finished_notice()
+            })
+            .collect()
+    }
+
+    /// Starts a command that has already outlived its tool call.
+    #[cfg(test)]
+    pub(crate) fn start_in_background_for_test(
+        self: &Rc<Self>,
+        terminal: Rc<dyn TerminalHandle>,
+        cx: &mut AsyncApp,
+    ) -> String {
+        let (stream, _events) = ToolCallEventStream::test();
+        let reservation = self.reserve().expect("a free task slot");
+        let task = self
+            .start(
+                reservation,
+                terminal,
+                "cargo test".into(),
+                TerminalOutputSelection::default(),
+                None,
+                None,
+                &stream,
+                cx,
+            )
+            .expect("the task starts");
+        task.background(cx);
+        task.id.clone()
     }
 
     pub(crate) fn register_child(&self, child: &Rc<Self>) {
@@ -247,7 +303,9 @@ impl TerminalTaskRegistry {
             note,
             stop_tx: RefCell::new(stop_tx),
             backgrounded: Cell::new(false),
+            reported: Cell::new(false),
         });
+        let completion_signal = self.completion_signal.borrow().clone();
         // Construct the timer before spawning: yielding never resets the hard deadline.
         let deadline =
             timeout_ms.map(|ms| cx.background_executor().timer(Duration::from_millis(ms)));
@@ -330,6 +388,10 @@ impl TerminalTaskRegistry {
                     .map_err(|error| error.to_string());
                     *state.result.borrow_mut() = Some(result);
                     state.terminal.borrow_mut().take();
+                    if let Some(signal) = completion_signal {
+                        // The receiver is gone only when its thread is.
+                        signal.unbounded_send(()).ok();
+                    }
                     // Dropping the native handle releases its PTY, even while the bounded
                     // completed result is retained in the registry.
                 }
@@ -467,6 +529,8 @@ struct TerminalTaskState {
     note: Option<String>,
     stop_tx: RefCell<watch::Sender<Option<StopReason>>>,
     backgrounded: Cell<bool>,
+    /// Whether the model has seen the final result.
+    reported: Cell<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -530,6 +594,34 @@ impl TerminalTask {
         self.state.result.borrow().is_some()
     }
 
+    fn is_unreported(&self) -> bool {
+        self.state.backgrounded.get() && self.is_complete() && !self.state.reported.get()
+    }
+
+    fn finished_notice(&self) -> String {
+        let mut command: String = self
+            .state
+            .command
+            .chars()
+            .take(NOTICE_COMMAND_CHARS)
+            .collect();
+        if command.len() < self.state.command.len() {
+            command.push('…');
+        }
+        let outcome = match self.state.result.borrow().as_ref() {
+            Some(Ok(result)) => match result.status.exit_code {
+                Some(code) => format!("exited with code {code}"),
+                None => "exited without an exit code".to_string(),
+            },
+            Some(Err(_)) => "ended, but its exit could not be confirmed".to_string(),
+            None => "is still running".to_string(),
+        };
+        format!(
+            "Background task {} `{command}` {outcome}. Read its output with terminal_status.",
+            self.id
+        )
+    }
+
     fn request_stop(&self, reason: StopReason) {
         if self.state.result.borrow().is_none() {
             self.state.stop_tx.borrow_mut().send(Some(reason)).log_err();
@@ -545,6 +637,7 @@ impl TerminalTask {
 
     pub(super) fn response(&self, foreground: bool, cx: &AsyncApp) -> Result<String, String> {
         if let Some(result) = self.state.result.borrow().as_ref() {
+            self.state.reported.set(true);
             let result = result.as_ref().map_err(|error| format!("task_id: {}\nstill_running: unknown\nExit could not be confirmed; cleanup requested.\nmonitor_error: {error}", self.id))?;
             if foreground {
                 return Ok(result.content.clone());
@@ -578,7 +671,7 @@ impl TerminalTask {
         } else {
             ""
         };
-        Ok(self.state.with_note(format!("task_id: {}\nstill_running: true\nCommand is still running; no final exit status yet.\n{stalled}{truncated}\n\n```\n{}\n```\nContinue useful independent work. When nothing useful remains, use terminal_wait; do not shell sleep or busy-poll terminal_status.", self.id, output.output)))
+        Ok(self.state.with_note(format!("task_id: {}\nstill_running: true\nCommand is still running; no final exit status yet.\n{stalled}{truncated}\n\n```\n{}\n```\nContinue with work that does not depend on this task. If nothing remains, end your turn instead of waiting: Praxis resumes this conversation when the task finishes. Do not shell sleep or busy-poll terminal_status.", self.id, output.output)))
     }
 }
 
@@ -597,19 +690,21 @@ fn bounded_output(mut output: ProcessOutput, selection: TerminalOutputSelection)
 }
 
 /// Read the current bounded output and exit status of a terminal task in this thread.
-/// This does not wait. Continue independent work while it runs; use terminal_wait
-/// when there is no useful work, rather than busy-polling or running shell sleep.
+/// This does not wait. Continue independent work while it runs, rather than
+/// busy-polling or running shell sleep.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct TerminalStatusToolInput {
     /// Task id returned by terminal in this thread (not a shell command or PID).
     pub task_id: String,
 }
 
-/// Wait efficiently for a terminal task in this thread, waking immediately on exit.
-/// Only wait when no useful independent work remains. Never use shell sleep or
-/// busy-poll status. Wait expiry returns still_running without killing the command;
-/// the launch command's hard timeout_ms continues to apply. Completion does not
-/// automatically start a new agent turn.
+/// Wait for a terminal task in this thread, waking immediately on exit.
+/// Prefer other work first: tool results tell you when background tasks finish.
+/// For a long task with nothing else to do, end your turn instead; Praxis resumes
+/// the conversation when a background task finishes. Use this tool for short
+/// waits whose result you need right away. Never use shell sleep or busy-poll
+/// status. Wait expiry returns still_running without killing the command; the
+/// launch command's hard timeout_ms continues to apply.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct TerminalWaitToolInput {
     /// Task id returned by terminal in this thread.
@@ -815,6 +910,44 @@ mod tests {
         assert_eq!(terminal.panel_exposures(), 1);
     }
 
+    #[gpui::test]
+    async fn terminal_tasks_report_background_completions_once(cx: &mut TestAppContext) {
+        use futures::StreamExt as _;
+
+        let registry = Rc::new(TerminalTaskRegistry::default());
+        let mut signals = registry.completion_signals();
+        let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
+        let task = start(&registry, terminal.clone(), None, cx);
+        task.background(&cx.to_async());
+        assert!(!registry.has_unreported_completions());
+        terminal.signal_exit();
+        task.completion.clone().await;
+        assert!(signals.next().await.is_some());
+        assert!(registry.has_unreported_completions());
+        let notices = registry.take_finished_notices();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains(&task.id), "{notices:?}");
+        assert!(notices[0].contains("`test command`"), "{notices:?}");
+        assert!(registry.take_finished_notices().is_empty());
+
+        // Reading the result directly also counts as reporting it.
+        let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
+        let task = start(&registry, terminal.clone(), None, cx);
+        task.background(&cx.to_async());
+        terminal.signal_exit();
+        task.completion.clone().await;
+        assert!(registry.has_unreported_completions());
+        assert!(task.response(false, &cx.to_async()).is_ok());
+        assert!(!registry.has_unreported_completions());
+
+        // A command that finished inside its own tool call was never backgrounded.
+        let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
+        let task = start(&registry, terminal.clone(), None, cx);
+        terminal.signal_exit();
+        task.completion.clone().await;
+        assert!(!registry.has_unreported_completions());
+    }
+
     fn advance(cx: &mut TestAppContext, milliseconds: u64) {
         // advance_clock polls while advancing, which can start a timer at the
         // wrong test instant. Advance the raw clock only after parking tasks.
@@ -836,7 +969,7 @@ mod tests {
             let input: crate::SandboxedTerminalToolInput = serde_json::from_value(value).unwrap();
             assert!(input.yield_ms.is_none());
         }
-        for mode in [crate::SessionMode::Plan, crate::SessionMode::Architect] {
+        for mode in [crate::SessionMode::Plan] {
             assert!(TerminalStatusTool::capability().is_allowed_in(mode));
             assert!(TerminalWaitTool::capability().is_allowed_in(mode));
             assert!(!TerminalStopTool::capability().is_allowed_in(mode));

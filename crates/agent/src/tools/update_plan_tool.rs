@@ -176,6 +176,51 @@ pub(crate) fn checklist_for_summary(steps: &[PlanStep]) -> Option<String> {
     ))
 }
 
+fn is_open(step: &PlanStep) -> bool {
+    matches!(
+        step.status,
+        PlanStepStatus::Pending | PlanStepStatus::InProgress
+    )
+}
+
+/// Asks for the checklist to be brought up to date at the start of a turn,
+/// when it still has steps to do.
+pub(crate) fn checklist_review_note(steps: &[PlanStep]) -> Option<String> {
+    if !steps.iter().any(is_open) {
+        return None;
+    }
+    let lines = steps
+        .iter()
+        .map(|step| format!("- [{}] {}", status_name(step.status), step.step.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "Checklist review: your checklist currently reads as below. If it no longer \
+         matches your progress, update it with `update_plan` now, and keep it current \
+         until this turn ends.\n{lines}"
+    ))
+}
+
+/// Points an agent that keeps waiting at work it could do instead.
+pub(crate) fn repeated_wait_note(waits: u32, steps: &[PlanStep]) -> String {
+    let open = steps
+        .iter()
+        .filter(|step| is_open(step))
+        .map(|step| format!("- {}", step.step.trim()))
+        .collect::<Vec<_>>();
+    let resume = "If nothing else can be done, end your turn instead of waiting again: \
+                  Praxis resumes this conversation when a background task finishes.";
+    if open.is_empty() {
+        return format!("You have waited {waits} times in a row. {resume}");
+    }
+    format!(
+        "You have waited {waits} times in a row. Work on a checklist step that does \
+         not depend on what you are waiting for, or run independent steps side by side \
+         with `run_steps` if it is available:\n{}\n{resume}",
+        open.join("\n")
+    )
+}
+
 fn summarize(steps: &[PlanStep]) -> UpdatePlanToolOutput {
     UpdatePlanToolOutput::Updated {
         completed: steps
@@ -365,6 +410,24 @@ mod tests {
         thread.read_with(cx, |thread, _| {
             assert_eq!(thread.agent_checklist(), checklist().steps.as_slice());
         });
+    }
+
+    #[test]
+    fn notes_point_at_the_steps_still_to_do() {
+        let mut steps = checklist().steps;
+        steps.push(step("Write the docs", PlanStepStatus::Pending));
+        let review = checklist_review_note(&steps).expect("open steps");
+        assert!(review.contains("- [in_progress] Add the setting"), "{review}");
+        let done = [step("Read the loader", PlanStepStatus::Completed)];
+        assert_eq!(checklist_review_note(&done), None);
+        assert_eq!(checklist_review_note(&[]), None);
+
+        let nudge = repeated_wait_note(2, &steps);
+        assert!(nudge.contains("waited 2 times"), "{nudge}");
+        assert!(nudge.contains("- Write the docs"), "{nudge}");
+        assert!(!nudge.contains("Read the loader"), "{nudge}");
+        assert!(nudge.contains("end your turn"), "{nudge}");
+        assert!(repeated_wait_note(5, &done).contains("end your turn"));
     }
 
     #[test]

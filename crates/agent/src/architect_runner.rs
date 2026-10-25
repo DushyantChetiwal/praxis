@@ -3362,7 +3362,7 @@ mod checkpoint_tests {
         cx.update(|cx| {
             stop_architect_run(&thread, Some(&acp_thread), cx);
             thread.update(cx, |thread, cx| {
-                thread.set_session_mode(SessionMode::Architect, cx)
+                thread.set_session_mode(SessionMode::Plan, cx)
             });
             let project = thread.read(cx).project().clone();
             let id = project
@@ -3456,7 +3456,7 @@ mod checkpoint_tests {
         cx.update(|cx| {
             thread.update(cx, |thread, cx| {
                 thread.set_architect_graph(Some(graph.clone()), cx);
-                thread.set_session_mode(SessionMode::Architect, cx);
+                thread.set_session_mode(SessionMode::Plan, cx);
             });
             remote.update(cx, |remote, cx| remote.force_heartbeat_timeout(0, cx));
             assert!(!remote.read(cx).is_connected());
@@ -3469,7 +3469,7 @@ mod checkpoint_tests {
             );
             let owner = thread.read(cx);
             assert_eq!(owner.architect_graph(), Some(&graph));
-            assert_eq!(owner.session_mode(), SessionMode::Architect);
+            assert_eq!(owner.session_mode(), SessionMode::Plan);
             assert!(owner.architect_run().is_none());
         });
         assert!(fake.pending_completions().is_empty());
@@ -3518,7 +3518,7 @@ mod checkpoint_tests {
         cx.update(|cx| {
             stop_architect_run(&thread, Some(&acp_thread), cx);
             thread.update(cx, |thread, cx| {
-                thread.set_session_mode(SessionMode::Architect, cx)
+                thread.set_session_mode(SessionMode::Plan, cx)
             });
         });
         assert_preflight_preserves_execution(&thread, &acp_thread, "Reconnect", cx).await;

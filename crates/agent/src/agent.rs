@@ -257,6 +257,18 @@ struct Session {
     _subscriptions: Vec<Subscription>,
 }
 
+fn background_wake_message(notices: &[String]) -> String {
+    let notices = notices
+        .iter()
+        .map(|notice| format!("- {notice}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Praxis resumed this conversation because background work finished:\n{notices}\n\n\
+         Continue from where you left off."
+    )
+}
+
 type NativeCompletion =
     Shared<oneshot::Receiver<std::result::Result<acp_v2::StopReason, Arc<anyhow::Error>>>>;
 
@@ -972,6 +984,48 @@ impl NativeAgent {
         self.register_session(thread, project_id, cx)
     }
 
+    /// Starts a turn reporting background commands that finished after the
+    /// agent ended its turn, once the session has nothing else running.
+    fn resume_after_background_tasks(
+        &mut self,
+        session_id: acp_v2::SessionId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.sessions.get(&session_id) else {
+            return;
+        };
+        if let Some(execution) = &session.execution
+            && execution.completion.peek().is_none()
+        {
+            let completion = execution.completion.clone();
+            cx.spawn(async move |this, cx| {
+                if completion.await.is_err() {
+                    log::debug!("Execution released before background work resumed it");
+                }
+                this.update(cx, |this, cx| this.resume_after_background_tasks(session_id, cx))
+                    .log_err();
+            })
+            .detach();
+            return;
+        }
+        let Some(acp_thread) = session.acp_thread.upgrade() else {
+            return;
+        };
+        let thread = session.thread.clone();
+        let notices = thread.update(cx, |thread, _| thread.take_background_wake_notices());
+        if notices.is_empty() {
+            return;
+        }
+        let message = background_wake_message(&notices);
+        let connection = NativeAgentConnection(cx.entity());
+        // Submitting reads this agent, which is still being updated here.
+        cx.defer(move |cx| {
+            connection
+                .send_and_wait_for_completion(acp_thread, vec![message.into()], cx)
+                .detach_and_log_err(cx);
+        });
+    }
+
     fn register_session(
         &mut self,
         thread_handle: Entity<Thread>,
@@ -1060,6 +1114,13 @@ impl NativeAgent {
         let subscriptions = vec![
             cx.subscribe(&thread_handle, Self::handle_thread_title_updated),
             cx.subscribe(&thread_handle, Self::handle_thread_token_usage_updated),
+            cx.subscribe(
+                &thread_handle,
+                |this, thread, _: &crate::thread::BackgroundTasksFinished, cx| {
+                    let session_id = thread.read(cx).id().clone();
+                    this.resume_after_background_tasks(session_id, cx);
+                },
+            ),
             cx.subscribe(
                 &thread_handle,
                 |this, thread, event: &crate::thread::CancellationRequested, cx| {
@@ -3340,7 +3401,6 @@ impl acp_thread::AgentSessionModes for NativeAgentSessionModes {
         vec![
             acp_v2::SessionConfigSelectOption::new(crate::SessionMode::BUILD_ID, "Build"),
             acp_v2::SessionConfigSelectOption::new(crate::SessionMode::PLAN_ID, "Plan"),
-            acp_v2::SessionConfigSelectOption::new(crate::SessionMode::ARCHITECT_ID, "Architect"),
         ]
     }
 
@@ -7268,7 +7328,7 @@ mod internal_tests {
             let path = architect::NodePath::root("step".into());
             let visit = thread.update(cx, |thread, cx| {
                 thread.set_architect_graph(Some(plan()), cx);
-                thread.set_session_mode(SessionMode::Architect, cx);
+                thread.set_session_mode(SessionMode::Plan, cx);
                 thread.start_architect_run(path.clone(), "Saved step".into(), Task::ready(()), cx);
                 thread.note_architect_run_position(path.clone(), "Saved step".into(), 1, 1, cx)
             });
@@ -7378,7 +7438,7 @@ mod internal_tests {
                     serde_json::to_value(vec![first_event]).expect("saved event"),
                 );
                 assert!(!thread.architect_snapshot().revisions.is_empty());
-                assert_eq!(thread.session_mode(), SessionMode::Architect);
+                assert_eq!(thread.session_mode(), SessionMode::Plan);
             });
             let child_saved = database
                 .load_thread(child_id)
@@ -11667,7 +11727,6 @@ mod internal_tests {
             vec![
                 crate::SessionMode::BUILD_ID.to_string(),
                 crate::SessionMode::PLAN_ID.to_string(),
-                crate::SessionMode::ARCHITECT_ID.to_string(),
             ],
         );
         assert_eq!(
@@ -11703,11 +11762,7 @@ mod internal_tests {
                 }
             })
         });
-        for mode in [
-            SessionMode::Architect,
-            SessionMode::Plan,
-            SessionMode::Build,
-        ] {
+        for mode in [SessionMode::Plan, SessionMode::Build] {
             thread.update(cx, |thread, cx| thread.set_session_mode(mode, cx));
             cx.run_until_parked();
             assert_eq!(
@@ -11722,7 +11777,7 @@ mod internal_tests {
         cx.run_until_parked();
         assert_eq!(
             observed.borrow().len(),
-            3,
+            2,
             "ordinary notifications must not duplicate mode events"
         );
     }
@@ -11761,9 +11816,7 @@ mod internal_tests {
                 TerminalTool::NAME,
                 SpawnAgentTool::NAME,
                 CreateThreadTool::NAME,
-                // Drafting on the canvas belongs to Architect mode.
-                DraftPlanTool::NAME,
-                SetStepLocksTool::NAME,
+                RunStepsTool::NAME,
             ] {
                 assert!(
                     !tools.contains_key(tool_name),
@@ -11774,6 +11827,10 @@ mod internal_tests {
                 tools.contains_key(ExitPlanModeTool::NAME),
                 "Plan mode must offer a way to present the plan"
             );
+            // Plan mode covers the former Architect mode: drafting on the
+            // canvas and keeping a checklist change only the plan.
+            assert!(tools.contains_key(DraftPlanTool::NAME));
+            assert!(tools.contains_key(UpdatePlanTool::NAME));
         });
 
         // Presenting a plan only means something while planning.
@@ -11801,7 +11858,7 @@ mod internal_tests {
             .update(|cx| connection.session_modes(&session_id, cx))
             .expect("mode selector");
 
-        for initial_mode in [SessionMode::Plan, SessionMode::Architect] {
+        for initial_mode in [SessionMode::Plan] {
             cx.update(|cx| {
                 modes.set_mode(acp_v2::SessionConfigValueId::new(initial_mode.id()), cx)
             })
@@ -11946,7 +12003,6 @@ mod internal_tests {
             plan(&thread, cx);
             for mode in [
                 SessionMode::Plan,
-                SessionMode::Architect,
                 SessionMode::Build,
             ] {
                 thread.update(cx, |thread, cx| thread.set_session_mode(mode, cx));
@@ -12238,7 +12294,7 @@ mod internal_tests {
             let task = cx.update(|cx| tool.run(input, events, cx));
             let authorization = receiver.expect_authorization().await;
             thread.update(cx, |thread, cx| {
-                thread.set_session_mode(SessionMode::Architect, cx);
+                thread.set_session_mode(SessionMode::Plan, cx);
             });
             authorization
                 .response
@@ -12670,7 +12726,7 @@ mod internal_tests {
         graph.add_node(node);
         thread.update(cx, |thread, cx| {
             thread.set_architect_graph(Some(graph.clone()), cx);
-            thread.set_session_mode(crate::SessionMode::Architect, cx);
+            thread.set_session_mode(crate::SessionMode::Plan, cx);
         });
 
         cx.update(|cx| {
@@ -12739,7 +12795,7 @@ mod internal_tests {
         thread.update(cx, |thread, cx| {
             thread.set_title("Persisted plan".into(), cx);
             thread.set_model(model.clone(), cx);
-            thread.set_session_mode(crate::SessionMode::Architect, cx);
+            thread.set_session_mode(crate::SessionMode::Plan, cx);
         });
 
         agent.update(cx, |agent, cx| agent.save_thread(thread.clone(), cx));
@@ -12762,22 +12818,78 @@ mod internal_tests {
                 )
             })
             .await
-            .expect("the Architect-mode session should reload");
+            .expect("the Plan-mode session should reload");
         cx.run_until_parked();
         let restored = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
         restored.update(cx, |thread, cx| thread.set_model(model, cx));
         restored.read_with(cx, |thread, cx| {
-            assert_eq!(thread.session_mode(), crate::SessionMode::Architect);
+            assert_eq!(thread.session_mode(), crate::SessionMode::Plan);
             let tools = thread.enabled_tools(cx);
             assert!(tools.contains_key(ReadFileTool::NAME));
             assert!(tools.contains_key(DraftPlanTool::NAME));
             // Nothing has been drafted, so there is nothing to lock yet.
             assert!(!tools.contains_key(SetStepLocksTool::NAME));
-            assert!(!tools.contains_key(ExitPlanModeTool::NAME));
+            assert!(tools.contains_key(ExitPlanModeTool::NAME));
             assert!(!tools.contains_key(EditFileTool::NAME));
             assert!(!tools.contains_key(TerminalTool::NAME));
         });
         drop(restored_acp_thread);
+    }
+
+    /// A command the agent left running resumes the conversation when it
+    /// finishes, so the agent can end its turn instead of waiting on it.
+    #[gpui::test]
+    async fn test_a_background_task_finishing_after_the_turn_resumes_the_conversation(
+        cx: &mut TestAppContext,
+    ) {
+        let fake = init_test(cx);
+        let (connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let model = fake.model("thread");
+        thread.update(cx, |thread, cx| thread.set_model(model.clone(), cx));
+        let terminal = Rc::new(cx.update(crate::tests::FakeTerminalHandle::new_never_exits));
+        let registry = thread.read_with(cx, |thread, _| thread.terminal_task_registry());
+        let task_id = registry.start_in_background_for_test(terminal.clone(), &mut cx.to_async());
+
+        let prompt = cx.update(|cx| {
+            connection.send_and_wait_for_completion(
+                acp_thread.clone(),
+                vec!["Run CI and report back".into()],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let request = fake
+            .pending_completions_for(&model)
+            .pop()
+            .expect("the prompt should reach the model");
+        fake.send_text(&model, &request, "CI is running; I will report when it finishes.");
+        fake.end_stream(&model, &request);
+        cx.run_until_parked();
+        prompt.await.expect("the turn should complete");
+        assert!(fake.pending_completions_for(&model).is_empty());
+
+        terminal.signal_exit();
+        cx.run_until_parked();
+        let request = fake
+            .pending_completions_for(&model)
+            .pop()
+            .expect("the finished task should resume the conversation");
+        let resumed = request
+            .messages
+            .last()
+            .expect("a resuming message")
+            .string_contents();
+        assert!(resumed.contains("Praxis resumed this conversation"), "{resumed}");
+        assert!(resumed.contains(&task_id), "{resumed}");
+        fake.send_text(&model, &request, "CI passed.");
+        fake.end_stream(&model, &request);
+        cx.run_until_parked();
+        assert!(
+            fake.pending_completions_for(&model).is_empty(),
+            "one finished task resumes the conversation once"
+        );
     }
 
     /// The agent's checklist reaches the plan card that external agents' plans
@@ -12904,7 +13016,7 @@ mod internal_tests {
         let nested_path = architect::NodePath(vec!["group".into(), "edit".into()]);
         thread.update(cx, |thread, cx| {
             thread.set_model(model.clone(), cx);
-            thread.set_session_mode(crate::SessionMode::Architect, cx);
+            thread.set_session_mode(crate::SessionMode::Plan, cx);
             thread.set_architect_graph(Some(graph), cx);
         });
 

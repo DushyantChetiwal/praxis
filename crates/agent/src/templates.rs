@@ -135,7 +135,7 @@ mod tests {
                     assert_eq!(rendered.contains(&format!("`{tool}`")), tool == visible);
                 }
                 if visible == "edit_architect_plan" {
-                    assert!(rendered.contains("permission approval, even in Architect mode"));
+                    assert!(rendered.contains("permission approval, even in Plan mode"));
                     assert!(rendered.contains("unsupported checkpoint rebases are refused"));
                     assert!(rendered.contains("even a canvas move can invalidate work"));
                     assert!(rendered.contains("unknown impact and no apply token"));
@@ -306,6 +306,7 @@ mod tests {
 
         let with_tool = render(vec!["update_plan".into()]);
         assert!(with_tool.contains("keep a checklist with `update_plan`"));
+        assert!(with_tool.contains("review it at the start of every turn"));
         assert!(!with_tool.contains("run_steps"));
         assert!(!render(Vec::new()).contains("update_plan"));
         let parallel = render(vec!["update_plan".into(), "run_steps".into()]);
@@ -359,7 +360,8 @@ mod tests {
         };
         let background = render(vec!["terminal".into(), "terminal_wait".into()]);
         assert!(background.contains("## Background terminal tasks"));
-        assert!(background.contains("When nothing useful remains except waiting"));
+        assert!(background.contains("When nothing independent remains"));
+        assert!(background.contains("Praxis resumes this conversation automatically"));
         assert!(background.contains("A wait expiring does not kill the process"));
         assert!(!render(vec!["read_file".into()]).contains("## Background terminal tasks"));
     }

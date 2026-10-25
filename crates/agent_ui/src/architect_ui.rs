@@ -1909,9 +1909,9 @@ impl ArchitectPane {
     }
 
     fn start_planning(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.thread.read(cx).session_mode() != agent::SessionMode::Architect {
+        if self.thread.read(cx).session_mode() != agent::SessionMode::Plan {
             self.thread.update(cx, |thread, cx| {
-                thread.set_session_mode(agent::SessionMode::Architect, cx);
+                thread.set_session_mode(agent::SessionMode::Plan, cx);
             });
         }
         self.open_plan_conversation(window, cx);

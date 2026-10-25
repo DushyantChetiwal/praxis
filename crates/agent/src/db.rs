@@ -1164,7 +1164,7 @@ mod tests {
             Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
         );
         thread.architect_graph = Some(graph.clone());
-        thread.session_mode = crate::SessionMode::Architect;
+        thread.session_mode = crate::SessionMode::Plan;
 
         database
             .save_thread(thread_id.clone(), thread, PathList::default())
@@ -1184,7 +1184,7 @@ mod tests {
         );
         assert_eq!(
             loaded.session_mode,
-            crate::SessionMode::Architect,
+            crate::SessionMode::Plan,
             "reopening a saved plan must not silently restore mutation tools"
         );
     }

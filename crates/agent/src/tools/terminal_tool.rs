@@ -77,8 +77,9 @@ pub struct TerminalToolInput {
     /// Foreground wait in milliseconds, 0 through 30000 inclusive; omitted/null
     /// defaults to 10000. Zero returns immediately with a running task id. The
     /// command's timeout_ms remains a hard total runtime limit after yielding.
-    /// Continue useful independent work after a running response, then use
-    /// terminal_wait when nothing useful remains; never shell sleep or busy-poll.
+    /// Continue independent work after a running response. With nothing left
+    /// to do, end the turn: Praxis resumes the conversation when the task
+    /// finishes. Never shell sleep or busy-poll.
     /// Without terminal lifecycle tools, execution waits for exit instead.
     #[serde(default)]
     #[schemars(range(min = 0, max = 30000))]
@@ -133,8 +134,9 @@ pub struct SandboxedTerminalToolInput {
     /// Foreground wait in milliseconds, 0 through 30000 inclusive; omitted/null
     /// defaults to 10000. Zero returns immediately with a running task id. The
     /// command's timeout_ms remains a hard total runtime limit after yielding.
-    /// Continue useful independent work after a running response, then use
-    /// terminal_wait when nothing useful remains; never shell sleep or busy-poll.
+    /// Continue independent work after a running response. With nothing left
+    /// to do, end the turn: Praxis resumes the conversation when the task
+    /// finishes. Never shell sleep or busy-poll.
     /// Without terminal lifecycle tools, execution waits for exit instead.
     #[serde(default)]
     #[schemars(range(min = 0, max = 30000))]

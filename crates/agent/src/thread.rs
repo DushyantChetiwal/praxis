@@ -175,50 +175,35 @@ const OVERFLOW_BYTES_PER_TOKEN: u64 = 5;
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionMode {
-    /// Working out what to do before doing it, as Zed's Plan mode does: the
-    /// agent researches read-only, then presents its plan with
-    /// `exit_plan_mode` and waits for the user to approve it.
+    /// Working out what to do before doing it: the agent researches
+    /// read-only, may draft or reshape a plan on the Architect canvas, then
+    /// presents its plan with `exit_plan_mode` and waits for approval.
+    /// Threads saved in the former Architect mode reopen here.
+    #[serde(alias = "architect")]
     Plan,
     /// Carrying the work out.
     #[default]
     Build,
-    /// Drafting a plan on the Architect canvas. Read-only research and
-    /// conversation-owned plan updates are available; project/external
-    /// mutation and arbitrary execution are mechanically denied.
-    Architect,
 }
 
 impl SessionMode {
     pub const PLAN_ID: &'static str = "plan";
     pub const BUILD_ID: &'static str = "build";
-    pub const ARCHITECT_ID: &'static str = "architect";
+    /// The former Architect mode, which Plan mode now covers.
+    const LEGACY_ARCHITECT_ID: &'static str = "architect";
 
     pub fn id(&self) -> &'static str {
         match self {
             SessionMode::Plan => Self::PLAN_ID,
             SessionMode::Build => Self::BUILD_ID,
-            SessionMode::Architect => Self::ARCHITECT_ID,
         }
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
         match id {
-            Self::PLAN_ID => Some(SessionMode::Plan),
+            Self::PLAN_ID | Self::LEGACY_ARCHITECT_ID => Some(SessionMode::Plan),
             Self::BUILD_ID => Some(SessionMode::Build),
-            Self::ARCHITECT_ID => Some(SessionMode::Architect),
             _ => None,
-        }
-    }
-
-    /// The mode a saved thread reopens in. Before Architect mode existed,
-    /// drafting on the canvas was saved as `plan`, so a thread saved in
-    /// `plan` that owns a canvas plan was drafting it and reopens in
-    /// Architect mode rather than Plan mode.
-    pub fn restored(saved: SessionMode, has_architect_graph: bool) -> Self {
-        if saved == SessionMode::Plan && has_architect_graph {
-            SessionMode::Architect
-        } else {
-            saved
         }
     }
 }
@@ -251,15 +236,14 @@ impl ToolCapability {
     pub fn is_allowed_in(self, mode: SessionMode) -> bool {
         match mode {
             SessionMode::Build => self != Self::PlanHandoff,
-            SessionMode::Plan => {
-                matches!(
-                    self,
-                    Self::ReadOnly | Self::ExternalRead | Self::PlanHandoff
-                )
-            }
-            SessionMode::Architect => matches!(
+            // Planning may change the conversation's own plan and checklist,
+            // never the project.
+            SessionMode::Plan => matches!(
                 self,
-                Self::ReadOnly | Self::ConversationMutation | Self::ExternalRead
+                Self::ReadOnly
+                    | Self::ConversationMutation
+                    | Self::ExternalRead
+                    | Self::PlanHandoff
             ),
         }
     }
@@ -2165,6 +2149,13 @@ pub struct Thread {
     /// The agent's checklist, kept here rather than read back from the
     /// history so that compaction cannot lose it.
     checklist: Vec<crate::PlanStep>,
+    /// Set when a turn ends normally while background commands still run,
+    /// so that their completion resumes the conversation.
+    background_wake_armed: bool,
+    background_completions: Option<Task<()>>,
+    /// Wait calls in a row with no other work in between.
+    consecutive_waits: u32,
+    checklist_reviewed_this_turn: bool,
     inherits_parent_model_settings: bool,
     /// The Architect plan drafted in this thread. The conversation governs the
     /// plan, so the two live and die together.
@@ -2403,6 +2394,10 @@ impl Thread {
             running_subagents: Vec::new(),
             file_claim: None,
             checklist: Vec::new(),
+            background_wake_armed: false,
+            background_completions: None,
+            consecutive_waits: 0,
+            checklist_reviewed_this_turn: false,
             inherits_parent_model_settings: true,
             architect_graph: None,
             architect_revision_baseline: None,
@@ -2758,8 +2753,7 @@ impl Thread {
 
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
 
-        let session_mode =
-            SessionMode::restored(db_thread.session_mode, db_thread.architect_graph.is_some());
+        let session_mode = db_thread.session_mode;
         let mut persistent_architect = db_thread.persistent_architect.unwrap_or_default();
         if let Some(event) = persistent_architect.events.last() {
             persistent_architect.sequence = persistent_architect.sequence.max(event.sequence);
@@ -2860,6 +2854,10 @@ impl Thread {
             running_subagents: Vec::new(),
             file_claim: None,
             checklist,
+            background_wake_armed: false,
+            background_completions: None,
+            consecutive_waits: 0,
+            checklist_reviewed_this_turn: false,
             inherits_parent_model_settings: true,
             architect_revision_baseline: architect_graph.clone(),
             architect_graph,
@@ -3065,6 +3063,73 @@ impl Thread {
 
     pub(crate) fn set_agent_checklist(&mut self, checklist: Vec<crate::PlanStep>) {
         self.checklist = checklist;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn terminal_task_registry(&self) -> Rc<TerminalTaskRegistry> {
+        self.terminal_tasks.clone()
+    }
+
+    fn background_task_finished(&mut self, cx: &mut Context<Self>) {
+        if self.running_turn.is_none()
+            && self.background_wake_armed
+            && self.terminal_tasks.has_unreported_completions()
+        {
+            cx.emit(BackgroundTasksFinished);
+        }
+    }
+
+    /// A turn that ends while its background commands still run resumes the
+    /// conversation when they finish, so the agent need not wait on them.
+    fn arm_background_wake(&mut self, cx: &mut Context<Self>) {
+        self.background_wake_armed = self.parent_thread_id().is_none()
+            && (self.terminal_tasks.running_in_background() > 0
+                || self.terminal_tasks.has_unreported_completions());
+        self.background_task_finished(cx);
+    }
+
+    /// What finished since the turn ended, for the turn that resumes the
+    /// conversation. Empty when nothing should resume it.
+    pub(crate) fn take_background_wake_notices(&mut self) -> Vec<String> {
+        if !self.background_wake_armed || self.running_turn.is_some() {
+            return Vec::new();
+        }
+        let notices = self.terminal_tasks.take_finished_notices();
+        if !notices.is_empty() {
+            self.background_wake_armed = false;
+        }
+        notices
+    }
+
+    /// Notes appended to a tool result: background commands that finished,
+    /// a nudge away from repeated waiting, and the turn's checklist review.
+    pub(crate) fn tool_result_notes(&mut self, tool_name: &str) -> Vec<String> {
+        let mut notes = self.terminal_tasks.take_finished_notices();
+        let waiting = matches!(
+            tool_name,
+            TerminalWaitTool::NAME | crate::WaitArchitectRunTool::NAME
+        );
+        if waiting {
+            self.consecutive_waits += 1;
+            if self.consecutive_waits >= 2 && (self.consecutive_waits - 2) % 3 == 0 {
+                notes.push(crate::repeated_wait_note(
+                    self.consecutive_waits,
+                    &self.checklist,
+                ));
+            }
+        } else if tool_name != TerminalStatusTool::NAME {
+            self.consecutive_waits = 0;
+        }
+        if matches!(
+            tool_name,
+            crate::UpdatePlanTool::NAME | crate::RunStepsTool::NAME
+        ) {
+            self.checklist_reviewed_this_turn = true;
+        } else if !self.checklist_reviewed_this_turn {
+            self.checklist_reviewed_this_turn = true;
+            notes.extend(crate::checklist_review_note(&self.checklist));
+        }
+        notes
     }
 
     pub fn architect_graph(&self) -> Option<&architect::ArchitectGraph> {
@@ -3802,6 +3867,16 @@ impl Thread {
         environment: Rc<dyn ThreadEnvironment>,
         cx: &mut Context<Self>,
     ) {
+        let mut completions = self.terminal_tasks.completion_signals();
+        self.background_completions = Some(cx.spawn(async move |this, cx| {
+            while completions.next().await.is_some() {
+                let handled = this.update(cx, |thread, cx| thread.background_task_finished(cx));
+                if handled.is_err() {
+                    break;
+                }
+            }
+        }));
+
         // Only update the agent location for the root thread, not for subagents.
         let update_agent_location = self.parent_thread_id().is_none();
 
@@ -4013,6 +4088,7 @@ impl Thread {
         // Signal only: monitors kill outside this entity update, avoiding re-entry.
         // This also applies when the launching turn has already finished.
         self.terminal_tasks.cancel_all();
+        self.background_wake_armed = false;
         self.cancel_turn(cx)
     }
 
@@ -4565,6 +4641,9 @@ impl Thread {
         // turn's pending message instead of the old one.
         self.flush_pending_message(cx);
         self.cancel_turn(cx).detach();
+        self.background_wake_armed = false;
+        self.consecutive_waits = 0;
+        self.checklist_reviewed_this_turn = false;
 
         let (events_tx, events_rx) = mpsc::unbounded::<Result<ThreadEvent>>();
         let event_stream = ThreadEventStream::new(events_tx);
@@ -4599,6 +4678,7 @@ impl Thread {
 
                 _ = this.update(cx, |this, cx| this.flush_pending_message(cx));
 
+                let ended_normally = turn_result.is_ok();
                 match turn_result {
                     Ok(()) => {
                         log::debug!("Turn execution completed");
@@ -4621,7 +4701,13 @@ impl Thread {
                     }
                 }
 
-                _ = this.update(cx, |this, _| this.running_turn.take());
+                this.update(cx, |this, cx| {
+                    this.running_turn.take();
+                    if ended_normally {
+                        this.arm_background_wake(cx);
+                    }
+                })
+                .log_err();
             }
         });
         self.running_turn = Some(RunningTurn::new(
@@ -5310,6 +5396,13 @@ impl Thread {
         this.update(cx, |this, cx| {
             // A cancelled turn can finish its tools after a successor has started.
             if &this.prompt_id == prompt_id {
+                let notes = this.tool_result_notes(&tool_result.tool_name);
+                if !notes.is_empty() {
+                    let notes = notes.join("\n\n");
+                    tool_result
+                        .content
+                        .push(LanguageModelToolResultContent::Text(notes.into()));
+                }
                 this.pending_message()
                     .tool_results
                     .insert(tool_result.tool_use_id.clone(), tool_result);
@@ -7353,6 +7446,12 @@ pub(crate) enum CancellationRequested {
 }
 
 impl EventEmitter<CancellationRequested> for Thread {}
+
+/// Background commands finished after the agent ended its turn, so the
+/// conversation should resume to report them.
+pub(crate) struct BackgroundTasksFinished;
+
+impl EventEmitter<BackgroundTasksFinished> for Thread {}
 
 pub struct TitleUpdated;
 
@@ -12521,22 +12620,11 @@ mod session_mode_tests {
         assert!(ToolCapability::ReadOnly.is_allowed_in(SessionMode::Plan));
         assert!(ToolCapability::ExternalRead.is_allowed_in(SessionMode::Plan));
         assert!(ToolCapability::PlanHandoff.is_allowed_in(SessionMode::Plan));
-        // The Architect canvas's tools belong to Architect mode.
-        assert!(!ToolCapability::ConversationMutation.is_allowed_in(SessionMode::Plan));
+        // Drafting on the canvas and keeping a checklist change only the plan.
+        assert!(ToolCapability::ConversationMutation.is_allowed_in(SessionMode::Plan));
         assert!(!ToolCapability::ProjectMutation.is_allowed_in(SessionMode::Plan));
         assert!(!ToolCapability::ExternalMutation.is_allowed_in(SessionMode::Plan));
         assert!(!ToolCapability::ArbitraryExecution.is_allowed_in(SessionMode::Plan));
-    }
-
-    #[test]
-    fn architect_allows_research_and_conversation_mutations() {
-        assert!(ToolCapability::ReadOnly.is_allowed_in(SessionMode::Architect));
-        assert!(ToolCapability::ConversationMutation.is_allowed_in(SessionMode::Architect));
-        assert!(ToolCapability::ExternalRead.is_allowed_in(SessionMode::Architect));
-        assert!(!ToolCapability::PlanHandoff.is_allowed_in(SessionMode::Architect));
-        assert!(!ToolCapability::ProjectMutation.is_allowed_in(SessionMode::Architect));
-        assert!(!ToolCapability::ExternalMutation.is_allowed_in(SessionMode::Architect));
-        assert!(!ToolCapability::ArbitraryExecution.is_allowed_in(SessionMode::Architect));
     }
 
     #[test]
@@ -12555,28 +12643,16 @@ mod session_mode_tests {
     }
 
     #[test]
-    fn a_canvas_plan_saved_as_plan_reopens_in_architect_mode() {
-        assert_eq!(
-            SessionMode::restored(SessionMode::Plan, true),
-            SessionMode::Architect
-        );
-        assert_eq!(
-            SessionMode::restored(SessionMode::Plan, false),
-            SessionMode::Plan
-        );
-        assert_eq!(
-            SessionMode::restored(SessionMode::Build, true),
-            SessionMode::Build
-        );
+    fn a_thread_saved_in_architect_mode_reopens_in_plan_mode() {
+        let saved: SessionMode = serde_json::from_str("\"architect\"").expect("legacy mode");
+        assert_eq!(saved, SessionMode::Plan);
+        assert_eq!(SessionMode::from_id("architect"), Some(SessionMode::Plan));
+        assert_eq!(serde_json::to_string(&saved).expect("mode"), "\"plan\"");
     }
 
     #[test]
     fn a_mode_survives_a_round_trip_through_its_id() {
-        for mode in [
-            SessionMode::Plan,
-            SessionMode::Build,
-            SessionMode::Architect,
-        ] {
+        for mode in [SessionMode::Plan, SessionMode::Build] {
             assert_eq!(SessionMode::from_id(mode.id()), Some(mode));
         }
         assert_eq!(SessionMode::from_id("review"), None);
