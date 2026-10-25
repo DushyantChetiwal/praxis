@@ -417,7 +417,10 @@ mod tests {
         let mut steps = checklist().steps;
         steps.push(step("Write the docs", PlanStepStatus::Pending));
         let review = checklist_review_note(&steps).expect("open steps");
-        assert!(review.contains("- [in_progress] Add the setting"), "{review}");
+        assert!(
+            review.contains("- [in_progress] Add the setting"),
+            "{review}"
+        );
         let done = [step("Read the loader", PlanStepStatus::Completed)];
         assert_eq!(checklist_review_note(&done), None);
         assert_eq!(checklist_review_note(&[]), None);

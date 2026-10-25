@@ -661,10 +661,17 @@ async fn test_background_terminal_completion_wakes_only_after_a_normal_turn(
     assert_eq!(woken.get(), 0);
     verify_thread_recovery(&thread, &fake, cx).await;
     cx.run_until_parked();
-    assert_eq!(woken.get(), 1, "a turn ending with unreported results resumes");
+    assert_eq!(
+        woken.get(),
+        1,
+        "a turn ending with unreported results resumes"
+    );
     let notices = thread.update(cx, |thread, _| thread.take_background_wake_notices());
     assert_eq!(notices.len(), 1);
-    assert!(notices[0].contains(&background_task_id(&response)), "{notices:?}");
+    assert!(
+        notices[0].contains(&background_task_id(&response)),
+        "{notices:?}"
+    );
     assert!(
         thread
             .update(cx, |thread, _| thread.take_background_wake_notices())
@@ -781,10 +788,7 @@ async fn test_background_terminal_profiles_refresh_and_subagent_isolation(cx: &m
     .await
     .unwrap();
     let task_id = background_task_id(&response);
-    for mode in [
-        SessionMode::Plan,
-        SessionMode::Build,
-    ] {
+    for mode in [SessionMode::Plan, SessionMode::Build] {
         thread.update(cx, |thread, cx| thread.set_session_mode(mode, cx));
         thread.read_with(cx, |thread, cx| {
             let tools = thread.enabled_tools(cx);

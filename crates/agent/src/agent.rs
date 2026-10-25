@@ -1002,8 +1002,10 @@ impl NativeAgent {
                 if completion.await.is_err() {
                     log::debug!("Execution released before background work resumed it");
                 }
-                this.update(cx, |this, cx| this.resume_after_background_tasks(session_id, cx))
-                    .log_err();
+                this.update(cx, |this, cx| {
+                    this.resume_after_background_tasks(session_id, cx)
+                })
+                .log_err();
             })
             .detach();
             return;
@@ -12001,10 +12003,7 @@ mod internal_tests {
                 assert!(!tools.contains_key(ControlArchitectRunTool::NAME));
             });
             plan(&thread, cx);
-            for mode in [
-                SessionMode::Plan,
-                SessionMode::Build,
-            ] {
+            for mode in [SessionMode::Plan, SessionMode::Build] {
                 thread.update(cx, |thread, cx| thread.set_session_mode(mode, cx));
                 thread.read_with(cx, |thread, cx| {
                     let tools = thread.enabled_tools(cx);
@@ -12864,7 +12863,11 @@ mod internal_tests {
             .pending_completions_for(&model)
             .pop()
             .expect("the prompt should reach the model");
-        fake.send_text(&model, &request, "CI is running; I will report when it finishes.");
+        fake.send_text(
+            &model,
+            &request,
+            "CI is running; I will report when it finishes.",
+        );
         fake.end_stream(&model, &request);
         cx.run_until_parked();
         prompt.await.expect("the turn should complete");
@@ -12881,7 +12884,10 @@ mod internal_tests {
             .last()
             .expect("a resuming message")
             .string_contents();
-        assert!(resumed.contains("Praxis resumed this conversation"), "{resumed}");
+        assert!(
+            resumed.contains("Praxis resumed this conversation"),
+            "{resumed}"
+        );
         assert!(resumed.contains(&task_id), "{resumed}");
         fake.send_text(&model, &request, "CI passed.");
         fake.end_stream(&model, &request);
