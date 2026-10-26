@@ -133,6 +133,11 @@ pub struct WorkspaceSettingsContent {
     ///
     /// Default: false
     pub use_system_window_tabs: Option<bool>,
+    /// Whether a window with no saved size of its own opens maximized.
+    /// Reopening a project still restores the size it was left at.
+    ///
+    /// Default: true
+    pub open_new_windows_maximized: Option<bool>,
     /// Which fullscreen mode the `zed::ToggleFullScreen` action enters (macOS only).
     ///
     /// Default: native

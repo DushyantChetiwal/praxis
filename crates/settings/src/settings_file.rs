@@ -162,6 +162,23 @@ pub fn test_settings() -> &'static str {
             }),
             &mut value,
         );
+        // Praxis's startup layout and its trimmed-down UI would change what
+        // every test starts from, and test windows cannot maximize, so tests
+        // keep the upstream defaults. Tests that need Praxis's turn them on.
+        util::merge_non_null_json_value_into(
+            serde_json::json!({
+                "open_new_windows_maximized": false,
+                "agent": { "starts_open": false },
+                "terminal": { "starts_open": false },
+                "title_bar": {
+                    "show_sign_in": true,
+                    "show_onboarding_banner": true,
+                },
+                "collaboration_panel": { "button": true },
+                "edit_predictions": { "provider": "zed" },
+            }),
+            &mut value,
+        );
         value.as_object_mut().unwrap().remove("languages");
         serde_json::to_string(&value).unwrap()
     });

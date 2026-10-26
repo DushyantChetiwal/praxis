@@ -340,6 +340,12 @@ jobs:
           cargo test --locked -p agent --lib internal_tests::test_a_thread_saved_with_the_minimal_profile_reopens_with_the_default -- --exact
           cargo test --locked -p agent --lib internal_tests::test_a_terminal_task_exit_is_announced -- --exact
 
+      - name: Test Praxis startup defaults
+        run: |
+          cargo test --locked -p workspace --lib tests::test_new_windows_open_maximized_at_the_last_size -- --exact
+          cargo test --locked -p agent_ui --lib agent_panel::tests::test_agent_panel_starts_open_follows_setting -- --exact
+          cargo test --locked -p terminal_view --lib terminal_panel::tests::test_terminal_panel_starts_open_follows_setting -- --exact
+
       - name: Test native-agent mode and run integration
         run: |
           cargo test --locked -p agent --lib test_repetition_

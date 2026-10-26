@@ -217,6 +217,7 @@ pub struct AgentSettings {
     pub button: bool,
     pub dock: DockPosition,
     pub flexible: bool,
+    pub starts_open: bool,
     pub max_idle_retained_threads: usize,
     pub threads_sidebar: ThreadsSidebarSettings,
     pub default_width: Pixels,
@@ -601,6 +602,7 @@ impl Settings for AgentSettings {
                 None
             },
             flexible: agent.flexible.unwrap(),
+            starts_open: agent.starts_open.unwrap(),
             default_model: Some(agent.default_model.unwrap()),
             subagent_model: agent.subagent_model,
             inline_assistant_model: agent.inline_assistant_model,

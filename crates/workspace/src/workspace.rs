@@ -2316,14 +2316,11 @@ impl Workspace {
                     {
                         // Reopening an existing workspace - restore its saved bounds
                         (Some(bounds.0), Some(display))
-                    } else if let Some((display, bounds)) =
-                        persistence::read_default_window_bounds(&kvp)
-                    {
-                        // New or empty workspace - use the last known window bounds
-                        (Some(bounds), Some(display))
                     } else {
-                        // New window - let GPUI's default_bounds() handle cascading
-                        (None, None)
+                        // New or empty workspace - open at the last known window
+                        // bounds, maximized unless the user turned that off
+                        let maximize = cx.update(|cx| maximized_restore_bounds(cx));
+                        new_window_bounds(persistence::read_default_window_bounds(&kvp), maximize)
                     };
 
                     // Use the serialized workspace to construct the new window
@@ -9402,6 +9399,33 @@ fn window_bounds_env_override() -> Option<Bounds<Pixels>> {
         })
 }
 
+/// The size a new window returns to when un-maximized, or `None` when new
+/// windows should not open maximized.
+fn maximized_restore_bounds(cx: &App) -> Option<Bounds<Pixels>> {
+    WorkspaceSettings::get_global(cx)
+        .open_new_windows_maximized
+        .then(|| Bounds::centered(None, gpui::DEFAULT_WINDOW_SIZE, cx))
+}
+
+/// Where a window with no saved bounds of its own opens: at the last window's
+/// bounds, maximized when `maximize` holds the size to restore to.
+fn new_window_bounds(
+    last_window: Option<(Uuid, WindowBounds)>,
+    maximize: Option<Bounds<Pixels>>,
+) -> (Option<WindowBounds>, Option<Uuid>) {
+    match (last_window, maximize) {
+        // Un-maximizing returns to the last window's size.
+        (Some((display, bounds)), Some(_)) => (
+            Some(WindowBounds::Maximized(bounds.get_bounds())),
+            Some(display),
+        ),
+        (Some((display, bounds)), None) => (Some(bounds), Some(display)),
+        (None, Some(restore)) => (Some(WindowBounds::Maximized(restore)), None),
+        // GPUI cascades the window from the active one.
+        (None, None) => (None, None),
+    }
+}
+
 fn open_items(
     serialized_workspace: Option<SerializedWorkspace>,
     mut project_paths_to_open: Vec<(PathBuf, Option<ProjectPath>)>,
@@ -11230,10 +11254,9 @@ pub fn open_workspace_by_id(
                 && let Some(bounds) = serialized_workspace.window_bounds.as_ref()
             {
                 (Some(bounds.0), Some(display))
-            } else if let Some((display, bounds)) = persistence::read_default_window_bounds(&kvp) {
-                (Some(bounds), Some(display))
             } else {
-                (None, None)
+                let maximize = cx.update(|cx| maximized_restore_bounds(cx));
+                new_window_bounds(persistence::read_default_window_bounds(&kvp), maximize)
             };
 
             let options = cx.update(|cx| {
@@ -12495,6 +12518,7 @@ pub fn remote_workspace_position_from_db(
     let paths = paths_to_open.to_vec();
     let db = WorkspaceDb::global(cx);
     let kvp = db::kvp::KeyValueStore::global(cx);
+    let maximize = maximized_restore_bounds(cx);
 
     cx.background_spawn(async move {
         let remote_connection_id = db
@@ -12503,21 +12527,15 @@ pub fn remote_workspace_position_from_db(
             .context("fetching serialized ssh project")?;
         let serialized_workspace = db.remote_workspace_for_roots(&paths, remote_connection_id);
 
+        let saved_bounds = serialized_workspace.as_ref().and_then(|workspace| {
+            Some((workspace.display?, workspace.window_bounds.map(|b| b.0)?))
+        });
         let (window_bounds, display) = if let Some(bounds) = window_bounds_env_override() {
             (Some(WindowBounds::Windowed(bounds)), None)
+        } else if let Some((display, bounds)) = saved_bounds {
+            (Some(bounds), Some(display))
         } else {
-            let restorable_bounds = serialized_workspace
-                .as_ref()
-                .and_then(|workspace| {
-                    Some((workspace.display?, workspace.window_bounds.map(|b| b.0)?))
-                })
-                .or_else(|| persistence::read_default_window_bounds(&kvp));
-
-            if let Some((serialized_display, serialized_bounds)) = restorable_bounds {
-                (Some(serialized_bounds), Some(serialized_display))
-            } else {
-                (None, None)
-            }
+            new_window_bounds(persistence::read_default_window_bounds(&kvp), maximize)
         };
 
         let centered_layout = serialized_workspace
@@ -12639,6 +12657,32 @@ mod tests {
     use settings::SettingsStore;
     use util::path;
     use util::rel_path::rel_path;
+
+    #[test]
+    fn test_new_windows_open_maximized_at_the_last_size() {
+        let display = Uuid::new_v4();
+        let last = Bounds::new(point(px(10.), px(20.)), size(px(800.), px(600.)));
+        let fallback = Bounds::new(point(px(0.), px(0.)), size(px(1536.), px(1095.)));
+
+        assert_eq!(
+            new_window_bounds(
+                Some((display, WindowBounds::Windowed(last))),
+                Some(fallback)
+            ),
+            (Some(WindowBounds::Maximized(last)), Some(display)),
+            "un-maximizing should return to the last window's size"
+        );
+        assert_eq!(
+            new_window_bounds(None, Some(fallback)),
+            (Some(WindowBounds::Maximized(fallback)), None)
+        );
+        assert_eq!(
+            new_window_bounds(Some((display, WindowBounds::Windowed(last))), None),
+            (Some(WindowBounds::Windowed(last)), Some(display)),
+            "with maximizing off, the last window's bounds are used as they were"
+        );
+        assert_eq!(new_window_bounds(None, None), (None, None));
+    }
 
     #[test]
     fn test_render_window_title_format_omits_empty_segments() {

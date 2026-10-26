@@ -132,6 +132,8 @@ impl EditPredictionProvider {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]
 pub struct EditPredictionSettingsContent {
     /// Determines which edit prediction provider to use.
+    ///
+    /// Default: none
     pub provider: Option<EditPredictionProvider>,
     /// Disable edit predictions for files matching these glob patterns.
     ///

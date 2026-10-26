@@ -5230,7 +5230,7 @@ fn window_and_layout_page() -> SettingsPage {
         ]
     }
 
-    fn window_section() -> [SettingsPageItem; 6] {
+    fn window_section() -> [SettingsPageItem; 7] {
         [
             SettingsPageItem::SectionHeader("Window"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -5284,6 +5284,25 @@ fn window_and_layout_page() -> SettingsPage {
                     },
                     write: |settings_content, value, _| {
                         settings_content.workspace.use_system_window_tabs = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Open New Windows Maximized",
+                description: "Whether a window with no saved size of its own opens maximized.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("open_new_windows_maximized"),
+                    pick: |settings_content| {
+                        settings_content
+                            .workspace
+                            .open_new_windows_maximized
+                            .as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content.workspace.open_new_windows_maximized = value;
                     },
                 }),
                 metadata: None,
@@ -6977,7 +6996,7 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn agent_panel_section() -> [SettingsPageItem; 7] {
+    fn agent_panel_section() -> [SettingsPageItem; 8] {
         [
             SettingsPageItem::SectionHeader("Agent Panel"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -7003,6 +7022,20 @@ fn panels_page() -> SettingsPage {
                     pick: |settings_content| settings_content.agent.as_ref()?.dock.as_ref(),
                     write: |settings_content, value, _| {
                         settings_content.agent.get_or_insert_default().dock = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Agent Panel Starts Open",
+                description: "Whether the agent panel should open on startup.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.starts_open"),
+                    pick: |settings_content| settings_content.agent.as_ref()?.starts_open.as_ref(),
+                    write: |settings_content, value, _| {
+                        settings_content.agent.get_or_insert_default().starts_open = value;
                     },
                 }),
                 metadata: None,
