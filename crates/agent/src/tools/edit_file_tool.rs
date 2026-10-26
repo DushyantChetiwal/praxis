@@ -3341,12 +3341,22 @@ mod tests {
     /// Turns the terminal sandbox back on, which restricts the agent: from then
     /// on settings, skills and symlink escapes ask before an edit, even one the
     /// edit tool's own permission, `mode`, allows.
+    ///
+    /// This goes through the user's settings rather than an override, because
+    /// loading a project's `.zed/settings.json` recomputes every setting and
+    /// would silently drop an override.
     fn restrict_agent(mode: settings::ToolPermissionMode, cx: &mut TestAppContext) {
         cx.update(|cx| {
-            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
-            settings.tool_permissions.default = mode;
-            settings.sandbox_permissions.allow_unsandboxed = false;
-            agent_settings::AgentSettings::override_global(settings, cx);
+            SettingsStore::update_global(cx, |store: &mut SettingsStore, cx| {
+                store.update_user_settings(cx, |settings| {
+                    let agent = settings.agent.get_or_insert_default();
+                    agent.tool_permissions.get_or_insert_default().default = Some(mode);
+                    agent
+                        .sandbox_permissions
+                        .get_or_insert_default()
+                        .allow_unsandboxed = Some(false);
+                });
+            });
         });
     }
 }

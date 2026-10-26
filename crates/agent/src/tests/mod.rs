@@ -8947,13 +8947,21 @@ async fn test_edit_file_tool_allow_still_prompts_for_local_settings(cx: &mut Tes
     .await;
     let project = Project::test(fs.clone(), ["/root".as_ref()], cx).await;
 
+    // Turning the sandbox on restricts the agent, which is what protects
+    // settings paths from an allowed tool. This goes through the user's
+    // settings because loading `.zed/settings.json` would drop an override.
     cx.update(|cx| {
-        let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
-        settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
-        // Turning the sandbox on restricts the agent, which is what protects
-        // settings paths from an allowed tool.
-        settings.sandbox_permissions.allow_unsandboxed = false;
-        agent_settings::AgentSettings::override_global(settings, cx);
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |content| {
+                let agent = content.agent.get_or_insert_default();
+                agent.tool_permissions.get_or_insert_default().default =
+                    Some(settings::ToolPermissionMode::Allow);
+                agent
+                    .sandbox_permissions
+                    .get_or_insert_default()
+                    .allow_unsandboxed = Some(false);
+            });
+        });
     });
 
     let context_server_registry =
