@@ -173,7 +173,7 @@ impl TerminalTaskRegistry {
             )
             .expect("the task starts");
         task.background(cx);
-        task.id.clone()
+        task.id
     }
 
     pub(crate) fn register_child(&self, child: &Rc<Self>) {
@@ -969,11 +969,10 @@ mod tests {
             let input: crate::SandboxedTerminalToolInput = serde_json::from_value(value).unwrap();
             assert!(input.yield_ms.is_none());
         }
-        for mode in [crate::SessionMode::Plan] {
-            assert!(TerminalStatusTool::capability().is_allowed_in(mode));
-            assert!(TerminalWaitTool::capability().is_allowed_in(mode));
-            assert!(!TerminalStopTool::capability().is_allowed_in(mode));
-        }
+        let mode = crate::SessionMode::Plan;
+        assert!(TerminalStatusTool::capability().is_allowed_in(mode));
+        assert!(TerminalWaitTool::capability().is_allowed_in(mode));
+        assert!(!TerminalStopTool::capability().is_allowed_in(mode));
         assert!(!TerminalStopTool::allow_in_restricted_mode());
     }
 

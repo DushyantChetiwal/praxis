@@ -11860,7 +11860,8 @@ mod internal_tests {
             .update(|cx| connection.session_modes(&session_id, cx))
             .expect("mode selector");
 
-        for initial_mode in [SessionMode::Plan] {
+        {
+            let initial_mode = SessionMode::Plan;
             cx.update(|cx| {
                 modes.set_mode(acp_v2::SessionConfigValueId::new(initial_mode.id()), cx)
             })
