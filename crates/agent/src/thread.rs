@@ -972,6 +972,7 @@ pub enum Message {
     Resume,
     Compaction(CompactionInfo),
     LoopGuard(LoopGuardInfo),
+    BackgroundWake(BackgroundWakeInfo),
 }
 
 /// A correction sent after the loop guard stopped the model from repeating
@@ -985,6 +986,43 @@ pub struct LoopGuardInfo {
     pub repeated: SharedString,
     /// The corrective instruction the model is given.
     pub instruction: String,
+}
+
+/// Background commands that finished while no turn was running, which resumed
+/// the conversation. Like `LoopGuard`, it reaches the model as a user
+/// instruction but is kept apart from `User`, so the transcript shows a notice
+/// instead of a message the user never typed.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct BackgroundWakeInfo {
+    /// One line for each finished command, as the model is told about it.
+    pub notices: Vec<String>,
+}
+
+impl BackgroundWakeInfo {
+    fn to_request(&self) -> LanguageModelRequestMessage {
+        let notices = self
+            .notices
+            .iter()
+            .map(|notice| format!("- {notice}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        LanguageModelRequestMessage {
+            role: Role::User,
+            content: vec![format!(
+                "Praxis resumed this conversation because background work finished:\n\
+                 {notices}\n\nContinue from where you left off."
+            )
+            .into()],
+            cache: false,
+            reasoning_details: None,
+        }
+    }
+
+    fn notice(&self) -> acp_thread::BackgroundWakeNotice {
+        acp_thread::BackgroundWakeNotice {
+            finished: self.notices.len(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -1036,6 +1074,7 @@ impl Message {
             // Historical notices remain readable, but must not reintroduce
             // retired automatic instructions into a resumed conversation.
             Message::LoopGuard(_) => vec![],
+            Message::BackgroundWake(info) => vec![info.to_request()],
             Message::Resume => vec![LanguageModelRequestMessage {
                 role: Role::User,
                 content: vec!["Continue where you left off".into()],
@@ -1061,14 +1100,17 @@ impl Message {
                 "## Context Compaction (Completed)\n\n".into()
             }
             Message::LoopGuard(info) => format!("--- Loop Guard: {} ---\n", info.repeated),
+            Message::BackgroundWake(info) => format!("--- {} ---\n", info.notice().label()),
         }
     }
 
     pub fn role(&self) -> Role {
         match self {
-            Message::User(_) | Message::Resume | Message::Compaction(_) | Message::LoopGuard(_) => {
-                Role::User
-            }
+            Message::User(_)
+            | Message::Resume
+            | Message::Compaction(_)
+            | Message::LoopGuard(_)
+            | Message::BackgroundWake(_) => Role::User,
             Message::Agent(_) => Role::Assistant,
         }
     }
@@ -1717,6 +1759,7 @@ pub enum ThreadEvent {
     ContextCompaction(acp_thread::ContextCompaction),
     ContextCompactionUpdate(acp_thread::ContextCompactionUpdate),
     LoopGuardNotice(acp_thread::LoopGuardNotice),
+    BackgroundWakeNotice(acp_thread::BackgroundWakeNotice),
     Plan(acp_v2::PlanItems),
     Stop(acp_v2::StopReason),
 }
@@ -2527,6 +2570,9 @@ impl Thread {
                 Message::Resume => {}
                 Message::LoopGuard(info) => {
                     stream.send_loop_guard_notice(info.kind, info.repeated.clone());
+                }
+                Message::BackgroundWake(info) => {
+                    stream.send_background_wake_notice(info.notice());
                 }
                 Message::Compaction(info) => {
                     let compaction_id = acp_thread::ContextCompactionId(
@@ -4295,7 +4341,8 @@ impl Thread {
                 Message::Agent(_)
                 | Message::Resume
                 | Message::Compaction(_)
-                | Message::LoopGuard(_) => {}
+                | Message::LoopGuard(_)
+                | Message::BackgroundWake(_) => {}
             }
         }
         self.clear_summary();
@@ -4409,6 +4456,26 @@ impl Thread {
 
         log::debug!("Total messages in thread: {}", self.messages.len());
         self.run_turn(cx)
+    }
+
+    /// Resumes the conversation after background commands finished while no
+    /// turn was running. The model is told what finished; the transcript shows
+    /// a notice rather than a message the user never typed.
+    pub fn resume_after_background_work(
+        &mut self,
+        notices: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<mpsc::UnboundedReceiver<Result<ThreadEvent>>> {
+        let info = BackgroundWakeInfo { notices };
+        let notice = info.notice();
+        self.messages.push(Arc::new(Message::BackgroundWake(info)));
+        cx.notify();
+        let events = self.send_existing(cx)?;
+        // Nothing has run on the new turn yet, so the notice comes first.
+        if let Some(turn) = &self.running_turn {
+            turn.event_stream.send_background_wake_notice(notice);
+        }
+        Ok(events)
     }
 
     /// Sending a message results in the model streaming a response, which could include tool calls.
@@ -6147,7 +6214,8 @@ impl Thread {
                 Message::Agent(_)
                 | Message::Resume
                 | Message::Compaction(_)
-                | Message::LoopGuard(_) => None,
+                | Message::LoopGuard(_)
+                | Message::BackgroundWake(_) => None,
             })
     }
 
@@ -7179,7 +7247,10 @@ fn render_messages_markdown(messages: &[Arc<Message>], include_debug_output: boo
         match &**message {
             Message::User(_) => markdown.push_str("## User\n\n"),
             Message::Agent(_) => markdown.push_str("## Assistant\n\n"),
-            Message::Resume | Message::Compaction(_) | Message::LoopGuard(_) => {}
+            Message::Resume
+            | Message::Compaction(_)
+            | Message::LoopGuard(_)
+            | Message::BackgroundWake(_) => {}
         }
         markdown.push_str(&message.render_markdown(include_debug_output));
     }
@@ -7399,7 +7470,10 @@ fn retained_request_messages_before(
                     agent_budget_spent = true;
                 }
             }
-            Message::Resume | Message::Compaction(_) | Message::LoopGuard(_) => {}
+            Message::Resume
+            | Message::Compaction(_)
+            | Message::LoopGuard(_)
+            | Message::BackgroundWake(_) => {}
         }
     }
 
@@ -7886,6 +7960,12 @@ impl ThreadEventStream {
             .unbounded_send(Ok(ThreadEvent::LoopGuardNotice(
                 acp_thread::LoopGuardNotice { kind, repeated },
             )))
+            .ok();
+    }
+
+    fn send_background_wake_notice(&self, notice: acp_thread::BackgroundWakeNotice) {
+        self.sender
+            .unbounded_send(Ok(ThreadEvent::BackgroundWakeNotice(notice)))
             .ok();
     }
 
@@ -11164,6 +11244,43 @@ mod tests {
         let event = replay_events.next().await;
         assert!(
             matches!(&event, Some(Ok(ThreadEvent::AgentText(text))) if text == "after"),
+            "expected replayed agent text, got {event:?}"
+        );
+    }
+
+    /// A reopened thread shows a background wake as a notice, never as a
+    /// message from the user, while the model still reads what finished.
+    #[gpui::test]
+    async fn test_replay_shows_a_background_wake_as_a_notice(cx: &mut TestAppContext) {
+        let (thread, _event_stream, _) = setup_thread_for_test(cx).await;
+        let notice = "Background task 1 `make ci` exited with code 0.".to_string();
+        let wake = Arc::new(Message::BackgroundWake(BackgroundWakeInfo {
+            notices: vec![notice.clone()],
+        }));
+        let request = wake.to_request();
+        assert_eq!(request.len(), 1);
+        assert_eq!(request[0].role, Role::User);
+        assert!(request[0].string_contents().contains(&notice));
+
+        let mut replay_events = cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.messages.push(wake);
+                thread.messages.push(agent_text_message("CI passed."));
+                thread.replay(cx)
+            })
+        });
+
+        let event = replay_events.next().await;
+        assert!(
+            matches!(
+                &event,
+                Some(Ok(ThreadEvent::BackgroundWakeNotice(shown))) if shown.finished == 1
+            ),
+            "expected a background wake notice, got {event:?}"
+        );
+        let event = replay_events.next().await;
+        assert!(
+            matches!(&event, Some(Ok(ThreadEvent::AgentText(text))) if text == "CI passed."),
             "expected replayed agent text, got {event:?}"
         );
     }

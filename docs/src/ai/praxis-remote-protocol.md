@@ -226,7 +226,7 @@ so unrelated image messages do not incorrectly acknowledge each other's outbox e
 
 ### Conversation snapshots and thinking
 
-`thread` answers and the snapshot's `thread` object have `session_id`, `title`, `status`, `total`, and `entries`. Each entry keeps its original thread `index`, `role`, `text`, and optional tool `status`. `total` counts source entries, not message parts.
+`thread` answers and the snapshot's `thread` object have `session_id`, `title`, `status`, `total`, and `entries`. Each entry keeps its original thread `index`, `role`, `text`, and optional tool `status`. `total` counts source entries, not message parts. An empty user message, which only anchors a turn the agent started itself (such as one resumed by finished background work), is left out like the desktop leaves it out; the other entries keep their indices.
 
 An assistant entry containing provider-supplied thoughts also has an optional ordered `parts` array. Each part has its source chunk `index`, `role` (`reasoning` or `assistant`), and `text`. Only ACP `Thought` chunks become `reasoning`; ordinary answers and tool output are never used to infer thoughts. Blank parts are omitted. For example:
 

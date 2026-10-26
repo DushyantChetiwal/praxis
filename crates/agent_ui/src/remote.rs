@@ -630,6 +630,7 @@ fn handle_paired(
             view.update(cx, |view, cx| view.retry_generation(cx));
             Ok(json!({ "retrying": true }))
         }),
+
         "compact" => with_workspace(window, cx, |workspace, window, cx| {
             required(args, "session_id")?;
             let view = requested_root_view(workspace, args, cx)?;
@@ -1865,6 +1866,13 @@ fn transcript_entry(
     include_details: bool,
     cx: &App,
 ) -> Option<Value> {
+    // An empty user message only anchors a turn the agent started itself, such
+    // as one resumed by finished background work. The desktop hides it too.
+    if let AgentThreadEntry::UserMessage(message) = entry
+        && message.content.source_blocks().is_empty()
+    {
+        return None;
+    }
     let (role, text, status) = describe_entry(entry, include_details, cx);
     let mut value = json!({
         "index": index, "role": role, "text": text.trim(), "status": status,
@@ -2059,6 +2067,9 @@ fn describe_entry(
                 truncate(call.label.read(cx).source(), 256)
             };
             ("tool", text, Some(status))
+        }
+        AgentThreadEntry::BackgroundWakeNotice(notice) => {
+            ("notice", notice.label().to_string(), None)
         }
         entry => {
             let text = entry.to_markdown(cx);

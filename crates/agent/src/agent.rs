@@ -257,18 +257,6 @@ struct Session {
     _subscriptions: Vec<Subscription>,
 }
 
-fn background_wake_message(notices: &[String]) -> String {
-    let notices = notices
-        .iter()
-        .map(|notice| format!("- {notice}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "Praxis resumed this conversation because background work finished:\n{notices}\n\n\
-         Continue from where you left off."
-    )
-}
-
 type NativeCompletion =
     Shared<oneshot::Receiver<std::result::Result<acp_v2::StopReason, Arc<anyhow::Error>>>>;
 
@@ -286,6 +274,14 @@ struct NativeExecution {
     completion: NativeCompletion,
 }
 
+/// Starts a turn that belongs to a new user message.
+enum NativeRequest {
+    /// Something the user sent, slash commands included.
+    Prompt(Vec<acp_v2::ContentBlock>),
+    /// Background commands finished while no turn was running.
+    BackgroundWake(Vec<String>),
+}
+
 #[derive(Clone)]
 enum NativeRetryAction {
     Prompt(Vec<acp_v2::ContentBlock>),
@@ -300,6 +296,8 @@ enum NativeRetryAction {
         content: Vec<acp_v2::ContentBlock>,
     },
     Compact,
+    /// Tells the model which background commands finished, then runs a turn.
+    BackgroundWake(Vec<String>),
 }
 
 impl NativeRetryAction {
@@ -1018,12 +1016,11 @@ impl NativeAgent {
         if notices.is_empty() {
             return;
         }
-        let message = background_wake_message(&notices);
         let connection = NativeAgentConnection(cx.entity());
         // Submitting reads this agent, which is still being updated here.
         cx.defer(move |cx| {
             connection
-                .send_and_wait_for_completion(acp_thread, vec![message.into()], cx)
+                .submit_and_wait(acp_thread, NativeRequest::BackgroundWake(notices), cx)
                 .detach_and_log_err(cx);
         });
     }
@@ -2782,8 +2779,22 @@ impl NativeAgentConnection {
         content: Vec<acp_v2::ContentBlock>,
         cx: &mut App,
     ) -> Task<Result<acp_v2::StopReason>> {
+        self.submit_and_wait(thread, NativeRequest::Prompt(content), cx)
+    }
+
+    fn submit_and_wait(
+        &self,
+        thread: Entity<AcpThread>,
+        request: NativeRequest,
+        cx: &mut App,
+    ) -> Task<Result<acp_v2::StopReason>> {
         let session_id = thread.read(cx).session_id().clone();
-        let (receipt, completion) = self.submit_native(session_id, Some(content.clone()), cx);
+        // The thread keeps what was sent so it can be restored if sending fails.
+        let content = match &request {
+            NativeRequest::Prompt(content) => content.clone(),
+            NativeRequest::BackgroundWake(_) => Vec::new(),
+        };
+        let (receipt, completion) = self.submit_request(session_id, Some(request), cx);
         let submission =
             thread.update(cx, |thread, cx| thread.submit_receipt(content, receipt, cx));
         cx.spawn(async move |_cx| {
@@ -2800,9 +2811,19 @@ impl NativeAgentConnection {
         content: Option<Vec<acp_v2::ContentBlock>>,
         cx: &mut App,
     ) -> (Task<Result<acp_v2::PromptResponse>>, NativeCompletion) {
+        self.submit_request(session_id, content.map(NativeRequest::Prompt), cx)
+    }
+
+    /// Without a request, runs the last submission again.
+    fn submit_request(
+        &self,
+        session_id: acp_v2::SessionId,
+        request: Option<NativeRequest>,
+        cx: &mut App,
+    ) -> (Task<Result<acp_v2::PromptResponse>>, NativeCompletion) {
         let (completion_sender, completion_receiver) = oneshot::channel();
         let completion = completion_receiver.shared();
-        if let Some(content) = &content
+        if let Some(NativeRequest::Prompt(content)) = &request
             && let Err(error) = acp_thread::AgentConnection::validate_prompt_content(self, content)
         {
             return (Task::ready(Err(error)), completion);
@@ -2875,22 +2896,32 @@ impl NativeAgentConnection {
                                 }),
                             ))
                         })??;
-                    let (message_id, preparation, retry_action) = if let Some(content) = content {
+                    let (message_id, preparation, retry_action) = if let Some(request) = request {
                         let message_id = ClientUserMessageId::new();
-                        let retry_action = agent.read_with(cx, |agent, cx| {
-                            let project_state = agent
-                                .session_project_state(&session_id)
-                                .context("Project state not found for session")?;
-                            anyhow::Ok(NativeRetryAction::for_prompt(
-                                content.clone(),
-                                project_state,
-                                cx,
-                            ))
-                        })??;
-                        let source = if matches!(retry_action, NativeRetryAction::Compact) {
-                            Vec::new()
-                        } else {
-                            content
+                        let (source, retry_action) = match request {
+                            NativeRequest::Prompt(content) => {
+                                let retry_action = agent.read_with(cx, |agent, cx| {
+                                    let project_state = agent
+                                        .session_project_state(&session_id)
+                                        .context("Project state not found for session")?;
+                                    anyhow::Ok(NativeRetryAction::for_prompt(
+                                        content.clone(),
+                                        project_state,
+                                        cx,
+                                    ))
+                                })??;
+                                let source = match retry_action {
+                                    NativeRetryAction::Compact => Vec::new(),
+                                    _ => content,
+                                };
+                                (source, retry_action)
+                            }
+                            // The turn still needs a user message to belong to. An
+                            // empty one stays out of the transcript and the model's
+                            // context, like the one a slash command leaves.
+                            NativeRequest::BackgroundWake(notices) => {
+                                (Vec::new(), NativeRetryAction::BackgroundWake(notices))
+                            }
                         };
                         let path_style = thread.read(cx).project().read(cx).path_style(cx);
                         thread.update(cx, |thread, cx| {
@@ -3136,6 +3167,11 @@ impl NativeAgentConnection {
                             ThreadEvent::LoopGuardNotice(notice) => {
                                 acp_thread.update(cx, |thread, cx| {
                                     thread.push_loop_guard_notice(notice, cx)
+                                })?;
+                            }
+                            ThreadEvent::BackgroundWakeNotice(notice) => {
+                                acp_thread.update(cx, |thread, cx| {
+                                    thread.push_background_wake_notice(notice, cx)
                                 })?;
                             }
                             ThreadEvent::Plan(plan) => {
@@ -3872,6 +3908,18 @@ impl NativeAgentConnection {
             Some(NativeRetryAction::Compact) => self.0.update(cx, |agent, cx| {
                 agent.send_compact_command(message_id, session_id, cx)
             }),
+            Some(NativeRetryAction::BackgroundWake(notices)) => {
+                let agent = self.0.downgrade();
+                let prepared_session_id = session_id.clone();
+                self.run_turn(session_id, cx, move |thread, cx| {
+                    agent.update(cx, |agent, _cx| {
+                        agent.mark_execution_history_prepared(&prepared_session_id)
+                    })??;
+                    thread.update(cx, |thread, cx| {
+                        thread.resume_after_background_work(notices, cx)
+                    })
+                })
+            }
             None => self.run_turn(session_id, cx, |thread, cx| {
                 thread.update(cx, |thread, cx| thread.resume(cx))
             }),
@@ -13050,6 +13098,22 @@ mod internal_tests {
             fake.pending_completions_for(&model).is_empty(),
             "one finished task resumes the conversation once"
         );
+
+        // The transcript marks the resumption with a notice instead of showing
+        // the instruction as a message from the user.
+        acp_thread.read_with(cx, |thread, _| {
+            let entries = thread.entries();
+            assert!(entries.iter().any(|entry| matches!(
+                entry,
+                acp_thread::AgentThreadEntry::BackgroundWakeNotice(notice) if notice.finished == 1
+            )));
+            let shown_user_messages = entries
+                .iter()
+                .filter_map(|entry| entry.user_message())
+                .filter(|message| !message.content.source_blocks().is_empty())
+                .count();
+            assert_eq!(shown_user_messages, 1, "only the prompt the user sent");
+        });
     }
 
     /// The agent's checklist reaches the plan card that external agents' plans

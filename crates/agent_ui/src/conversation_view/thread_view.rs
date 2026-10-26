@@ -4978,6 +4978,32 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// Marks where background commands that finished while the agent was idle
+    /// resumed the conversation, styled like the line shown while the agent
+    /// works. The instruction the model is given is not shown.
+    fn render_background_wake_notice(
+        &self,
+        notice: &acp_thread::BackgroundWakeNotice,
+    ) -> AnyElement {
+        h_flex()
+            .py_1()
+            .px(rems_from_px(22_f32))
+            .gap_2()
+            .child(
+                h_flex().w_2().justify_center().child(
+                    Icon::new(IconName::Terminal)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(
+                Label::new(notice.label())
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .into_any_element()
+    }
+
     /// Renders the point where the loop guard stopped the model from repeating
     /// itself. The correction sent to the model is deliberately not shown as a
     /// message, so without this the transcript would show a response ending
@@ -7760,6 +7786,9 @@ impl ThreadView {
             AgentThreadEntry::LoopGuardNotice(notice) => {
                 self.render_loop_guard_notice(entry_ix, notice)
             }
+            AgentThreadEntry::BackgroundWakeNotice(notice) => {
+                self.render_background_wake_notice(notice)
+            }
         };
 
         let is_subagent_output = self.is_subagent()
@@ -9080,7 +9109,8 @@ impl ThreadView {
                 | AgentThreadEntry::Elicitation(_)
                 | AgentThreadEntry::AssistantMessage(_)
                 | AgentThreadEntry::ContextCompaction(_)
-                | AgentThreadEntry::LoopGuardNotice(_) => {}
+                | AgentThreadEntry::LoopGuardNotice(_)
+                | AgentThreadEntry::BackgroundWakeNotice(_) => {}
             }
         }
 

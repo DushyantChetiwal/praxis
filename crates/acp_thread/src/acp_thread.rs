@@ -520,6 +520,7 @@ pub enum AgentThreadEntry {
     Elicitation(ElicitationEntryId),
     ContextCompaction(ContextCompaction),
     LoopGuardNotice(LoopGuardNotice),
+    BackgroundWakeNotice(BackgroundWakeNotice),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1160,6 +1161,24 @@ impl LoopGuardNotice {
     }
 }
 
+/// Where background commands that finished while no turn was running resumed
+/// the conversation. The instruction the model is given is not shown, so this
+/// marks why the agent started talking again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackgroundWakeNotice {
+    /// How many background commands finished.
+    pub finished: usize,
+}
+
+impl BackgroundWakeNotice {
+    pub fn label(&self) -> SharedString {
+        match self.finished {
+            1 => "Background command finished".into(),
+            count => format!("{count} background commands finished").into(),
+        }
+    }
+}
+
 impl AgentThreadEntry {
     pub fn is_indented(&self) -> bool {
         match self {
@@ -1169,6 +1188,7 @@ impl AgentThreadEntry {
             Self::Elicitation(_) => false,
             Self::ContextCompaction(_) => false,
             Self::LoopGuardNotice(_) => false,
+            Self::BackgroundWakeNotice(_) => false,
         }
     }
 
@@ -1206,6 +1226,7 @@ impl AgentThreadEntry {
                     notice.explanation()
                 )
             }
+            Self::BackgroundWakeNotice(notice) => format!("--- {} ---\n\n", notice.label()),
         }
     }
 
@@ -4434,7 +4455,8 @@ impl AcpThread {
                 | AgentThreadEntry::Elicitation(_)
                 | AgentThreadEntry::AssistantMessage(_)
                 | AgentThreadEntry::ContextCompaction(_)
-                | AgentThreadEntry::LoopGuardNotice(_) => {}
+                | AgentThreadEntry::LoopGuardNotice(_)
+                | AgentThreadEntry::BackgroundWakeNotice(_) => {}
             }
         }
         false
@@ -4706,7 +4728,8 @@ impl AcpThread {
                 | AgentThreadEntry::Elicitation(_)
                 | AgentThreadEntry::AssistantMessage(_)
                 | AgentThreadEntry::ContextCompaction(_)
-                | AgentThreadEntry::LoopGuardNotice(_) => {}
+                | AgentThreadEntry::LoopGuardNotice(_)
+                | AgentThreadEntry::BackgroundWakeNotice(_) => {}
             }
         }
 
@@ -4729,7 +4752,8 @@ impl AcpThread {
                 | AgentThreadEntry::Elicitation(_)
                 | AgentThreadEntry::AssistantMessage(_)
                 | AgentThreadEntry::ContextCompaction(_)
-                | AgentThreadEntry::LoopGuardNotice(_) => {}
+                | AgentThreadEntry::LoopGuardNotice(_)
+                | AgentThreadEntry::BackgroundWakeNotice(_) => {}
             }
         }
 
@@ -4743,6 +4767,7 @@ impl AcpThread {
                 AgentThreadEntry::AssistantMessage(..)
                 | AgentThreadEntry::ContextCompaction(_)
                 | AgentThreadEntry::LoopGuardNotice(_)
+                | AgentThreadEntry::BackgroundWakeNotice(_)
                 | AgentThreadEntry::Elicitation(_) => continue,
                 AgentThreadEntry::ToolCall(..) => return true,
             }
@@ -5549,6 +5574,14 @@ impl AcpThread {
 
     pub fn push_loop_guard_notice(&mut self, notice: LoopGuardNotice, cx: &mut Context<Self>) {
         self.push_entry(AgentThreadEntry::LoopGuardNotice(notice), cx);
+    }
+
+    pub fn push_background_wake_notice(
+        &mut self,
+        notice: BackgroundWakeNotice,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_entry(AgentThreadEntry::BackgroundWakeNotice(notice), cx);
     }
 
     pub fn upsert_context_compaction_update(
