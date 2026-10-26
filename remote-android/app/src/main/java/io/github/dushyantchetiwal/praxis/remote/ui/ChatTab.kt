@@ -40,6 +40,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -264,7 +265,7 @@ private fun TurnStatus(ui: DeviceUi, vm: MainViewModel, generating: Boolean) {
         }
         return
     }
-    val error = summary.error?.takeIf { !generating } ?: return
+    val error = summary.error?.takeIf { !generating && it != ui.dismissedError } ?: return
     val scheme = MaterialTheme.colorScheme
     Card(
         colors = CardDefaults.cardColors(containerColor = scheme.errorContainer, contentColor = scheme.onErrorContainer),
@@ -274,7 +275,10 @@ private fun TurnStatus(ui: DeviceUi, vm: MainViewModel, generating: Boolean) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.ErrorOutline, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text(stringResource(R.string.turn_failed), style = MaterialTheme.typography.labelLarge)
+                Text(stringResource(R.string.turn_failed), style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+                IconButton(onClick = vm::dismissTurnError, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.action_dismiss), modifier = Modifier.size(18.dp))
+                }
             }
             Text(error.message, style = MaterialTheme.typography.bodySmall, maxLines = 4, overflow = TextOverflow.Ellipsis)
             Row {
@@ -1009,7 +1013,8 @@ private fun TranscriptEntry(entry: Entry, session: String?, expanded: MutableMap
 @Composable
 private fun EntryView(entry: Entry, expanded: Boolean, onToggle: () -> Unit, details: @Composable () -> Unit) {
     when (entry.role) {
-        "user", "assistant" -> MessageRow(entry, expanded, onToggle, details)
+        "user" -> UserMessageRow(entry, expanded, onToggle, details)
+        "assistant" -> MessageRow(entry, expanded, onToggle, details)
         "tool" -> ToolRow(entry, expanded, onToggle, details)
         "reasoning" -> ThinkingRow(expanded, onToggle, details)
         else -> if (entry.detailsPending) MessageRow(entry, expanded, onToggle, details) else Text(
@@ -1017,9 +1022,45 @@ private fun EntryView(entry: Entry, expanded: Boolean, onToggle: () -> Unit, det
             style = MaterialTheme.typography.bodySmall,
             fontStyle = FontStyle.Italic,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
+            textAlign = TextAlign.Start,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         )
+    }
+}
+
+// Your messages sit on the right, in the same bubble a queued message shows
+// in, and everything else on the left, so who said what is clear at a glance.
+@Composable
+private fun UserMessageRow(entry: Entry, expanded: Boolean, onToggle: () -> Unit, details: @Composable () -> Unit) {
+    val preview = remember(entry.text) { firstLine(entry.text).take(160) }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        Spacer(Modifier.width(48.dp))
+        Surface(
+            color = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            shape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp),
+        ) {
+            Column {
+                Row(
+                    Modifier.clickable(onClick = onToggle).padding(start = 14.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        preview.ifBlank { stringResource(R.string.chat_user_header) },
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Icon(
+                        if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                        contentDescription = stringResource(if (expanded) R.string.action_collapse else R.string.action_expand),
+                        modifier = Modifier.padding(start = 4.dp).size(20.dp),
+                    )
+                }
+                if (expanded) Box(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) { details() }
+            }
+        }
     }
 }
 

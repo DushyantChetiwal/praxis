@@ -18,6 +18,7 @@ import io.github.dushyantchetiwal.praxis.remote.data.TerminalTask
 import io.github.dushyantchetiwal.praxis.remote.data.ThreadItem
 import io.github.dushyantchetiwal.praxis.remote.data.ThreadView
 import io.github.dushyantchetiwal.praxis.remote.data.TranscriptHistory
+import io.github.dushyantchetiwal.praxis.remote.data.TurnError
 import io.github.dushyantchetiwal.praxis.remote.data.UpdateInfo
 import io.github.dushyantchetiwal.praxis.remote.data.WatchInfo
 import io.github.dushyantchetiwal.praxis.remote.data.WindowInfo
@@ -255,6 +256,10 @@ data class DeviceUi(
     val lastContact: Long = 0L,
     val liveTransport: Boolean = false,
     val banners: Map<String, Banner> = emptyMap(),
+    /** Banners the user dismissed; each stays hidden until its text changes or it clears. */
+    val dismissedBanners: Map<String, Banner> = emptyMap(),
+    /** The turn error the user dismissed, hidden until a different one arrives. */
+    val dismissedError: TurnError? = null,
     val stopping: Boolean = false,
     /** Whether the phone is asking how to stop while commands run in the background. */
     val confirmingStop: Boolean = false,

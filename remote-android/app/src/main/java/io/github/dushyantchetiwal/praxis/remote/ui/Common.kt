@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -128,7 +129,7 @@ fun OnlineDot(online: Boolean, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun BannerRow(banner: Banner, modifier: Modifier = Modifier) {
+fun BannerRow(banner: Banner, modifier: Modifier = Modifier, onDismiss: (() -> Unit)? = null) {
     val scheme = MaterialTheme.colorScheme
     Surface(
         color = if (banner.error) scheme.errorContainer else scheme.secondaryContainer,
@@ -136,14 +137,25 @@ fun BannerRow(banner: Banner, modifier: Modifier = Modifier) {
         shape = RoundedCornerShape(12.dp),
         modifier = modifier.fillMaxWidth(),
     ) {
-        Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        // The dismiss button brings its own touch padding.
+        val padding = if (onDismiss == null) {
+            PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+        } else {
+            PaddingValues(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)
+        }
+        Row(Modifier.padding(padding), verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 if (banner.error) Icons.Outlined.ErrorOutline else Icons.Outlined.Info,
                 contentDescription = null,
                 modifier = Modifier.size(18.dp),
             )
             Spacer(Modifier.width(10.dp))
-            Text(banner.text, style = MaterialTheme.typography.bodySmall)
+            Text(banner.text, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+            if (onDismiss != null) {
+                IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.action_dismiss), modifier = Modifier.size(18.dp))
+                }
+            }
         }
     }
 }

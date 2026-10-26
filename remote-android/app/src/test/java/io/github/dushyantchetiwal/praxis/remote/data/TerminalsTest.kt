@@ -14,11 +14,11 @@ class TerminalsTest {
             "session_id":"s","queued":0,"pending":[],
             "error":{"kind":"stream_error","message":"Connection to Anthropic's API was interrupted.","retryable":true},
             "retrying":{"attempt":3,"max_attempts":18,"message":"Can't reach api.anthropic.com."},
-            "compact":true,"terminals":true,"background_commands":2}}]}"""))
+            "dismiss_error":true,"compact":true,"terminals":true,"background_commands":2}}]}"""))
         val thread = status.windows.single().thread!!
         assertEquals(TurnError("stream_error", "Connection to Anthropic's API was interrupted.", true), thread.error)
         assertEquals(RetryInfo(3, 18, "Can't reach api.anthropic.com."), thread.retrying)
-        assertTrue(thread.compact && thread.terminals)
+        assertTrue(thread.dismissError && thread.compact && thread.terminals)
         assertEquals(2, thread.backgroundCommands)
 
         // An older Praxis sends none of these and the phone hides the controls.
@@ -26,7 +26,7 @@ class TerminalsTest {
         val plain = older.windows.single().thread!!
         assertNull(plain.error)
         assertNull(plain.retrying)
-        assertFalse(plain.compact || plain.terminals)
+        assertFalse(plain.dismissError || plain.compact || plain.terminals)
         assertEquals(0, plain.backgroundCommands)
     }
 
