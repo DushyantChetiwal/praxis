@@ -5296,7 +5296,10 @@ fn window_and_layout_page() -> SettingsPage {
                     organization_override: None,
                     json_path: Some("open_new_windows_maximized"),
                     pick: |settings_content| {
-                        settings_content.workspace.open_new_windows_maximized.as_ref()
+                        settings_content
+                            .workspace
+                            .open_new_windows_maximized
+                            .as_ref()
                     },
                     write: |settings_content, value, _| {
                         settings_content.workspace.open_new_windows_maximized = value;
@@ -7030,9 +7033,7 @@ fn panels_page() -> SettingsPage {
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("agent.starts_open"),
-                    pick: |settings_content| {
-                        settings_content.agent.as_ref()?.starts_open.as_ref()
-                    },
+                    pick: |settings_content| settings_content.agent.as_ref()?.starts_open.as_ref(),
                     write: |settings_content, value, _| {
                         settings_content.agent.get_or_insert_default().starts_open = value;
                     },

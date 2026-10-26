@@ -12665,7 +12665,10 @@ mod tests {
         let fallback = Bounds::new(point(px(0.), px(0.)), size(px(1536.), px(1095.)));
 
         assert_eq!(
-            new_window_bounds(Some((display, WindowBounds::Windowed(last))), Some(fallback)),
+            new_window_bounds(
+                Some((display, WindowBounds::Windowed(last))),
+                Some(fallback)
+            ),
             (Some(WindowBounds::Maximized(last)), Some(display)),
             "un-maximizing should return to the last window's size"
         );
