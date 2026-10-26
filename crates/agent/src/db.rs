@@ -97,10 +97,14 @@ pub struct DbThread {
     /// [`crate::sandboxing::ThreadSandboxGrants`].
     #[serde(default)]
     pub sandbox_grants: DbSandboxGrants,
-    /// The agent's checklist. Older saved threads have none and rebuild it
-    /// from their history.
+    /// The checklist as it was saved, for builds that keep it on its own.
+    /// Threads saved before `step_progress` existed rebuild the plan's steps
+    /// from it, and older ones from their history.
     #[serde(default)]
     pub checklist: Option<Vec<crate::PlanStep>>,
+    /// How far each top-level step of the plan has got, by step id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_progress: Option<std::collections::BTreeMap<String, crate::PlanStepStatus>>,
 }
 
 /// Serialized form of the sandbox permissions the user granted "for the rest of
@@ -188,6 +192,7 @@ impl SharedThread {
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
             checklist: None,
+            step_progress: None,
         }
     }
 
@@ -384,6 +389,7 @@ impl DbThread {
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
             checklist: None,
+            step_progress: None,
         })
     }
 }
@@ -1073,6 +1079,7 @@ mod tests {
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: DbSandboxGrants::default(),
             checklist: None,
+            step_progress: None,
         }
     }
 
@@ -1287,6 +1294,26 @@ mod tests {
         }"#;
         let db_thread: DbThread = serde_json::from_str(json).expect("Failed to deserialize");
         assert!(db_thread.checklist.is_none());
+        assert!(db_thread.step_progress.is_none());
+    }
+
+    #[test]
+    fn test_step_progress_roundtrips() {
+        let json = r#"{
+            "title": "Thread",
+            "messages": [],
+            "updated_at": "2024-01-01T00:00:00Z",
+            "step_progress": {"read-the-loader": "completed", "add-the-setting": "in_progress"}
+        }"#;
+        let db_thread: DbThread = serde_json::from_str(json).expect("Failed to deserialize");
+        let progress = db_thread.step_progress.clone().expect("saved progress");
+        assert_eq!(
+            progress.get("add-the-setting"),
+            Some(&crate::PlanStepStatus::InProgress)
+        );
+        let saved = serde_json::to_string(&db_thread).expect("Failed to serialize");
+        let reloaded: DbThread = serde_json::from_str(&saved).expect("Failed to deserialize");
+        assert_eq!(reloaded.step_progress, Some(progress));
     }
 
     #[gpui::test]

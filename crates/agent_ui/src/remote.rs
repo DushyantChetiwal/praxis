@@ -1135,6 +1135,10 @@ fn architect_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
 fn architect_thread_summary(thread: &agent::Thread) -> Option<Value> {
     let graph = thread.architect_status_graph()?;
     let run = thread.architect_run();
+    // A plan that is only a checklist is already in the plan summary.
+    if run.is_none() && graph.is_plain_checklist() {
+        return None;
+    }
     let running = run.is_some_and(agent::ArchitectRun::is_running);
     // Branches of a plan run side by side, so there can be several at once.
     let running_steps: Vec<Value> = run

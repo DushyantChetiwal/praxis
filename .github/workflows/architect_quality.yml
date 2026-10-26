@@ -346,6 +346,12 @@ jobs:
           cargo test --locked -p agent_ui --lib parallel_step_cards_follow_their_step_and_the_call
           cargo test --locked -p agent_ui --lib parallel_steps_summary_counts_finished_steps
 
+      - name: Test the checklist as a view of the plan
+        run: |
+          cargo test --locked -p agent --lib thread::tests::test_a_saved_checklist_becomes_the_plan -- --exact
+          cargo test --locked -p agent --lib thread::tests::test_the_checklist_is_the_plan -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_update_plan_shows_the_checklist_in_build_mode -- --exact
+
       - name: Test Praxis startup defaults
         run: |
           cargo test --locked -p workspace --lib tests::test_new_windows_open_maximized_at_the_last_size -- --exact

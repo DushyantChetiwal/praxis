@@ -714,17 +714,22 @@ async fn test_background_terminal_tool_result_notes_nudge_waits_and_review_the_c
     cx: &mut TestAppContext,
 ) {
     let ThreadTest { thread, .. } = setup(cx, TestModel::Fake).await;
-    thread.update(cx, |thread, _| {
-        thread.set_agent_checklist(vec![
-            crate::PlanStep {
-                step: "Run CI".into(),
-                status: crate::PlanStepStatus::InProgress,
-            },
-            crate::PlanStep {
-                step: "Write the docs".into(),
-                status: crate::PlanStepStatus::Pending,
-            },
-        ]);
+    thread.update(cx, |thread, cx| {
+        thread
+            .set_agent_checklist(
+                &[
+                    crate::PlanStep {
+                        step: "Run CI".into(),
+                        status: crate::PlanStepStatus::InProgress,
+                    },
+                    crate::PlanStep {
+                        step: "Write the docs".into(),
+                        status: crate::PlanStepStatus::Pending,
+                    },
+                ],
+                cx,
+            )
+            .expect("no plan is running");
         let first = thread.tool_result_notes("read_file");
         assert_eq!(first.len(), 1);
         assert!(first[0].starts_with("Checklist review"), "{first:?}");

@@ -2131,6 +2131,41 @@ impl From<&ThreadModel> for Option<DbLanguageModel> {
     }
 }
 
+/// Turns a checklist saved on its own, before it became a view of the plan,
+/// into the plan's step progress. Without a plan, the checklist becomes one;
+/// a plan that already existed keeps its steps and takes the statuses of the
+/// ones the checklist names.
+fn progress_from_saved_checklist(
+    graph: &mut Option<architect::ArchitectGraph>,
+    checklist: &[crate::PlanStep],
+) -> BTreeMap<String, crate::PlanStepStatus> {
+    if checklist.is_empty() {
+        return BTreeMap::default();
+    }
+    match graph {
+        Some(graph) if !graph.is_empty() => checklist
+            .iter()
+            .filter_map(|step| {
+                let node = graph
+                    .nodes
+                    .iter()
+                    .find(|node| node.title.trim().eq_ignore_ascii_case(step.step.trim()))?;
+                Some((node.id.0.clone(), step.status))
+            })
+            .collect(),
+        _ => {
+            let mut plan = architect::ArchitectGraph::default();
+            let titles: Vec<String> = checklist.iter().map(|step| step.step.clone()).collect();
+            let ids = plan.sync_checklist(&titles);
+            *graph = Some(plan);
+            ids.into_iter()
+                .zip(checklist)
+                .map(|(id, step)| (id.0, step.status))
+                .collect()
+        }
+    }
+}
+
 /// The parts of `to_db` that are worth saving while a message streams. Token
 /// usage and scroll position are left out because they can change on every
 /// streamed chunk or scroll, and some fields never change after creation.
@@ -2147,7 +2182,7 @@ pub(crate) struct StreamingSaveKey {
     thinking_effort: Option<String>,
     sandboxed_terminal_temp_dir: Option<PathBuf>,
     sandbox_grants: crate::db::DbSandboxGrants,
-    checklist: Vec<crate::PlanStep>,
+    step_progress: BTreeMap<String, crate::PlanStepStatus>,
 }
 
 pub struct Thread {
@@ -2209,9 +2244,12 @@ pub struct Thread {
     /// Set while this thread carries out one of several steps running side by
     /// side, so it cannot change a file another step has already changed.
     file_claim: Option<crate::FileClaim>,
-    /// The agent's checklist, kept here rather than read back from the
-    /// history so that compaction cannot lose it.
-    checklist: Vec<crate::PlanStep>,
+    /// How far each top-level step of the plan has got, by step id, as the
+    /// agent last reported it. The checklist is the plan's steps with these
+    /// statuses. Kept here rather than read back from the history so that
+    /// compaction cannot lose it, and apart from the plan so that reporting
+    /// progress never counts as revising the plan.
+    step_progress: BTreeMap<String, crate::PlanStepStatus>,
     /// Set when a turn ends normally while background commands still run,
     /// so that their completion resumes the conversation.
     background_wake_armed: bool,
@@ -2454,7 +2492,7 @@ impl Thread {
             ui_scroll_position: None,
             running_subagents: Vec::new(),
             file_claim: None,
-            checklist: Vec::new(),
+            step_progress: BTreeMap::default(),
             background_wake_armed: false,
             background_completions: None,
             consecutive_waits: 0,
@@ -2597,6 +2635,12 @@ impl Thread {
                     }
                 }
             }
+        }
+        // The checklist is a view of the plan, so a reopened conversation
+        // shows it as the plan now stands.
+        let checklist = self.agent_checklist();
+        if !checklist.is_empty() {
+            stream.send_checklist(&checklist);
         }
         rx
     }
@@ -2781,14 +2825,20 @@ impl Thread {
             .filter(|profile| profile.as_str() != builtin_profiles::MINIMAL)
             .unwrap_or_else(|| settings.default_profile.clone());
         let mut subagent_context = db_thread.subagent_context;
-        let checklist = db_thread.checklist.unwrap_or_else(|| {
-            let agent_messages = db_thread
-                .messages
-                .iter()
-                .rev()
-                .filter_map(|message| message.as_agent_message());
-            crate::latest_checklist(agent_messages)
-        });
+        // Threads saved before the checklist became a view of the plan kept it
+        // on its own, and older ones only in their history.
+        let saved_checklist = if db_thread.step_progress.is_some() {
+            Vec::new()
+        } else {
+            db_thread.checklist.unwrap_or_else(|| {
+                let agent_messages = db_thread
+                    .messages
+                    .iter()
+                    .rev()
+                    .filter_map(|message| message.as_agent_message());
+                crate::latest_checklist(agent_messages)
+            })
+        };
         if let Some(context) = &mut subagent_context {
             context.restore_kind(&profile_id);
         }
@@ -2871,6 +2921,9 @@ impl Thread {
                 );
             }
         }
+        let step_progress = db_thread.step_progress.unwrap_or_else(|| {
+            progress_from_saved_checklist(&mut architect_graph, &saved_checklist)
+        });
 
         Self {
             id,
@@ -2919,7 +2972,7 @@ impl Thread {
             }),
             running_subagents: Vec::new(),
             file_claim: None,
-            checklist,
+            step_progress,
             background_wake_armed: false,
             background_completions: None,
             consecutive_waits: 0,
@@ -3040,7 +3093,9 @@ impl Thread {
             session_mode: self.session_mode(),
             sandboxed_terminal_temp_dir: self.sandboxed_terminal_temp_dir.clone(),
             sandbox_grants: self.sandbox_grants.borrow().to_db(),
-            checklist: Some(self.checklist.clone()),
+            // Written for builds that still keep the checklist on its own.
+            checklist: Some(self.agent_checklist()),
+            step_progress: Some(self.step_progress.clone()),
         };
 
         cx.background_spawn(async move {
@@ -3067,7 +3122,7 @@ impl Thread {
             thinking_effort: self.thinking_effort.clone(),
             sandboxed_terminal_temp_dir: self.sandboxed_terminal_temp_dir.clone(),
             sandbox_grants: self.sandbox_grants.borrow().to_db(),
-            checklist: self.checklist.clone(),
+            step_progress: self.step_progress.clone(),
         }
     }
 
@@ -3122,13 +3177,76 @@ impl Thread {
             .map_or(Ok(()), |claim| claim.claim(path))
     }
 
-    /// The checklist as the agent last left it.
-    pub fn agent_checklist(&self) -> &[crate::PlanStep] {
-        &self.checklist
+    /// The checklist: the plan's top-level steps in the order they run, each
+    /// with how far it has got. Empty when there is no plan.
+    pub fn agent_checklist(&self) -> Vec<crate::PlanStep> {
+        let Some(graph) = self.architect_graph.as_ref() else {
+            return Vec::new();
+        };
+        graph
+            .execution_order()
+            .iter()
+            .filter_map(|id| graph.node(id))
+            .map(|node| crate::PlanStep {
+                step: node.title.clone(),
+                status: self.step_status(node),
+            })
+            .collect()
     }
 
-    pub(crate) fn set_agent_checklist(&mut self, checklist: Vec<crate::PlanStep>) {
-        self.checklist = checklist;
+    /// How far a top-level step of the plan has got. A run of the plan knows
+    /// best while it lasts; otherwise it is what the agent last reported, or
+    /// done when the step reported a result the last time it ran.
+    pub fn step_status(&self, node: &architect::ArchitectNode) -> crate::PlanStepStatus {
+        let in_step = |path: &architect::NodePath| path.0.first() == Some(&node.id);
+        if let Some(run) = self.architect_run.as_ref().filter(|run| run.is_running())
+            && run.running_steps().iter().any(|step| in_step(&step.path))
+        {
+            return crate::PlanStepStatus::InProgress;
+        }
+        if let Some(status) = self.step_progress.get(&node.id.0) {
+            return *status;
+        }
+        if node.result.is_some() {
+            crate::PlanStepStatus::Completed
+        } else {
+            crate::PlanStepStatus::Pending
+        }
+    }
+
+    /// Makes the plan's top-level steps match a checklist the agent wrote, and
+    /// records how far each has got. A conversation without a plan gets one,
+    /// so the checklist and the canvas always show the same steps.
+    pub(crate) fn set_agent_checklist(
+        &mut self,
+        checklist: &[crate::PlanStep],
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self.architect_run.as_ref().is_some_and(ArchitectRun::is_running) {
+            return Err("The plan is running, and its run keeps the checklist up to date. \
+                 Wait for it to finish or stop it before changing the steps."
+                .into());
+        }
+        if self.architect_graph.is_none() && checklist.is_empty() {
+            self.step_progress.clear();
+            cx.notify();
+            return Ok(());
+        }
+        let mut graph = self.architect_graph.clone().unwrap_or_default();
+        let titles: Vec<String> = checklist.iter().map(|step| step.step.clone()).collect();
+        let ids = graph.sync_checklist(&titles);
+        for (id, step) in ids.iter().zip(checklist) {
+            self.step_progress.insert(id.0.clone(), step.status);
+        }
+        self.step_progress
+            .retain(|id, _| graph.node(&architect::NodeId(id.clone())).is_some());
+        if self.architect_graph.is_none() {
+            self.set_architect_graph(Some(graph), cx);
+        } else {
+            self.update_architect_graph(|plan| *plan = graph, cx);
+        }
+        cx.notify();
+        Ok(())
     }
 
     #[cfg(test)]
@@ -3181,7 +3299,7 @@ impl Thread {
             if self.consecutive_waits >= 2 && (self.consecutive_waits - 2).is_multiple_of(3) {
                 notes.push(crate::repeated_wait_note(
                     self.consecutive_waits,
-                    &self.checklist,
+                    &self.agent_checklist(),
                 ));
             }
         } else if tool_name != TerminalStatusTool::NAME {
@@ -3194,7 +3312,7 @@ impl Thread {
             self.checklist_reviewed_this_turn = true;
         } else if !self.checklist_reviewed_this_turn {
             self.checklist_reviewed_this_turn = true;
-            notes.extend(crate::checklist_review_note(&self.checklist));
+            notes.extend(crate::checklist_review_note(&self.agent_checklist()));
         }
         notes
     }
@@ -5408,7 +5526,7 @@ impl Thread {
                 // The summary is all the model keeps of the history, so the
                 // checklist travels with it rather than depending on whether
                 // the summary happened to mention it.
-                let summary = match crate::checklist_for_summary(&this.checklist) {
+                let summary = match crate::checklist_for_summary(&this.agent_checklist()) {
                     Some(checklist) => format!("{summary}\n\n{checklist}"),
                     None => summary,
                 };
@@ -6404,9 +6522,13 @@ impl Thread {
         // capabilities that are mechanically read-only.
         let mode = self.session_mode.get();
 
-        // Plan and run tools mean nothing until a plan exists, so they stay out
-        // of the model's way until one is drafted.
-        let has_architect_state = self.architect_graph.is_some()
+        // Plan and run tools mean nothing until a plan has more to it than the
+        // checklist `update_plan` already keeps, so they stay out of the
+        // model's way until one is drafted or shaped on the canvas.
+        let has_architect_state = self
+            .architect_graph
+            .as_ref()
+            .is_some_and(|graph| !graph.is_plain_checklist())
             || self.architect_run.is_some()
             || !self.persistent_architect.archive.is_empty();
 
@@ -6638,11 +6760,13 @@ impl Thread {
             restricted: self.workspace_tool_access(cx) != WorkspaceToolAccess::Full,
             plan_mode: self.session_mode.get() == SessionMode::Plan,
             // Rebuilt every request, so it is never a stale copy of a plan the
-            // user has since reshaped.
+            // user has since reshaped. A plan that is only a checklist reaches
+            // the model through `update_plan` and the checklist notes instead,
+            // which keeps progress updates from changing the system prompt.
             plan: self
                 .architect_graph
                 .as_ref()
-                .filter(|graph| !graph.is_empty())
+                .filter(|graph| !graph.is_plain_checklist())
                 .map(|graph| graph.outline()),
         }
         .render(&self.templates)
@@ -7980,6 +8104,15 @@ impl ThreadEventStream {
     fn send_thinking(&self, text: &str) {
         self.sender
             .unbounded_send(Ok(ThreadEvent::AgentThinking(text.to_string())))
+            .ok();
+    }
+
+    fn send_checklist(&self, checklist: &[crate::PlanStep]) {
+        self.sender
+            .unbounded_send(Ok(ThreadEvent::Plan(acp_v2::PlanItems::new(
+                crate::AGENT_PLAN_ID,
+                crate::plan_entries(checklist),
+            ))))
             .ok();
     }
 
@@ -9517,6 +9650,89 @@ mod tests {
     use settings::LanguageModelProviderSetting;
     use std::sync::Arc;
 
+    fn plan_step(step: &str, status: crate::PlanStepStatus) -> crate::PlanStep {
+        crate::PlanStep {
+            step: step.into(),
+            status,
+        }
+    }
+
+    /// A checklist saved before it became a view of the plan becomes the
+    /// plan's steps, or marks the steps of a plan drafted alongside it.
+    #[test]
+    fn test_a_saved_checklist_becomes_the_plan() {
+        let saved = vec![
+            plan_step("Read the loader", crate::PlanStepStatus::Completed),
+            plan_step("Add the setting", crate::PlanStepStatus::InProgress),
+        ];
+        let mut graph = None;
+        let progress = progress_from_saved_checklist(&mut graph, &saved);
+        let graph = graph.expect("the checklist became a plan");
+        let titles: Vec<&str> = graph.nodes.iter().map(|node| node.title.as_str()).collect();
+        assert_eq!(titles, ["Read the loader", "Add the setting"]);
+        assert!(graph.is_plain_checklist());
+        assert_eq!(
+            progress.get("read-the-loader"),
+            Some(&crate::PlanStepStatus::Completed)
+        );
+        assert_eq!(
+            progress.get("add-the-setting"),
+            Some(&crate::PlanStepStatus::InProgress)
+        );
+
+        let mut drafted = architect::ArchitectGraph::default();
+        drafted.add_node(architect::ArchitectNode::new("load", "read the loader"));
+        drafted.add_node(architect::ArchitectNode::new("ship", "Ship it"));
+        let mut existing = Some(drafted.clone());
+        let progress = progress_from_saved_checklist(&mut existing, &saved);
+        assert_eq!(existing, Some(drafted), "a drafted plan keeps its steps");
+        assert_eq!(progress.len(), 1);
+        assert_eq!(progress.get("load"), Some(&crate::PlanStepStatus::Completed));
+
+        let mut none = None;
+        assert!(progress_from_saved_checklist(&mut none, &[]).is_empty());
+        assert!(none.is_none(), "no checklist, no plan");
+    }
+
+    /// Setting the checklist draws its steps as the plan, and while the plan
+    /// runs, the run says how far its steps have got.
+    #[gpui::test]
+    async fn test_the_checklist_is_the_plan(cx: &mut TestAppContext) {
+        let (thread, _event_stream, _fake) = setup_thread_for_test(cx).await;
+        let checklist = vec![
+            plan_step("Read the loader", crate::PlanStepStatus::Completed),
+            plan_step("Add the setting", crate::PlanStepStatus::Pending),
+        ];
+        cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread
+                    .set_agent_checklist(&checklist, cx)
+                    .expect("no plan is running");
+                assert_eq!(thread.agent_checklist(), checklist);
+                assert_eq!(thread.architect_graph().map(|graph| graph.nodes.len()), Some(2));
+
+                let path = architect::NodePath::root("add-the-setting".into());
+                thread.start_architect_run(
+                    path.clone(),
+                    "Add the setting".into(),
+                    Task::ready(()),
+                    cx,
+                );
+                thread.note_architect_run_position(path, "Add the setting".into(), 2, 1, cx);
+                assert_eq!(
+                    thread.agent_checklist()[1].status,
+                    crate::PlanStepStatus::InProgress,
+                    "the step the run is on is in progress"
+                );
+                assert!(
+                    thread.set_agent_checklist(&[], cx).is_err(),
+                    "a running plan keeps its steps"
+                );
+                assert_eq!(thread.agent_checklist().len(), 2);
+            });
+        });
+    }
+
     #[gpui::test]
     async fn test_tool_call_events_preserve_opaque_id_storage(cx: &mut TestAppContext) {
         let storage: Arc<str> = Arc::from("  call/雪:\"quoted\"\\opaque  ");
@@ -10727,7 +10943,9 @@ mod tests {
                     .messages
                     .push(user_text_message(ClientUserMessageId::new(), "old user"));
                 thread.messages.push(agent_text_message("old assistant"));
-                thread.set_agent_checklist(checklist.clone());
+                thread
+                    .set_agent_checklist(&checklist, cx)
+                    .expect("no plan is running");
             });
         });
 

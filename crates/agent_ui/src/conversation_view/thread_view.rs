@@ -4969,6 +4969,26 @@ impl ThreadView {
             })
             .child(Disclosure::new("plan_disclosure", plan_expanded))
             .child(title.flex_1())
+            // The Praxis Agent's checklist is its plan, which the canvas shows
+            // with room to reshape it.
+            .when(self.as_native_thread(cx).is_some(), |this| {
+                this.child(
+                    IconButton::new("open-plan-canvas", IconName::ListTree)
+                        .icon_size(IconSize::XSmall)
+                        .shape(ui::IconButtonShape::Square)
+                        .tooltip(|_window, cx| {
+                            Tooltip::for_action(
+                                "Open in Architect View",
+                                &crate::OpenArchitectView,
+                                cx,
+                            )
+                        })
+                        .on_click(cx.listener(|_, _, window, cx| {
+                            window.dispatch_action(crate::OpenArchitectView.boxed_clone(), cx);
+                            cx.stop_propagation();
+                        })),
+                )
+            })
             .child(
                 IconButton::new("dismiss-plan", IconName::Close)
                     .icon_size(IconSize::XSmall)

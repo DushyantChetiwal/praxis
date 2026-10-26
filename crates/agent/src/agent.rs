@@ -1135,6 +1135,7 @@ impl NativeAgent {
             cx.observe(&thread_handle, {
                 let acp_thread = acp_thread.downgrade();
                 let mut previous_mode = thread_handle.read(cx).session_mode();
+                let mut previous_checklist = thread_handle.read(cx).agent_checklist();
                 move |this, thread, cx| {
                     let mode = thread.read(cx).session_mode();
                     if mode != previous_mode {
@@ -1144,6 +1145,23 @@ impl NativeAgent {
                                 cx.emit(acp_thread::AcpThreadEvent::ModeUpdated(
                                     acp_v2::SessionConfigValueId::new(mode.id()),
                                 ));
+                            })
+                            .log_err();
+                    }
+                    // The checklist is a view of the plan, so it follows every
+                    // change to the plan, whether made on the canvas, by a run
+                    // or by a tool, and not only the agent's own updates.
+                    let checklist = thread.read(cx).agent_checklist();
+                    if checklist != previous_checklist {
+                        let entries = crate::plan_entries(&checklist);
+                        previous_checklist = checklist;
+                        acp_thread
+                            .update(cx, |acp_thread, cx| {
+                                acp_thread.upsert_plan_items(
+                                    acp_v2::PlanItems::new(crate::AGENT_PLAN_ID, entries),
+                                    None,
+                                    cx,
+                                );
                             })
                             .log_err();
                     }
@@ -13185,6 +13203,24 @@ mod internal_tests {
             assert_eq!(plan.stats().completed, 1);
         });
 
+        // The checklist is the plan, so a step renamed on the canvas is
+        // renamed in the conversation's checklist too.
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(
+                |graph| graph.nodes[2].title = "Run the test suite".into(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        acp_thread.read_with(cx, |thread, cx| {
+            let plan = thread.plan().expect("the checklist should still be visible");
+            assert_eq!(plan.entries.len(), 3);
+            assert_eq!(
+                plan.entries[2].content.read(cx).source(),
+                "Run the test suite"
+            );
+        });
+
         // The checklist is saved with the conversation, not only replayed.
         thread.read_with(cx, |thread, _| {
             assert_eq!(thread.agent_checklist().len(), 3)
@@ -13213,6 +13249,7 @@ mod internal_tests {
             assert_eq!(checklist.len(), 3);
             assert_eq!(checklist[1].step, "Add the retry setting");
             assert_eq!(checklist[1].status, crate::PlanStepStatus::InProgress);
+            assert_eq!(checklist[2].step, "Run the test suite");
         });
     }
 

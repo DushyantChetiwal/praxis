@@ -8,6 +8,7 @@
 //! This crate is deliberately free of UI and app dependencies so the graph can
 //! be stored alongside a thread and exercised in plain unit tests.
 
+mod checklist;
 mod edit;
 mod layout;
 mod run;

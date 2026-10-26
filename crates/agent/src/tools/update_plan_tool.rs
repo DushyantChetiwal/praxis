@@ -5,7 +5,6 @@ use language_model::LanguageModelToolResultContent;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use util::ResultExt as _;
 
 use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 
@@ -37,8 +36,13 @@ pub(super) const MAX_STEP_LENGTH: usize = 300;
 /// each other, carry them out at the same time with it; it keeps this checklist
 /// up to date for you.
 ///
-/// This checklist is separate from the Architect canvas. Use `draft_plan` only
-/// when the user wants to review, reshape or run a plan as a flowchart.
+/// The checklist and the Architect canvas are two views of one plan: the
+/// checklist lists the plan's steps in the order they run. Steps you list here
+/// appear on the canvas, and steps drafted or changed there appear here, so
+/// always send the steps as the checklist currently shows them, reworded or
+/// extended as needed. Steps the user has settled on the canvas stay even if
+/// you leave them out. Use `draft_plan` when steps need branches, rules, file
+/// assignments or a model of their own, or the user wants to run the plan.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct UpdatePlanToolInput {
@@ -137,7 +141,7 @@ fn validate(steps: &[PlanStep]) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn plan_entries(steps: &[PlanStep]) -> Vec<acp::PlanEntry> {
+pub(crate) fn plan_entries(steps: &[PlanStep]) -> Vec<acp::PlanEntry> {
     steps
         .iter()
         .map(|step| {
@@ -279,28 +283,32 @@ impl AgentTool for UpdatePlanTool {
                     error: format!("Failed to receive tool input: {error}"),
                 })?;
             validate(&input.steps).map_err(|error| UpdatePlanToolOutput::Error { error })?;
-            self.thread
-                .update(cx, |thread, _| {
-                    thread.set_agent_checklist(input.steps.clone())
+            // The plan may keep steps the checklist left out, so what is shown
+            // and reported is the checklist as the plan now has it.
+            let checklist = self
+                .thread
+                .update(cx, |thread, cx| {
+                    thread.set_agent_checklist(&input.steps, cx)?;
+                    Ok::<_, String>(thread.agent_checklist())
                 })
-                .log_err();
-            event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&input.steps));
-            Ok(summarize(&input.steps))
+                .map_err(|error| UpdatePlanToolOutput::Error {
+                    error: format!("The conversation this checklist belongs to is gone: {error}"),
+                })?
+                .map_err(|error| UpdatePlanToolOutput::Error { error })?;
+            event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&checklist));
+            Ok(summarize(&checklist))
         })
     }
 
     fn replay(
         &self,
-        input: Self::Input,
-        output: Self::Output,
-        event_stream: ToolCallEventStream,
+        _input: Self::Input,
+        _output: Self::Output,
+        _event_stream: ToolCallEventStream,
         _cx: &mut App,
     ) -> Result<()> {
-        // Replaying every update in order leaves the card showing the latest
-        // checklist, as it was when the conversation was saved.
-        if matches!(output, UpdatePlanToolOutput::Updated { .. }) {
-            event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&input.steps));
-        }
+        // Reopening a conversation shows the checklist as the plan has it now,
+        // not as each update in the history left it.
         Ok(())
     }
 }
@@ -408,7 +416,76 @@ mod tests {
         assert_eq!(plan.entries[1].content, "Add the setting");
         assert_eq!(plan.entries[1].status, acp::PlanEntryStatus::InProgress);
         thread.read_with(cx, |thread, _| {
-            assert_eq!(thread.agent_checklist(), checklist().steps.as_slice());
+            assert_eq!(thread.agent_checklist(), checklist().steps);
+            // The checklist is the plan: its steps are on the canvas.
+            let graph = thread.architect_graph().expect("the checklist made a plan");
+            let titles: Vec<&str> = graph.nodes.iter().map(|node| node.title.as_str()).collect();
+            assert_eq!(titles, ["Read the loader", "Add the setting"]);
+            assert!(graph.is_single_line());
+        });
+    }
+
+    /// A step changed on the canvas is changed in the checklist, and a step
+    /// the user settled there stays when the agent leaves it out.
+    #[gpui::test]
+    async fn the_checklist_follows_the_plan(cx: &mut gpui::TestAppContext) {
+        let (_connection, _agent, thread, _session) =
+            super::super::architect_run_tool::architect_tool_test_session(cx).await;
+        let tool = Arc::new(UpdatePlanTool::new(thread.downgrade()));
+        let (stream, _events) = ToolCallEventStream::test();
+        cx.update(|cx| tool.clone().run(ToolInput::resolved(checklist()), stream, cx))
+            .await
+            .expect("a valid checklist");
+
+        thread.update(cx, |thread, cx| {
+            thread.update_architect_graph(
+                |graph| {
+                    let node = &mut graph.nodes[1];
+                    node.title = "Add the retry setting".into();
+                    node.locked = true;
+                },
+                cx,
+            );
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(
+                thread.agent_checklist(),
+                vec![
+                    step("Read the loader", PlanStepStatus::Completed),
+                    step("Add the retry setting", PlanStepStatus::InProgress),
+                ],
+                "a renamed step keeps its progress"
+            );
+        });
+
+        let (stream, _events) = ToolCallEventStream::test();
+        let input = UpdatePlanToolInput {
+            steps: vec![
+                step("Read the loader", PlanStepStatus::Completed),
+                step("Write the docs", PlanStepStatus::Pending),
+            ],
+        };
+        let output = cx
+            .update(|cx| tool.run(ToolInput::resolved(input), stream, cx))
+            .await
+            .expect("a valid checklist");
+        assert!(matches!(
+            output,
+            UpdatePlanToolOutput::Updated {
+                completed: 1,
+                total: 3,
+            }
+        ));
+        thread.read_with(cx, |thread, _| {
+            let steps: Vec<String> = thread
+                .agent_checklist()
+                .into_iter()
+                .map(|step| step.step)
+                .collect();
+            assert_eq!(
+                steps,
+                ["Read the loader", "Write the docs", "Add the retry setting"]
+            );
         });
     }
 
@@ -443,10 +520,10 @@ mod tests {
         );
     }
 
-    /// Reopening a conversation replays its tool calls, which has to bring the
-    /// checklist back, but a refused update never showed one.
+    /// Reopening a conversation shows the checklist as the plan has it now,
+    /// so replaying an old update shows nothing of its own.
     #[gpui::test]
-    async fn replay_restores_only_accepted_checklists(cx: &mut gpui::TestAppContext) {
+    async fn replay_leaves_the_checklist_to_the_plan(cx: &mut gpui::TestAppContext) {
         let (stream, mut events) = ToolCallEventStream::test();
         let accepted = UpdatePlanToolOutput::Updated {
             completed: 1,
@@ -455,18 +532,7 @@ mod tests {
         let tool = UpdatePlanTool::new(WeakEntity::new_invalid());
         cx.update(|cx| tool.replay(checklist(), accepted, stream, cx))
             .expect("replay");
-        assert_eq!(next_plan(&mut events).await.entries.len(), 2);
-
-        let (stream, mut events) = ToolCallEventStream::test();
-        let refused = UpdatePlanToolOutput::Error {
-            error: "refused".into(),
-        };
-        cx.update(|cx| tool.replay(checklist(), refused, stream, cx))
-            .expect("replay");
-        assert!(
-            !matches!(events.try_recv(), Ok(Ok(ThreadEvent::Plan(_)))),
-            "a refused update shows nothing"
-        );
+        assert!(!matches!(events.try_recv(), Ok(Ok(ThreadEvent::Plan(_)))));
     }
 
     #[test]

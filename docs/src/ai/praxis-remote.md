@@ -1,6 +1,6 @@
 # Praxis Remote
 
-Praxis Remote lets you follow and steer the agent on your computer from your Android phone. You can send it messages, answer its permission prompts, switch between Plan, Build and Architect, start or stop a plan, open earlier conversations, and read or download your project's files. The phone never edits files itself: ask the agent, and the agent on your computer makes the change.
+Praxis Remote lets you follow and steer the agent on your computer from your Android phone. You can send it messages, answer its permission prompts, switch between Plan and Build, start or stop a plan, open earlier conversations, and read or download your project's files. The phone never edits files itself: ask the agent, and the agent on your computer makes the change.
 
 Your phone and your computer never connect directly, and nothing on your computer listens on the network. Both talk to GitHub, through a secret gist in your own GitHub account, and everything they exchange there is end-to-end encrypted.
 
@@ -22,7 +22,7 @@ Praxis must be running on the computer for the phone to pair or to reach it. The
 
 - **Chat:** read the active conversation as it happens, send messages (queued if the agent is busy), stop a turn, and start a new thread. Tap **Thinking** to expand thinking supplied by the model provider. It only appears when the provider sends it; Praxis does not generate a substitute.
 - **Approvals:** every tool call waiting for permission appears as a card with the same choices Praxis offers, including requests from a plan step's own thread.
-- **Modes:** switch the conversation between Plan, Build and Architect.
+- **Modes:** switch the conversation between Plan and Build.
 - **Architect:** see the whole plan's step count, including nested plans, and start or stop a run. Live step conversations appear below the root conversation, including their provider-supplied thinking. Parallel steps have separate sections. The label **Visit 9 · 5 steps in plan** separates execution visits from the whole plan's step count. Retries and loops can make the visit number exceed the plan total, which also includes nested-plan containers. This is not a progress fraction.
 - **Threads:** open an earlier conversation from the same project.
 - **Files:** browse and read the project's files, and download any of them, one at a time, with the download button next to a file or in the file viewer. On Android 10 and later downloads go to **Downloads/Praxis**; on older versions the phone asks where to save. Files up to 5 MB can be downloaded, and a large one takes a few minutes because it travels through GitHub in 32 KB pieces. Files covered by the project's `private_files` setting are never sent. There is no editing.
