@@ -340,6 +340,12 @@ jobs:
           cargo test --locked -p agent --lib internal_tests::test_a_thread_saved_with_the_minimal_profile_reopens_with_the_default -- --exact
           cargo test --locked -p agent --lib internal_tests::test_a_terminal_task_exit_is_announced -- --exact
 
+      - name: Test live parallel step cards
+        run: |
+          cargo test --locked -p acp_thread --lib tests::test_parallel_steps_follow_each_progress_update -- --exact
+          cargo test --locked -p agent_ui --lib parallel_step_cards_follow_their_step_and_the_call
+          cargo test --locked -p agent_ui --lib parallel_steps_summary_counts_finished_steps
+
       - name: Test Praxis startup defaults
         run: |
           cargo test --locked -p workspace --lib tests::test_new_windows_open_maximized_at_the_last_size -- --exact

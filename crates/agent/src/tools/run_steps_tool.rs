@@ -1,6 +1,11 @@
+use acp_thread::{
+    ParallelStep as StepProgress, ParallelStepStatus, SubagentSessionInfo, parallel_steps_meta,
+};
 use agent_client_protocol::schema::v2 as acp_v2;
 use anyhow::Result;
 use collections::HashMap;
+use futures::StreamExt as _;
+use futures::stream::FuturesUnordered;
 use gpui::{App, SharedString, Task, WeakEntity};
 use language_model::{LanguageModelToolResultContent, LanguageModelToolUseInput};
 use schemars::JsonSchema;
@@ -264,6 +269,33 @@ fn step_message(step: &str, instructions: &str, all_steps: &[String]) -> String 
     )
 }
 
+/// Each step's progress, as the conversation shows it, once the steps have
+/// finished.
+fn finished_progress(steps: &[StepOutcome]) -> Vec<StepProgress> {
+    steps
+        .iter()
+        .map(|outcome| StepProgress {
+            step: outcome.step.clone(),
+            status: if outcome.completed {
+                ParallelStepStatus::Done
+            } else {
+                ParallelStepStatus::NotFinished
+            },
+            // Every step runs in a new agent, so its whole conversation is the
+            // step's.
+            session: outcome
+                .session_id
+                .clone()
+                .map(|session_id| SubagentSessionInfo {
+                    session_id,
+                    message_start_index: 0,
+                    message_end_index: None,
+                }),
+            error: (!outcome.completed).then(|| outcome.output.clone()),
+        })
+        .collect()
+}
+
 fn outcome_text(steps: &[StepOutcome]) -> String {
     steps
         .iter()
@@ -358,13 +390,30 @@ impl AgentTool for RunStepsTool {
             self.store_checklist(&checklist, cx);
             event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&checklist));
 
+            // Each step's progress is reported on this call as it changes, so
+            // the conversation can show every step's agent at work instead of
+            // a single call that says nothing until all of them finish.
+            let mut progress: Vec<StepProgress> = names
+                .iter()
+                .map(|name| StepProgress {
+                    step: name.clone(),
+                    status: ParallelStepStatus::Running,
+                    session: None,
+                    error: None,
+                })
+                .collect();
             let claims = FileClaims::default();
-            let mut running = Vec::new();
-            for (name, step) in names.iter().zip(&input.steps) {
+            let mut running = FuturesUnordered::new();
+            for (index, (name, step)) in names.iter().zip(&input.steps).enumerate() {
                 let message = step_message(name, &step.instructions, &names);
                 let created = cx.update(|cx| {
                     let subagent = self.environment.create_subagent(name.clone(), None, cx)?;
                     subagent.set_file_claim(claims.claim_for(name), cx);
+                    progress[index].session = Some(SubagentSessionInfo {
+                        session_id: subagent.id(),
+                        message_start_index: subagent.num_entries(cx),
+                        message_end_index: None,
+                    });
                     event_stream.subagent_spawned(subagent.id());
                     anyhow::Ok(subagent)
                 });
@@ -372,38 +421,62 @@ impl AgentTool for RunStepsTool {
                     let send = subagent.send(message, cx);
                     (subagent, send)
                 });
-                let name = name.clone();
                 running.push(async move {
                     match started {
-                        Ok((subagent, send)) => (name, Some(subagent.id()), send.await),
-                        Err(error) => (name, None, Err(error)),
+                        Ok((subagent, send)) => (index, Some(subagent), send.await),
+                        Err(error) => (index, None, Err(error)),
                     }
                 });
             }
-            let finished = futures::future::join_all(running).await;
+            event_stream.update_fields(|update| update.meta(parallel_steps_meta(&progress)));
 
-            let mut outcomes = Vec::new();
-            for (name, session_id, result) in finished {
-                let (completed, output) = match result {
-                    Ok(output) => (true, output),
-                    Err(error) => (false, format!("{error:#}")),
+            let mut results: Vec<Option<(Option<acp_v2::SessionId>, Result<String, String>)>> =
+                vec![None; names.len()];
+            while let Some((index, subagent, result)) = running.next().await {
+                let name = &names[index];
+                let result = result.map_err(|error| format!("{error:#}"));
+                let step = &mut progress[index];
+                if let (Some(subagent), Some(session)) = (&subagent, step.session.as_mut()) {
+                    session.message_end_index =
+                        cx.update(|cx| Some(subagent.num_entries(cx).saturating_sub(1)));
+                }
+                let status = match &result {
+                    Ok(_) => {
+                        step.status = ParallelStepStatus::Done;
+                        PlanStepStatus::Completed
+                    }
+                    Err(error) => {
+                        step.status = ParallelStepStatus::NotFinished;
+                        step.error = Some(error.clone());
+                        PlanStepStatus::Pending
+                    }
                 };
-                let status = if completed {
-                    PlanStepStatus::Completed
-                } else {
-                    PlanStepStatus::Pending
-                };
-                set_status(&mut checklist, &name, status);
-                outcomes.push(StepOutcome {
-                    changed_files: claims.files_for(&name),
-                    step: name,
-                    completed,
-                    session_id,
-                    output,
-                });
+                event_stream.update_fields(|update| update.meta(parallel_steps_meta(&progress)));
+                set_status(&mut checklist, name, status);
+                self.store_checklist(&checklist, cx);
+                event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&checklist));
+                results[index] = Some((subagent.map(|subagent| subagent.id()), result));
             }
-            self.store_checklist(&checklist, cx);
-            event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&checklist));
+
+            let outcomes: Vec<StepOutcome> = names
+                .into_iter()
+                .zip(results)
+                .map(|(name, result)| {
+                    let (session_id, result) =
+                        result.unwrap_or_else(|| (None, Err("The step did not run.".into())));
+                    let (completed, output) = match result {
+                        Ok(output) => (true, output),
+                        Err(error) => (false, error),
+                    };
+                    StepOutcome {
+                        changed_files: claims.files_for(&name),
+                        step: name,
+                        completed,
+                        session_id,
+                        output,
+                    }
+                })
+                .collect();
             let text = outcome_text(&outcomes);
             event_stream.update_fields(|update| update.content(vec![text.into()]));
             Ok(RunStepsToolOutput::Finished {
@@ -423,7 +496,12 @@ impl AgentTool for RunStepsTool {
         if let RunStepsToolOutput::Finished { steps, checklist } = output {
             event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&checklist));
             let text = outcome_text(&steps);
-            event_stream.update_fields(|update| update.content(vec![text.into()]));
+            let progress = finished_progress(&steps);
+            event_stream.update_fields(|update| {
+                update
+                    .content(vec![text.into()])
+                    .meta(parallel_steps_meta(&progress))
+            });
         }
         Ok(())
     }
@@ -612,16 +690,26 @@ mod tests {
         };
 
         let mut plans = Vec::new();
+        let mut progress_updates = Vec::new();
         let mut spawned = 0;
         while let Ok(Ok(event)) = events.try_recv() {
             match event {
                 ThreadEvent::Plan(plan) => plans.push(plan),
                 ThreadEvent::SubagentSpawned(_) => spawned += 1,
+                ThreadEvent::ToolCallUpdate(acp_thread::ToolCallUpdate::V2(update)) => {
+                    let meta = update.meta.value().cloned();
+                    let progress = acp_thread::parallel_steps_from_meta(&meta);
+                    if !progress.is_empty() {
+                        progress_updates.push(progress);
+                    }
+                }
                 _ => {}
             }
         }
         assert_eq!(spawned, 3);
-        assert_eq!(plans.len(), 2);
+        // The checklist changes once when the steps start and again as each
+        // one finishes, rather than all at once at the end.
+        assert_eq!(plans.len(), 4);
         let statuses = |plan: &acp_v2::PlanItems| {
             plan.entries
                 .iter()
@@ -633,12 +721,53 @@ mod tests {
             vec![acp_v2::PlanEntryStatus::InProgress; 3]
         );
         assert_eq!(
-            statuses(&plans[1]),
+            statuses(&plans[3]),
             vec![
                 acp_v2::PlanEntryStatus::Completed,
                 acp_v2::PlanEntryStatus::Completed,
                 acp_v2::PlanEntryStatus::Pending,
             ]
+        );
+
+        // Every step's agent is reported as soon as the steps start, then
+        // each step's progress as it finishes.
+        assert_eq!(progress_updates.len(), 4);
+        let progress_statuses =
+            |progress: &[StepProgress]| progress.iter().map(|step| step.status).collect::<Vec<_>>();
+        assert_eq!(
+            progress_statuses(&progress_updates[0]),
+            vec![ParallelStepStatus::Running; 3]
+        );
+        let started_sessions: Vec<_> = progress_updates[0]
+            .iter()
+            .map(|step| {
+                step.session
+                    .as_ref()
+                    .map(|session| session.session_id.clone())
+            })
+            .collect();
+        assert_eq!(
+            started_sessions,
+            ["Alpha", "Beta", "Gamma"]
+                .map(|name| Some(acp_v2::SessionId::new(format!("session-{name}"))))
+                .to_vec()
+        );
+        let last = &progress_updates[3];
+        assert_eq!(
+            progress_statuses(last),
+            vec![
+                ParallelStepStatus::Done,
+                ParallelStepStatus::Done,
+                ParallelStepStatus::NotFinished,
+            ]
+        );
+        assert!(last[0].error.is_none());
+        assert!(
+            last[2]
+                .error
+                .as_ref()
+                .is_some_and(|error| error.contains("step failed")),
+            "a step that did not finish says why"
         );
         let checklist_statuses: Vec<_> = checklist.iter().map(|entry| entry.status).collect();
         assert_eq!(

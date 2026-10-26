@@ -1662,12 +1662,9 @@ impl ConversationView {
             .read(cx)
             .entries()
             .iter()
-            .filter_map(|entry| match entry {
-                AgentThreadEntry::ToolCall(call) => call
-                    .subagent_session_info
-                    .as_ref()
-                    .map(|i| i.session_id.clone()),
-                _ => None,
+            .flat_map(|entry| match entry {
+                AgentThreadEntry::ToolCall(call) => call.subagent_session_ids().cloned().collect(),
+                _ => Vec::new(),
             })
             .collect::<Vec<_>>();
 

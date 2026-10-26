@@ -9,9 +9,10 @@ use agent_client_protocol::schema::v2 as acp_v2;
 use std::{cell::RefCell, path::Path};
 
 use acp_thread::{
-    Elicitation, ElicitationEntryId, ElicitationStatus, ForegroundActivity,
-    SandboxAuthorizationDetails, SandboxFallbackAuthorizationDetails, SandboxNotAppliedReason,
-    SubmissionId, SubmissionResponse, SubmissionState, ToolCallLocation, decode_path_escapes,
+    Elicitation, ElicitationEntryId, ElicitationStatus, ForegroundActivity, ParallelStep,
+    ParallelStepStatus, SandboxAuthorizationDetails, SandboxFallbackAuthorizationDetails,
+    SandboxNotAppliedReason, SubagentSessionInfo, SubmissionId, SubmissionResponse,
+    SubmissionState, ToolCallLocation, decode_path_escapes,
 };
 use agent::{
     SandboxStatusKey, SandboxStatusRefresh, SkillLoadingIssue, SkillLoadingIssueKind,
@@ -735,6 +736,75 @@ impl ToolCallLayout {
             ToolCallLayout::Embedded => "embedded",
             ToolCallLayout::Floating => "floating",
         }
+    }
+}
+
+/// What the agent reports when the user stops an agent's turn.
+const USER_CANCELED: &str = "User canceled";
+
+/// What one subagent card shows: the agent a `spawn_agent` call started, or
+/// the agent carrying out one of the steps a call runs side by side.
+struct SubagentCard<'a> {
+    /// Keys the card's expanded state and keeps its element ids apart from
+    /// every other card's.
+    id: acp_v2::ToolCallId,
+    /// Shown until the agent's conversation has a title of its own.
+    label: SharedString,
+    status: ToolCallStatus,
+    canceled: bool,
+    error: Option<SharedString>,
+    session: Option<&'a SubagentSessionInfo>,
+}
+
+/// How a step's card shows the step, given the state of the call running it:
+/// the status to show, and whether the step was stopped.
+fn parallel_step_card_status(
+    step: &ParallelStep,
+    call_status: ToolCallStatus,
+) -> (ToolCallStatus, bool) {
+    match step.status {
+        ParallelStepStatus::Done => (ToolCallStatus::Completed, false),
+        ParallelStepStatus::NotFinished => {
+            if call_status == ToolCallStatus::Canceled
+                || step.error.as_deref() == Some(USER_CANCELED)
+            {
+                (ToolCallStatus::Canceled, true)
+            } else {
+                (ToolCallStatus::Failed, false)
+            }
+        }
+        ParallelStepStatus::Running => match call_status {
+            ToolCallStatus::Canceled => (ToolCallStatus::Canceled, true),
+            ToolCallStatus::Failed | ToolCallStatus::Rejected => (ToolCallStatus::Failed, false),
+            ToolCallStatus::Completed => (ToolCallStatus::Completed, false),
+            ToolCallStatus::Pending
+            | ToolCallStatus::WaitingForConfirmation
+            | ToolCallStatus::InProgress => (ToolCallStatus::InProgress, false),
+        },
+    }
+}
+
+/// The line above a call's step cards, such as "Running 3 steps in parallel
+/// · 1 of 3 done".
+fn parallel_steps_summary(steps: &[ParallelStep], call_status: ToolCallStatus) -> String {
+    let total = steps.len();
+    let done = steps
+        .iter()
+        .filter(|step| step.status == ParallelStepStatus::Done)
+        .count();
+    let running = matches!(
+        call_status,
+        ToolCallStatus::Pending
+            | ToolCallStatus::WaitingForConfirmation
+            | ToolCallStatus::InProgress
+    ) && steps
+        .iter()
+        .any(|step| step.status == ParallelStepStatus::Running);
+    let verb = if running { "Running" } else { "Ran" };
+    if done == total || (running && done == 0) {
+        format!("{verb} {total} steps in parallel")
+    } else {
+        format!("{verb} {total} steps in parallel · {done} of {total} done")
     }
 }
 
@@ -2672,7 +2742,7 @@ impl ThreadView {
                     entry.diffs().next().is_some()
                         || matches!(
                             entry,
-                            AgentThreadEntry::ToolCall(tool_call) if tool_call.is_subagent()
+                            AgentThreadEntry::ToolCall(tool_call) if tool_call.runs_subagents()
                         )
                 })
             });
@@ -4256,18 +4326,30 @@ impl ThreadView {
         let tool_calls_by_session: HashMap<_, _> = entries
             .iter()
             .enumerate()
-            .filter_map(|(entry_ix, entry)| {
+            .flat_map(|(entry_ix, entry)| {
                 let AgentThreadEntry::ToolCall(tool_call) = entry else {
-                    return None;
+                    return Vec::new();
                 };
-                let info = tool_call.subagent_session_info.as_ref()?;
-                let summary_text = tool_call.label.read(cx).source().to_string();
-                let subagent_summary = if summary_text.is_empty() {
-                    SharedString::from("Subagent")
-                } else {
-                    SharedString::from(summary_text)
-                };
-                Some((info.session_id.clone(), (subagent_summary, entry_ix)))
+                let mut sessions = Vec::new();
+                if let Some(info) = tool_call.subagent_session_info.as_ref() {
+                    let summary_text = tool_call.label.read(cx).source().to_string();
+                    let subagent_summary = if summary_text.is_empty() {
+                        SharedString::from("Subagent")
+                    } else {
+                        SharedString::from(summary_text)
+                    };
+                    sessions.push((info.session_id.clone(), (subagent_summary, entry_ix)));
+                }
+                // A step's agent is named after its step.
+                for step in &tool_call.parallel_steps {
+                    if let Some(session) = step.session.as_ref() {
+                        sessions.push((
+                            session.session_id.clone(),
+                            (SharedString::from(step.step.clone()), entry_ix),
+                        ));
+                    }
+                }
+                sessions
             })
             .collect();
 
@@ -9495,11 +9577,18 @@ impl ThreadView {
         )));
 
         div().w_full().id(container_id).map(|this| {
-            if tool_call.is_subagent() {
+            if !tool_call.parallel_steps.is_empty() {
+                this.child(self.render_parallel_steps_tool_call(
+                    active_session_id,
+                    tool_call,
+                    focus_handle,
+                    window,
+                    cx,
+                ))
+            } else if tool_call.is_subagent() {
                 this.child(
                     self.render_subagent_tool_call(
                         active_session_id,
-                        entry_ix,
                         tool_call,
                         tool_call
                             .subagent_session_info
@@ -12099,25 +12188,35 @@ impl ThreadView {
     fn render_subagent_tool_call(
         &self,
         active_session_id: &acp_v2::SessionId,
-        entry_ix: usize,
         tool_call: &ToolCall,
         subagent_session_id: Option<acp_v2::SessionId>,
         focus_handle: &FocusHandle,
         window: &Window,
         cx: &Context<Self>,
     ) -> Div {
-        let subagent_thread_view = subagent_session_id.and_then(|session_id| {
-            self.server_view
-                .upgrade()
-                .and_then(|server_view| server_view.read(cx).as_connected())
-                .and_then(|connected| connected.threads.get(&session_id))
-        });
+        let subagent_thread_view = subagent_session_id
+            .as_ref()
+            .and_then(|session_id| self.subagent_thread_view(session_id, cx));
 
+        let status = tool_call.status();
+        let card = SubagentCard {
+            id: tool_call.id.clone(),
+            label: tool_call.label.read(cx).source().clone(),
+            status,
+            canceled: matches!(status, ToolCallStatus::Canceled)
+                || tool_call.content().iter().any(|c| match c {
+                    ToolCallContent::ContentBlock { block, .. } => {
+                        block.text_content(cx) == Some(USER_CANCELED)
+                    }
+                    _ => false,
+                }),
+            error: self.subagent_error_message(&status, tool_call, cx),
+            session: tool_call.subagent_session_info.as_ref(),
+        };
         let content = self.render_subagent_card(
             active_session_id,
-            entry_ix,
             subagent_thread_view,
-            tool_call,
+            card,
             focus_handle,
             window,
             cx,
@@ -12126,12 +12225,83 @@ impl ThreadView {
         v_flex().mx_5().my_1p5().gap_3().child(content)
     }
 
+    fn subagent_thread_view<'a>(
+        &self,
+        session_id: &acp_v2::SessionId,
+        cx: &'a App,
+    ) -> Option<&'a Entity<ThreadView>> {
+        self.server_view
+            .upgrade()
+            .and_then(|server_view| server_view.read(cx).as_connected())
+            .and_then(|connected| connected.threads.get(session_id))
+    }
+
+    /// A call that runs several steps side by side, shown as one card per
+    /// step's agent, each following its agent while it works.
+    fn render_parallel_steps_tool_call(
+        &self,
+        active_session_id: &acp_v2::SessionId,
+        tool_call: &ToolCall,
+        focus_handle: &FocusHandle,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Div {
+        let call_status = tool_call.status();
+        let steps = &tool_call.parallel_steps;
+        let cards = steps.iter().enumerate().map(|(index, step)| {
+            let (status, canceled) = parallel_step_card_status(step, call_status);
+            let card = SubagentCard {
+                id: acp_v2::ToolCallId::new(format!("{}#step-{index}", tool_call.id.0)),
+                label: step.step.clone().into(),
+                status,
+                canceled,
+                error: step
+                    .error
+                    .clone()
+                    .filter(|_| !canceled)
+                    .map(SharedString::from),
+                session: step.session.as_ref(),
+            };
+            let thread_view = step
+                .session
+                .as_ref()
+                .and_then(|session| self.subagent_thread_view(&session.session_id, cx));
+            self.render_subagent_card(
+                active_session_id,
+                thread_view,
+                card,
+                focus_handle,
+                window,
+                cx,
+            )
+        });
+
+        v_flex()
+            .mx_5()
+            .my_1p5()
+            .gap_1p5()
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .child(
+                        Icon::new(IconName::ListTree)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new(parallel_steps_summary(steps, call_status))
+                            .size(LabelSize::Custom(self.tool_name_font_size()))
+                            .color(Color::Muted),
+                    ),
+            )
+            .children(cards)
+    }
+
     fn render_subagent_card(
         &self,
         active_session_id: &acp_v2::SessionId,
-        entry_ix: usize,
         thread_view: Option<&Entity<ThreadView>>,
-        tool_call: &ToolCall,
+        card: SubagentCard<'_>,
         focus_handle: &FocusHandle,
         window: &Window,
         cx: &Context<Self>,
@@ -12158,29 +12328,23 @@ impl ThreadView {
         let is_expanded = self
             .entry_view_state
             .read(cx)
-            .is_tool_call_expanded(&tool_call.id);
+            .is_tool_call_expanded(&card.id);
         let files_changed = changed_buffers.len();
         let diff_stats = DiffStats::all_files(changed_buffers, cx);
 
         let is_running = matches!(
-            tool_call.status(),
+            card.status,
             ToolCallStatus::Pending
                 | ToolCallStatus::InProgress
                 | ToolCallStatus::WaitingForConfirmation
         );
 
         let is_failed = matches!(
-            tool_call.status(),
+            card.status,
             ToolCallStatus::Failed | ToolCallStatus::Rejected
         );
 
-        let is_cancelled = matches!(tool_call.status(), ToolCallStatus::Canceled)
-            || tool_call.content().iter().any(|c| match c {
-                ToolCallContent::ContentBlock { block, .. } => {
-                    block.text_content(cx) == Some("User canceled")
-                }
-                _ => false,
-            });
+        let is_cancelled = card.canceled;
 
         let model_name = thread_view
             .and_then(|view| view.read(cx).as_native_thread(cx))
@@ -12193,16 +12357,15 @@ impl ThreadView {
             .as_ref()
             .and_then(|t| t.read(cx).title())
             .filter(|t| !t.is_empty());
-        let tool_call_label = tool_call.label.read(cx).source().to_string();
-        let has_tool_call_label = !tool_call_label.is_empty();
+        let has_card_label = !card.label.is_empty();
 
-        let has_title = thread_title.is_some() || has_tool_call_label;
+        let has_title = thread_title.is_some() || has_card_label;
         let has_no_title_or_canceled = !has_title || is_failed || is_cancelled;
 
         let title: SharedString = if let Some(thread_title) = thread_title {
             thread_title
-        } else if !tool_call_label.is_empty() {
-            tool_call_label.into()
+        } else if has_card_label {
+            card.label.clone()
         } else if is_cancelled {
             "Subagent Canceled".into()
         } else if is_failed {
@@ -12211,9 +12374,10 @@ impl ThreadView {
             "Spawning Agent…".into()
         };
 
-        let card_header_id = format!("subagent-header-{}", entry_ix);
-        let status_icon = format!("status-icon-{}", entry_ix);
-        let diff_stat_id = format!("subagent-diff-{}", entry_ix);
+        let card_id = card.id.0.clone();
+        let card_header_id = format!("subagent-header-{card_id}");
+        let status_icon = format!("status-icon-{card_id}");
+        let diff_stat_id = format!("subagent-diff-{card_id}");
 
         let icon = h_flex().w_4().justify_center().child(if is_running {
             SpinnerLabel::new()
@@ -12258,7 +12422,7 @@ impl ThreadView {
             "Click to Preview"
         };
 
-        let error_message = self.subagent_error_message(&tool_call.status(), tool_call, cx);
+        let error_message = card.error.clone();
 
         v_flex()
             .w_full()
@@ -12279,7 +12443,7 @@ impl ThreadView {
                     })
                     .child(
                         h_flex()
-                            .id(format!("subagent-title-{}", entry_ix))
+                            .id(format!("subagent-title-{card_id}"))
                             .px_1()
                             .min_w_0()
                             .size_full()
@@ -12376,12 +12540,12 @@ impl ThreadView {
                                         ),
                                     )
                                     .on_click(cx.listener({
-                                        let tool_call_id = tool_call.id.clone();
+                                        let card_id = card.id.clone();
                                         move |this, _, window, cx| {
                                             let expanded =
                                                 this.entry_view_state.update(cx, |state, _cx| {
-                                                    state.toggle_tool_call_expansion(&tool_call_id);
-                                                    state.is_tool_call_expanded(&tool_call_id)
+                                                    state.toggle_tool_call_expansion(&card_id);
+                                                    state.is_tool_call_expanded(&card_id)
                                                 });
                                             this.refresh_thread_search(window, cx);
                                             telemetry::event!("Subagent Toggled", expanded);
@@ -12392,7 +12556,7 @@ impl ThreadView {
                     )
                     .when(is_running && subagent_session_id.is_some(), |buttons| {
                         buttons.child(
-                            IconButton::new(format!("stop-subagent-{}", entry_ix), IconName::Stop)
+                            IconButton::new(format!("stop-subagent-{card_id}"), IconName::Stop)
                                 .icon_size(IconSize::Small)
                                 .icon_color(Color::Error)
                                 .tooltip(Tooltip::text("Stop Subagent"))
@@ -12423,7 +12587,7 @@ impl ThreadView {
                 let nav_session_id = tv_session_id.clone();
 
                 let fullscreen_toggle = h_flex()
-                    .id(entry_ix)
+                    .id(format!("subagent-fullscreen-{card_id}"))
                     .py_1()
                     .w_full()
                     .justify_center()
@@ -12469,7 +12633,7 @@ impl ThreadView {
                     this.when(is_expanded, |this| {
                         this.child(self.render_subagent_expanded_content(
                             thread_view,
-                            tool_call,
+                            &card,
                             window,
                             cx,
                         ))
@@ -12491,7 +12655,7 @@ impl ThreadView {
     fn render_subagent_expanded_content(
         &self,
         thread_view: &Entity<ThreadView>,
-        tool_call: &ToolCall,
+        card: &SubagentCard<'_>,
         window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -12500,10 +12664,11 @@ impl ThreadView {
         let subagent_view = thread_view.read(cx);
         let session_id = subagent_view.thread.read(cx).session_id().clone();
 
-        let is_canceled_or_failed = matches!(
-            tool_call.status(),
-            ToolCallStatus::Canceled | ToolCallStatus::Failed | ToolCallStatus::Rejected
-        );
+        let is_canceled_or_failed = card.canceled
+            || matches!(
+                card.status,
+                ToolCallStatus::Canceled | ToolCallStatus::Failed | ToolCallStatus::Rejected
+            );
 
         let editor_bg = cx.theme().colors().editor_background;
         let overlay = {
@@ -12521,7 +12686,7 @@ impl ThreadView {
 
         let entries = subagent_view.thread.read(cx).entries();
         let total_entries = entries.len();
-        let mut entry_range = if let Some(info) = tool_call.subagent_session_info.as_ref() {
+        let mut entry_range = if let Some(info) = card.session {
             info.message_start_index
                 ..info
                     .message_end_index
@@ -12569,10 +12734,7 @@ impl ThreadView {
                     // Include the tool call id so the same subagent session
                     // rendered in multiple parent cards gets distinct element
                     // ids for its inlined entries (avoids duplicate a11y ids).
-                    .id(format!(
-                        "subagent-entries-{}-{}",
-                        session_id, tool_call.id.0
-                    ))
+                    .id(format!("subagent-entries-{}-{}", session_id, card.id.0))
                     .track_scroll(&scroll_handle)
                     .children(rendered_entries),
             )
@@ -12592,7 +12754,7 @@ impl ThreadView {
                 if let ToolCallContent::ContentBlock { block, .. } = content {
                     if let Some(source) = block.text_content(cx).filter(|source| !source.is_empty())
                     {
-                        if source == "User canceled" {
+                        if source == USER_CANCELED {
                             return None;
                         } else {
                             return Some(SharedString::from(source));
@@ -14532,6 +14694,81 @@ mod tests {
     use std::sync::Once;
     use util::path;
     use workspace::MultiWorkspace;
+
+    fn parallel_step(status: ParallelStepStatus, error: Option<&str>) -> ParallelStep {
+        ParallelStep {
+            step: "Update the docs".into(),
+            status,
+            session: None,
+            error: error.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn parallel_step_cards_follow_their_step_and_the_call() {
+        use ParallelStepStatus::{Done, NotFinished, Running};
+        let card =
+            |status, error, call| parallel_step_card_status(&parallel_step(status, error), call);
+
+        assert_eq!(
+            card(Running, None, ToolCallStatus::InProgress),
+            (ToolCallStatus::InProgress, false)
+        );
+        assert_eq!(
+            card(Done, None, ToolCallStatus::InProgress),
+            (ToolCallStatus::Completed, false),
+            "a step that finished shows as done while the others run"
+        );
+        assert_eq!(
+            card(
+                NotFinished,
+                Some("tests failed"),
+                ToolCallStatus::InProgress
+            ),
+            (ToolCallStatus::Failed, false)
+        );
+        assert_eq!(
+            card(NotFinished, Some(USER_CANCELED), ToolCallStatus::InProgress),
+            (ToolCallStatus::Canceled, true),
+            "a step stopped from its card shows as stopped, not failed"
+        );
+        assert_eq!(
+            card(Running, None, ToolCallStatus::Canceled),
+            (ToolCallStatus::Canceled, true),
+            "stopping the turn stops every step that was still running"
+        );
+    }
+
+    #[test]
+    fn parallel_steps_summary_counts_finished_steps() {
+        use ParallelStepStatus::{Done, NotFinished, Running};
+        let steps = |statuses: &[ParallelStepStatus]| {
+            statuses
+                .iter()
+                .map(|status| parallel_step(*status, None))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            parallel_steps_summary(&steps(&[Running, Running]), ToolCallStatus::InProgress),
+            "Running 2 steps in parallel"
+        );
+        assert_eq!(
+            parallel_steps_summary(
+                &steps(&[Done, Running, Running]),
+                ToolCallStatus::InProgress
+            ),
+            "Running 3 steps in parallel · 1 of 3 done"
+        );
+        assert_eq!(
+            parallel_steps_summary(&steps(&[Done, Done]), ToolCallStatus::Completed),
+            "Ran 2 steps in parallel"
+        );
+        assert_eq!(
+            parallel_steps_summary(&steps(&[Done, NotFinished]), ToolCallStatus::Completed),
+            "Ran 2 steps in parallel · 1 of 2 done"
+        );
+    }
 
     #[gpui::test]
     fn compact_terminal_wait_selects_one_active_timer(_cx: &mut gpui::TestAppContext) {
