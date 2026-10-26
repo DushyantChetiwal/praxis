@@ -273,6 +273,8 @@ data class ThreadSummary(
     val imageInput: Boolean = false,
     /** The error that ended the last turn, until the next one starts. */
     val error: TurnError? = null,
+    /** Whether dismissing [error] on the phone also clears it on the computer. */
+    val dismissError: Boolean = false,
     /** A failed request the agent is waiting to retry. */
     val retrying: RetryInfo? = null,
     val compact: Boolean = false,
@@ -530,6 +532,7 @@ private fun parseThreadSummary(o: JSONObject): ThreadSummary = ThreadSummary(
     error = o.obj("error")?.let { e ->
         e.str("message")?.let { message -> TurnError(e.str("kind").orEmpty(), message, e.bool("retryable")) }
     },
+    dismissError = o.bool("dismiss_error"),
     retrying = o.obj("retrying")?.let { r ->
         RetryInfo(r.int("attempt") ?: 0, r.int("max_attempts") ?: 0, r.str("message"))
     },

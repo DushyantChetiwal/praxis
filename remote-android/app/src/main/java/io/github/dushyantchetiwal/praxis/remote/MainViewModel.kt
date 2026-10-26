@@ -837,7 +837,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun setBanner(key: String, text: String?, error: Boolean = false) {
-        edit { copy(banners = if (text == null) banners - key else banners + (key to Banner(text, error))) }
+        edit {
+            if (text == null) copy(banners = banners - key, dismissedBanners = dismissedBanners - key)
+            else copy(banners = banners + (key to Banner(text, error)))
+        }
+    }
+
+    /** Hides a banner until its text changes, or until it clears and comes back. */
+    fun dismissBanner(key: String) {
+        val banner = d.banners[key] ?: return
+        edit { copy(dismissedBanners = dismissedBanners + (key to banner)) }
     }
 
     // -----------------------------------------------------------------------
@@ -972,6 +981,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val previousThread = d.currentWindow()?.thread
         edit { copy(status = status) }
         val currentThread = d.currentWindow()?.thread
+        // A dismissed error stays hidden only while it is the one being reported.
+        if (d.dismissedError != null && (currentThread?.sessionId != previousThread?.sessionId || currentThread?.error != d.dismissedError)) {
+            edit { copy(dismissedError = null) }
+        }
         if (currentThread?.sessionId != previousThread?.sessionId) {
             invalidateQuestionRequests()
             edit { copy(models = ModelsState(), queue = QueueState(), question = QuestionState(), questionList = QuestionListState(), answeredQuestions = emptySet()) }
@@ -1401,6 +1414,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             edit { copy(retrying = true) }
             act("retry", windowArgs { put("session_id", session) }, str(R.string.label_could_not_retry))
             edit { copy(retrying = false) }
+        }
+    }
+
+    /** Hides the error that ended the last turn, and clears it on the computer when it can. */
+    fun dismissTurnError() {
+        val summary = d.currentWindow()?.thread ?: return
+        val error = summary.error ?: return
+        edit { copy(dismissedError = error) }
+        val session = summary.sessionId ?: return
+        if (!summary.dismissError) return
+        viewModelScope.launch {
+            act("dismiss_error", windowArgs { put("session_id", session) }, str(R.string.label_could_not_dismiss))
         }
     }
 

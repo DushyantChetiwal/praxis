@@ -333,6 +333,7 @@
     <string name="toast_stopping_agent_only">Stopping the agent. Background commands keep running.</string>
     <string name="label_could_not_retry">Couldn’t retry</string>
     <string name="label_could_not_compact">Couldn’t compact</string>
+    <string name="label_could_not_dismiss">Couldn’t dismiss the error on the computer</string>
     <string name="label_could_not_stop_command">Couldn’t stop the command</string>
     <string name="stop_choice_title">Stop the agent?</string>
     <plurals name="stop_choice_body">

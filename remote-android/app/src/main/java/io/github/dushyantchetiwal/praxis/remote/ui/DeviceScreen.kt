@@ -350,7 +350,7 @@ private fun DeviceHeader(state: AppState, ui: DeviceUi, vm: MainViewModel) {
     val context = LocalContext.current
     val now = rememberNow(15_000L)
     val device = ui.device
-    val banners = buildList {
+    val banners = buildList<Banner> {
         if (device != null && !ui.isOnline(now)) {
             val seen = device.lastSeen?.let { stringResource(R.string.banner_offline_seen, relativeTime(context, it, now)) }
                 ?: stringResource(R.string.banner_offline_never)
@@ -358,9 +358,9 @@ private fun DeviceHeader(state: AppState, ui: DeviceUi, vm: MainViewModel) {
         } else if (device != null && ui.stateApplied && !ui.snapshotFresh(now)) {
             add(Banner(stringResource(R.string.banner_waiting), error = false))
         }
-        addAll(ui.banners.values)
     }
-    if (banners.isEmpty() && state.update == null) return
+    val reported = ui.banners.filter { (key, banner) -> ui.dismissedBanners[key] != banner }
+    if (banners.isEmpty() && reported.isEmpty() && state.update == null) return
     Column(
         Modifier
             .fillMaxWidth()
@@ -369,6 +369,7 @@ private fun DeviceHeader(state: AppState, ui: DeviceUi, vm: MainViewModel) {
     ) {
         state.update?.let { UpdateBanner(it, onDismiss = vm::dismissUpdate) }
         banners.forEach { BannerRow(it) }
+        reported.forEach { (key, banner) -> BannerRow(banner, onDismiss = { vm.dismissBanner(key) }) }
     }
 }
 
