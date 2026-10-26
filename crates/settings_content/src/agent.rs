@@ -383,7 +383,8 @@ pub struct AgentSettingsContent {
     /// Default: automatic
     pub thinking_display: Option<ThinkingBlockDisplay>,
     /// Whether clicking the stop button on a running terminal tool should also cancel the agent's generation.
-    /// Note that this only applies to the stop button, not to ctrl+c inside the terminal.
+    /// Note that this only applies to the stop button, not to ctrl+c inside the terminal, and not
+    /// to commands the agent left running in the background.
     ///
     /// Default: true
     pub cancel_generation_on_terminal_stop: Option<bool>,
@@ -407,13 +408,13 @@ pub struct AgentSettingsContent {
     /// Per-tool permission rules for granular control over which tool actions
     /// require confirmation.
     ///
-    /// The global `default` applies when no tool-specific rules match.
-    /// For external agent servers (e.g. Claude Agent) that define their own
-    /// permission modes, "deny" and "confirm" still take precedence — the
-    /// external agent's permission system is only used when Zed would allow
-    /// the action. Per-tool regex patterns (`always_allow`, `always_deny`,
-    /// `always_confirm`) match against the tool's text input (command, path,
-    /// URL, etc.).
+    /// Every tool call is allowed until these rules say otherwise. The global
+    /// `default` applies when no tool-specific rules match. Per-tool regex
+    /// patterns (`always_allow`, `always_deny`, `always_confirm`) match
+    /// against the tool's text input (command, path, URL, etc.). Once any rule
+    /// can deny or confirm, the agent also asks before writing settings or
+    /// skills, or following a symlink out of the project, so it cannot lift
+    /// the rules itself.
     pub tool_permissions: Option<ToolPermissionsContent>,
 
     /// Persistent sandbox permission grants for agent-run terminal commands.
@@ -1050,9 +1051,11 @@ pub struct SandboxPermissionsContent {
     /// sandbox. This is the model-facing "off switch": when true, the sandboxed
     /// terminal tool is not exposed and the system prompt omits the sandbox
     /// section, so the model uses the plain `terminal` tool. On Windows, WSL
-    /// sandbox setup is skipped. Distinct from the model-requested
-    /// `unsandboxed: true` escape approved "once" or "for this thread".
-    /// Default: false
+    /// sandbox setup is skipped. Set it to false to sandbox agent commands,
+    /// which brings back the prompts for network and write access. Distinct
+    /// from the model-requested `unsandboxed: true` escape approved "once" or
+    /// "for this thread".
+    /// Default: true
     pub allow_unsandboxed: Option<bool>,
 
     /// Directory subtrees that sandboxed terminal commands may always write
@@ -1086,7 +1089,7 @@ pub struct SandboxPermissionsContent {
 pub struct ToolPermissionsContent {
     /// Global default permission when no tool-specific rules match.
     /// Individual tools can override this with their own default.
-    /// Default: confirm
+    /// Default: allow
     #[serde(alias = "default_mode")]
     pub default: Option<ToolPermissionMode>,
 
@@ -1151,12 +1154,12 @@ pub struct ToolRegexRule {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ToolPermissionMode {
-    /// Auto-approve without prompting.
+    /// Auto-approve without prompting (default behavior).
+    #[default]
     Allow,
     /// Auto-reject with an error.
     Deny,
-    /// Always prompt for confirmation (default behavior).
-    #[default]
+    /// Always prompt for confirmation.
     Confirm,
 }
 

@@ -1234,21 +1234,23 @@
     ],
     // Permission rules for tool actions.
     //
-    // The "default" setting applies when no tool-specific rules match.
-    // For external agents that define their own permission modes,
-    // "deny" and "confirm" still take precedence — the external agent's
-    // permission system is only used when Zed would allow the action.
+    // Every tool call is allowed until these rules say otherwise. The
+    // "default" setting applies when no tool-specific rules match.
     //
     // Per-tool regex patterns ("tools" below) match against tool input text
     // (commands, paths, URLs, etc.). For `copy_path` and `move_path`,
     // patterns are matched independently against each path (source and
     // destination).
+    //
+    // Once any rule can deny or confirm, the agent also asks before writing
+    // settings or skills, or following a symlink out of the project, so it
+    // cannot lift the rules itself.
     "tool_permissions": {
       // Global default permission when no tool-specific rules match.
-      // "allow" - Auto-approve without prompting
+      // "allow" - Auto-approve without prompting (default)
       // "deny" - Auto-reject
-      // "confirm" - Always prompt (default)
-      "default": "confirm",
+      // "confirm" - Always prompt
+      "default": "allow",
       // Per-tool permission rules. Regex patterns match against tool input text.
       // The per-tool "default" also applies to MCP tools.
       // Each tool can have its own default and regex patterns.
@@ -1273,6 +1275,13 @@
         // },
       },
     },
+    // The OS sandbox for agent terminal commands.
+    "sandbox_permissions": {
+      // Run agent terminal commands without a sandbox. Set this to false to
+      // sandbox them; the agent then asks before reaching the network or
+      // writing outside the project, unless a grant below already covers it.
+      "allow_unsandboxed": true,
+    },
     // When enabled, agent edits will be displayed in single-file editors for review
     "single_file_review": false,
     // Settings for automatic agent context compaction, which summarizes earlier
@@ -1294,13 +1303,11 @@
 
     // When enabled, show voting thumbs for feedback on agent edits.
     "enable_feedback": true,
-    // Build mode runs under "build". Which tools a thread may use is decided by
+    // Threads run under "build". Which tools a thread may use is decided by
     // its mode — Plan permits only reviewed read capabilities — so the profile
     // behind it has no filtering left to do.
     "default_profile": "build",
     "profiles": {
-      // Applied automatically by Build mode; it is not selectable from the
-      // profile picker.
       "build": {
         "name": "Build",
         // Holds nothing back, and keeps holding nothing back as tools are added.
@@ -1395,8 +1402,7 @@
           "spawn_agent": true,
         },
       },
-      // Applied automatically to Architect step threads; it is not selectable
-      // or editable from the profile picker.
+      // Applied automatically to Architect step threads.
       "architect_step": {
         "name": "Architect Step",
         // The thread behind a single step of a plan. It settles what that one
@@ -1469,7 +1475,8 @@
     // Default: auto
     "thinking_display": "auto",
     // Whether clicking the stop button on a running terminal tool should also cancel the agent's generation.
-    // Note that this only applies to the stop button, not to ctrl+c inside the terminal.
+    // Note that this only applies to the stop button, not to ctrl+c inside the terminal, and not to
+    // commands the agent left running in the background.
     //
     // Default: true
     "cancel_generation_on_terminal_stop": true,

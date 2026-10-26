@@ -249,6 +249,27 @@ impl ToolCapability {
     }
 }
 
+/// The tools a thread may still use while its project is untrusted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkspaceToolAccess {
+    /// The project is trusted, so nothing is withheld.
+    Full,
+    /// Only tools that are safe in an untrusted project.
+    RestrictedOnly,
+    /// No tools at all.
+    None,
+}
+
+impl WorkspaceToolAccess {
+    fn allows(self, tool: &dyn AnyAgentTool) -> bool {
+        match self {
+            Self::Full => true,
+            Self::RestrictedOnly => tool.allow_in_restricted_mode(),
+            Self::None => false,
+        }
+    }
+}
+
 pub const ARCHITECT_STATE_VERSION: u32 = 1;
 pub const MAX_ARCHITECT_EVENTS: usize = 1024;
 /// Only draft graph snapshots are trimmed; run snapshots retain their own graph,
@@ -951,6 +972,7 @@ pub enum Message {
     Resume,
     Compaction(CompactionInfo),
     LoopGuard(LoopGuardInfo),
+    BackgroundWake(BackgroundWakeInfo),
 }
 
 /// A correction sent after the loop guard stopped the model from repeating
@@ -964,6 +986,45 @@ pub struct LoopGuardInfo {
     pub repeated: SharedString,
     /// The corrective instruction the model is given.
     pub instruction: String,
+}
+
+/// Background commands that finished while no turn was running, which resumed
+/// the conversation. Like `LoopGuard`, it reaches the model as a user
+/// instruction but is kept apart from `User`, so the transcript shows a notice
+/// instead of a message the user never typed.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct BackgroundWakeInfo {
+    /// One line for each finished command, as the model is told about it.
+    pub notices: Vec<String>,
+}
+
+impl BackgroundWakeInfo {
+    fn to_request(&self) -> LanguageModelRequestMessage {
+        let notices = self
+            .notices
+            .iter()
+            .map(|notice| format!("- {notice}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        LanguageModelRequestMessage {
+            role: Role::User,
+            content: vec![
+                format!(
+                    "Praxis resumed this conversation because background work finished:\n\
+                 {notices}\n\nContinue from where you left off."
+                )
+                .into(),
+            ],
+            cache: false,
+            reasoning_details: None,
+        }
+    }
+
+    fn notice(&self) -> acp_thread::BackgroundWakeNotice {
+        acp_thread::BackgroundWakeNotice {
+            finished: self.notices.len(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -1015,6 +1076,7 @@ impl Message {
             // Historical notices remain readable, but must not reintroduce
             // retired automatic instructions into a resumed conversation.
             Message::LoopGuard(_) => vec![],
+            Message::BackgroundWake(info) => vec![info.to_request()],
             Message::Resume => vec![LanguageModelRequestMessage {
                 role: Role::User,
                 content: vec!["Continue where you left off".into()],
@@ -1040,14 +1102,17 @@ impl Message {
                 "## Context Compaction (Completed)\n\n".into()
             }
             Message::LoopGuard(info) => format!("--- Loop Guard: {} ---\n", info.repeated),
+            Message::BackgroundWake(info) => format!("--- {} ---\n", info.notice().label()),
         }
     }
 
     pub fn role(&self) -> Role {
         match self {
-            Message::User(_) | Message::Resume | Message::Compaction(_) | Message::LoopGuard(_) => {
-                Role::User
-            }
+            Message::User(_)
+            | Message::Resume
+            | Message::Compaction(_)
+            | Message::LoopGuard(_)
+            | Message::BackgroundWake(_) => Role::User,
             Message::Agent(_) => Role::Assistant,
         }
     }
@@ -1696,6 +1761,7 @@ pub enum ThreadEvent {
     ContextCompaction(acp_thread::ContextCompaction),
     ContextCompactionUpdate(acp_thread::ContextCompactionUpdate),
     LoopGuardNotice(acp_thread::LoopGuardNotice),
+    BackgroundWakeNotice(acp_thread::BackgroundWakeNotice),
     Plan(acp_v2::PlanItems),
     Stop(acp_v2::StopReason),
 }
@@ -2122,9 +2188,6 @@ pub struct Thread {
     initial_project_snapshot: Shared<Task<Option<Arc<ProjectSnapshot>>>>,
     pub(crate) context_server_registry: Entity<ContextServerRegistry>,
     profile_id: AgentProfileId,
-    /// Whether `profile_id` was downgraded to `minimal` at thread start because
-    /// the workspace is restricted. Used purely to surface a warning in the UI.
-    profile_downgraded_for_restricted_workspace: bool,
     project_context: Entity<ProjectContext>,
     pub(crate) templates: Arc<Templates>,
     model: ThreadModel,
@@ -2326,8 +2389,7 @@ impl Thread {
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = AgentSettings::get_global(cx);
-        let (profile_id, profile_downgraded_for_restricted_workspace) =
-            Self::profile_for_restricted_workspace(settings.default_profile.clone(), &project, cx);
+        let profile_id = settings.default_profile.clone();
         let enable_thinking = settings
             .default_model
             .as_ref()
@@ -2376,7 +2438,6 @@ impl Thread {
             },
             context_server_registry,
             profile_id,
-            profile_downgraded_for_restricted_workspace,
             project_context,
             templates,
             model,
@@ -2422,8 +2483,6 @@ impl Thread {
         self.thinking_effort = parent.thinking_effort.clone();
         self.summarization_model = parent.summarization_model.clone();
         self.profile_id = parent.profile_id.clone();
-        self.profile_downgraded_for_restricted_workspace =
-            parent.profile_downgraded_for_restricted_workspace;
     }
 
     fn apply_model_selection(
@@ -2513,6 +2572,9 @@ impl Thread {
                 Message::Resume => {}
                 Message::LoopGuard(info) => {
                     stream.send_loop_guard_notice(info.kind, info.repeated.clone());
+                }
+                Message::BackgroundWake(info) => {
+                    stream.send_background_wake_notice(info.notice());
                 }
                 Message::Compaction(info) => {
                     let compaction_id = acp_thread::ContextCompactionId(
@@ -2712,6 +2774,11 @@ impl Thread {
         let settings = AgentSettings::get_global(cx);
         let profile_id = db_thread
             .profile
+            // Threads started before their project was trusted used to be
+            // pinned to `minimal`, which offers no tools, for good. Only the
+            // default profile setting can still choose `minimal`, and it is
+            // what this falls back to.
+            .filter(|profile| profile.as_str() != builtin_profiles::MINIMAL)
             .unwrap_or_else(|| settings.default_profile.clone());
         let mut subagent_context = db_thread.subagent_context;
         let checklist = db_thread.checklist.unwrap_or_else(|| {
@@ -2832,7 +2899,6 @@ impl Thread {
             initial_project_snapshot: Task::ready(db_thread.initial_project_snapshot).shared(),
             context_server_registry,
             profile_id,
-            profile_downgraded_for_restricted_workspace: false,
             project_context,
             templates,
             model,
@@ -3071,6 +3137,7 @@ impl Thread {
     }
 
     fn background_task_finished(&mut self, cx: &mut Context<Self>) {
+        cx.emit(TerminalTaskExited);
         if self.running_turn.is_none()
             && self.background_wake_armed
             && self.terminal_tasks.has_unreported_completions()
@@ -3988,48 +4055,29 @@ impl Thread {
         &self.profile_id
     }
 
-    /// Whether this thread's profile was downgraded to `minimal` at thread start
-    /// because the workspace is restricted.
-    pub fn profile_was_downgraded(&self) -> bool {
-        self.profile_downgraded_for_restricted_workspace
-    }
-
-    /// Computes the profile a thread should start with, given the user's chosen
-    /// profile. In a restricted workspace, the built-in `write`/`ask` profiles
-    /// are downgraded to `minimal` — but only when both the chosen profile and
-    /// `minimal` are unmodified, shipped defaults, so we never override a user's
-    /// custom or customized profiles.
+    /// How far this thread's project being untrusted limits its tools.
     ///
-    /// Returns the (possibly downgraded) profile and whether a downgrade
-    /// happened.
-    fn profile_for_restricted_workspace(
-        profile_id: AgentProfileId,
-        project: &Entity<Project>,
-        cx: &App,
-    ) -> (AgentProfileId, bool) {
-        // `build` holds nothing back, so it is the most important one to
-        // downgrade, not an exception to it.
-        let is_downgradable = matches!(
-            profile_id.as_str(),
-            builtin_profiles::WRITE | builtin_profiles::ASK | builtin_profiles::BUILD
-        );
-        let minimal = AgentProfileId(builtin_profiles::MINIMAL.into());
-        if is_downgradable
-            && TrustedWorktrees::has_restricted_worktrees(&project.read(cx).worktree_store(), cx)
-            && AgentProfileSettings::is_unmodified_default(&profile_id, cx)
-            && AgentProfileSettings::is_unmodified_default(&minimal, cx)
+    /// Worked out again for every request rather than once when the thread
+    /// starts, so trusting the project gives a thread that is already open its
+    /// tools back with its next message.
+    fn workspace_tool_access(&self, cx: &App) -> WorkspaceToolAccess {
+        if !TrustedWorktrees::has_restricted_worktrees(&self.project.read(cx).worktree_store(), cx)
         {
-            (minimal, true)
+            WorkspaceToolAccess::Full
+        } else if matches!(
+            self.profile_id.as_str(),
+            builtin_profiles::WRITE | builtin_profiles::ASK | builtin_profiles::BUILD
+        ) && AgentProfileSettings::is_unmodified_default(&self.profile_id, cx)
+        {
+            // A shipped profile offers nothing until the project is trusted. A
+            // profile the user wrote or changed keeps what is safe there.
+            WorkspaceToolAccess::None
         } else {
-            (profile_id, false)
+            WorkspaceToolAccess::RestrictedOnly
         }
     }
 
     pub fn set_profile(&mut self, profile_id: AgentProfileId, cx: &mut Context<Self>) {
-        // An explicit selection means any earlier automatic downgrade no longer
-        // applies, even if the user re-selects the same profile.
-        self.profile_downgraded_for_restricted_workspace = false;
-
         if self.profile_id == profile_id {
             return;
         }
@@ -4081,6 +4129,15 @@ impl Thread {
     pub fn stop_terminal_task(&self, task_id: &str) -> Result<()> {
         self.terminal_tasks
             .stop_task(task_id)
+            .map_err(|error| anyhow!(error))
+    }
+
+    /// Shows the command's terminal in the Terminal panel. Call it from an
+    /// async context, outside any update.
+    pub fn reveal_terminal_task(this: &Entity<Self>, task_id: &str, cx: &AsyncApp) -> Result<()> {
+        let tasks = this.read_with(cx, |thread, _| thread.terminal_tasks.clone());
+        tasks
+            .reveal_task(task_id, cx)
             .map_err(|error| anyhow!(error))
     }
 
@@ -4286,7 +4343,8 @@ impl Thread {
                 Message::Agent(_)
                 | Message::Resume
                 | Message::Compaction(_)
-                | Message::LoopGuard(_) => {}
+                | Message::LoopGuard(_)
+                | Message::BackgroundWake(_) => {}
             }
         }
         self.clear_summary();
@@ -4400,6 +4458,26 @@ impl Thread {
 
         log::debug!("Total messages in thread: {}", self.messages.len());
         self.run_turn(cx)
+    }
+
+    /// Resumes the conversation after background commands finished while no
+    /// turn was running. The model is told what finished; the transcript shows
+    /// a notice rather than a message the user never typed.
+    pub fn resume_after_background_work(
+        &mut self,
+        notices: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<mpsc::UnboundedReceiver<Result<ThreadEvent>>> {
+        let info = BackgroundWakeInfo { notices };
+        let notice = info.notice();
+        self.messages.push(Arc::new(Message::BackgroundWake(info)));
+        cx.notify();
+        let events = self.send_existing(cx)?;
+        // Nothing has run on the new turn yet, so the notice comes first.
+        if let Some(turn) = &self.running_turn {
+            turn.event_stream.send_background_wake_notice(notice);
+        }
+        Ok(events)
     }
 
     /// Sending a message results in the model streaming a response, which could include tool calls.
@@ -5747,15 +5825,9 @@ impl Thread {
         cancellation_rx: watch::Receiver<bool>,
         cx: &mut Context<Self>,
     ) -> Task<(usize, LanguageModelToolResult)> {
-        // A workspace can become restricted after a thread has already started.
-        // Tools that aren't allowed in restricted workspaces must never run in
-        // that state, even though they were exposed to the model earlier.
-        if !tool.allow_in_restricted_mode()
-            && TrustedWorktrees::has_restricted_worktrees(
-                &self.project.read(cx).worktree_store(),
-                cx,
-            )
-        {
+        // The project can stop being trusted between offering a tool and the
+        // model calling it, so check again before running it.
+        if !self.workspace_tool_access(cx).allows(tool.as_ref()) {
             return Task::ready((
                 owning_message_ix,
                 LanguageModelToolResult {
@@ -5763,7 +5835,8 @@ impl Thread {
                     tool_name,
                     is_error: true,
                     content: vec![LanguageModelToolResultContent::Text(Arc::from(
-                        "workspace has become restricted",
+                        "This project is in Restricted Mode, so this tool can't run until \
+                         the user trusts the project.",
                     ))],
                     output: None,
                 },
@@ -6143,7 +6216,8 @@ impl Thread {
                 Message::Agent(_)
                 | Message::Resume
                 | Message::Compaction(_)
-                | Message::LoopGuard(_) => None,
+                | Message::LoopGuard(_)
+                | Message::BackgroundWake(_) => None,
             })
     }
 
@@ -6266,11 +6340,12 @@ impl Thread {
         let available_tools: Vec<SharedString> =
             tools.iter().map(|tool| tool.name.clone().into()).collect();
         log::info!(
-            "Native request capabilities: session={} prompt={} mode={} profile={} tools={} write_file={} edit_file={} terminal={}",
+            "Native request capabilities: session={} prompt={} mode={} profile={} workspace={:?} tools={} write_file={} edit_file={} terminal={}",
             self.id,
             self.prompt_id,
             mode.id(),
             self.profile_id.as_str(),
+            self.workspace_tool_access(cx),
             tools.len(),
             tools.iter().any(|tool| tool.name == WriteFileTool::NAME),
             tools.iter().any(|tool| tool.name == EditFileTool::NAME),
@@ -6308,7 +6383,14 @@ impl Thread {
         let Some(model) = self.model() else {
             return BTreeMap::new();
         };
-        let Some(profile) = AgentSettings::get_global(cx).profiles.get(&self.profile_id) else {
+        let settings = AgentSettings::get_global(cx);
+        // A profile removed from settings after the thread started would
+        // otherwise leave the thread with no tools and nothing saying why.
+        let Some(profile) = settings
+            .profiles
+            .get(&self.profile_id)
+            .or_else(|| settings.profiles.get(&settings.default_profile))
+        else {
             return BTreeMap::new();
         };
         // Terminal variants are configured by users under the canonical
@@ -6316,11 +6398,7 @@ impl Thread {
         // to the model under that name.
         let use_sandboxed_terminal = sandboxing_enabled_for_project(self.project.read(cx), cx);
 
-        // Tools that aren't allowed in restricted workspaces must never be
-        // provided to the model while the workspace is restricted, regardless
-        // of what the active profile enables.
-        let is_restricted =
-            TrustedWorktrees::has_restricted_worktrees(&self.project.read(cx).worktree_store(), cx);
+        let workspace_access = self.workspace_tool_access(cx);
 
         // Planning and building are different jobs. Plan mode permits only
         // capabilities that are mechanically read-only.
@@ -6339,7 +6417,7 @@ impl Thread {
             .filter(|(tool_name, _)| {
                 has_architect_state || !ARCHITECT_STATE_TOOLS.contains(&tool_name.as_ref())
             })
-            .filter(|(_, tool)| !is_restricted || tool.allow_in_restricted_mode())
+            .filter(|(_, tool)| workspace_access.allows(tool.as_ref()))
             .filter_map(|(tool_name, tool)| {
                 let terminal_variant = matches!(
                     tool_name.as_ref(),
@@ -6385,6 +6463,7 @@ impl Thread {
             for (tool_name, tool) in server_tools {
                 if profile.is_context_server_tool_enabled(&server_id.0, &tool_name)
                     && tool.capability().is_allowed_in(mode)
+                    && workspace_access.allows(tool.as_ref())
                 {
                     let tool_name: SharedString =
                         provider_compatible_tool_name(tool_name.as_ref()).into();
@@ -6437,6 +6516,12 @@ impl Thread {
 
     pub fn has_tool(&self, name: &str) -> bool {
         self.tool(name).is_some()
+    }
+
+    /// Whether the model could read project files itself on its next request,
+    /// given the thread's profile and mode and whether the project is trusted.
+    pub fn can_read_files(&self, cx: &App) -> bool {
+        self.enabled_tools(cx).contains_key(ReadFileTool::NAME)
     }
 
     /// Whether the tool exists on this thread at all, regardless of whether the
@@ -6550,6 +6635,7 @@ impl Thread {
             ),
             is_linux: cfg!(target_os = "linux"),
             is_windows: cfg!(target_os = "windows"),
+            restricted: self.workspace_tool_access(cx) != WorkspaceToolAccess::Full,
             plan_mode: self.session_mode.get() == SessionMode::Plan,
             // Rebuilt every request, so it is never a stale copy of a plan the
             // user has since reshaped.
@@ -7163,7 +7249,10 @@ fn render_messages_markdown(messages: &[Arc<Message>], include_debug_output: boo
         match &**message {
             Message::User(_) => markdown.push_str("## User\n\n"),
             Message::Agent(_) => markdown.push_str("## Assistant\n\n"),
-            Message::Resume | Message::Compaction(_) | Message::LoopGuard(_) => {}
+            Message::Resume
+            | Message::Compaction(_)
+            | Message::LoopGuard(_)
+            | Message::BackgroundWake(_) => {}
         }
         markdown.push_str(&message.render_markdown(include_debug_output));
     }
@@ -7383,7 +7472,10 @@ fn retained_request_messages_before(
                     agent_budget_spent = true;
                 }
             }
-            Message::Resume | Message::Compaction(_) | Message::LoopGuard(_) => {}
+            Message::Resume
+            | Message::Compaction(_)
+            | Message::LoopGuard(_)
+            | Message::BackgroundWake(_) => {}
         }
     }
 
@@ -7452,6 +7544,11 @@ impl EventEmitter<CancellationRequested> for Thread {}
 pub(crate) struct BackgroundTasksFinished;
 
 impl EventEmitter<BackgroundTasksFinished> for Thread {}
+
+/// A terminal command this thread started has exited.
+pub struct TerminalTaskExited;
+
+impl EventEmitter<TerminalTaskExited> for Thread {}
 
 pub struct TitleUpdated;
 
@@ -7865,6 +7962,12 @@ impl ThreadEventStream {
             .unbounded_send(Ok(ThreadEvent::LoopGuardNotice(
                 acp_thread::LoopGuardNotice { kind, repeated },
             )))
+            .ok();
+    }
+
+    fn send_background_wake_notice(&self, notice: acp_thread::BackgroundWakeNotice) {
+        self.sender
+            .unbounded_send(Ok(ThreadEvent::BackgroundWakeNotice(notice)))
             .ok();
     }
 
@@ -8307,7 +8410,7 @@ impl ToolCallEventStream {
     ///
     /// For authorizations that must always prompt regardless of settings
     /// (e.g. symlink-escape confirmations, sensitive settings-file edits),
-    /// use [`Self::prompt`] instead.
+    /// use [`Self::authorize_always_prompt`] instead.
     pub fn authorize(
         &self,
         title: impl Into<String>,
@@ -9194,9 +9297,7 @@ impl ToolCallEventStream {
                                 ToolPermissionMode::Deny => {
                                     agent.add_tool_deny_pattern(&tool, pattern);
                                 }
-                                // If there's no matching pattern this will
-                                // default to confirm, so falling through is
-                                // fine here.
+                                // Only allow and deny choices are persisted.
                                 ToolPermissionMode::Confirm => (),
                             }
                         }
@@ -11145,6 +11246,43 @@ mod tests {
         let event = replay_events.next().await;
         assert!(
             matches!(&event, Some(Ok(ThreadEvent::AgentText(text))) if text == "after"),
+            "expected replayed agent text, got {event:?}"
+        );
+    }
+
+    /// A reopened thread shows a background wake as a notice, never as a
+    /// message from the user, while the model still reads what finished.
+    #[gpui::test]
+    async fn test_replay_shows_a_background_wake_as_a_notice(cx: &mut TestAppContext) {
+        let (thread, _event_stream, _) = setup_thread_for_test(cx).await;
+        let notice = "Background task 1 `make ci` exited with code 0.".to_string();
+        let wake = Arc::new(Message::BackgroundWake(BackgroundWakeInfo {
+            notices: vec![notice.clone()],
+        }));
+        let request = wake.to_request();
+        assert_eq!(request.len(), 1);
+        assert_eq!(request[0].role, Role::User);
+        assert!(request[0].string_contents().contains(&notice));
+
+        let mut replay_events = cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.messages.push(wake);
+                thread.messages.push(agent_text_message("CI passed."));
+                thread.replay(cx)
+            })
+        });
+
+        let event = replay_events.next().await;
+        assert!(
+            matches!(
+                &event,
+                Some(Ok(ThreadEvent::BackgroundWakeNotice(shown))) if shown.finished == 1
+            ),
+            "expected a background wake notice, got {event:?}"
+        );
+        let event = replay_events.next().await;
+        assert!(
+            matches!(&event, Some(Ok(ThreadEvent::AgentText(text))) if text == "CI passed."),
             "expected replayed agent text, got {event:?}"
         );
     }

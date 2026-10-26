@@ -112,6 +112,15 @@ impl AgentTool for CreateDirectoryTool {
         cx.spawn(async move |cx| {
             let input = input.recv().await.map_err(|e| e.to_string())?;
 
+            // A deny rule applies wherever the directory would go, so check it
+            // before choosing how to create it.
+            let decision = cx.update(|cx| {
+                decide_permission_for_path(Self::NAME, &input.path, AgentSettings::get_global(cx))
+            });
+            if let ToolPermissionDecision::Deny(reason) = decision {
+                return Err(reason);
+            }
+
             let fs = project.read_with(cx, |project, _cx| project.fs().clone());
 
             // Resolve where this directory lives. The global agent-skills dir is a
@@ -131,14 +140,6 @@ impl AgentTool for CreateDirectoryTool {
             // here.
             if global_skill_directory.is_none() && !in_project {
                 return create_out_of_project_directory(&project, &input, &event_stream, cx).await;
-            }
-
-            let decision = cx.update(|cx| {
-                decide_permission_for_path(Self::NAME, &input.path, AgentSettings::get_global(cx))
-            });
-
-            if let ToolPermissionDecision::Deny(reason) = decision {
-                return Err(reason);
             }
 
             let destination_path: Arc<str> = input.path.as_str().into();
@@ -353,6 +354,10 @@ mod tests {
         cx.update(|cx| {
             let mut settings = AgentSettings::get_global(cx).clone();
             settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            // With the sandbox on, the agent is restricted, so skills paths and
+            // symlink escapes ask, and directories outside the project become
+            // sandbox grants.
+            settings.sandbox_permissions.allow_unsandboxed = false;
             AgentSettings::override_global(settings, cx);
         });
     }
@@ -834,6 +839,58 @@ mod tests {
         assert!(
             !target.exists(),
             "denied create should leave no directory behind"
+        );
+    }
+
+    /// A deny rule applies to a directory outside the project too, before the
+    /// sandbox grant flow would create it.
+    #[gpui::test]
+    async fn test_create_directory_deny_rule_covers_paths_outside_the_project(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.tools.insert(
+                CreateDirectoryTool::NAME.into(),
+                agent_settings::ToolRules {
+                    default: Some(settings::ToolPermissionMode::Deny),
+                    ..Default::default()
+                },
+            );
+            AgentSettings::override_global(settings, cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/root"), json!({ "project": {} }))
+            .await;
+        let project = Project::test(fs.clone(), [path!("/root/project").as_ref()], cx).await;
+        cx.executor().run_until_parked();
+
+        let tool = Arc::new(CreateDirectoryTool::new(project));
+        let (event_stream, mut event_rx) = ToolCallEventStream::test();
+        let result = cx
+            .update(|cx| {
+                tool.run(
+                    ToolInput::resolved(CreateDirectoryToolInput {
+                        path: path!("/root/outside").into(),
+                        reason: Some("scratch space for the build".into()),
+                    }),
+                    event_stream,
+                    cx,
+                )
+            })
+            .await;
+
+        let error = result.expect_err("the deny rule should block the directory");
+        assert!(error.contains("disabled"), "unexpected error: {error}");
+        assert!(!fs.is_dir(Path::new(path!("/root/outside"))).await);
+        assert!(
+            !matches!(
+                event_rx.try_recv(),
+                Ok(Ok(crate::ThreadEvent::ToolCallAuthorization(_)))
+            ),
+            "a denied directory should not ask for a sandbox grant",
         );
     }
 }

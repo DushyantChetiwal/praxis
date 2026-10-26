@@ -25,7 +25,6 @@ mod message_editor;
 mod mode_selector;
 mod model_selector;
 mod model_selector_popover;
-mod profile_selector;
 mod remote;
 mod terminal_codegen;
 mod terminal_inline_assistant;
@@ -300,7 +299,7 @@ actions!(
         ToggleNewThreadMenu,
         /// Toggles the options menu for agent settings and preferences.
         ToggleOptionsMenu,
-        /// Toggles the profile or mode selector for switching between agent profiles.
+        /// Toggles the mode selector. Keeps its old name so existing keymaps work.
         ToggleProfileSelector,
         /// Cycles through available session modes.
         CycleModeSelector,

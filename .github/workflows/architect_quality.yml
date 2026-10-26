@@ -318,9 +318,27 @@ jobs:
           cargo test --locked -p agent --lib tools::update_plan_tool::tests::
           cargo test --locked -p agent --lib tools::run_steps_tool::tests::
           cargo test --locked -p agent --lib internal_tests::test_a_background_task_finishing_after_the_turn_resumes_the_conversation -- --exact
+          cargo test --locked -p agent --lib thread::tests::test_replay_shows_a_background_wake_as_a_notice -- --exact
 
           cargo test --locked -p agent --lib internal_tests::test_update_plan_shows_the_checklist_in_build_mode -- --exact
           cargo test --locked -p agent --lib templates::tests::
+
+      - name: Test default permissions and Restricted Mode
+        run: |
+          cargo test --locked -p agent_settings --lib
+          cargo test --locked -p agent --lib tool_permissions::tests::
+          cargo test --locked -p agent --lib tools::delete_path_tool::tests::
+          cargo test --locked -p agent --lib tools::copy_path_tool::tests::
+          cargo test --locked -p agent --lib tools::move_path_tool::tests::
+          cargo test --locked -p agent --lib tools::create_directory_tool::tests::
+          cargo test --locked -p agent --lib tools::read_file_tool::test::
+          cargo test --locked -p agent --lib tools::list_directory_tool::tests::
+          cargo test --locked -p agent --lib tools::skill_tool::tests::
+          cargo test --locked -p agent --lib tools::fetch_tool::tests::
+          cargo test --locked -p agent --lib tests::test_tool_authorization -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_restricted_mode_follows_trust_without_a_new_thread -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_a_thread_saved_with_the_minimal_profile_reopens_with_the_default -- --exact
+          cargo test --locked -p agent --lib internal_tests::test_a_terminal_task_exit_is_announced -- --exact
 
       - name: Test native-agent mode and run integration
         run: |

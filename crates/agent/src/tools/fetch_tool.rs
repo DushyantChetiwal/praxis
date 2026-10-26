@@ -415,4 +415,37 @@ mod tests {
         verify_host_not_forbidden("https://93.184.215.14/")
             .expect("a public address must be allowed through the gate");
     }
+
+    #[gpui::test]
+    async fn shipped_defaults_fetch_without_prompting(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+        let http_client = http_client::FakeHttpClient::create(|_| async move {
+            Ok(http_client::Response::builder()
+                .status(200)
+                .header("content-type", "text/plain")
+                .body(AsyncBody::from("page text"))
+                .unwrap())
+        });
+        let tool = Arc::new(FetchTool::new(http_client));
+        let (event_stream, mut events) = ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                ToolInput::resolved(FetchToolInput {
+                    url: "https://example.com/page".into(),
+                }),
+                event_stream,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert!(
+            !matches!(
+                events.try_recv(),
+                Ok(Ok(crate::ThreadEvent::ToolCallAuthorization(_)))
+            ),
+            "neither the fetch nor its host should need approval by default"
+        );
+        assert_eq!(task.await, Ok("page text".to_string()));
+    }
 }

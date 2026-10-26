@@ -105,6 +105,8 @@ Node chats and node execution have distinct persisted roles from helpers created
 
 Native terminal commands that yield to the background appear as tabs in the owning workspace's terminal panel. The tab shares the original terminal and output; inspecting it does not rerun the command. It does not steal focus or open a dock in Architect mode. Switch to **Code** and open **Terminal** to inspect it.
 
+In the thread, the command's card says **Background** instead of spinning, and a **Background Commands** row above the message box lists every command still running. From that list you can show a command in the Terminal panel or stop it, one at a time or all at once. Stopping a background command, from the list or from its card, leaves the agent's current work alone.
+
 Use **Show Agent Terminals** in the terminal tab bar's **New…** menu to reattach views for retained client-created agent terminals. Closing an inspection view does not transfer command ownership. Existing terminal task status/wait/stop controls remain attached to the original task. Agent task tabs do not offer a rerun action that could repeat a command outside its original lifecycle. Available output remains subject to the terminal's retained scrollback and capture settings.
 
 ## Per-step models

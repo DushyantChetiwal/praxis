@@ -2521,6 +2521,54 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_run_shipped_defaults_allow_commands_without_prompting(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        crate::tests::init_test(cx);
+
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/root", serde_json::json!({})).await;
+        let project = project::Project::test(fs, ["/root".as_ref()], cx).await;
+
+        let environment = std::rc::Rc::new(cx.update(|cx| {
+            crate::tests::FakeThreadEnvironment::default().with_terminal(
+                crate::tests::FakeTerminalHandle::new_with_immediate_exit(cx, 0),
+            )
+        }));
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let tool = std::sync::Arc::new(TerminalTool::new(project, environment.clone()));
+        let (event_stream, mut rx) = crate::ToolCallEventStream::test();
+
+        let task = cx.update(|cx| {
+            tool.run(
+                crate::ToolInput::resolved(TerminalToolInput {
+                    command: "echo $HOME".to_string(),
+                    cd: "root".to_string(),
+                    timeout_ms: None,
+                    ..Default::default()
+                }),
+                event_stream,
+                cx,
+            )
+        });
+
+        // A confirmation prompt would arrive before the terminal card.
+        let update = rx.expect_update_fields().await;
+        assert!(
+            update.content.value().is_some_and(|blocks| {
+                blocks
+                    .iter()
+                    .any(|content| matches!(content, acp_v2::ToolCallContent::Terminal(_)))
+            }),
+            "expected the command to start without asking"
+        );
+        task.await
+            .expect("the shipped defaults should allow a command with a substitution");
+        assert_eq!(environment.terminal_creation_count(), 1);
+    }
+
+    #[gpui::test]
     async fn test_run_env_prefixed_allow_pattern_is_used_end_to_end(cx: &mut gpui::TestAppContext) {
         crate::tests::init_test(cx);
 
@@ -3478,6 +3526,7 @@ mod tests {
             let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
             settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
             settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            settings.sandbox_permissions.allow_unsandboxed = false;
             agent_settings::AgentSettings::override_global(settings, cx);
         });
 
@@ -3575,6 +3624,7 @@ mod tests {
             let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
             settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
             settings.tool_permissions.tools.remove(TerminalTool::NAME);
+            settings.sandbox_permissions.allow_unsandboxed = false;
             agent_settings::AgentSettings::override_global(settings, cx);
         });
 

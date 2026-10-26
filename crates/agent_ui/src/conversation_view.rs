@@ -13,7 +13,7 @@ use agent_client_protocol::schema::v2 as acp_v2;
 #[cfg(test)]
 use agent_servers::AgentServerDelegate;
 use agent_servers::{AgentServer, GEMINI_TERMINAL_AUTH_METHOD_ID};
-use agent_settings::{AgentProfileId, AgentSettings};
+use agent_settings::AgentSettings;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "audio")]
 use audio::{Audio, Sound};
@@ -89,8 +89,6 @@ use crate::agent_diff::AgentDiff;
 use crate::completion_provider::{AgentContextSelection, AvailableSkill};
 use crate::entry_view_state::{EntryViewEvent, ViewEvent};
 use crate::message_editor::{InputAttempt, MessageEditor, MessageEditorEvent};
-use crate::profile_selector::{ProfileProvider, ProfileSelector};
-
 use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore};
 use crate::ui::{AgentNotification, AgentNotificationEvent};
 use crate::{
@@ -255,40 +253,6 @@ impl From<&anyhow::Error> for ThreadError {
                 acp_error_code,
             }
         }
-    }
-}
-
-impl ProfileProvider for Entity<agent::Thread> {
-    fn profile_id(&self, cx: &App) -> AgentProfileId {
-        self.read(cx).profile().clone()
-    }
-
-    fn set_profile(&self, profile_id: AgentProfileId, cx: &mut App) {
-        self.update(cx, |thread, cx| {
-            // Apply the profile and let the thread swap to its default model.
-            thread.set_profile(profile_id, cx);
-        });
-    }
-
-    fn profiles_supported(&self, cx: &App) -> bool {
-        self.read(cx)
-            .model()
-            .is_some_and(|model| model.supports_tools())
-    }
-
-    fn model_selected(&self, cx: &App) -> bool {
-        self.read(cx).model().is_some()
-    }
-
-    fn is_restricted(&self, cx: &App) -> bool {
-        project::trusted_worktrees::TrustedWorktrees::has_restricted_worktrees(
-            &self.read(cx).project().read(cx).worktree_store(),
-            cx,
-        )
-    }
-
-    fn profile_downgraded(&self, cx: &App) -> bool {
-        self.read(cx).profile_was_downgraded()
     }
 }
 
@@ -1725,13 +1689,6 @@ impl ConversationView {
             .detach();
         }
 
-        // No profile picker. It only ever existed for Zed's own agent, and Plan
-        // and Build now say what a profile said, at the moment it matters,
-        // through one control instead of two. Left as `None` rather than removed
-        // so that `ToggleProfileSelector` and `CycleModeSelector` fall through to
-        // the mode switch, which is what they should now reach.
-        let profile_selector = None;
-
         let agent_display_name = self
             .agent_server_store
             .read(cx)
@@ -1768,7 +1725,6 @@ impl ConversationView {
                 config_options_view,
                 mode_selector,
                 model_selector,
-                profile_selector,
                 list_state,
                 session_capabilities,
                 resumed_without_history,

@@ -1014,6 +1014,11 @@ mod test {
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
+            // Turning the sandbox back on restricts the agent, which is what
+            // makes symlink escapes ask.
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.sandbox_permissions.allow_unsandboxed = false;
+            agent_settings::AgentSettings::override_global(settings, cx);
         });
     }
 
@@ -1606,6 +1611,60 @@ mod test {
 
         let result = task.await;
         assert!(result.is_ok(), "should succeed after approval: {result:?}");
+    }
+
+    #[gpui::test]
+    async fn test_read_file_symlink_escape_does_not_ask_until_restricted(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.sandbox_permissions.allow_unsandboxed = true;
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/root"),
+            json!({
+                "project": {},
+                "external": { "notes.txt": "outside" }
+            }),
+        )
+        .await;
+        fs.create_symlink(
+            path!("/root/project/notes_link.txt").as_ref(),
+            PathBuf::from("../external/notes.txt"),
+        )
+        .await
+        .unwrap();
+        let project = Project::test(fs.clone(), [path!("/root/project").as_ref()], cx).await;
+        cx.executor().run_until_parked();
+
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+        let (event_stream, mut event_rx) = ToolCallEventStream::test();
+        let result = cx
+            .update(|cx| {
+                tool.run(
+                    ToolInput::resolved(ReadFileToolInput {
+                        path: "project/notes_link.txt".to_string(),
+                        start_line: None,
+                        end_line: None,
+                    }),
+                    event_stream,
+                    cx,
+                )
+            })
+            .await;
+
+        assert!(result.is_ok(), "should read without asking: {result:?}");
+        assert!(
+            !matches!(
+                event_rx.try_recv(),
+                Ok(Ok(crate::ThreadEvent::ToolCallAuthorization(_)))
+            ),
+            "an unrestricted agent should not be asked about symlinks",
+        );
     }
 
     #[gpui::test]

@@ -8568,6 +8568,7 @@ exit 7
                     acp_thread::AgentThreadEntry::Elicitation(_) => "elicitation",
                     acp_thread::AgentThreadEntry::ContextCompaction(_) => "compaction",
                     acp_thread::AgentThreadEntry::LoopGuardNotice(_) => "loop_guard",
+                    acp_thread::AgentThreadEntry::BackgroundWakeNotice(_) => "background_wake",
                 })
                 .collect::<Vec<_>>()
         });

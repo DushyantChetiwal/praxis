@@ -414,6 +414,13 @@ mod tests {
     #[gpui::test]
     async fn test_streaming_write_global_skill_file(cx: &mut TestAppContext) {
         init_test(cx);
+        // Turning the sandbox back on restricts the agent, which is what makes
+        // writing a skill ask first.
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.sandbox_permissions.allow_unsandboxed = false;
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
 
         let fs = project::FakeFs::new(cx.executor());
         fs.insert_tree(path!("/root"), json!({})).await;

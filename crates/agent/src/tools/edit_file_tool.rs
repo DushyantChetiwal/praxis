@@ -665,6 +665,7 @@ mod tests {
     #[gpui::test]
     async fn test_streaming_edit_global_skill_file(cx: &mut TestAppContext) {
         init_test(cx);
+        restrict_agent(settings::ToolPermissionMode::Allow, cx);
 
         let fs = project::FakeFs::new(cx.executor());
         fs.insert_tree(path!("/root"), json!({})).await;
@@ -1576,6 +1577,7 @@ mod tests {
     #[gpui::test]
     async fn test_streaming_authorize(cx: &mut TestAppContext) {
         let (edit_tool, _project, _action_log, _fs, _thread) = setup_test(cx, json!({})).await;
+        restrict_agent(settings::ToolPermissionMode::Confirm, cx);
 
         // Test 1: Path with .zed component should require confirmation
         let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
@@ -1599,12 +1601,15 @@ mod tests {
             MaybeUndefined::Value("Edit `/etc/hosts`".into())
         );
 
-        // Test 3: Relative path without .zed should not require confirmation
+        // Test 3: Confirm applies to ordinary project files too
         let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
-        cx.update(|cx| edit_tool.authorize(&PathBuf::from("root/src/main.rs"), &stream_tx, cx))
-            .await
-            .unwrap();
-        assert!(stream_rx.try_recv().is_err());
+        let _auth =
+            cx.update(|cx| edit_tool.authorize(&PathBuf::from("root/src/main.rs"), &stream_tx, cx));
+        let event = stream_rx.expect_authorization().await;
+        assert_eq!(
+            event.tool_call.title,
+            MaybeUndefined::Value("Edit `root/src/main.rs`".into())
+        );
 
         // Test 4: Path with .zed in the middle should require confirmation
         let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
@@ -1617,8 +1622,8 @@ mod tests {
             MaybeUndefined::Value("Edit `root/.zed/tasks.json` (local settings)".into())
         );
 
-        // Test 5: When global default is allow, sensitive and outside-project
-        // paths still require confirmation
+        // Test 5: With edits allowed, sensitive paths still require
+        // confirmation while the agent is restricted
         cx.update(|cx| {
             let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
             settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
@@ -1649,7 +1654,7 @@ mod tests {
             .unwrap();
         assert!(stream_rx.try_recv().is_err());
 
-        // 5.4: With Confirm default, non-project paths still prompt
+        // 5.4: With Confirm, paths outside the project prompt too
         cx.update(|cx| {
             let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
             settings.tool_permissions.default = settings::ToolPermissionMode::Confirm;
@@ -1716,6 +1721,39 @@ mod tests {
         );
     }
 
+    /// Until the user restricts the agent, nothing an edit touches asks first.
+    #[gpui::test]
+    async fn test_streaming_authorize_asks_nothing_by_default(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = project::FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/root"), json!({ "src": { "main.rs": "" } }))
+            .await;
+        fs.insert_tree(path!("/outside"), json!({ "config.txt": "" }))
+            .await;
+        fs.insert_symlink(path!("/root/link"), PathBuf::from(path!("/outside")))
+            .await;
+        let (edit_tool, _project, _action_log, _fs, _thread) =
+            setup_test_with_fs(cx, fs, &[path!("/root").as_ref()]).await;
+
+        for path in [
+            PathBuf::from("root/src/main.rs"),
+            PathBuf::from("root/.zed/settings.json"),
+            PathBuf::from("root/.agents/skills/my-skill/SKILL.md"),
+            PathBuf::from("root/link/config.txt"),
+            PathBuf::from("/etc/hosts"),
+            paths::settings_file().clone(),
+            agent_skills::global_skills_dir()
+                .join("my-skill")
+                .join("SKILL.md"),
+        ] {
+            let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
+            cx.update(|cx| edit_tool.authorize(&path, &stream_tx, cx))
+                .await
+                .unwrap();
+            assert!(stream_rx.try_recv().is_err(), "{path:?} should not ask");
+        }
+    }
+
     /// `.agents/foo/../skills/SKILL.md` would slip past the raw
     /// `is_agents_skills_path` check (the components `.agents` and
     /// `skills` aren't consecutive once `..` sits between them), but it
@@ -1724,6 +1762,7 @@ mod tests {
     #[gpui::test]
     async fn test_streaming_authorize_blocks_dotdot_skills_bypass(cx: &mut TestAppContext) {
         init_test(cx);
+        restrict_agent(settings::ToolPermissionMode::Allow, cx);
         let fs = project::FakeFs::new(cx.executor());
         fs.insert_tree(
             path!("/root"),
@@ -1765,6 +1804,7 @@ mod tests {
     #[gpui::test]
     async fn test_streaming_authorize_blocks_dotdot_settings_bypass(cx: &mut TestAppContext) {
         init_test(cx);
+        restrict_agent(settings::ToolPermissionMode::Allow, cx);
         let fs = project::FakeFs::new(cx.executor());
         fs.insert_tree(
             path!("/root"),
@@ -1805,6 +1845,7 @@ mod tests {
     #[gpui::test]
     async fn test_streaming_authorize_blocks_intra_project_symlink_bypass(cx: &mut TestAppContext) {
         init_test(cx);
+        restrict_agent(settings::ToolPermissionMode::Allow, cx);
         let fs = project::FakeFs::new(cx.executor());
         fs.insert_tree(
             path!("/root"),
@@ -1845,6 +1886,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         init_test(cx);
+        restrict_agent(settings::ToolPermissionMode::Allow, cx);
         let fs = project::FakeFs::new(cx.executor());
         fs.insert_tree(
             path!("/root"),
@@ -1891,12 +1933,7 @@ mod tests {
             .await;
         let (edit_tool, _project, _action_log, _fs, _thread) =
             setup_test_with_fs(cx, fs, &[path!("/root").as_ref()]).await;
-
-        cx.update(|cx| {
-            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
-            settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
-            agent_settings::AgentSettings::override_global(settings, cx);
-        });
+        restrict_agent(settings::ToolPermissionMode::Allow, cx);
 
         let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
         let authorize_task =
@@ -1927,6 +1964,7 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         init_test(cx);
+        restrict_agent(settings::ToolPermissionMode::Allow, cx);
 
         let fs = project::FakeFs::new(cx.executor());
         fs.insert_tree(
@@ -1976,6 +2014,7 @@ mod tests {
     #[gpui::test]
     async fn test_streaming_edit_file_symlink_escape_denied(cx: &mut TestAppContext) {
         init_test(cx);
+        restrict_agent(settings::ToolPermissionMode::Allow, cx);
 
         let fs = project::FakeFs::new(cx.executor());
         fs.insert_tree(
@@ -2077,53 +2116,50 @@ mod tests {
         );
     }
 
+    /// Praxis's own settings are protected like a project's `.zed` folder,
+    /// while other paths outside the project get no special treatment.
     #[gpui::test]
     async fn test_streaming_authorize_global_config(cx: &mut TestAppContext) {
         init_test(cx);
+        restrict_agent(settings::ToolPermissionMode::Allow, cx);
         let fs = project::FakeFs::new(cx.executor());
         fs.insert_tree("/project", json!({})).await;
         let (edit_tool, _project, _action_log, _fs, _thread) =
             setup_test_with_fs(cx, fs, &[path!("/project").as_ref()]).await;
 
-        let test_cases = vec![
-            (
-                "/etc/hosts",
-                true,
-                "System file should require confirmation",
-            ),
-            (
-                "/usr/local/bin/script",
-                true,
-                "System bin file should require confirmation",
-            ),
-            (
-                "project/normal_file.rs",
-                false,
-                "Normal project file should not require confirmation",
-            ),
-        ];
+        let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
+        let _auth = cx.update(|cx| edit_tool.authorize(paths::settings_file(), &stream_tx, cx));
+        let event = stream_rx.expect_authorization().await;
+        assert!(
+            event
+                .tool_call
+                .title
+                .value()
+                .is_some_and(|title| title.ends_with("(settings)")),
+            "the global settings file must prompt: {:?}",
+            event.tool_call.title,
+        );
 
-        for (path, should_confirm, description) in test_cases {
+        for path in [
+            "/etc/hosts",
+            "/usr/local/bin/script",
+            "project/normal_file.rs",
+        ] {
             let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
-            let auth = cx.update(|cx| edit_tool.authorize(&PathBuf::from(path), &stream_tx, cx));
-
-            if should_confirm {
-                stream_rx.expect_authorization().await;
-            } else {
-                auth.await.unwrap();
-                assert!(
-                    stream_rx.try_recv().is_err(),
-                    "Failed for case: {} - path: {} - expected no confirmation but got one",
-                    description,
-                    path
-                );
-            }
+            cx.update(|cx| edit_tool.authorize(&PathBuf::from(path), &stream_tx, cx))
+                .await
+                .unwrap();
+            assert!(
+                stream_rx.try_recv().is_err(),
+                "{path} is not sensitive, so an allowed edit should not ask"
+            );
         }
     }
 
     #[gpui::test]
     async fn test_streaming_needs_confirmation_with_multiple_worktrees(cx: &mut TestAppContext) {
         init_test(cx);
+        restrict_agent(settings::ToolPermissionMode::Allow, cx);
         let fs = project::FakeFs::new(cx.executor());
         fs.insert_tree(
             "/workspace/frontend",
@@ -2171,10 +2207,10 @@ mod tests {
                 true,
                 ".zed file in third worktree",
             ),
-            ("/etc/hosts", true, "Absolute path outside all worktrees"),
+            ("/etc/hosts", false, "Absolute path outside all worktrees"),
             (
                 "../outside/file.txt",
-                true,
+                false,
                 "Relative path outside worktrees",
             ),
         ];
@@ -2200,6 +2236,7 @@ mod tests {
     #[gpui::test]
     async fn test_streaming_needs_confirmation_edge_cases(cx: &mut TestAppContext) {
         init_test(cx);
+        restrict_agent(settings::ToolPermissionMode::Allow, cx);
         let fs = project::FakeFs::new(cx.executor());
         fs.insert_tree(
             "/project",
@@ -2220,10 +2257,10 @@ mod tests {
 
         let test_cases = vec![
             ("", false, "Empty path is treated as project root"),
-            ("/", true, "Root directory should be outside project"),
+            ("/", false, "Root directory is outside the project"),
             (
                 "project/../other",
-                true,
+                false,
                 "Path with .. that goes outside of root directory",
             ),
             (
@@ -2231,8 +2268,18 @@ mod tests {
                 false,
                 "Path with . should work normally",
             ),
+            (
+                "project/./.zed/settings.json",
+                true,
+                "Path with . still reaches local settings",
+            ),
+            (
+                "project/src/.zed/local.json",
+                true,
+                "Nested .zed folder is local settings too",
+            ),
             #[cfg(target_os = "windows")]
-            ("C:\\Windows\\System32\\hosts", true, "Windows system path"),
+            ("C:\\Windows\\System32\\hosts", false, "Windows system path"),
             #[cfg(target_os = "windows")]
             ("project\\src\\main.rs", false, "Windows-style project path"),
         ];
@@ -2254,53 +2301,6 @@ mod tests {
                 );
                 auth.await.unwrap();
             }
-        }
-    }
-
-    #[gpui::test]
-    async fn test_streaming_needs_confirmation_with_different_modes(cx: &mut TestAppContext) {
-        init_test(cx);
-        let fs = project::FakeFs::new(cx.executor());
-        fs.insert_tree(
-            "/project",
-            json!({
-                "existing.txt": "content",
-                ".zed": {
-                    "settings.json": "{}"
-                }
-            }),
-        )
-        .await;
-        let (edit_tool, _project, _action_log, _fs, _thread) =
-            setup_test_with_fs(cx, fs, &[path!("/project").as_ref()]).await;
-
-        let modes = vec![EditSessionMode::Edit, EditSessionMode::Write];
-
-        for _mode in modes {
-            // Test .zed path with different modes
-            let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
-            let _auth = cx.update(|cx| {
-                edit_tool.authorize(&PathBuf::from("project/.zed/settings.json"), &stream_tx, cx)
-            });
-
-            stream_rx.expect_authorization().await;
-
-            // Test outside path with different modes
-            let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
-            let _auth = cx.update(|cx| {
-                edit_tool.authorize(&PathBuf::from("/outside/file.txt"), &stream_tx, cx)
-            });
-
-            stream_rx.expect_authorization().await;
-
-            // Test normal path with different modes
-            let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
-            cx.update(|cx| {
-                edit_tool.authorize(&PathBuf::from("project/normal.txt"), &stream_tx, cx)
-            })
-            .await
-            .unwrap();
-            assert!(stream_rx.try_recv().is_err());
         }
     }
 
@@ -3333,6 +3333,28 @@ mod tests {
                         .all_languages
                         .defaults
                         .ensure_final_newline_on_save = Some(false);
+                });
+            });
+        });
+    }
+
+    /// Turns the terminal sandbox back on, which restricts the agent: from then
+    /// on settings, skills and symlink escapes ask before an edit, even one the
+    /// edit tool's own permission, `mode`, allows.
+    ///
+    /// This goes through the user's settings rather than an override, because
+    /// loading a project's `.zed/settings.json` recomputes every setting and
+    /// would silently drop an override.
+    fn restrict_agent(mode: settings::ToolPermissionMode, cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store: &mut SettingsStore, cx| {
+                store.update_user_settings(cx, |settings| {
+                    let agent = settings.agent.get_or_insert_default();
+                    agent.tool_permissions.get_or_insert_default().default = Some(mode);
+                    agent
+                        .sandbox_permissions
+                        .get_or_insert_default()
+                        .allow_unsandboxed = Some(false);
                 });
             });
         });

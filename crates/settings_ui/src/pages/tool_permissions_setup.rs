@@ -1420,11 +1420,20 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
 
+    /// Asks by default, so a result other than Confirm can only come from a
+    /// tool's own rules.
+    fn confirm_by_default(cx: &mut App) {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        let mut settings = AgentSettings::get_global(cx).clone();
+        settings.tool_permissions.default = ToolPermissionMode::Confirm;
+        AgentSettings::override_global(settings, cx);
+    }
+
     #[gpui::test]
     fn architect_run_permission_actions_use_settings_rules(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            let store = SettingsStore::test(cx);
-            cx.set_global(store);
+            confirm_by_default(cx);
             assert!(TOOLS.iter().any(|tool| tool.id == "control_architect_run"));
             assert!(!TOOLS.iter().any(|tool| tool.id == "inspect_architect_run"));
             for action in [
@@ -1482,8 +1491,7 @@ mod tests {
     #[gpui::test]
     fn architect_plan_apply_has_separate_permission_rules(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            let store = SettingsStore::test(cx);
-            cx.set_global(store);
+            confirm_by_default(cx);
             assert!(TOOLS.iter().any(|tool| tool.id == "edit_architect_plan"));
             assert_eq!(
                 evaluate_test_input("edit_architect_plan", "apply", cx),

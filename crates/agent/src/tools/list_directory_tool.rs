@@ -362,6 +362,11 @@ mod tests {
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
+            // Turning the sandbox back on restricts the agent, which is what
+            // makes symlink escapes ask.
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.sandbox_permissions.allow_unsandboxed = false;
+            agent_settings::AgentSettings::override_global(settings, cx);
         });
     }
 

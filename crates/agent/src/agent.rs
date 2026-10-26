@@ -257,18 +257,6 @@ struct Session {
     _subscriptions: Vec<Subscription>,
 }
 
-fn background_wake_message(notices: &[String]) -> String {
-    let notices = notices
-        .iter()
-        .map(|notice| format!("- {notice}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "Praxis resumed this conversation because background work finished:\n{notices}\n\n\
-         Continue from where you left off."
-    )
-}
-
 type NativeCompletion =
     Shared<oneshot::Receiver<std::result::Result<acp_v2::StopReason, Arc<anyhow::Error>>>>;
 
@@ -286,6 +274,14 @@ struct NativeExecution {
     completion: NativeCompletion,
 }
 
+/// Starts a turn that belongs to a new user message.
+enum NativeRequest {
+    /// Something the user sent, slash commands included.
+    Prompt(Vec<acp_v2::ContentBlock>),
+    /// Background commands finished while no turn was running.
+    BackgroundWake(Vec<String>),
+}
+
 #[derive(Clone)]
 enum NativeRetryAction {
     Prompt(Vec<acp_v2::ContentBlock>),
@@ -300,6 +296,8 @@ enum NativeRetryAction {
         content: Vec<acp_v2::ContentBlock>,
     },
     Compact,
+    /// Tells the model which background commands finished, then runs a turn.
+    BackgroundWake(Vec<String>),
 }
 
 impl NativeRetryAction {
@@ -1018,12 +1016,11 @@ impl NativeAgent {
         if notices.is_empty() {
             return;
         }
-        let message = background_wake_message(&notices);
         let connection = NativeAgentConnection(cx.entity());
         // Submitting reads this agent, which is still being updated here.
         cx.defer(move |cx| {
             connection
-                .send_and_wait_for_completion(acp_thread, vec![message.into()], cx)
+                .submit_and_wait(acp_thread, NativeRequest::BackgroundWake(notices), cx)
                 .detach_and_log_err(cx);
         });
     }
@@ -2782,8 +2779,22 @@ impl NativeAgentConnection {
         content: Vec<acp_v2::ContentBlock>,
         cx: &mut App,
     ) -> Task<Result<acp_v2::StopReason>> {
+        self.submit_and_wait(thread, NativeRequest::Prompt(content), cx)
+    }
+
+    fn submit_and_wait(
+        &self,
+        thread: Entity<AcpThread>,
+        request: NativeRequest,
+        cx: &mut App,
+    ) -> Task<Result<acp_v2::StopReason>> {
         let session_id = thread.read(cx).session_id().clone();
-        let (receipt, completion) = self.submit_native(session_id, Some(content.clone()), cx);
+        // The thread keeps what was sent so it can be restored if sending fails.
+        let content = match &request {
+            NativeRequest::Prompt(content) => content.clone(),
+            NativeRequest::BackgroundWake(_) => Vec::new(),
+        };
+        let (receipt, completion) = self.submit_request(session_id, Some(request), cx);
         let submission =
             thread.update(cx, |thread, cx| thread.submit_receipt(content, receipt, cx));
         cx.spawn(async move |_cx| {
@@ -2800,9 +2811,19 @@ impl NativeAgentConnection {
         content: Option<Vec<acp_v2::ContentBlock>>,
         cx: &mut App,
     ) -> (Task<Result<acp_v2::PromptResponse>>, NativeCompletion) {
+        self.submit_request(session_id, content.map(NativeRequest::Prompt), cx)
+    }
+
+    /// Without a request, runs the last submission again.
+    fn submit_request(
+        &self,
+        session_id: acp_v2::SessionId,
+        request: Option<NativeRequest>,
+        cx: &mut App,
+    ) -> (Task<Result<acp_v2::PromptResponse>>, NativeCompletion) {
         let (completion_sender, completion_receiver) = oneshot::channel();
         let completion = completion_receiver.shared();
-        if let Some(content) = &content
+        if let Some(NativeRequest::Prompt(content)) = &request
             && let Err(error) = acp_thread::AgentConnection::validate_prompt_content(self, content)
         {
             return (Task::ready(Err(error)), completion);
@@ -2875,22 +2896,32 @@ impl NativeAgentConnection {
                                 }),
                             ))
                         })??;
-                    let (message_id, preparation, retry_action) = if let Some(content) = content {
+                    let (message_id, preparation, retry_action) = if let Some(request) = request {
                         let message_id = ClientUserMessageId::new();
-                        let retry_action = agent.read_with(cx, |agent, cx| {
-                            let project_state = agent
-                                .session_project_state(&session_id)
-                                .context("Project state not found for session")?;
-                            anyhow::Ok(NativeRetryAction::for_prompt(
-                                content.clone(),
-                                project_state,
-                                cx,
-                            ))
-                        })??;
-                        let source = if matches!(retry_action, NativeRetryAction::Compact) {
-                            Vec::new()
-                        } else {
-                            content
+                        let (source, retry_action) = match request {
+                            NativeRequest::Prompt(content) => {
+                                let retry_action = agent.read_with(cx, |agent, cx| {
+                                    let project_state = agent
+                                        .session_project_state(&session_id)
+                                        .context("Project state not found for session")?;
+                                    anyhow::Ok(NativeRetryAction::for_prompt(
+                                        content.clone(),
+                                        project_state,
+                                        cx,
+                                    ))
+                                })??;
+                                let source = match retry_action {
+                                    NativeRetryAction::Compact => Vec::new(),
+                                    _ => content,
+                                };
+                                (source, retry_action)
+                            }
+                            // The turn still needs a user message to belong to. An
+                            // empty one stays out of the transcript and the model's
+                            // context, like the one a slash command leaves.
+                            NativeRequest::BackgroundWake(notices) => {
+                                (Vec::new(), NativeRetryAction::BackgroundWake(notices))
+                            }
                         };
                         let path_style = thread.read(cx).project().read(cx).path_style(cx);
                         thread.update(cx, |thread, cx| {
@@ -3136,6 +3167,11 @@ impl NativeAgentConnection {
                             ThreadEvent::LoopGuardNotice(notice) => {
                                 acp_thread.update(cx, |thread, cx| {
                                     thread.push_loop_guard_notice(notice, cx)
+                                })?;
+                            }
+                            ThreadEvent::BackgroundWakeNotice(notice) => {
+                                acp_thread.update(cx, |thread, cx| {
+                                    thread.push_background_wake_notice(notice, cx)
                                 })?;
                             }
                             ThreadEvent::Plan(plan) => {
@@ -3872,6 +3908,18 @@ impl NativeAgentConnection {
             Some(NativeRetryAction::Compact) => self.0.update(cx, |agent, cx| {
                 agent.send_compact_command(message_id, session_id, cx)
             }),
+            Some(NativeRetryAction::BackgroundWake(notices)) => {
+                let agent = self.0.downgrade();
+                let prepared_session_id = session_id.clone();
+                self.run_turn(session_id, cx, move |thread, cx| {
+                    agent.update(cx, |agent, _cx| {
+                        agent.mark_execution_history_prepared(&prepared_session_id)
+                    })??;
+                    thread.update(cx, |thread, cx| {
+                        thread.resume_after_background_work(notices, cx)
+                    })
+                })
+            }
             None => self.run_turn(session_id, cx, |thread, cx| {
                 thread.update(cx, |thread, cx| thread.resume(cx))
             }),
@@ -12836,6 +12884,159 @@ mod internal_tests {
         drop(restored_acp_thread);
     }
 
+    /// Threads opened before their project was trusted used to be saved with
+    /// the `minimal` profile, which offers no tools. Reopening one gives it the
+    /// default profile back.
+    #[gpui::test]
+    async fn test_a_thread_saved_with_the_minimal_profile_reopens_with_the_default(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let (connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        thread.update(cx, |thread, cx| {
+            thread.set_title("Stuck without tools".into(), cx);
+            thread.set_profile(
+                agent_settings::AgentProfileId(agent_settings::builtin_profiles::MINIMAL.into()),
+                cx,
+            );
+        });
+
+        agent.update(cx, |agent, cx| agent.save_thread(thread.clone(), cx));
+        cx.run_until_parked();
+        drop(thread);
+        drop(acp_thread);
+        release_dropped_entities(cx);
+
+        let restored_acp_thread = cx
+            .update(|cx| {
+                connection.clone().load_session(
+                    session_id.clone(),
+                    project,
+                    PathList::new(&[Path::new("/a")]),
+                    None,
+                    cx,
+                )
+            })
+            .await
+            .expect("the session should reload");
+        cx.run_until_parked();
+        let restored = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        restored.read_with(cx, |thread, cx| {
+            assert_eq!(
+                thread.profile(),
+                &agent_settings::AgentSettings::get_global(cx).default_profile
+            );
+        });
+        drop(restored_acp_thread);
+    }
+
+    /// While the project is untrusted, a shipped profile offers no tools and a
+    /// profile the user made keeps only the ones that are safe there. Trusting
+    /// the project gives the same thread everything back.
+    #[gpui::test]
+    async fn test_restricted_mode_follows_trust_without_a_new_thread(cx: &mut TestAppContext) {
+        use collections::{HashMap, HashSet};
+        use project::trusted_worktrees::{self, PathTrust};
+
+        let fake = init_test(cx);
+        cx.update(|cx| trusted_worktrees::init(HashMap::default(), cx));
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project", json!({ "main.rs": "" })).await;
+        let project =
+            Project::test_with_worktree_trust(fs.clone(), [Path::new("/project")], cx).await;
+        let thread_store = cx.new(|cx| ThreadStore::new(cx));
+        let agent =
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx));
+        let connection = Rc::new(NativeAgentConnection(agent.clone()));
+        let work_dirs = PathList::new(&[Path::new("/project")]);
+        let acp_thread = cx
+            .update(|cx| connection.new_session(project.clone(), work_dirs, cx))
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        thread.update(cx, |thread, cx| {
+            thread.set_model(fake.model("fake"), cx);
+            thread.set_session_mode(SessionMode::Build, cx);
+        });
+
+        thread.read_with(cx, |thread, cx| {
+            assert_eq!(
+                thread.profile().as_str(),
+                agent_settings::builtin_profiles::BUILD
+            );
+            assert!(thread.enabled_tools(cx).is_empty());
+            assert!(!thread.can_read_files(cx));
+        });
+
+        let custom = agent_settings::AgentProfileId("custom".into());
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            let build = settings.profiles[&settings.default_profile].clone();
+            settings.profiles.insert(custom.clone(), build);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+        thread.update(cx, |thread, cx| thread.set_profile(custom, cx));
+        thread.read_with(cx, |thread, cx| {
+            let tools = thread.enabled_tools(cx);
+            assert!(tools.contains_key(ReadFileTool::NAME));
+            assert!(tools.contains_key(EditFileTool::NAME));
+            assert!(!tools.contains_key(TerminalTool::NAME));
+            assert!(!tools.contains_key(FetchTool::NAME));
+        });
+
+        let worktree_id = project.read_with(cx, |project, cx| {
+            project.worktrees(cx).next().unwrap().read(cx).id()
+        });
+        cx.update(|cx| {
+            TrustedWorktrees::try_get_global(cx)
+                .expect("trust initialized")
+                .update(cx, |trusted_worktrees, cx| {
+                    trusted_worktrees.trust(
+                        &project.read(cx).worktree_store(),
+                        HashSet::from_iter([PathTrust::Worktree(worktree_id)]),
+                        cx,
+                    );
+                });
+        });
+        cx.run_until_parked();
+
+        thread.read_with(cx, |thread, cx| {
+            let tools = thread.enabled_tools(cx);
+            assert!(tools.contains_key(TerminalTool::NAME));
+            assert!(tools.contains_key(FetchTool::NAME));
+        });
+    }
+
+    /// The thread view redraws its background commands list off this event.
+    #[gpui::test]
+    async fn test_a_terminal_task_exit_is_announced(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let exits = Rc::new(std::cell::Cell::new(0));
+        let _subscription = cx.update(|cx| {
+            let exits = exits.clone();
+            cx.subscribe(&thread, move |_, _: &TerminalTaskExited, _| {
+                exits.set(exits.get() + 1);
+            })
+        });
+
+        let terminal = Rc::new(cx.update(crate::tests::FakeTerminalHandle::new_never_exits));
+        let registry = thread.read_with(cx, |thread, _| thread.terminal_task_registry());
+        registry.start_in_background_for_test(terminal.clone(), &mut cx.to_async());
+        cx.run_until_parked();
+        assert_eq!(exits.get(), 0);
+
+        terminal.signal_exit();
+        cx.run_until_parked();
+        assert_eq!(exits.get(), 1);
+    }
+
     /// A command the agent left running resumes the conversation when it
     /// finishes, so the agent can end its turn instead of waiting on it.
     #[gpui::test]
@@ -12897,6 +13098,22 @@ mod internal_tests {
             fake.pending_completions_for(&model).is_empty(),
             "one finished task resumes the conversation once"
         );
+
+        // The transcript marks the resumption with a notice instead of showing
+        // the instruction as a message from the user.
+        acp_thread.read_with(cx, |thread, _| {
+            let entries = thread.entries();
+            assert!(entries.iter().any(|entry| matches!(
+                entry,
+                acp_thread::AgentThreadEntry::BackgroundWakeNotice(notice) if notice.finished == 1
+            )));
+            let shown_user_messages = entries
+                .iter()
+                .filter_map(|entry| entry.user_message())
+                .filter(|message| !message.content.source_blocks().is_empty())
+                .count();
+            assert_eq!(shown_user_messages, 1, "only the prompt the user sent");
+        });
     }
 
     /// The agent's checklist reaches the plan card that external agents' plans

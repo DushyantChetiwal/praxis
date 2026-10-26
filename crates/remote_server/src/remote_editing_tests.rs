@@ -4843,7 +4843,7 @@ async fn test_adding_remote_skill(cx: &mut TestAppContext, server_cx: &mut TestA
         skills_resolver_for_project(agent.downgrade(), project.entity_id()),
         skill_body_resolver_for_project(project.clone(), fs.clone()),
     ));
-    let (event_stream, mut event_stream_rx) = ToolCallEventStream::test();
+    let (event_stream, _event_stream_rx) = ToolCallEventStream::test();
 
     let input = SkillToolInput {
         name: "test-skill".into(),
@@ -4853,17 +4853,6 @@ async fn test_adding_remote_skill(cx: &mut TestAppContext, server_cx: &mut TestA
             .clone()
             .run(ToolInput::resolved(input), event_stream.clone(), cx)
     });
-
-    // The project-local skill is not a built-in, so the tool requests
-    // authorization. Approve it so the tool can proceed.
-    let authorization = event_stream_rx.expect_authorization().await;
-    authorization
-        .response
-        .send(acp_thread::SelectedPermissionOutcome::new(
-            agent_client_protocol::schema::v2::PermissionOptionId::new("allow"),
-            agent_client_protocol::schema::v2::PermissionOptionKind::AllowOnce,
-        ))
-        .unwrap();
 
     let output = task.await.unwrap();
     cx.run_until_parked();
@@ -4905,15 +4894,6 @@ async fn test_adding_remote_skill(cx: &mut TestAppContext, server_cx: &mut TestA
             .clone()
             .run(ToolInput::resolved(input2), event_stream.clone(), cx)
     });
-
-    let authorization = event_stream_rx.expect_authorization().await;
-    authorization
-        .response
-        .send(acp_thread::SelectedPermissionOutcome::new(
-            agent_client_protocol::schema::v2::PermissionOptionId::new("allow"),
-            agent_client_protocol::schema::v2::PermissionOptionKind::AllowOnce,
-        ))
-        .unwrap();
 
     let output = task.await.unwrap();
     let expected2 = format!(

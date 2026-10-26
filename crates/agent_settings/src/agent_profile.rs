@@ -34,31 +34,11 @@ pub mod builtin_profiles {
             WRITE | ASK | BUILD | ARCHITECT_STEP | MINIMAL
         )
     }
-
-    /// Whether the user may pick this profile for a thread. `ARCHITECT_STEP`
-    /// is applied by step threads themselves and would do the wrong thing on
-    /// any other thread, so it is kept out of the picker.
-    pub fn is_selectable(profile_id: &AgentProfileId) -> bool {
-        !matches!(profile_id.as_str(), ARCHITECT_STEP | BUILD)
-    }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AgentProfile {
-    id: AgentProfileId,
-}
-
-pub type AvailableProfiles = IndexMap<AgentProfileId, SharedString>;
+pub struct AgentProfile;
 
 impl AgentProfile {
-    pub fn new(id: AgentProfileId) -> Self {
-        Self { id }
-    }
-
-    pub fn id(&self) -> &AgentProfileId {
-        &self.id
-    }
-
     /// Saves a new profile to the settings.
     pub fn create(
         name: String,
@@ -110,15 +90,6 @@ impl AgentProfile {
         });
 
         id
-    }
-
-    /// Returns a map of AgentProfileIds to their names
-    pub fn available_profiles(cx: &App) -> AvailableProfiles {
-        let mut profiles = AvailableProfiles::default();
-        for (id, profile) in AgentSettings::get_global(cx).profiles.iter() {
-            profiles.insert(id.clone(), profile.name.clone());
-        }
-        profiles
     }
 }
 

@@ -471,9 +471,11 @@ pub fn resolve_project_path(
 }
 
 /// Prompts the user for permission when a path resolves through a symlink to a
-/// location outside the project. This check is an additional gate after
-/// settings-based deny decisions: even if a tool is configured as "always allow,"
-/// a symlink escape still requires explicit user approval.
+/// location outside the project, once the user has restricted the agent in
+/// their settings. This check is an additional gate after settings-based deny
+/// decisions: even if the tool is configured as "always allow," a symlink
+/// escape then requires explicit user approval. Until the user restricts
+/// anything, there is nothing to ask about.
 pub fn authorize_symlink_access(
     tool_name: &str,
     display_path: &str,
@@ -481,6 +483,10 @@ pub fn authorize_symlink_access(
     event_stream: &ToolCallEventStream,
     cx: &mut App,
 ) -> Task<Result<()>> {
+    if !agent_settings::AgentSettings::get_global(cx).restricts_agent() {
+        return Task::ready(Ok(()));
+    }
+
     let title = format!(
         "`{}` points outside the project (symlink to `{}`)",
         display_path,
@@ -495,6 +501,10 @@ pub fn authorize_symlink_access(
     event_stream.authorize_always_prompt(title, context, cx)
 }
 
+/// Asks before a tool touches a settings or skills path, regardless of an
+/// "always allow" rule, once the user has restricted the agent, so it cannot
+/// lift those restrictions itself. Otherwise the tool's permission settings
+/// decide, as for any other path.
 pub fn authorize_with_sensitive_settings(
     kind: Option<SensitiveSettingsKind>,
     context: ToolPermissionContext,
@@ -502,6 +512,10 @@ pub fn authorize_with_sensitive_settings(
     event_stream: &ToolCallEventStream,
     cx: &mut App,
 ) -> Task<Result<()>> {
+    if !agent_settings::AgentSettings::get_global(cx).restricts_agent() {
+        return event_stream.authorize(title, context, cx);
+    }
+
     match kind {
         Some(SensitiveSettingsKind::Local) => {
             event_stream.authorize_always_prompt(format!("{title} (local settings)"), context, cx)
@@ -518,7 +532,8 @@ pub fn authorize_with_sensitive_settings(
     }
 }
 
-/// Creates a single authorization prompt for multiple symlink escapes.
+/// Creates a single authorization prompt for multiple symlink escapes, under
+/// the same conditions as [`authorize_symlink_access`].
 /// Each escape is a `(display_path, canonical_target)` pair.
 ///
 /// Accepts `&[(&str, PathBuf)]` to match the natural return type of
@@ -531,6 +546,10 @@ pub fn authorize_symlink_escapes(
     cx: &mut App,
 ) -> Task<Result<()>> {
     debug_assert!(!escapes.is_empty());
+
+    if !agent_settings::AgentSettings::get_global(cx).restricts_agent() {
+        return Task::ready(Ok(()));
+    }
 
     if escapes.len() == 1 {
         return authorize_symlink_access(tool_name, escapes[0].0, &escapes[0].1, event_stream, cx);
@@ -552,20 +571,6 @@ pub fn authorize_symlink_escapes(
     );
 
     event_stream.authorize_always_prompt(title, context, cx)
-}
-
-/// Checks whether a path escapes the project via symlink, without creating
-/// an authorization task. Useful for pre-filtering paths before settings checks.
-pub fn path_has_symlink_escape(
-    project: &Project,
-    path: impl AsRef<Path>,
-    canonical_worktree_roots: &[PathBuf],
-    cx: &App,
-) -> bool {
-    matches!(
-        resolve_project_path(project, path, canonical_worktree_roots, cx),
-        Ok(ResolvedProjectPath::SymlinkEscape { .. })
-    )
 }
 
 /// Collects symlink escape info for a path without creating an authorization task.
@@ -611,8 +616,9 @@ pub fn collect_symlink_escapes<'a>(
     escapes
 }
 
-/// Checks authorization for file edits, handling symlink escapes and
-/// sensitive settings paths.
+/// Checks authorization for file edits. The tool's permission settings decide,
+/// and once the user has restricted the agent, symlink escapes and settings or
+/// skills paths always ask as well.
 ///
 /// # Authorization precedence
 ///
@@ -638,6 +644,11 @@ pub fn authorize_file_edit(
 
     if let ToolPermissionDecision::Deny(reason) = decision {
         return Task::ready(Err(anyhow!("{}", reason)));
+    }
+    // Nothing is restricted, so every edit is allowed and there is no
+    // restriction for the checks below to protect.
+    if !settings.restricts_agent() {
+        return Task::ready(Ok(()));
     }
 
     let path_owned = path.to_path_buf();
@@ -713,8 +724,6 @@ pub fn authorize_file_edit(
             }
         }
 
-        let explicitly_allowed = matches!(decision, ToolPermissionDecision::Allow);
-
         // Check sensitive settings asynchronously. Short-circuit on the
         // raw-path fast paths to skip the canonicalization in
         // `sensitive_settings_kind`; the slow path still runs for paths
@@ -728,67 +737,18 @@ pub fn authorize_file_edit(
             sensitive_settings_kind(&path_owned, &canonical_roots, fs.as_ref()).await
         };
 
-        let is_sensitive = settings_kind.is_some();
-        if explicitly_allowed && !is_sensitive {
+        if settings_kind.is_none() && matches!(decision, ToolPermissionDecision::Allow) {
             return Ok(());
         }
 
-        match settings_kind {
-            Some(SensitiveSettingsKind::Local) => {
-                let authorize = cx.update(|cx| {
-                    let context = ToolPermissionContext::new(
-                        &tool_name,
-                        vec![path_owned.to_string_lossy().to_string()],
-                    );
-                    event_stream.authorize_always_prompt(
-                        format!("{title} (local settings)"),
-                        context,
-                        cx,
-                    )
-                });
-                return authorize.await;
-            }
-            Some(SensitiveSettingsKind::Global) => {
-                let authorize = cx.update(|cx| {
-                    let context = ToolPermissionContext::new(
-                        &tool_name,
-                        vec![path_owned.to_string_lossy().to_string()],
-                    );
-                    event_stream.authorize_always_prompt(format!("{title} (settings)"), context, cx)
-                });
-                return authorize.await;
-            }
-            Some(SensitiveSettingsKind::AgentSkills) => {
-                let authorize = cx.update(|cx| {
-                    let context = ToolPermissionContext::new(
-                        &tool_name,
-                        vec![path_owned.to_string_lossy().to_string()],
-                    )
-                    .for_agent_skills();
-                    event_stream.authorize_always_prompt(
-                        format!("{title} (agent skills)"),
-                        context,
-                        cx,
-                    )
-                });
-                return authorize.await;
-            }
-            None => {}
-        }
-
-        match resolved {
-            Ok(_) => Ok(()),
-            Err(_) => {
-                let authorize = cx.update(|cx| {
-                    let context = ToolPermissionContext::new(
-                        &tool_name,
-                        vec![path_owned.to_string_lossy().to_string()],
-                    );
-                    event_stream.authorize(&title, context, cx)
-                });
-                authorize.await
-            }
-        }
+        let authorize = cx.update(|cx| {
+            let context = ToolPermissionContext::new(
+                &tool_name,
+                vec![path_owned.to_string_lossy().to_string()],
+            );
+            authorize_with_sensitive_settings(settings_kind, context, &title, &event_stream, cx)
+        });
+        authorize.await
     })
 }
 

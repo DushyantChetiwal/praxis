@@ -159,7 +159,7 @@ Copying an image and pasting it is also supported.
 
 ## Token Usage and Compaction {#token-usage}
 
-Zed surfaces how many tokens you are consuming for your currently active thread near the profile selector in the panel's message editor.
+Zed surfaces how many tokens you are consuming for your currently active thread near the mode selector in the panel's message editor.
 
 Zed automatically compacts long Zed Agent threads as they approach the configured token threshold. Compaction summarizes earlier messages and replaces them in the model context with that summary, leaving more room for the next turn. The thread shows a **Context Compacted** entry that you can expand to inspect the summary. You can compact manually by typing `/compact` in the message editor.
 

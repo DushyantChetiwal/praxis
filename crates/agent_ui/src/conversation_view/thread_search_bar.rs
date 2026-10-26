@@ -985,6 +985,7 @@ fn collect_markdowns(
         )),
         AgentThreadEntry::Elicitation(_) => {}
         AgentThreadEntry::LoopGuardNotice(_) => {}
+        AgentThreadEntry::BackgroundWakeNotice(_) => {}
     }
     out
 }

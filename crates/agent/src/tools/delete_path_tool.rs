@@ -286,6 +286,9 @@ mod tests {
         cx.update(|cx| {
             let mut settings = AgentSettings::get_global(cx).clone();
             settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            // Turning the sandbox back on restricts the agent, which is what
+            // makes skills paths and symlink escapes ask.
+            settings.sandbox_permissions.allow_unsandboxed = false;
             AgentSettings::override_global(settings, cx);
         });
     }
@@ -714,6 +717,57 @@ mod tests {
                 Ok(Ok(crate::ThreadEvent::ToolCallAuthorization(_)))
             ),
             "Deny policy should not emit symlink authorization prompt",
+        );
+    }
+
+    #[gpui::test]
+    async fn test_delete_path_global_skill_does_not_ask_until_restricted(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.sandbox_permissions.allow_unsandboxed = true;
+            AgentSettings::override_global(settings, cx);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/root/project"), json!({})).await;
+        let skill_file = agent_skills::global_skills_dir()
+            .join("my-skill")
+            .join("SKILL.md");
+        fs.create_dir(skill_file.parent().unwrap()).await.unwrap();
+        fs.insert_file(&skill_file, b"skill".to_vec()).await;
+        let project = Project::test(fs.clone(), [path!("/root/project").as_ref()], cx).await;
+        cx.executor().run_until_parked();
+
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let tool = Arc::new(DeletePathTool::new(project, action_log));
+        let input_path = PathBuf::from("~")
+            .join(".agents")
+            .join("skills")
+            .join("my-skill")
+            .join("SKILL.md")
+            .to_string_lossy()
+            .into_owned();
+
+        let (event_stream, mut event_rx) = ToolCallEventStream::test();
+        let result = cx
+            .update(|cx| {
+                tool.run(
+                    ToolInput::resolved(DeletePathToolInput { path: input_path }),
+                    event_stream,
+                    cx,
+                )
+            })
+            .await;
+
+        assert!(result.is_ok(), "should delete without asking: {result:?}");
+        assert!(!fs.is_file(&skill_file).await);
+        assert!(
+            !matches!(
+                event_rx.try_recv(),
+                Ok(Ok(crate::ThreadEvent::ToolCallAuthorization(_)))
+            ),
+            "an unrestricted agent should not be asked about skills",
         );
     }
 }
