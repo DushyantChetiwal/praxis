@@ -1102,6 +1102,9 @@ impl VsCodeSettings {
             use_system_path_prompts: self.read_bool("files.simpleDialog.enable").map(|b| !b),
             use_system_prompts: None,
             use_system_window_tabs: self.read_bool("window.nativeTabs"),
+            open_new_windows_maximized: self
+                .read_string("window.newWindowDimensions")
+                .map(|dimensions| dimensions == "maximized"),
             fullscreen_mode: self.read_bool("window.nativeFullScreen").map(|b| {
                 if b {
                     FullscreenMode::Native

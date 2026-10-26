@@ -355,8 +355,6 @@ actions!(
         RejectOnce,
         /// Follows the agent's suggestions.
         Follow,
-        /// Resets the trial upsell notification.
-        ResetTrialUpsell,
         /// Resets the trial end upsell notification.
         ResetTrialEndUpsell,
         /// Re-enables the fast mode warning for every provider and model.
@@ -1163,6 +1161,7 @@ mod tests {
             button: true,
             dock: DockPosition::Right,
             flexible: true,
+            starts_open: true,
             default_width: px(300.),
             default_height: px(600.),
             max_content_width: Some(px(850.)),

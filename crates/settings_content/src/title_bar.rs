@@ -89,7 +89,7 @@ pub struct TitleBarSettingsContent {
     pub show_branch_status_icon: Option<bool>,
     /// Whether to show onboarding banners in the title bar.
     ///
-    /// Default: true
+    /// Default: false
     pub show_onboarding_banner: Option<bool>,
     /// Whether to show user avatar in the title bar.
     ///
@@ -109,7 +109,7 @@ pub struct TitleBarSettingsContent {
     pub show_project_items: Option<bool>,
     /// Whether to show the sign in button in the title bar.
     ///
-    /// Default: true
+    /// Default: false
     pub show_sign_in: Option<bool>,
     /// Whether to show the user menu button in the title bar.
     ///

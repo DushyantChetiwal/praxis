@@ -3110,7 +3110,7 @@ mod tests {
                 terminal_panel.update(cx, |terminal_panel, cx| {
                     assert!(
                         !terminal_panel.starts_open(window, cx),
-                        "terminal panel should not start open by default"
+                        "terminal panel should not start open when the setting is off"
                     );
                 });
             })

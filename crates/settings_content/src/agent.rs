@@ -244,6 +244,11 @@ pub struct AgentSettingsContent {
     ///
     /// Default: true
     pub flexible: Option<bool>,
+    /// Whether the agent panel opens on startup, alongside the project panel
+    /// and the terminal.
+    ///
+    /// Default: true
+    pub starts_open: Option<bool>,
     /// The deprecated version of `threads_sidebar.position`.
     ///
     /// Don't use this field.

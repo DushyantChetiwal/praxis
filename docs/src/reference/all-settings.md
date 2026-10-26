@@ -853,9 +853,9 @@ For the case of "open", regular selection behavior can be achieved by holding `a
 
 ### Edit Prediction Provider
 
-- Description: Which edit prediction provider to use
+- Description: Which edit prediction provider to use. Edit predictions are off until you choose one.
 - Setting: `provider`
-- Default: `"zed"`
+- Default: `"none"`
 
 **Options**
 
@@ -1936,6 +1936,16 @@ Each option controls displaying of a particular toolbar element. If all elements
 **Options**
 
 This setting enables integration with macOS's native window tabbing feature. When set to `true`, Zed windows can be grouped together as tabs in a single macOS window, following the system-wide tabbing preferences set by the user (such as "Always", "In Full Screen", or "Never"). This setting is only available on macOS.
+
+## Open New Windows Maximized
+
+- Description: Whether a window with no saved size of its own opens maximized.
+- Setting: `open_new_windows_maximized`
+- Default: `true`
+
+**Options**
+
+`boolean` values. Reopening a project still restores the size its window was left at, and un-maximizing a new window returns it to the size the last window had.
 
 ## Fullscreen Mode
 
@@ -4698,7 +4708,7 @@ List of `integer` column numbers
     "keep_selection_on_copy": true,
     "open_links_in_mouse_mode": true,
     "dock": "bottom",
-    "starts_open": false,
+    "starts_open": true,
     "default_width": 640,
     "default_height": 320,
     "detect_venv": {
@@ -4742,7 +4752,7 @@ List of `integer` column numbers
 
 - Description: Whether the terminal panel should open on startup.
 - Setting: `starts_open`
-- Default: `false`
+- Default: `true`
 
 **Options**
 
@@ -4751,7 +4761,7 @@ List of `integer` column numbers
 ```json [settings]
 {
   "terminal": {
-    "starts_open": true
+    "starts_open": false
   }
 }
 ```
@@ -5494,10 +5504,10 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
     "show_branch_name": true,
     "show_worktree_name": true,
     "show_project_items": true,
-    "show_onboarding_banner": true,
+    "show_onboarding_banner": false,
     "show_user_picture": true,
     "show_user_menu": true,
-    "show_sign_in": true,
+    "show_sign_in": false,
     "show_menus": false,
     "open_menus_on_hover": false,
     "button_layout": "platform_default"
@@ -6076,7 +6086,7 @@ Visit [AI Quick Start](../ai/quick-start.md) under the AI section to learn more 
 ```json [settings]
 {
   "collaboration_panel": {
-    "button": true,
+    "button": false,
     "dock": "right",
     "default_width": 240
   }
