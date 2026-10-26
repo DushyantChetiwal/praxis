@@ -3222,10 +3222,16 @@ impl Thread {
         checklist: &[crate::PlanStep],
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        if self.architect_run.as_ref().is_some_and(ArchitectRun::is_running) {
-            return Err("The plan is running, and its run keeps the checklist up to date. \
+        if self
+            .architect_run
+            .as_ref()
+            .is_some_and(ArchitectRun::is_running)
+        {
+            return Err(
+                "The plan is running, and its run keeps the checklist up to date. \
                  Wait for it to finish or stop it before changing the steps."
-                .into());
+                    .into(),
+            );
         }
         if self.architect_graph.is_none() && checklist.is_empty() {
             self.step_progress.clear();
@@ -9687,7 +9693,10 @@ mod tests {
         let progress = progress_from_saved_checklist(&mut existing, &saved);
         assert_eq!(existing, Some(drafted), "a drafted plan keeps its steps");
         assert_eq!(progress.len(), 1);
-        assert_eq!(progress.get("load"), Some(&crate::PlanStepStatus::Completed));
+        assert_eq!(
+            progress.get("load"),
+            Some(&crate::PlanStepStatus::Completed)
+        );
 
         let mut none = None;
         assert!(progress_from_saved_checklist(&mut none, &[]).is_empty());
@@ -9709,7 +9718,10 @@ mod tests {
                     .set_agent_checklist(&checklist, cx)
                     .expect("no plan is running");
                 assert_eq!(thread.agent_checklist(), checklist);
-                assert_eq!(thread.architect_graph().map(|graph| graph.nodes.len()), Some(2));
+                assert_eq!(
+                    thread.architect_graph().map(|graph| graph.nodes.len()),
+                    Some(2)
+                );
 
                 let path = architect::NodePath::root("add-the-setting".into());
                 thread.start_architect_run(

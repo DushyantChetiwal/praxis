@@ -13213,7 +13213,9 @@ mod internal_tests {
         });
         cx.run_until_parked();
         acp_thread.read_with(cx, |thread, cx| {
-            let plan = thread.plan().expect("the checklist should still be visible");
+            let plan = thread
+                .plan()
+                .expect("the checklist should still be visible");
             assert_eq!(plan.entries.len(), 3);
             assert_eq!(
                 plan.entries[2].content.read(cx).source(),

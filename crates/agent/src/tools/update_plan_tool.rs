@@ -433,9 +433,12 @@ mod tests {
             super::super::architect_run_tool::architect_tool_test_session(cx).await;
         let tool = Arc::new(UpdatePlanTool::new(thread.downgrade()));
         let (stream, _events) = ToolCallEventStream::test();
-        cx.update(|cx| tool.clone().run(ToolInput::resolved(checklist()), stream, cx))
-            .await
-            .expect("a valid checklist");
+        cx.update(|cx| {
+            tool.clone()
+                .run(ToolInput::resolved(checklist()), stream, cx)
+        })
+        .await
+        .expect("a valid checklist");
 
         thread.update(cx, |thread, cx| {
             thread.update_architect_graph(

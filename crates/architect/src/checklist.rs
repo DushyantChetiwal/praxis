@@ -82,7 +82,11 @@ impl ArchitectGraph {
             *outgoing.entry(&edge.from).or_default() += 1;
             *incoming.entry(&edge.to).or_default() += 1;
         }
-        if incoming.values().chain(outgoing.values()).any(|count| *count > 1) {
+        if incoming
+            .values()
+            .chain(outgoing.values())
+            .any(|count| *count > 1)
+        {
             return false;
         }
         let mut entries = self
@@ -210,8 +214,7 @@ mod tests {
     #[test]
     fn a_checklist_becomes_a_single_line_plan() {
         let mut graph = ArchitectGraph::default();
-        let ids =
-            graph.sync_checklist(&titles(&["Read the code", "Fix the bug!", "Run tests"]));
+        let ids = graph.sync_checklist(&titles(&["Read the code", "Fix the bug!", "Run tests"]));
 
         assert_eq!(
             ids,
@@ -222,7 +225,10 @@ mod tests {
             ]
         );
         assert!(graph.is_single_line());
-        assert_eq!(step_titles(&graph), ["Read the code", "Fix the bug!", "Run tests"]);
+        assert_eq!(
+            step_titles(&graph),
+            ["Read the code", "Fix the bug!", "Run tests"]
+        );
         assert!(
             graph.nodes.iter().all(|node| node.position.is_some()),
             "the canvas can show the plan as soon as it exists"
@@ -288,12 +294,20 @@ mod tests {
         let ids = graph.sync_checklist(&titles(&["LEFT", "Wrap up"]));
 
         assert_eq!(ids, vec![NodeId::from("left"), NodeId::from("wrap-up")]);
-        assert_eq!(graph.nodes.len(), 4, "unlisted steps of a branched plan stay");
+        assert_eq!(
+            graph.nodes.len(),
+            4,
+            "unlisted steps of a branched plan stay"
+        );
         let into_new: Vec<&str> = graph
             .edges_into(&NodeId::from("wrap-up"))
             .map(|edge| edge.from.0.as_str())
             .collect();
-        assert_eq!(into_new, ["left", "right"], "a new step follows every branch");
+        assert_eq!(
+            into_new,
+            ["left", "right"],
+            "a new step follows every branch"
+        );
     }
 
     #[test]
@@ -316,7 +330,10 @@ mod tests {
     #[test]
     fn only_a_line_of_bare_steps_is_a_plain_checklist() {
         let mut graph = ArchitectGraph::default();
-        assert!(graph.is_plain_checklist(), "no plan is no more than a checklist");
+        assert!(
+            graph.is_plain_checklist(),
+            "no plan is no more than a checklist"
+        );
         graph.sync_checklist(&titles(&["Read", "Write"]));
         assert!(graph.is_plain_checklist());
 
@@ -325,7 +342,10 @@ mod tests {
         graph.node_mut(&NodeId::from("write")).unwrap().locked = false;
 
         graph.add_node(ArchitectNode::new("apart", "Apart"));
-        assert!(!graph.is_plain_checklist(), "a step standing apart is a shape");
+        assert!(
+            !graph.is_plain_checklist(),
+            "a step standing apart is a shape"
+        );
     }
 
     #[test]
@@ -335,7 +355,10 @@ mod tests {
         for id in ["a", "b", "c"] {
             graph.add_node(ArchitectNode::new(id, id));
         }
-        assert!(!graph.is_single_line(), "steps standing apart are not a line");
+        assert!(
+            !graph.is_single_line(),
+            "steps standing apart are not a line"
+        );
         graph.connect("a", "b");
         graph.connect("b", "c");
         assert!(graph.is_single_line());
