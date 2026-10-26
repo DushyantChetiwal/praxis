@@ -5230,7 +5230,7 @@ fn window_and_layout_page() -> SettingsPage {
         ]
     }
 
-    fn window_section() -> [SettingsPageItem; 6] {
+    fn window_section() -> [SettingsPageItem; 7] {
         [
             SettingsPageItem::SectionHeader("Window"),
             SettingsPageItem::SettingItem(SettingItem {
