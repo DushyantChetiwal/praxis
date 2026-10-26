@@ -299,8 +299,9 @@ mod tests {
             4,
             "unlisted steps of a branched plan stay"
         );
+        let wrap_up = NodeId::from("wrap-up");
         let into_new: Vec<&str> = graph
-            .edges_into(&NodeId::from("wrap-up"))
+            .edges_into(&wrap_up)
             .map(|edge| edge.from.0.as_str())
             .collect();
         assert_eq!(
