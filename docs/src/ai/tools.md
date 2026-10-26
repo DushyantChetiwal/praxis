@@ -150,3 +150,9 @@ Spawns a subagent with its own context window to perform a delegated task. Usefu
 To configure a subagent's model, reasoning effort, and speed, see [Subagent Models](./agent-settings.md#subagent-models).
 
 **Example:** While refactoring the authentication module, spawn a subagent to investigate how session tokens are validated elsewhere in the codebase. The parent agent continues its work and reviews the subagent's findings when it completes — keeping both context windows focused on a single task.
+
+### `run_steps`
+
+Carries out two to six independent steps of the agent's checklist at the same time, one subagent per step. The conversation shows a card for each step's agent while it works: whether it is still running, the files it has changed, and a preview of its conversation. From a card you can stop that step or open its agent full screen. The checklist marks each step done as soon as its agent finishes, without waiting for the others.
+
+If two steps try to change the same file, the first one keeps it and the other reports what it could not change, so the agent can finish that part itself.

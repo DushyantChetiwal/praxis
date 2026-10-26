@@ -168,6 +168,10 @@ pub fn command_category_from_meta(meta: &Option<acp_v2::Meta>) -> Option<Command
 /// Key used in ACP ToolCall meta to store the session id and message indexes
 pub const SUBAGENT_SESSION_INFO_META_KEY: &str = "subagent_session_info";
 
+/// Key used in ACP ToolCall meta for the steps a call runs side by side, each
+/// with an agent of its own. See [`ParallelStep`].
+pub const PARALLEL_STEPS_META_KEY: &str = "parallel_steps";
+
 pub const SANDBOX_AUTHORIZATION_META_KEY: &str = "sandbox_authorization";
 
 /// Stable `PermissionOption` ids for the sandbox-escalation approval prompt.
@@ -334,6 +338,45 @@ pub fn subagent_session_info_from_meta(meta: &Option<acp_v2::Meta>) -> Option<Su
     meta.as_ref()
         .and_then(|m| m.get(SUBAGENT_SESSION_INFO_META_KEY))
         .and_then(|v| serde_json::from_value(v.clone()).ok())
+}
+
+/// How far one of several steps running side by side has got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParallelStepStatus {
+    Running,
+    Done,
+    /// The step stopped before it finished, because it failed or was stopped.
+    NotFinished,
+}
+
+/// One of the steps a tool call runs side by side, such as a checklist step
+/// handed to an agent of its own. The tool call reports every step's progress
+/// as it changes, so each step can be followed while it runs.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ParallelStep {
+    /// The step's name, as it appears in the checklist.
+    pub step: String,
+    pub status: ParallelStepStatus,
+    /// The agent carrying out the step, once it has started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SubagentSessionInfo>,
+    /// Why the step did not finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The steps a tool call runs side by side, from its ACP meta.
+pub fn parallel_steps_from_meta(meta: &Option<acp_v2::Meta>) -> Vec<ParallelStep> {
+    meta.as_ref()
+        .and_then(|meta| meta.get(PARALLEL_STEPS_META_KEY))
+        .and_then(|steps| serde_json::from_value(steps.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// ACP meta reporting the steps a tool call runs side by side.
+pub fn parallel_steps_meta(steps: &[ParallelStep]) -> acp_v2::Meta {
+    acp_v2::Meta::from_iter([(PARALLEL_STEPS_META_KEY.into(), serde_json::json!(steps))])
 }
 
 #[derive(Debug)]
@@ -1333,6 +1376,8 @@ pub struct ToolCall {
     raw_output_content: Option<Box<ToolCallContent>>,
     pub tool_name: Option<SharedString>,
     pub subagent_session_info: Option<SubagentSessionInfo>,
+    /// The steps this call runs side by side, each with an agent of its own.
+    pub parallel_steps: Vec<ParallelStep>,
     pub sandbox_authorization_details: Option<SandboxAuthorizationDetails>,
     pub sandbox_fallback_authorization_details: Option<SandboxFallbackAuthorizationDetails>,
     /// Why this terminal command ran without the OS sandbox even though
@@ -1644,6 +1689,7 @@ impl ToolCall {
         };
         let tool_name = name.clone().or_else(|| tool_name_from_meta(&meta));
         let subagent_session_info = subagent_session_info_from_meta(&meta);
+        let parallel_steps = parallel_steps_from_meta(&meta);
         let sandbox_authorization_details = sandbox_authorization_details_from_meta(&meta);
         let sandbox_fallback_authorization_details =
             sandbox_fallback_authorization_details_from_meta(&meta);
@@ -1680,6 +1726,7 @@ impl ToolCall {
             raw_output_content: None,
             tool_name,
             subagent_session_info,
+            parallel_steps,
             sandbox_authorization_details,
             sandbox_fallback_authorization_details,
             sandbox_not_applied,
@@ -1841,6 +1888,10 @@ impl ToolCall {
                 if let Some(value) = subagent_session_info_from_meta(&meta) {
                     self.subagent_session_info = Some(value);
                 }
+                let parallel_steps = parallel_steps_from_meta(&meta);
+                if !parallel_steps.is_empty() {
+                    self.parallel_steps = parallel_steps;
+                }
                 if let Some(value) = sandbox_authorization_details_from_meta(&meta) {
                     self.sandbox_authorization_details = Some(value);
                 }
@@ -1859,6 +1910,7 @@ impl ToolCall {
                 let meta_changed = MetadataUpdate::V2(meta).apply(&mut self.meta) || cleared;
                 if meta_changed {
                     self.subagent_session_info = subagent_session_info_from_meta(&self.meta);
+                    self.parallel_steps = parallel_steps_from_meta(&self.meta);
                     self.sandbox_authorization_details =
                         sandbox_authorization_details_from_meta(&self.meta);
                     self.sandbox_fallback_authorization_details =
@@ -2097,6 +2149,22 @@ impl ToolCall {
     pub fn is_subagent(&self) -> bool {
         self.tool_name.as_ref().is_some_and(|s| s == "spawn_agent")
             || self.subagent_session_info.is_some()
+    }
+
+    /// Whether this call hands work to agents of its own: one, or one per step
+    /// it runs side by side.
+    pub fn runs_subagents(&self) -> bool {
+        self.is_subagent()
+            || !self.parallel_steps.is_empty()
+            || self.tool_name.as_ref().is_some_and(|name| name == "run_steps")
+    }
+
+    /// The sessions of every agent this call started.
+    pub fn subagent_session_ids(&self) -> impl Iterator<Item = &acp_v2::SessionId> {
+        self.subagent_session_info
+            .iter()
+            .chain(self.parallel_steps.iter().filter_map(|step| step.session.as_ref()))
+            .map(|session| &session.session_id)
     }
 
     pub fn to_markdown(&self, cx: &App) -> String {
@@ -6212,14 +6280,10 @@ impl AcpThread {
 
     pub fn tool_call_for_subagent(&self, session_id: &acp_v2::SessionId) -> Option<&ToolCall> {
         self.entries.iter().find_map(|entry| match entry {
-            AgentThreadEntry::ToolCall(tool_call) => {
-                if let Some(subagent_session_info) = &tool_call.subagent_session_info
-                    && &subagent_session_info.session_id == session_id
-                {
-                    Some(tool_call)
-                } else {
-                    None
-                }
+            AgentThreadEntry::ToolCall(tool_call)
+                if tool_call.subagent_session_ids().any(|id| id == session_id) =>
+            {
+                Some(tool_call)
             }
             _ => None,
         })
@@ -16051,6 +16115,79 @@ mod tests {
                 assert_eq!(serde_json::to_value(info).expect("session metadata"), wire);
             }
         }
+    }
+
+    #[gpui::test]
+    async fn test_parallel_steps_follow_each_progress_update(cx: &mut TestAppContext) {
+        init_test(cx);
+        let thread = new_test_thread(cx).await;
+        let step = |name: &str, status| ParallelStep {
+            step: name.into(),
+            status,
+            session: Some(SubagentSessionInfo {
+                session_id: acp_v2::SessionId::new(name.to_lowercase()),
+                message_start_index: 0,
+                message_end_index: None,
+            }),
+            error: None,
+        };
+        thread.update(cx, |thread, cx| {
+            let id = acp_v2::ToolCallId::new("steps");
+            thread
+                .upsert_local_tool_call(
+                    acp_v2::ToolCallUpdate::new(id.clone())
+                        .name("run_steps")
+                        .title("Run 2 steps in parallel"),
+                    cx,
+                )
+                .expect("native creation");
+            let (_, call) = thread.tool_call(&id).expect("tool");
+            assert!(
+                call.runs_subagents(),
+                "the call runs agents before it reports any"
+            );
+            assert!(call.parallel_steps.is_empty());
+
+            thread
+                .update_tool_call(
+                    acp_v2::ToolCallUpdate::new(id.clone()).meta(parallel_steps_meta(&[
+                        step("First", ParallelStepStatus::Running),
+                        step("Second", ParallelStepStatus::Running),
+                    ])),
+                    cx,
+                )
+                .expect("steps started");
+            let (_, call) = thread.tool_call(&id).expect("tool");
+            assert_eq!(
+                call.subagent_session_ids().cloned().collect::<Vec<_>>(),
+                vec![
+                    acp_v2::SessionId::new("first"),
+                    acp_v2::SessionId::new("second")
+                ]
+            );
+            assert!(
+                thread
+                    .tool_call_for_subagent(&acp_v2::SessionId::new("second"))
+                    .is_some_and(|call| call.id == id),
+                "a step's agent leads back to the call that started it"
+            );
+
+            thread
+                .update_tool_call(
+                    acp_v2::ToolCallUpdate::new(id.clone()).meta(parallel_steps_meta(&[
+                        step("First", ParallelStepStatus::Done),
+                        step("Second", ParallelStepStatus::Running),
+                    ])),
+                    cx,
+                )
+                .expect("one step finished");
+            let (_, call) = thread.tool_call(&id).expect("tool");
+            let statuses: Vec<_> = call.parallel_steps.iter().map(|step| step.status).collect();
+            assert_eq!(
+                statuses,
+                vec![ParallelStepStatus::Done, ParallelStepStatus::Running]
+            );
+        });
     }
 
     #[gpui::test]
