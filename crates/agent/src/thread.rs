@@ -1008,11 +1008,13 @@ impl BackgroundWakeInfo {
             .join("\n");
         LanguageModelRequestMessage {
             role: Role::User,
-            content: vec![format!(
-                "Praxis resumed this conversation because background work finished:\n\
+            content: vec![
+                format!(
+                    "Praxis resumed this conversation because background work finished:\n\
                  {notices}\n\nContinue from where you left off."
-            )
-            .into()],
+                )
+                .into(),
+            ],
             cache: false,
             reasoning_details: None,
         }
