@@ -721,9 +721,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_delete_path_global_skill_does_not_ask_until_restricted(
-        cx: &mut TestAppContext,
-    ) {
+    async fn test_delete_path_global_skill_does_not_ask_until_restricted(cx: &mut TestAppContext) {
         init_test(cx);
         cx.update(|cx| {
             let mut settings = AgentSettings::get_global(cx).clone();

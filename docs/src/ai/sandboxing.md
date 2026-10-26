@@ -185,12 +185,12 @@ If you want to pre-approve common sandbox requests, add persistent permissions t
 
 The available options are:
 
-| Setting              | Description                                                                                                       |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `network_hosts`      | Hosts that sandboxed tools may reach without prompting. Entries can be exact hostnames or leading-`*.` wildcards. |
-| `allow_all_hosts`    | Allow sandboxed tools to reach any host without prompting.                                                        |
-| `write_paths`        | Directory subtrees that sandboxed terminal commands may write to without prompting. Paths are absolute.           |
-| `allow_fs_write_all` | Allow sandboxed terminal commands to write anywhere except protected Git metadata without prompting.              |
+| Setting              | Description                                                                                                              |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `network_hosts`      | Hosts that sandboxed tools may reach without prompting. Entries can be exact hostnames or leading-`*.` wildcards.        |
+| `allow_all_hosts`    | Allow sandboxed tools to reach any host without prompting.                                                               |
+| `write_paths`        | Directory subtrees that sandboxed terminal commands may write to without prompting. Paths are absolute.                  |
+| `allow_fs_write_all` | Allow sandboxed terminal commands to write anywhere except protected Git metadata without prompting.                     |
 | `allow_unsandboxed`  | Turn sandboxing off entirely for Zed Agent terminal commands. The fetch tool will have no restrictions. Default: `true`. |
 
 Prefer narrow grants, such as a specific host or write path, over `allow_all_hosts`, `allow_fs_write_all`, or

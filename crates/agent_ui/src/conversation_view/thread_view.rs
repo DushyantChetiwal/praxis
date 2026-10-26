@@ -843,10 +843,11 @@ impl ThreadView {
         subscriptions.push(cx.observe(&conversation, |_, _, cx| cx.notify()));
         // Keeps the Restricted Mode notice in step with the project's trust.
         if let Some(trusted_worktrees) = TrustedWorktrees::try_get_global(cx) {
-            subscriptions.push(cx.subscribe(
-                &trusted_worktrees,
-                |_, _, _: &TrustedWorktreesEvent, cx| cx.notify(),
-            ));
+            subscriptions.push(
+                cx.subscribe(&trusted_worktrees, |_, _, _: &TrustedWorktreesEvent, cx| {
+                    cx.notify()
+                }),
+            );
         }
 
         let has_slash_completions = session_capabilities.read().has_slash_completions();
@@ -4711,10 +4712,7 @@ impl ThreadView {
                 h_flex()
                     .id("background_commands_summary")
                     .gap_1()
-                    .child(Disclosure::new(
-                        "background_commands_disclosure",
-                        expanded,
-                    ))
+                    .child(Disclosure::new("background_commands_disclosure", expanded))
                     .child(
                         Icon::new(IconName::Terminal)
                             .size(IconSize::Small)

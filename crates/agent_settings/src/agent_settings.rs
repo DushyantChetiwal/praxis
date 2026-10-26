@@ -1531,7 +1531,9 @@ mod tests {
         })));
 
         assert!(restricts(json!({ "default": "confirm" })));
-        assert!(restricts(json!({ "tools": { "fetch": { "default": "deny" } } })));
+        assert!(restricts(
+            json!({ "tools": { "fetch": { "default": "deny" } } })
+        ));
         assert!(restricts(json!({
             "tools": { "terminal": { "always_confirm": [{ "pattern": "git push" }] } }
         })));

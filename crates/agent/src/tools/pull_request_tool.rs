@@ -846,8 +846,10 @@ mod tests {
         };
 
         let (event_stream, mut events) = ToolCallEventStream::test();
-        let task =
-            cx.update(|cx| tool.clone().run(ToolInput::resolved(input()), event_stream, cx));
+        let task = cx.update(|cx| {
+            tool.clone()
+                .run(ToolInput::resolved(input()), event_stream, cx)
+        });
         cx.run_until_parked();
         assert!(
             !matches!(
