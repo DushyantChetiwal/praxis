@@ -536,7 +536,7 @@ mod tests {
         before.add_node(architect::ArchitectNode::new("keep", "Keep"));
         thread.update(cx, |thread, cx| {
             thread.set_architect_graph(Some(before.clone()), cx);
-            thread.set_session_mode(crate::SessionMode::Architect, cx);
+            thread.set_session_mode(crate::SessionMode::Plan, cx);
         });
         let revision = thread.read_with(cx, |thread, _| thread.architect_revision());
         for nodes in [
@@ -563,7 +563,7 @@ mod tests {
             thread.read_with(cx, |thread, _| {
                 assert_eq!(thread.architect_graph(), Some(&before));
                 assert_eq!(thread.architect_revision(), revision);
-                assert_eq!(thread.session_mode(), crate::SessionMode::Architect);
+                assert_eq!(thread.session_mode(), crate::SessionMode::Plan);
             });
         }
     }

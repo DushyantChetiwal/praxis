@@ -272,10 +272,10 @@ pub enum ArchitectPlanEditAction {
 /// even if approval is denied or apply fails. At most 8 previews are retained;
 /// a newer preview can evict the oldest. Reinspect and preview again on expiry,
 /// consumption, eviction, or graph/run/event drift; do not retry an old token.
-/// Apply always checks permission settings, even in Architect mode. Plan mode
-/// cannot mutate. Stop execution before applying; unsupported checkpoint rebases
-/// are refused. Execution edits reopen affected locks; this tool never approves
-/// locks, starts execution, or silently clears checkpoints. Impact includes
+/// Apply always checks permission settings, even in Plan mode. Stop execution
+/// before applying; unsupported checkpoint rebases are refused. Execution edits
+/// reopen affected locks; this tool never approves locks, starts execution, or
+/// silently clears checkpoints. Impact includes
 /// changes from the frozen checkpoint, so a move on a diverged live graph can
 /// invalidate execution. Missing runtime impact fields prevent issuing a token.
 /// Rebases requiring reconstruction support flat acyclic plans only and cannot
@@ -667,7 +667,7 @@ mod tests {
             edges: vec![],
         };
         thread.update(cx, |thread, cx| {
-            thread.set_session_mode(SessionMode::Architect, cx);
+            thread.set_session_mode(SessionMode::Plan, cx);
             thread.set_architect_graph(Some(graph.clone()), cx);
         });
         graph
@@ -1181,10 +1181,10 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn apply_rechecks_graph_and_mode_after_permission(cx: &mut TestAppContext) {
+    async fn apply_rechecks_the_graph_after_permission(cx: &mut TestAppContext) {
         let (_connection, _agent, thread, _coordinator) = architect_tool_test_session(cx).await;
         permission(ToolPermissionMode::Confirm, cx);
-        for change_mode in [false, true] {
+        {
             let graph = plan(&thread, cx);
             let tool = Arc::new(EditArchitectPlanTool::new(thread.downgrade()));
             let preview = cx.update(|cx| tool.preview(&move_input(), cx)).unwrap();
@@ -1196,13 +1196,9 @@ mod tests {
                 EditArchitectPlanTool::NAME
             );
             thread.update(cx, |thread, cx| {
-                if change_mode {
-                    thread.set_session_mode(SessionMode::Plan, cx);
-                } else {
-                    let mut changed = graph.clone();
-                    changed.nodes.first_mut().unwrap().title = "Changed during approval".into();
-                    thread.set_architect_graph(Some(changed), cx);
-                }
+                let mut changed = graph.clone();
+                changed.nodes.first_mut().unwrap().title = "Changed during approval".into();
+                thread.set_architect_graph(Some(changed), cx);
             });
             authorization
                 .response
@@ -1401,8 +1397,7 @@ mod tests {
             InspectArchitectPlanTool::capability(),
             ToolCapability::ReadOnly
         );
-        assert!(!EditArchitectPlanTool::capability().is_allowed_in(SessionMode::Plan));
-        assert!(EditArchitectPlanTool::capability().is_allowed_in(SessionMode::Architect));
+        assert!(EditArchitectPlanTool::capability().is_allowed_in(SessionMode::Plan));
     }
 
     #[test]

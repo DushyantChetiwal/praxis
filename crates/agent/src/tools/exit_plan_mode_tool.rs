@@ -13,8 +13,9 @@ const KEEP_PLANNING: &str = "keep_planning";
 
 /// Present the plan you have worked out and ask the user to approve it.
 ///
-/// You are in Plan mode: you can read and search the project and the web, but
-/// you cannot change anything or run commands. Once you understand the task
+/// You are in Plan mode: you can read and search the project and the web, and
+/// keep a checklist or a canvas plan, but you cannot change the project or run
+/// commands. Once you understand the task
 /// well enough to say exactly what you would do, call this tool with the plan.
 /// The user either approves it, which switches the conversation to Build mode
 /// so you can carry it out, or asks you to keep planning.

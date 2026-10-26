@@ -629,6 +629,121 @@ async fn test_background_terminal_parent_stop_reaches_finished_children(cx: &mut
 }
 
 #[gpui::test]
+async fn test_background_terminal_completion_wakes_only_after_a_normal_turn(
+    cx: &mut TestAppContext,
+) {
+    let ThreadTest { thread, fake, .. } = setup(cx, TestModel::Fake).await;
+    always_allow_tools(cx);
+    disable_sandboxing(cx);
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    let handle = environment.terminal_handle.clone().unwrap();
+    thread.update(cx, |thread, cx| thread.add_default_tools(environment, cx));
+    let woken = Rc::new(std::cell::Cell::new(0));
+    let _subscription = cx.update(|cx| {
+        cx.subscribe(&thread, {
+            let woken = woken.clone();
+            move |_, _: &crate::thread::BackgroundTasksFinished, _| woken.set(woken.get() + 1)
+        })
+    });
+    let response = run_terminal_lifecycle_tool(
+        &thread,
+        "terminal",
+        json!({"command": "cargo test", "cd": ".", "yield_ms": 0}),
+        cx,
+    )
+    .await
+    .unwrap();
+    // Nothing resumes a conversation whose last turn has not ended yet.
+    handle.signal_exit();
+    cx.run_until_parked();
+    assert_eq!(woken.get(), 0);
+    verify_thread_recovery(&thread, &fake, cx).await;
+    cx.run_until_parked();
+    assert_eq!(
+        woken.get(),
+        1,
+        "a turn ending with unreported results resumes"
+    );
+    let notices = thread.update(cx, |thread, _| thread.take_background_wake_notices());
+    assert_eq!(notices.len(), 1);
+    assert!(
+        notices[0].contains(&background_task_id(&response)),
+        "{notices:?}"
+    );
+    assert!(
+        thread
+            .update(cx, |thread, _| thread.take_background_wake_notices())
+            .is_empty()
+    );
+}
+
+#[gpui::test]
+async fn test_background_terminal_stop_does_not_wake_the_thread(cx: &mut TestAppContext) {
+    let ThreadTest { thread, fake, .. } = setup(cx, TestModel::Fake).await;
+    always_allow_tools(cx);
+    disable_sandboxing(cx);
+    let environment = Rc::new(cx.update(|cx| {
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+    thread.update(cx, |thread, cx| thread.add_default_tools(environment, cx));
+    let woken = Rc::new(std::cell::Cell::new(0));
+    let _subscription = cx.update(|cx| {
+        cx.subscribe(&thread, {
+            let woken = woken.clone();
+            move |_, _: &crate::thread::BackgroundTasksFinished, _| woken.set(woken.get() + 1)
+        })
+    });
+    run_terminal_lifecycle_tool(
+        &thread,
+        "terminal",
+        json!({"command": "cargo test", "cd": ".", "yield_ms": 0}),
+        cx,
+    )
+    .await
+    .unwrap();
+    verify_thread_recovery(&thread, &fake, cx).await;
+    thread.update(cx, |thread, cx| thread.cancel(cx)).await;
+    cx.run_until_parked();
+    assert_eq!(woken.get(), 0, "Stop ends background work without resuming");
+}
+
+#[gpui::test]
+async fn test_background_terminal_tool_result_notes_nudge_waits_and_review_the_checklist(
+    cx: &mut TestAppContext,
+) {
+    let ThreadTest { thread, .. } = setup(cx, TestModel::Fake).await;
+    thread.update(cx, |thread, _| {
+        thread.set_agent_checklist(vec![
+            crate::PlanStep {
+                step: "Run CI".into(),
+                status: crate::PlanStepStatus::InProgress,
+            },
+            crate::PlanStep {
+                step: "Write the docs".into(),
+                status: crate::PlanStepStatus::Pending,
+            },
+        ]);
+        let first = thread.tool_result_notes("read_file");
+        assert_eq!(first.len(), 1);
+        assert!(first[0].starts_with("Checklist review"), "{first:?}");
+        assert!(thread.tool_result_notes("read_file").is_empty());
+        assert!(thread.tool_result_notes("terminal_wait").is_empty());
+        let second = thread.tool_result_notes("terminal_wait");
+        assert_eq!(second.len(), 1);
+        assert!(second[0].contains("waited 2 times"), "{second:?}");
+        assert!(second[0].contains("- Write the docs"), "{second:?}");
+        assert!(thread.tool_result_notes("terminal_status").is_empty());
+        assert!(thread.tool_result_notes("terminal_wait").is_empty());
+        assert!(thread.tool_result_notes("terminal_wait").is_empty());
+        assert_eq!(thread.tool_result_notes("terminal_wait").len(), 1);
+        assert!(thread.tool_result_notes("grep").is_empty());
+        assert!(thread.tool_result_notes("terminal_wait").is_empty());
+    });
+}
+
+#[gpui::test]
 async fn test_background_terminal_thread_drop(cx: &mut TestAppContext) {
     let ThreadTest { thread, .. } = setup(cx, TestModel::Fake).await;
     always_allow_tools(cx);
@@ -673,11 +788,7 @@ async fn test_background_terminal_profiles_refresh_and_subagent_isolation(cx: &m
     .await
     .unwrap();
     let task_id = background_task_id(&response);
-    for mode in [
-        SessionMode::Plan,
-        SessionMode::Architect,
-        SessionMode::Build,
-    ] {
+    for mode in [SessionMode::Plan, SessionMode::Build] {
         thread.update(cx, |thread, cx| thread.set_session_mode(mode, cx));
         thread.read_with(cx, |thread, cx| {
             let tools = thread.enabled_tools(cx);

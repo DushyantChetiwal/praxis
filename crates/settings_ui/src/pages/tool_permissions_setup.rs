@@ -30,7 +30,7 @@ const TOOLS: &[ToolInfo] = &[
         id: "edit_architect_plan",
         name: "Architect Plan Edit",
         description: "Apply a previewed topology change with a fresh token; affected execution locks reopen for review",
-        regex_explanation: "Patterns match apply only. Preview does not request permission or change the graph. Apply checks permission even in Architect mode, never starts a run, and refuses stale previews or unsupported checkpoint rebases.",
+        regex_explanation: "Patterns match apply only. Preview does not request permission or change the graph. Apply checks permission even in Plan mode, never starts a run, and refuses stale previews or unsupported checkpoint rebases.",
     },
     ToolInfo {
         id: "terminal",

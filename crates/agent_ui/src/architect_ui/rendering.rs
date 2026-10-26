@@ -1793,7 +1793,7 @@ impl ArchitectPane {
         if !self.focus.is_empty() {
             return self.render_empty_nested_plan(cx);
         }
-        let planning = self.thread.read(cx).session_mode() == agent::SessionMode::Architect;
+        let planning = self.thread.read(cx).session_mode() == agent::SessionMode::Plan;
 
         v_flex()
             .id("architect-empty-state")
@@ -1818,9 +1818,9 @@ impl ArchitectPane {
                     .color(Color::Muted),
                 ),
             )
-            // Plans are only drafted in Architect mode, and the mode pill beside the
-            // composer is easy to miss. One action switches the mode if needed
-            // and puts the cursor where the goal is typed.
+            // The mode pill beside the composer is easy to miss. One action
+            // switches to Plan mode if needed and puts the cursor where the
+            // goal is typed.
             .child(
                 Button::new("architect-start-planning", "Start planning")
                     .tab_index(0isize)
@@ -1829,13 +1829,13 @@ impl ArchitectPane {
                     .tooltip(Tooltip::text(if planning {
                         "Open the plan conversation and describe the goal"
                     } else {
-                        "Switch to Architect mode and describe the goal"
+                        "Switch to Plan mode and describe the goal"
                     }))
                     .on_click(cx.listener(|this, _, window, cx| this.start_planning(window, cx))),
             )
             .when(planning, |this| {
                 this.child(
-                    Label::new("Architect mode is on — the agent will draft before it builds.")
+                    Label::new("Plan mode is on — the agent will draft before it builds.")
                         .size(LabelSize::XSmall)
                         .color(Color::Muted),
                 )

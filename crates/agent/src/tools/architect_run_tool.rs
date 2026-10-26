@@ -157,7 +157,7 @@ pub struct ControlArchitectRunToolInput {
     /// list_agents_and_models. Copy the native model's models[].configuration
     /// object directly; provider/model IDs may themselves contain slashes.
     /// Null or omission restores plan-model inheritance.
-    /// Draft model choices can also be supplied to draft_plan in Architect mode.
+    /// Draft model choices can also be supplied to draft_plan in Plan mode.
     #[serde(default)]
     pub model: Option<StepModel>,
     /// Only for revise_step: replace the goal. Omit or null to preserve it;
@@ -351,7 +351,7 @@ impl ControlArchitectRunTool {
         );
         ensure!(
             thread.read(cx).session_mode() == SessionMode::Build,
-            "Run controls require Build mode. Ask the user to switch to Build; use draft_plan for draft model choices in Architect mode."
+            "Run controls require Build mode. Ask the user to switch to Build; use draft_plan for draft model choices in Plan mode."
         );
         ensure!(
             !project::trusted_worktrees::TrustedWorktrees::has_restricted_worktrees(
