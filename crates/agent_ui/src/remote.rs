@@ -630,7 +630,12 @@ fn handle_paired(
             view.update(cx, |view, cx| view.retry_generation(cx));
             Ok(json!({ "retrying": true }))
         }),
-
+        "dismiss_error" => with_workspace(window, cx, |workspace, _, cx| {
+            required(args, "session_id")?;
+            let view = requested_root_view(workspace, args, cx)?;
+            view.update(cx, |view, cx| view.clear_thread_error(cx));
+            Ok(json!({ "dismissed": true }))
+        }),
         "compact" => with_workspace(window, cx, |workspace, window, cx| {
             required(args, "session_id")?;
             let view = requested_root_view(workspace, args, cx)?;
@@ -1031,6 +1036,7 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
         "queue_management": true,
         "image_input": thread.prompt_capabilities().image.is_some(),
         "error": error,
+        "dismiss_error": true,
         "retrying": retrying,
         "compact": native_thread.is_some(),
         "terminals": native_thread.is_some(),

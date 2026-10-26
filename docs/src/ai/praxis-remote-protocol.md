@@ -228,6 +228,8 @@ so unrelated image messages do not incorrectly acknowledge each other's outbox e
 
 `thread` answers and the snapshot's `thread` object have `session_id`, `title`, `status`, `total`, and `entries`. Each entry keeps its original thread `index`, `role`, `text`, and optional tool `status`. `total` counts source entries, not message parts. An empty user message, which only anchors a turn the agent started itself (such as one resumed by finished background work), is left out like the desktop leaves it out; the other entries keep their indices.
 
+When the last turn ended with an error, `status.windows[].thread.error` holds its `kind`, `message`, and `retryable`. A thread that advertises `dismiss_error` accepts the `dismiss_error` operation with the root `session_id`, which clears the error on the desktop as its own dismiss button does. Against a desktop without that flag, the phone can only hide the error locally.
+
 An assistant entry containing provider-supplied thoughts also has an optional ordered `parts` array. Each part has its source chunk `index`, `role` (`reasoning` or `assistant`), and `text`. Only ACP `Thought` chunks become `reasoning`; ordinary answers and tool output are never used to infer thoughts. Blank parts are omitted. For example:
 
 ```json
