@@ -3111,7 +3111,7 @@ impl Thread {
         );
         if waiting {
             self.consecutive_waits += 1;
-            if self.consecutive_waits >= 2 && (self.consecutive_waits - 2) % 3 == 0 {
+            if self.consecutive_waits >= 2 && (self.consecutive_waits - 2).is_multiple_of(3) {
                 notes.push(crate::repeated_wait_note(
                     self.consecutive_waits,
                     &self.checklist,
