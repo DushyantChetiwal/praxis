@@ -732,16 +732,19 @@ mod tests {
         // Every step's agent is reported as soon as the steps start, then
         // each step's progress as it finishes.
         assert_eq!(progress_updates.len(), 4);
-        let progress_statuses = |progress: &[StepProgress]| {
-            progress.iter().map(|step| step.status).collect::<Vec<_>>()
-        };
+        let progress_statuses =
+            |progress: &[StepProgress]| progress.iter().map(|step| step.status).collect::<Vec<_>>();
         assert_eq!(
             progress_statuses(&progress_updates[0]),
             vec![ParallelStepStatus::Running; 3]
         );
         let started_sessions: Vec<_> = progress_updates[0]
             .iter()
-            .map(|step| step.session.as_ref().map(|session| session.session_id.clone()))
+            .map(|step| {
+                step.session
+                    .as_ref()
+                    .map(|session| session.session_id.clone())
+            })
             .collect();
         assert_eq!(
             started_sessions,

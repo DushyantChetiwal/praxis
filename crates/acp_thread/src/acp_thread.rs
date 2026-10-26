@@ -2156,14 +2156,21 @@ impl ToolCall {
     pub fn runs_subagents(&self) -> bool {
         self.is_subagent()
             || !self.parallel_steps.is_empty()
-            || self.tool_name.as_ref().is_some_and(|name| name == "run_steps")
+            || self
+                .tool_name
+                .as_ref()
+                .is_some_and(|name| name == "run_steps")
     }
 
     /// The sessions of every agent this call started.
     pub fn subagent_session_ids(&self) -> impl Iterator<Item = &acp_v2::SessionId> {
         self.subagent_session_info
             .iter()
-            .chain(self.parallel_steps.iter().filter_map(|step| step.session.as_ref()))
+            .chain(
+                self.parallel_steps
+                    .iter()
+                    .filter_map(|step| step.session.as_ref()),
+            )
             .map(|session| &session.session_id)
     }
 

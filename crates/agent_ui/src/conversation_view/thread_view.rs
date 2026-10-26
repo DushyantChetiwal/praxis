@@ -14707,9 +14707,8 @@ mod tests {
     #[test]
     fn parallel_step_cards_follow_their_step_and_the_call() {
         use ParallelStepStatus::{Done, NotFinished, Running};
-        let card = |status, error, call| {
-            parallel_step_card_status(&parallel_step(status, error), call)
-        };
+        let card =
+            |status, error, call| parallel_step_card_status(&parallel_step(status, error), call);
 
         assert_eq!(
             card(Running, None, ToolCallStatus::InProgress),
@@ -14721,7 +14720,11 @@ mod tests {
             "a step that finished shows as done while the others run"
         );
         assert_eq!(
-            card(NotFinished, Some("tests failed"), ToolCallStatus::InProgress),
+            card(
+                NotFinished,
+                Some("tests failed"),
+                ToolCallStatus::InProgress
+            ),
             (ToolCallStatus::Failed, false)
         );
         assert_eq!(
@@ -14751,7 +14754,10 @@ mod tests {
             "Running 2 steps in parallel"
         );
         assert_eq!(
-            parallel_steps_summary(&steps(&[Done, Running, Running]), ToolCallStatus::InProgress),
+            parallel_steps_summary(
+                &steps(&[Done, Running, Running]),
+                ToolCallStatus::InProgress
+            ),
             "Running 3 steps in parallel · 1 of 3 done"
         );
         assert_eq!(
