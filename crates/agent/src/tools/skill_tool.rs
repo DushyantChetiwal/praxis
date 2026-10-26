@@ -664,11 +664,13 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_skill_tool_prompts_for_authorization_by_default(cx: &mut TestAppContext) {
+    async fn test_skill_tool_prompts_for_authorization_when_set_to_confirm(
+        cx: &mut TestAppContext,
+    ) {
         init_test(cx);
 
-        // Override the test default (Allow) back to Confirm so we exercise
-        // the prompt flow.
+        // Override the test default (Allow) with Confirm so we exercise the
+        // prompt flow.
         cx.update(|cx| {
             let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
             settings.tool_permissions.tools.insert(

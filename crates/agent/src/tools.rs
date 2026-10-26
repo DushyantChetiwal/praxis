@@ -176,7 +176,8 @@ macro_rules! tools {
         /// Returns whether the tool with the given name may be provided to an
         /// agent in a restricted workspace. Unknown tools (e.g. MCP tools) are
         /// considered allowed.
-        pub fn tool_allowed_in_restricted_mode(name: &str) -> bool {
+        #[cfg(test)]
+        fn tool_allowed_in_restricted_mode(name: &str) -> bool {
             $(
                 if name == <$tool>::NAME {
                     return <$tool>::allow_in_restricted_mode();

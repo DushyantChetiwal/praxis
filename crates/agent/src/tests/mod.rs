@@ -345,11 +345,11 @@ fn always_allow_tools(cx: &mut TestAppContext) {
     });
 }
 
-/// Turns terminal sandboxing off so the non-sandboxed `TerminalTool` is the
-/// variant exposed to the model as `terminal`. Tests that register
-/// `TerminalTool` directly need this because the sandboxing feature flag is
-/// enabled for all, in which case `Thread::enabled_tools` would otherwise
-/// expose `SandboxedTerminalTool` under that name instead.
+/// Pins terminal sandboxing off, as shipped, so the non-sandboxed
+/// `TerminalTool` stays the variant exposed to the model as `terminal`. Tests
+/// that register `TerminalTool` directly rely on this: with the sandbox on,
+/// `Thread::enabled_tools` exposes `SandboxedTerminalTool` under that name
+/// instead.
 fn disable_sandboxing(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
@@ -6031,6 +6031,9 @@ async fn setup(cx: &mut TestAppContext, model: TestModel) -> ThreadTest {
         paths::settings_file(),
         json!({
             "agent": {
+                // The authorization tests need tool calls to ask first. Setting it here
+                // rather than with an override keeps it when an "Always" answer is saved.
+                "tool_permissions": { "default": "confirm" },
                 "default_profile": "test-profile",
                 "profiles": {
                     "test-profile": {
@@ -8947,6 +8950,9 @@ async fn test_edit_file_tool_allow_still_prompts_for_local_settings(cx: &mut Tes
     cx.update(|cx| {
         let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
         settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+        // Turning the sandbox on restricts the agent, which is what protects
+        // settings paths from an allowed tool.
+        settings.sandbox_permissions.allow_unsandboxed = false;
         agent_settings::AgentSettings::override_global(settings, cx);
     });
 
@@ -8975,7 +8981,8 @@ async fn test_edit_file_tool_allow_still_prompts_for_local_settings(cx: &mut Tes
     ));
 
     // Editing a file inside .zed/ should still prompt even with global default: allow,
-    // because local settings paths are sensitive and require confirmation regardless.
+    // because local settings paths are sensitive and require confirmation once the
+    // agent is restricted.
     let (event_stream, mut rx) = crate::ToolCallEventStream::test();
     let _task = cx.update(|cx| {
         tool.run(
@@ -9038,6 +9045,7 @@ async fn test_fetch_tool_allow_rule_skips_confirmation(cx: &mut TestAppContext) 
 
     cx.update(|cx| {
         let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+        settings.sandbox_permissions.allow_unsandboxed = false;
         settings.tool_permissions.tools.insert(
             FetchTool::NAME.into(),
             agent_settings::ToolRules {
@@ -9085,6 +9093,7 @@ async fn test_fetch_tool_prompts_for_ungranted_host(cx: &mut TestAppContext) {
 
     cx.update(|cx| {
         let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+        settings.sandbox_permissions.allow_unsandboxed = false;
         settings.tool_permissions.tools.insert(
             FetchTool::NAME.into(),
             agent_settings::ToolRules {
@@ -9128,6 +9137,7 @@ async fn test_fetch_tool_granted_host_skips_prompt(cx: &mut TestAppContext) {
 
     cx.update(|cx| {
         let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+        settings.sandbox_permissions.allow_unsandboxed = false;
         // Allow the tool itself so only the shared per-host grant is under test.
         settings.tool_permissions.tools.insert(
             FetchTool::NAME.into(),
@@ -9174,6 +9184,7 @@ async fn test_fetch_tool_refuses_loopback_without_unsandboxed(cx: &mut TestAppCo
 
     cx.update(|cx| {
         let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+        settings.sandbox_permissions.allow_unsandboxed = false;
         // Allow the tool itself so the request reaches the per-host gate.
         settings.tool_permissions.tools.insert(
             FetchTool::NAME.into(),
@@ -9263,6 +9274,7 @@ async fn test_fetch_tool_refuses_redirect_to_loopback(cx: &mut TestAppContext) {
 
     cx.update(|cx| {
         let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+        settings.sandbox_permissions.allow_unsandboxed = false;
         settings.tool_permissions.tools.insert(
             FetchTool::NAME.into(),
             agent_settings::ToolRules {
@@ -9321,6 +9333,7 @@ async fn test_fetch_tool_reauthorizes_redirect_to_new_host(cx: &mut TestAppConte
 
     cx.update(|cx| {
         let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+        settings.sandbox_permissions.allow_unsandboxed = false;
         settings.tool_permissions.tools.insert(
             FetchTool::NAME.into(),
             agent_settings::ToolRules {
@@ -9384,6 +9397,7 @@ async fn test_fetch_tool_follows_same_host_redirect(cx: &mut TestAppContext) {
 
     cx.update(|cx| {
         let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+        settings.sandbox_permissions.allow_unsandboxed = false;
         settings.tool_permissions.tools.insert(
             FetchTool::NAME.into(),
             agent_settings::ToolRules {

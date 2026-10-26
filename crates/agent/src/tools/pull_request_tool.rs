@@ -826,4 +826,51 @@ mod tests {
         assert!(!output.starts_with("aé"));
         assert!(output.contains("Pull request output truncated"));
     }
+
+    #[gpui::test]
+    async fn api_host_needs_a_grant_only_while_sandboxed(cx: &mut gpui::TestAppContext) {
+        use settings::Settings as _;
+
+        crate::tests::init_test(cx);
+        let client = http_client::FakeHttpClient::create(|_| async move {
+            Ok(http_client::Response::builder()
+                .status(200)
+                .body(AsyncBody::from(r#"{"title":"Fix it"}"#))
+                .unwrap())
+        });
+        let tool = Arc::new(PullRequestTool::new(client));
+        let input = || PullRequestToolInput {
+            url: "https://github.com/o/r/pull/1".into(),
+            sections: Vec::new(),
+            max_bytes: None,
+        };
+
+        let (event_stream, mut events) = ToolCallEventStream::test();
+        let task =
+            cx.update(|cx| tool.clone().run(ToolInput::resolved(input()), event_stream, cx));
+        cx.run_until_parked();
+        assert!(
+            !matches!(
+                events.try_recv(),
+                Ok(Ok(crate::ThreadEvent::ToolCallAuthorization(_)))
+            ),
+            "the shipped defaults run commands unsandboxed, so no host grant is needed"
+        );
+        let output = task.await.unwrap();
+        assert!(output.contains(r#""title": "Fix it""#), "{output}");
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.sandbox_permissions.allow_unsandboxed = false;
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+        let (event_stream, mut events) = ToolCallEventStream::test();
+        let _task = cx.update(|cx| tool.run(ToolInput::resolved(input()), event_stream, cx));
+        let authorization = events.expect_authorization().await;
+        let details = acp_thread::sandbox_authorization_details_from_meta(
+            &authorization.tool_call.meta.value().cloned(),
+        )
+        .expect("the API host should be requested as a sandbox network grant");
+        assert_eq!(details.network_hosts, vec!["api.github.com".to_string()]);
+    }
 }

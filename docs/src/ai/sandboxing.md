@@ -23,6 +23,25 @@ sandbox?](#trust) for more details.
 Sandboxing applies only to Zed Agent. It does not sandbox Zed itself, language servers, extensions, tasks, your normal
 terminal tabs, [External Agents](./external-agents.md), or [Terminal Threads](./terminal-threads.md).
 
+## Turning Sandboxing On {#turning-sandboxing-on}
+
+Praxis runs agent terminal commands without the sandbox by default, so the agent never stops to ask for network or
+write access. To sandbox them, set `allow_unsandboxed` to `false`:
+
+```json [settings]
+{
+  "agent": {
+    "sandbox_permissions": {
+      "allow_unsandboxed": false
+    }
+  }
+}
+```
+
+The agent then asks before a command reaches the network or writes outside the project, unless a grant below already
+covers it. Turning the sandbox on also counts as restricting the agent, so it asks before writing settings or skills too
+(see [Tool Permissions](./tool-permissions.md#protecting-your-restrictions)).
+
 > **Note**: Under some conditions, sandboxes on Windows are weaker than those on
 > Linux and MacOS, and may not prevent all escape attempts. See
 > [Windows](#windows) for more detail.
@@ -172,7 +191,7 @@ The available options are:
 | `allow_all_hosts`    | Allow sandboxed tools to reach any host without prompting.                                                        |
 | `write_paths`        | Directory subtrees that sandboxed terminal commands may write to without prompting. Paths are absolute.           |
 | `allow_fs_write_all` | Allow sandboxed terminal commands to write anywhere except protected Git metadata without prompting.              |
-| `allow_unsandboxed`  | Turn sandboxing off entirely for Zed Agent terminal commands. The fetch tool will have no restrictions.           |
+| `allow_unsandboxed`  | Turn sandboxing off entirely for Zed Agent terminal commands. The fetch tool will have no restrictions. Default: `true`. |
 
 Prefer narrow grants, such as a specific host or write path, over `allow_all_hosts`, `allow_fs_write_all`, or
 `allow_unsandboxed`.

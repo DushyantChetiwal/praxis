@@ -43,6 +43,7 @@ use language_model::{
 };
 use notifications::status_toast::StatusToast;
 use project::ResolvedPath;
+use project::trusted_worktrees::{TrustedWorktrees, TrustedWorktreesEvent};
 use settings::{update_settings_file, update_settings_file_with_completion};
 use ui::{
     ButtonLike, CalloutBorderPosition, Checkbox, SpinnerLabel, SpinnerVariant, SplitButton,
@@ -50,7 +51,7 @@ use ui::{
 };
 use url::Url;
 use util::markdown::source_position_from_fragment;
-use workspace::{OpenOptions, SERIALIZATION_THROTTLE_TIME};
+use workspace::{OpenOptions, SERIALIZATION_THROTTLE_TIME, ToggleWorktreeSecurity};
 
 use super::elicitation::{
     ElicitationCard, ElicitationCardHandlers, ElicitationFormState, should_render_elicitation,
@@ -609,7 +610,6 @@ pub struct ThreadView {
     pub config_options_view: Option<Entity<ConfigOptionsView>>,
     pub mode_selector: Option<Entity<ModeSelector>>,
     pub model_selector: Option<Entity<ModelSelectorPopover>>,
-    pub profile_selector: Option<Entity<ProfileSelector>>,
     pub permission_dropdown_handle: PopoverMenuHandle<ContextMenu>,
     pub thread_retry_status: Option<RetryStatus>,
     pub(super) thread_error: Option<ThreadError>,
@@ -639,6 +639,7 @@ pub struct ThreadView {
     pub edits_expanded: bool,
     pub plan_expanded: bool,
     pub queue_expanded: bool,
+    pub background_commands_expanded: bool,
     pub editor_expanded: bool,
     pub should_be_following: bool,
     pub editing_message: Option<usize>,
@@ -824,7 +825,6 @@ impl ThreadView {
         config_options_view: Option<Entity<ConfigOptionsView>>,
         mode_selector: Option<Entity<ModeSelector>>,
         model_selector: Option<Entity<ModelSelectorPopover>>,
-        profile_selector: Option<Entity<ProfileSelector>>,
         list_state: ListState,
         session_capabilities: SharedSessionCapabilities,
         resumed_without_history: bool,
@@ -841,6 +841,13 @@ impl ThreadView {
 
         subscriptions.push(cx.observe(&thread, |_, _, cx| cx.notify()));
         subscriptions.push(cx.observe(&conversation, |_, _, cx| cx.notify()));
+        // Keeps the Restricted Mode notice in step with the project's trust.
+        if let Some(trusted_worktrees) = TrustedWorktrees::try_get_global(cx) {
+            subscriptions.push(cx.subscribe(
+                &trusted_worktrees,
+                |_, _, _: &TrustedWorktreesEvent, cx| cx.notify(),
+            ));
+        }
 
         let has_slash_completions = session_capabilities.read().has_slash_completions();
         let placeholder = placeholder_text(agent_display_name.as_ref(), has_slash_completions);
@@ -1005,6 +1012,12 @@ impl ThreadView {
                         }
                     },
                 ));
+                // A background command can exit while nothing else in the
+                // thread changes; keep the background commands list current.
+                subscriptions.push(cx.subscribe(
+                    &native_thread,
+                    |_: &mut Self, _thread, _event: &agent::TerminalTaskExited, cx| cx.notify(),
+                ));
             }
         }
 
@@ -1059,7 +1072,6 @@ impl ThreadView {
             config_options_view,
             mode_selector,
             model_selector,
-            profile_selector,
             list_state,
             session_capabilities,
             resumed_without_history,
@@ -1081,6 +1093,7 @@ impl ThreadView {
             edits_expanded: false,
             plan_expanded: false,
             queue_expanded: true,
+            background_commands_expanded: false,
             editor_expanded: false,
             should_be_following: false,
             editing_message: None,
@@ -1261,9 +1274,9 @@ impl ThreadView {
             .thread(acp_thread.session_id(), cx)
     }
 
-    /// Resolves the message editor's contents into content blocks. For profiles
-    /// that do not enable any tools, directory mentions are expanded to inline
-    /// file contents since the agent can't read files on its own.
+    /// Resolves the message editor's contents into content blocks. When the
+    /// agent can't read files on its own, directory mentions are expanded to
+    /// inline file contents.
     fn resolve_message_contents(
         &self,
         message_editor: &Entity<MessageEditor>,
@@ -1274,13 +1287,9 @@ impl ThreadView {
                 "This draft contains unsupported content and cannot be edited or sent. Discard the draft to write a new message."
             )));
         }
-        let expand = self.as_native_thread(cx).is_some_and(|thread| {
-            let thread = thread.read(cx);
-            AgentSettings::get_global(cx)
-                .profiles
-                .get(thread.profile())
-                .is_some_and(|profile| profile.tools.is_empty())
-        });
+        let expand = self
+            .as_native_thread(cx)
+            .is_some_and(|thread| !thread.read(cx).can_read_files(cx));
         message_editor.update(cx, |message_editor, cx| message_editor.contents(expand, cx))
     }
 
@@ -1291,12 +1300,8 @@ impl ThreadView {
     }
 
     pub fn current_mode_id(&self, cx: &App) -> Option<Arc<str>> {
-        if let Some(thread) = self.as_native_thread(cx) {
-            Some(thread.read(cx).profile().0.clone())
-        } else {
-            let mode_selector = self.mode_selector.as_ref()?;
-            Some(mode_selector.read(cx).mode().0)
-        }
+        let mode_selector = self.mode_selector.as_ref()?;
+        Some(mode_selector.read(cx).mode().0)
     }
 
     fn is_subagent(&self) -> bool {
@@ -2549,6 +2554,38 @@ impl ThreadView {
         self.as_native_thread(cx).map_or(0, |thread| {
             thread.read(cx).running_background_terminal_count()
         })
+    }
+
+    /// The commands the native agent left running in the background, oldest
+    /// first.
+    fn background_commands(&self, cx: &App) -> Vec<agent::TerminalTaskSummary> {
+        self.as_native_thread(cx).map_or_else(Vec::new, |thread| {
+            thread
+                .read(cx)
+                .terminal_tasks(cx)
+                .into_iter()
+                .filter(|task| task.running && task.in_background)
+                .collect()
+        })
+    }
+
+    /// Stops background commands without stopping the agent.
+    fn stop_background_commands(&self, task_ids: impl IntoIterator<Item = String>, cx: &App) {
+        let Some(thread) = self.as_native_thread(cx) else {
+            return;
+        };
+        let thread = thread.read(cx);
+        for task_id in task_ids {
+            thread.stop_terminal_task(&task_id).log_err();
+        }
+    }
+
+    fn reveal_background_command(&self, task_id: String, cx: &mut Context<Self>) {
+        let Some(thread) = self.as_native_thread(cx) else {
+            return;
+        };
+        cx.spawn(async move |_, cx| agent::Thread::reveal_terminal_task(&thread, &task_id, cx))
+            .detach_and_log_err(cx);
     }
 
     fn cancel_thread(&self, thread: &Entity<AcpThread>, cx: &mut Context<Self>) -> Task<()> {
@@ -3864,8 +3901,15 @@ impl ThreadView {
             (generic, legacy) => generic.or(legacy),
         };
         let has_awaiting_permission = awaiting_permission.is_some();
+        let background_commands = self.background_commands(cx);
+        let has_background_commands = !background_commands.is_empty();
 
-        if changed_buffers.is_empty() && !has_plan && queue_is_empty && !has_awaiting_permission {
+        if changed_buffers.is_empty()
+            && !has_plan
+            && queue_is_empty
+            && !has_awaiting_permission
+            && !has_background_commands
+        {
             return None;
         }
 
@@ -3879,6 +3923,7 @@ impl ThreadView {
         let plan_expanded = self.plan_expanded;
         let edits_expanded = self.edits_expanded;
         let queue_expanded = self.queue_expanded;
+        let background_commands_expanded = self.background_commands_expanded;
 
         let max_content_width = AgentSettings::get_global(cx).max_content_width;
         // Drop shadows have no opaque surface to blend into on a transparent
@@ -3950,6 +3995,21 @@ impl ThreadView {
                         .child(self.render_message_queue_summary(window, cx))
                         .when(queue_expanded, |parent| {
                             parent.child(self.render_message_queue_entries(window, cx))
+                        })
+                    })
+                    .when(has_background_commands, |this| {
+                        this.when(
+                            has_awaiting_permission
+                                || has_plan
+                                || !changed_buffers.is_empty()
+                                || !queue_is_empty,
+                            |this| this.child(Divider::horizontal().color(DividerColor::Border)),
+                        )
+                        .child(self.render_background_commands_summary(&background_commands, cx))
+                        .when(background_commands_expanded, |parent| {
+                            parent.child(
+                                self.render_background_commands_list(&background_commands, cx),
+                            )
                         })
                     }),
             )
@@ -4621,6 +4681,126 @@ impl ThreadView {
         self.message_queue.clear();
         self.sync_queue_flag_to_native_thread(cx);
         cx.notify();
+    }
+
+    fn render_background_commands_summary(
+        &self,
+        commands: &[agent::TerminalTaskSummary],
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let expanded = self.background_commands_expanded;
+        let title: SharedString = if commands.len() == 1 {
+            "1 Background Command".into()
+        } else {
+            format!("{} Background Commands", commands.len()).into()
+        };
+        let task_ids = commands
+            .iter()
+            .map(|command| command.id.clone())
+            .collect::<Vec<_>>();
+
+        h_flex()
+            .p_1()
+            .w_full()
+            .gap_1()
+            .justify_between()
+            .when(expanded, |this| {
+                this.border_b_1().border_color(cx.theme().colors().border)
+            })
+            .child(
+                h_flex()
+                    .id("background_commands_summary")
+                    .gap_1()
+                    .child(Disclosure::new(
+                        "background_commands_disclosure",
+                        expanded,
+                    ))
+                    .child(
+                        Icon::new(IconName::Terminal)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(Label::new(title).size(LabelSize::Small).color(Color::Muted))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.background_commands_expanded = !this.background_commands_expanded;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("stop_background_commands", "Stop All")
+                    .label_size(LabelSize::Small)
+                    .tooltip(Tooltip::text(
+                        "Stop every command the agent left running. The agent keeps going.",
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.stop_background_commands(task_ids.clone(), cx);
+                    })),
+            )
+    }
+
+    fn render_background_commands_list(
+        &self,
+        commands: &[agent::TerminalTaskSummary],
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let row_count = commands.len();
+
+        v_flex()
+            .id("background_commands_list")
+            .max_h_40()
+            .overflow_y_scroll()
+            .children(commands.iter().enumerate().map(|(index, command)| {
+                let task_id = command.id.clone();
+                let first_line = command
+                    .command
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+
+                h_flex()
+                    .id(("background_command", index))
+                    .w_full()
+                    .py_1()
+                    .pl_2()
+                    .pr_1()
+                    .gap_1p5()
+                    .bg(cx.theme().colors().editor_background)
+                    .when(index + 1 < row_count, |this| {
+                        this.border_b_1()
+                            .border_color(cx.theme().colors().border_variant)
+                    })
+                    .tooltip(Tooltip::text(command.command.clone()))
+                    .child(
+                        div().flex_1().min_w_0().overflow_hidden().child(
+                            Label::new(first_line)
+                                .buffer_font(cx)
+                                .size(LabelSize::XSmall)
+                                .truncate(),
+                        ),
+                    )
+                    .child(
+                        IconButton::new(("reveal_background_command", index), IconName::Terminal)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .tooltip(Tooltip::text("Show in Terminal Panel"))
+                            .on_click(cx.listener({
+                                let task_id = task_id.clone();
+                                move |this, _, _, cx| {
+                                    this.reveal_background_command(task_id.clone(), cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        IconButton::new(("stop_background_command", index), IconName::Stop)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Error)
+                            .tooltip(Tooltip::text("Stop This Command"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.stop_background_commands([task_id.clone()], cx);
+                            })),
+                    )
+            }))
     }
 
     fn render_plan_summary(
@@ -5322,6 +5502,37 @@ impl ThreadView {
         )
     }
 
+    /// Says so while the project is untrusted, which holds back some or all of
+    /// the agent's tools, and opens the trust prompt when clicked. Trusting the
+    /// project gives this thread its tools back with the next message.
+    fn render_restricted_mode_notice(&self, cx: &App) -> Option<AnyElement> {
+        let thread = self.as_native_thread(cx)?;
+        let worktree_store = thread.read(cx).project().read(cx).worktree_store();
+        if !TrustedWorktrees::has_restricted_worktrees(&worktree_store, cx) {
+            return None;
+        }
+
+        Some(
+            Button::new("restricted-mode", "Restricted Mode")
+                .style(ButtonStyle::Tinted(TintColor::Warning))
+                .label_size(LabelSize::Small)
+                .color(Color::Warning)
+                .start_icon(
+                    Icon::new(IconName::Warning)
+                        .size(IconSize::Small)
+                        .color(Color::Warning),
+                )
+                .tooltip(Tooltip::text(
+                    "This project isn't trusted yet, so the agent's tools are held back. \
+                     Click to trust it; the tools come back with your next message.",
+                ))
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(ToggleWorktreeSecurity), cx);
+                })
+                .into_any_element(),
+        )
+    }
+
     pub(crate) fn render_message_editor(
         &mut self,
         window: &mut Window,
@@ -5455,7 +5666,7 @@ impl ThreadView {
                                     .children(discard_draft_button)
                                     .children(self.render_token_usage(cx))
                                     .children(self.render_tools_unsupported_notice(cx))
-                                    .children(self.profile_selector.clone())
+                                    .children(self.render_restricted_mode_notice(cx))
                                     .map(|this| match self.config_options_view.clone() {
                                         Some(config_view) => this.child(config_view),
                                         None => this
@@ -8995,6 +9206,12 @@ impl ThreadView {
             started_at.elapsed()
         };
 
+        // The tool call returned but the command kept going: the agent moved
+        // on and left it running in the background.
+        let in_background = output.is_none()
+            && terminal_data.is_process_backed()
+            && matches!(tool_call.status(), ToolCallStatus::Completed);
+
         let header_group = SharedString::from(format!(
             "terminal-tool-header-group-{}",
             terminal.entity_id()
@@ -9046,8 +9263,11 @@ impl ThreadView {
             working_dir,
             is_expanded,
         )
-        .elapsed(time_elapsed)
+        // Nothing redraws a background card while it waits, so an elapsed time
+        // there would only go stale.
+        .when(!in_background, |header| header.elapsed(time_elapsed))
         .running(!command_finished && !needs_confirmation)
+        .in_background(in_background)
         .on_toggle_expand(cx.listener({
             let id = tool_call.id.clone();
             move |this, _event, window, cx| {
@@ -9065,7 +9285,11 @@ impl ThreadView {
                     terminal.update(cx, |terminal, cx| {
                         terminal.stop_by_user(cx);
                     });
-                    if AgentSettings::get_global(cx).cancel_generation_on_terminal_stop {
+                    // The agent isn't waiting on a background command, so
+                    // stopping one leaves whatever it is doing now alone.
+                    if !in_background
+                        && AgentSettings::get_global(cx).cancel_generation_on_terminal_stop
+                    {
                         this.cancel_generation(cx);
                     }
                 })
@@ -13803,9 +14027,7 @@ impl Render for ThreadView {
                     }
                 }
 
-                if let Some(profile_selector) = this.profile_selector.clone() {
-                    profile_selector.read(cx).menu_handle().toggle(window, cx);
-                } else if let Some(mode_selector) = this.mode_selector.clone() {
+                if let Some(mode_selector) = this.mode_selector.clone() {
                     mode_selector.read(cx).menu_handle().toggle(window, cx);
                 }
             }))
@@ -13826,11 +14048,7 @@ impl Render for ThreadView {
                     }
                 }
 
-                if let Some(profile_selector) = this.profile_selector.clone() {
-                    profile_selector.update(cx, |profile_selector, cx| {
-                        profile_selector.cycle_profile(cx);
-                    });
-                } else if let Some(mode_selector) = this.mode_selector.clone() {
+                if let Some(mode_selector) = this.mode_selector.clone() {
                     mode_selector.update(cx, |mode_selector, cx| {
                         mode_selector.cycle_mode(window, cx);
                     });

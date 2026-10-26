@@ -270,6 +270,19 @@ impl TerminalTaskRegistry {
             .map_err(|error| error.to_string())
     }
 
+    /// Shows one command's terminal in the Terminal panel, for a person.
+    /// Needs an async context that is not inside an update.
+    pub(crate) fn reveal_task(&self, task_id: &str, cx: &AsyncApp) -> Result<(), String> {
+        let task = self.get(task_id)?;
+        let terminal = task.state.terminal.borrow();
+        let terminal = terminal
+            .as_ref()
+            .ok_or_else(|| "Terminal task has no terminal".to_string())?;
+        terminal
+            .show_in_terminal_panel(cx)
+            .map_err(|error| error.to_string())
+    }
+
     fn get(&self, task_id: &str) -> Result<TerminalTask, String> {
         self.tasks.borrow().iter().find(|task| task.id == task_id).cloned()
             .ok_or_else(|| format!("Unknown terminal task {task_id}. Tasks belong only to this thread; old completed tasks may have been evicted."))
@@ -1197,6 +1210,31 @@ mod tests {
         assert_eq!(registry.running_in_background(), 0);
         assert!(!registry.summaries(cx.executor().now())[0].running);
         assert!(registry.stop_task("missing").is_err());
+    }
+
+    #[gpui::test]
+    async fn terminal_tasks_reveal_shows_known_running_tasks(cx: &mut TestAppContext) {
+        let registry = Rc::new(TerminalTaskRegistry::default());
+        let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
+        let task = start(&registry, terminal.clone(), None, cx);
+
+        assert!(
+            registry
+                .reveal_task("missing", &cx.to_async())
+                .unwrap_err()
+                .contains("Unknown terminal task")
+        );
+        assert_eq!(terminal.panel_exposures(), 0);
+
+        registry.reveal_task(&task.id, &cx.to_async()).unwrap();
+        assert_eq!(terminal.panel_exposures(), 1);
+        assert!(!terminal.was_killed());
+
+        // An exited command has released its terminal, so there is nothing to show.
+        terminal.signal_exit();
+        task.completion.clone().await;
+        assert!(registry.reveal_task(&task.id, &cx.to_async()).is_err());
+        assert_eq!(terminal.panel_exposures(), 1);
     }
 
     #[gpui::test]

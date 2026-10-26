@@ -61,6 +61,9 @@ pub struct SystemPromptTemplate<'a> {
     pub is_linux: bool,
     /// Whether sandboxed terminal commands run through WSL on Windows.
     pub is_windows: bool,
+    /// Whether the project is untrusted, which withholds some or all of the
+    /// thread's tools until the user trusts it.
+    pub restricted: bool,
     /// Whether the thread is in Plan mode, where the agent researches and
     /// then presents a plan for approval before changing anything.
     pub plan_mode: bool,
@@ -116,36 +119,36 @@ mod tests {
             "edit_architect_plan",
             "wait_architect_run",
         ];
-        for name in ["system_prompt.hbs", "experimental_system_prompt.hbs"] {
-            for visible in tools {
-                let template = SystemPromptTemplate {
-                    project: &project,
-                    available_tools: vec![visible.into()],
-                    model_name: None,
-                    date: "2026-10-01".into(),
-                    user_agents_md: None,
-                    sandboxing: false,
-                    is_linux: false,
-                    is_windows: false,
-                    plan_mode: false,
-                    plan: None,
-                };
-                let rendered = templates.0.render(name, &template).unwrap();
-                for tool in tools {
-                    assert_eq!(rendered.contains(&format!("`{tool}`")), tool == visible);
-                }
-                if visible == "edit_architect_plan" {
-                    assert!(rendered.contains("permission approval, even in Plan mode"));
-                    assert!(rendered.contains("unsupported checkpoint rebases are refused"));
-                    assert!(rendered.contains("even a canvas move can invalidate work"));
-                    assert!(rendered.contains("unknown impact and no apply token"));
-                    assert!(rendered.contains("recomputes runtime impact after permission"));
-                    assert!(rendered.contains("flat acyclic graph"));
-                    assert!(rendered.contains("cannot infer retained conditional verdicts"));
-                }
-                if visible == "wait_architect_run" {
-                    assert!(rendered.contains("event_sequence unchanged"));
-                }
+        for visible in tools {
+            let rendered = SystemPromptTemplate {
+                project: &project,
+                available_tools: vec![visible.into()],
+                model_name: None,
+                date: "2026-10-01".into(),
+                user_agents_md: None,
+                sandboxing: false,
+                is_linux: false,
+                is_windows: false,
+                restricted: false,
+                plan_mode: false,
+                plan: None,
+            }
+            .render(&templates)
+            .unwrap();
+            for tool in tools {
+                assert_eq!(rendered.contains(&format!("`{tool}`")), tool == visible);
+            }
+            if visible == "edit_architect_plan" {
+                assert!(rendered.contains("permission approval, even in Plan mode"));
+                assert!(rendered.contains("unsupported checkpoint rebases are refused"));
+                assert!(rendered.contains("even a canvas move can invalidate work"));
+                assert!(rendered.contains("unknown impact and no apply token"));
+                assert!(rendered.contains("recomputes runtime impact after permission"));
+                assert!(rendered.contains("flat acyclic graph"));
+                assert!(rendered.contains("cannot infer retained conditional verdicts"));
+            }
+            if visible == "wait_architect_run" {
+                assert!(rendered.contains("event_sequence unchanged"));
             }
         }
     }
@@ -154,45 +157,45 @@ mod tests {
     fn architect_coordinator_instructions_follow_tool_visibility() {
         let project = prompt_store::ProjectContext::default();
         let templates = Templates::new();
-        for name in ["system_prompt.hbs", "experimental_system_prompt.hbs"] {
-            for (tools, inspect, control) in [
-                (vec!["refine_step".into()], false, false),
-                (vec!["inspect_architect_run".into()], true, false),
-                (
-                    vec![
-                        "inspect_architect_run".into(),
-                        "control_architect_run".into(),
-                    ],
-                    true,
-                    true,
-                ),
-            ] {
-                let template = SystemPromptTemplate {
-                    project: &project,
-                    available_tools: tools,
-                    model_name: None,
-                    date: "2026-10-01".into(),
-                    user_agents_md: None,
-                    sandboxing: false,
-                    is_linux: false,
-                    is_windows: false,
-                    plan_mode: false,
-                    plan: None,
-                };
-                let rendered = templates.0.render(name, &template).unwrap();
-                assert_eq!(rendered.contains("## Architect Coordination"), inspect);
-                assert_eq!(
-                    rendered.contains("`control_architect_run` requires Build mode"),
-                    control
-                );
-                if control {
-                    assert!(rendered.contains("clears checkpoints"));
-                    assert!(rendered.contains("`revise_step`"));
-                    assert!(rendered.contains("Completed work cannot be revised"));
-                    assert!(rendered.contains("does not roll back their file changes"));
-                    assert!(rendered.contains("`models[].configuration`"));
-                    assert!(rendered.contains("never split display IDs"));
-                }
+        for (tools, inspect, control) in [
+            (vec!["refine_step".into()], false, false),
+            (vec!["inspect_architect_run".into()], true, false),
+            (
+                vec![
+                    "inspect_architect_run".into(),
+                    "control_architect_run".into(),
+                ],
+                true,
+                true,
+            ),
+        ] {
+            let rendered = SystemPromptTemplate {
+                project: &project,
+                available_tools: tools,
+                model_name: None,
+                date: "2026-10-01".into(),
+                user_agents_md: None,
+                sandboxing: false,
+                is_linux: false,
+                is_windows: false,
+                restricted: false,
+                plan_mode: false,
+                plan: None,
+            }
+            .render(&templates)
+            .unwrap();
+            assert_eq!(rendered.contains("## Architect Coordination"), inspect);
+            assert_eq!(
+                rendered.contains("`control_architect_run` requires Build mode"),
+                control
+            );
+            if control {
+                assert!(rendered.contains("clears checkpoints"));
+                assert!(rendered.contains("`revise_step`"));
+                assert!(rendered.contains("Completed work cannot be revised"));
+                assert!(rendered.contains("does not roll back their file changes"));
+                assert!(rendered.contains("`models[].configuration`"));
+                assert!(rendered.contains("never split display IDs"));
             }
         }
     }
@@ -209,6 +212,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            restricted: false,
             plan_mode: false,
             plan: None,
         };
@@ -242,6 +246,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            restricted: false,
             plan_mode: false,
             plan: Some("- schema — \"Define schema\" [locked: settled, do not rewrite]".into()),
         };
@@ -272,6 +277,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            restricted: false,
             plan_mode: false,
             plan: Some("- schema — \"Define schema\" [locked: settled, do not rewrite]".into()),
         };
@@ -297,6 +303,7 @@ mod tests {
                 sandboxing: false,
                 is_linux: false,
                 is_windows: false,
+                restricted: false,
                 plan_mode: false,
                 plan: None,
             }
@@ -326,6 +333,7 @@ mod tests {
                 sandboxing: false,
                 is_linux: false,
                 is_windows: false,
+                restricted: false,
                 plan_mode,
                 plan: None,
             }
@@ -337,6 +345,40 @@ mod tests {
         assert!(planning.contains("## Plan mode"));
         assert!(planning.contains("call `exit_plan_mode` with the plan"));
         assert!(!render(false).contains("## Plan mode"));
+    }
+
+    #[test]
+    fn test_system_prompt_explains_restricted_mode() {
+        let project = prompt_store::ProjectContext::default();
+        let render = |available_tools: Vec<SharedString>, restricted| {
+            SystemPromptTemplate {
+                project: &project,
+                available_tools,
+                model_name: Some("test-model".to_string()),
+                date: "2026-01-01".to_string(),
+                user_agents_md: None,
+                sandboxing: false,
+                is_linux: false,
+                is_windows: false,
+                restricted,
+                plan_mode: true,
+                plan: None,
+            }
+            .render(&Templates::new())
+            .unwrap()
+        };
+
+        let nothing = render(Vec::new(), true);
+        assert!(nothing.contains("## Restricted Mode"));
+        assert!(nothing.contains("withholding all of your tools"));
+        assert!(nothing.contains("do not need to start a new thread"));
+        // Without the tool, Plan mode must not send the model looking for it.
+        assert!(!nothing.contains("exit_plan_mode"));
+
+        let safe_tools = render(vec!["read_file".into()], true);
+        assert!(safe_tools.contains("withholding the tools that run commands"));
+
+        assert!(!render(vec!["read_file".into()], false).contains("## Restricted Mode"));
     }
 
     #[test]
@@ -352,6 +394,7 @@ mod tests {
                 sandboxing: false,
                 is_linux: false,
                 is_windows: false,
+                restricted: false,
                 plan_mode: false,
                 plan: None,
             }
@@ -390,6 +433,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            restricted: false,
             plan_mode: false,
             plan: None,
         };
@@ -421,6 +465,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            restricted: false,
             plan_mode: false,
             plan: None,
         };
@@ -456,6 +501,7 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            restricted: false,
             plan_mode: false,
             plan: None,
         };
@@ -501,6 +547,7 @@ mod tests {
             sandboxing: true,
             is_linux: true,
             is_windows: false,
+            restricted: false,
             plan_mode: false,
             plan: None,
         };
@@ -536,6 +583,7 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: true,
+            restricted: false,
             plan_mode: false,
             plan: None,
         };
@@ -568,6 +616,7 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            restricted: false,
             plan_mode: false,
             plan: None,
         };
@@ -592,6 +641,7 @@ mod tests {
             sandboxing: true,
             is_linux: false,
             is_windows: false,
+            restricted: false,
             plan_mode: false,
             plan: None,
         };
@@ -614,6 +664,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            restricted: false,
             plan_mode: false,
             plan: None,
         };
@@ -634,6 +685,7 @@ mod tests {
             sandboxing: false,
             is_linux: false,
             is_windows: false,
+            restricted: false,
             plan_mode: false,
             plan: None,
         };

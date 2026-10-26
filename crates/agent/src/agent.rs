@@ -12836,6 +12836,159 @@ mod internal_tests {
         drop(restored_acp_thread);
     }
 
+    /// Threads opened before their project was trusted used to be saved with
+    /// the `minimal` profile, which offers no tools. Reopening one gives it the
+    /// default profile back.
+    #[gpui::test]
+    async fn test_a_thread_saved_with_the_minimal_profile_reopens_with_the_default(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let (connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        thread.update(cx, |thread, cx| {
+            thread.set_title("Stuck without tools".into(), cx);
+            thread.set_profile(
+                agent_settings::AgentProfileId(agent_settings::builtin_profiles::MINIMAL.into()),
+                cx,
+            );
+        });
+
+        agent.update(cx, |agent, cx| agent.save_thread(thread.clone(), cx));
+        cx.run_until_parked();
+        drop(thread);
+        drop(acp_thread);
+        release_dropped_entities(cx);
+
+        let restored_acp_thread = cx
+            .update(|cx| {
+                connection.clone().load_session(
+                    session_id.clone(),
+                    project,
+                    PathList::new(&[Path::new("/a")]),
+                    None,
+                    cx,
+                )
+            })
+            .await
+            .expect("the session should reload");
+        cx.run_until_parked();
+        let restored = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        restored.read_with(cx, |thread, cx| {
+            assert_eq!(
+                thread.profile(),
+                &agent_settings::AgentSettings::get_global(cx).default_profile
+            );
+        });
+        drop(restored_acp_thread);
+    }
+
+    /// While the project is untrusted, a shipped profile offers no tools and a
+    /// profile the user made keeps only the ones that are safe there. Trusting
+    /// the project gives the same thread everything back.
+    #[gpui::test]
+    async fn test_restricted_mode_follows_trust_without_a_new_thread(cx: &mut TestAppContext) {
+        use collections::{HashMap, HashSet};
+        use project::trusted_worktrees::{self, PathTrust};
+
+        let fake = init_test(cx);
+        cx.update(|cx| trusted_worktrees::init(HashMap::default(), cx));
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project", json!({ "main.rs": "" })).await;
+        let project =
+            Project::test_with_worktree_trust(fs.clone(), [Path::new("/project")], cx).await;
+        let thread_store = cx.new(|cx| ThreadStore::new(cx));
+        let agent =
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx));
+        let connection = Rc::new(NativeAgentConnection(agent.clone()));
+        let work_dirs = PathList::new(&[Path::new("/project")]);
+        let acp_thread = cx
+            .update(|cx| connection.new_session(project.clone(), work_dirs, cx))
+            .await
+            .unwrap();
+        cx.run_until_parked();
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        thread.update(cx, |thread, cx| {
+            thread.set_model(fake.model("fake"), cx);
+            thread.set_session_mode(SessionMode::Build, cx);
+        });
+
+        thread.read_with(cx, |thread, cx| {
+            assert_eq!(
+                thread.profile().as_str(),
+                agent_settings::builtin_profiles::BUILD
+            );
+            assert!(thread.enabled_tools(cx).is_empty());
+            assert!(!thread.can_read_files(cx));
+        });
+
+        let custom = agent_settings::AgentProfileId("custom".into());
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            let build = settings.profiles[&settings.default_profile].clone();
+            settings.profiles.insert(custom.clone(), build);
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+        thread.update(cx, |thread, cx| thread.set_profile(custom, cx));
+        thread.read_with(cx, |thread, cx| {
+            let tools = thread.enabled_tools(cx);
+            assert!(tools.contains_key(ReadFileTool::NAME));
+            assert!(tools.contains_key(EditFileTool::NAME));
+            assert!(!tools.contains_key(TerminalTool::NAME));
+            assert!(!tools.contains_key(FetchTool::NAME));
+        });
+
+        let worktree_id = project.read_with(cx, |project, cx| {
+            project.worktrees(cx).next().unwrap().read(cx).id()
+        });
+        cx.update(|cx| {
+            TrustedWorktrees::try_get_global(cx)
+                .expect("trust initialized")
+                .update(cx, |trusted_worktrees, cx| {
+                    trusted_worktrees.trust(
+                        &project.read(cx).worktree_store(),
+                        HashSet::from_iter([PathTrust::Worktree(worktree_id)]),
+                        cx,
+                    );
+                });
+        });
+        cx.run_until_parked();
+
+        thread.read_with(cx, |thread, cx| {
+            let tools = thread.enabled_tools(cx);
+            assert!(tools.contains_key(TerminalTool::NAME));
+            assert!(tools.contains_key(FetchTool::NAME));
+        });
+    }
+
+    /// The thread view redraws its background commands list off this event.
+    #[gpui::test]
+    async fn test_a_terminal_task_exit_is_announced(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (_connection, agent, _project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let exits = Rc::new(std::cell::Cell::new(0));
+        let _subscription = cx.update(|cx| {
+            let exits = exits.clone();
+            cx.subscribe(&thread, move |_, _: &TerminalTaskExited, _| {
+                exits.set(exits.get() + 1);
+            })
+        });
+
+        let terminal = Rc::new(cx.update(crate::tests::FakeTerminalHandle::new_never_exits));
+        let registry = thread.read_with(cx, |thread, _| thread.terminal_task_registry());
+        registry.start_in_background_for_test(terminal.clone(), &mut cx.to_async());
+        cx.run_until_parked();
+        assert_eq!(exits.get(), 0);
+
+        terminal.signal_exit();
+        cx.run_until_parked();
+        assert_eq!(exits.get(), 1);
+    }
+
     /// A command the agent left running resumes the conversation when it
     /// finishes, so the agent can end its turn instead of waiting on it.
     #[gpui::test]

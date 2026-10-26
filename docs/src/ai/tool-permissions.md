@@ -3,18 +3,18 @@
 Configure which [Agent Panel](./agent-panel.md) tools run automatically and which require your approval.
 For a list of available tools, [see the Tools page](./tools.md).
 
-> **Note:** In Zed v0.224.0 and above, tool approval is controlled by `agent.tool_permissions.default`.
-> In earlier versions, it was controlled by the `agent.always_allow_tool_actions` boolean (default `false`).
+Out of the box, Praxis allows every tool call without asking, and agent terminal commands run without the OS sandbox.
+The agent only asks when your settings tell it to.
+Plan mode still asks you to approve a plan before anything changes, and the agent can still ask you a question when it needs a decision.
 
 ## Quick Start
 
-Use Zed's Settings Editor to [configure tool permissions](zed://settings/agent.tool_permissions), or add rules directly to your settings file:
+Use the Settings Editor to [configure tool permissions](zed://settings/agent.tool_permissions), or add rules directly to your settings file:
 
 ```json [settings]
 {
   "agent": {
     "tool_permissions": {
-      "default": "allow",
       "tools": {
         "terminal": {
           "default": "confirm",
@@ -31,15 +31,25 @@ Use Zed's Settings Editor to [configure tool permissions](zed://settings/agent.t
 ```
 
 This example auto-approves `cargo` and `npm` commands in the terminal tool, while requiring manual confirmation on a case-by-case basis for `sudo` commands.
-Non-terminal commands follow the global `"default": "allow"` setting, but tool-specific defaults and `always_confirm` rules can still prompt.
+Other tools follow the global default, which is `"allow"`.
 
 ## How It Works
 
 The `tool_permissions` setting lets you customize tool permissions by specifying regex patterns that:
 
 - **Auto-approve** actions you trust
-- **Auto-deny** dangerous actions (blocked even when `tool_permissions.default` is set to `"allow"`)
+- **Auto-deny** dangerous actions (blocked even when `tool_permissions.default` is `"allow"`)
 - **Always confirm** sensitive actions regardless of other settings
+
+### Protecting Your Restrictions
+
+Once you add any rule that can deny or confirm (or turn the terminal sandbox back on, see [Sandboxing](./sandboxing.md)), the agent also asks before it:
+
+- writes or deletes Praxis settings, project `.zed` folders, or skills
+- follows a symlink from the project to somewhere outside it
+
+This happens even when the tool itself is allowed, so the agent cannot lift your restrictions on its own.
+While nothing is restricted, there is nothing to protect, and these actions run without asking.
 
 ## Supported Tools
 
@@ -67,7 +77,7 @@ For model-invoked [Skills](./skills.md), use the `skill` tool. A user-invoked `/
 {
   "agent": {
     "tool_permissions": {
-      "default": "confirm",
+      "default": "allow",
       "tools": {
         "<tool_name>": {
           "default": "confirm",
@@ -85,7 +95,7 @@ For model-invoked [Skills](./skills.md), use the `skill` tool. A user-invoked `/
 
 | Option           | Description                                                                    |
 | ---------------- | ------------------------------------------------------------------------------ |
-| `default`        | Fallback when no patterns match: `"confirm"` (default), `"allow"`, or `"deny"` |
+| `default`        | Fallback when no patterns match: `"allow"` (default), `"confirm"`, or `"deny"` |
 | `always_allow`   | Patterns that auto-approve (unless deny or confirm also matches)               |
 | `always_deny`    | Patterns that block immediately—highest priority, cannot be overridden         |
 | `always_confirm` | Patterns that always prompt, even when `tool_permissions.default` is `"allow"` |
@@ -125,21 +135,21 @@ From highest to lowest priority:
 5. **Tool-specific `default`**: Per-tool fallback when no patterns match (e.g., `tools.terminal.default`)
 6. **Global `default`**: Falls back to `tool_permissions.default` when no tool-specific default is set
 
-## Global Auto-Approve
+## Confirm Everything
 
-To auto-approve all tool actions:
+To be asked before every tool action:
 
 ```json [settings]
 {
   "agent": {
     "tool_permissions": {
-      "default": "allow"
+      "default": "confirm"
     }
   }
 }
 ```
 
-This bypasses confirmation prompts for most tools, but `always_deny`, `always_confirm`, built-in security rules, and paths inside Zed settings directories still prompt or block.
+Per-tool `default`, `always_allow` and `always_deny` rules still apply on top of this.
 
 ## Shell Compatibility
 

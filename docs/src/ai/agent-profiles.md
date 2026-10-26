@@ -11,19 +11,22 @@ Profiles do not decide whether a tool call is allowed automatically. Use [Tool P
 
 ## Built-in Profiles {#built-in-profiles}
 
-Zed includes three built-in profiles:
+Praxis includes these built-in profiles:
 
+- `Build`: enables every tool. Threads use it unless `agent.default_profile` names another profile.
 - `Write`: enables tools for reading, editing, and running commands.
 - `Ask`: focuses on read-only codebase questions.
 - `Minimal`: uses no project tools.
 
 Planning is not a profile. A native-agent thread switches between [Plan, Build and Architect modes](./architect.md#plan-build-and-architect-modes) as the task needs. Plan and Architect modes permit only tools classified as local or external reads (plus plan updates in Architect), regardless of whether the active profile also enables mutating or executable tools.
 
+## Untrusted Projects {#untrusted-projects}
+
+Until you trust a project, the built-in profiles offer the agent no tools, and a profile you wrote or changed offers only the tools that are safe in an untrusted project. The agent panel shows a **Restricted Mode** button while this applies; click it to trust the project. This is checked on every message, so a thread you started before trusting the project gets its tools back with your next message.
+
 ## Configure Profiles {#configure-profiles}
 
-Open the profile selector in the [Agent Panel](./agent-panel.md), then click `Configure`.
-
-You can also run {#action agent::ManageProfiles} from the command palette.
+Choose **Profiles** from the Agent Panel's options menu, or run {#action agent::ManageProfiles} from the command palette.
 
 From the profile modal, you can:
 

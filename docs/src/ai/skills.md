@@ -58,7 +58,7 @@ Nothing is written to disk until they explicitly save, so a shared link can neve
 
 By default, the agent picks up skills autonomously. It sees a catalog of every installed skill (name and description) in its system prompt, and calls the `skill` tool when a task matches a skill's description.
 
-When the agent invokes a skill you created or installed, Zed prompts you to allow or deny it, using the same permission flow as other tools. Skills built into Zed do not prompt. You can set per-skill defaults in [Tool Permissions](./tool-permissions.md) so you're not prompted for skills you always trust.
+Skill invocations go through the same permission flow as other tools, so they run without asking unless your [Tool Permissions](./tool-permissions.md) say otherwise. To be asked before the agent uses a skill you created or installed, set the `skill` tool's default to `"confirm"`; skills built into Praxis never prompt.
 
 ### Manual Invocation {#manual-invocation}
 

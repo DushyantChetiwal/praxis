@@ -311,6 +311,9 @@ mod tests {
         cx.update(|cx| {
             let mut settings = AgentSettings::get_global(cx).clone();
             settings.tool_permissions.default = settings::ToolPermissionMode::Allow;
+            // Turning the sandbox back on restricts the agent, which is what
+            // makes skills paths and symlink escapes ask.
+            settings.sandbox_permissions.allow_unsandboxed = false;
             AgentSettings::override_global(settings, cx);
         });
     }

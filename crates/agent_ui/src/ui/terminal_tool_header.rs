@@ -22,6 +22,7 @@ pub struct TerminalToolHeader {
     is_expanded: bool,
     elapsed: Option<Duration>,
     running: bool,
+    in_background: bool,
     truncated_tooltip: Option<SharedString>,
     failed: bool,
     exit_code: Option<u32>,
@@ -45,6 +46,7 @@ impl TerminalToolHeader {
             is_expanded,
             elapsed: None,
             running: false,
+            in_background: false,
             truncated_tooltip: None,
             failed: false,
             exit_code: None,
@@ -62,6 +64,12 @@ impl TerminalToolHeader {
 
     pub fn running(mut self, running: bool) -> Self {
         self.running = running;
+        self
+    }
+
+    /// The agent moved on and left the running command to carry on by itself.
+    pub fn in_background(mut self, in_background: bool) -> Self {
+        self.in_background = in_background;
         self
     }
 
@@ -116,6 +124,7 @@ impl RenderOnce for TerminalToolHeader {
             is_expanded,
             elapsed,
             running,
+            in_background,
             truncated_tooltip,
             failed,
             exit_code,
@@ -172,12 +181,28 @@ impl RenderOnce for TerminalToolHeader {
             .when(running, |header| {
                 header
                     .gap_1p5()
-                    .child(
+                    // A background command can run for hours, so it gets a
+                    // still label rather than a spinner that redraws forever.
+                    .child(if in_background {
+                        div()
+                            .id(child_id("background"))
+                            .tooltip(Tooltip::text(
+                                "The agent moved on and left this running. \
+                                 It is also in the Terminal panel.",
+                            ))
+                            .child(
+                                Label::new("Background")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .into_any_element()
+                    } else {
                         Icon::new(IconName::LoadCircle)
                             .size(IconSize::Small)
                             .color(Color::Muted)
-                            .with_rotate_animation(2),
-                    )
+                            .with_rotate_animation(2)
+                            .into_any_element()
+                    })
                     .when_some(on_stop, |header, handler| {
                         header
                             .child(Divider::vertical().color(DividerColor::Border).ml_1())
@@ -349,6 +374,20 @@ impl Component for TerminalToolHeader {
                             false,
                         )
                         .running(true),
+                    ),
+                ),
+                single_example(
+                    "Running in the background",
+                    card(
+                        "background",
+                        TerminalToolHeader::new(
+                            "background",
+                            "preview-terminal-header-group-background",
+                            working_dir,
+                            false,
+                        )
+                        .running(true)
+                        .in_background(true),
                     ),
                 ),
                 single_example(
