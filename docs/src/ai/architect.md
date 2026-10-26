@@ -1,30 +1,40 @@
 # Architect
 
-Architect is a mode for planning a task as a flowchart before any of it is carried out, and then running that flowchart one step at a time.
+Architect is the canvas where the agent's plan is a flowchart: you can read it, reshape it step by step, and run it one step at a time.
 
 The difference from simply asking an agent to "make a plan" is where the plan lives. A plan written into a chat message is a suggestion the model may drift away from. An Architect plan is a graph the agent is driven through: Praxis holds the position in it, tells the agent about one step at a time, and decides every branch itself.
 
-## Plan, Build and Architect modes
+## The checklist and the canvas {#the-checklist-and-the-canvas}
 
-The agent works in one of three modes, shown next to the message editor:
+For a task with several steps, the Praxis Agent keeps a checklist with the `update_plan` tool, shown above the message box. The checklist and the canvas are two views of one plan:
 
-| Mode                | Can change your project | Purpose                                           |
-| ------------------- | ----------------------- | ------------------------------------------------- |
-| **Build** (default) | Yes                     | Carrying work out.                                |
-| **Plan**            | **No**                  | Working out what to do, then asking to go ahead.  |
-| **Architect**       | **No**                  | Drawing a plan on the canvas to run step by step. |
+- The checklist lists the plan's top-level steps in the order they run. Steps inside a step count as part of it.
+- Choose **Open in Architect View** on the checklist to see the same steps on the canvas. A checklist the agent writes appears there as a line of steps.
+- Renaming, adding, removing, reordering, or connecting steps on the canvas changes the checklist. The agent sees the checklist as it now stands and builds on it.
+- Progress the agent reports shows on the canvas as **in progress** or **completed**, and running the plan updates the checklist as each step starts and finishes.
+- Anything else a step carries is optional: a goal, rules, files, a model, a nested plan, a conversation of its own, or a lock. The agent's checklist updates never remove a step that has any of these, and in a plan with branches they add new steps after the last ones rather than rearranging it.
+- While a plan runs, the run keeps the checklist up to date, and the agent's own checklist updates are refused until the run finishes or is stopped.
 
-**Plan** works like Praxis's Plan mode. The agent reads and researches, then presents its plan for approval. Choosing **Start Building** switches the conversation to Build so it can carry the plan out; **Keep Planning** keeps it in Plan to refine it.
+The Architect status card in the Agent Panel appears once a plan has more to it than a checklist: branches, step details, or a run.
 
-You do not have to switch to Architect yourself. When the agent decides a task is worth drawing as a flowchart, it draws a plan, and drawing a plan is what puts the thread into Architect mode. Pressing **Run** puts it back into Build.
+## Plan and Build modes
 
-In Plan and Architect modes only tools reviewed as local or external reads are available, and Architect adds conversation-owned plan updates. Architect's tools may draft, refine, and report steps, but cannot change project files or external systems. Project mutation, external mutation, terminal execution, subagents, sibling threads, and MCP tools without an explicit read-only annotation are withheld rather than merely discouraged. Shell-free Git and GitHub/GitLab pull-request tools remain available for research. The selected mode is saved with the thread, so reopening a plan does not silently restore Build tools. You can switch modes by hand at any time from the mode selector.
+The agent works in one of two modes, shown next to the message editor:
+
+| Mode                | Can change your project | Purpose                                                                |
+| ------------------- | ----------------------- | ---------------------------------------------------------------------- |
+| **Build** (default) | Yes                     | Carrying work out.                                                     |
+| **Plan**            | **No**                  | Working out what to do, drawing it as a plan, then asking to go ahead. |
+
+In **Plan** mode the agent reads and researches, can draw or reshape the plan on the canvas, then presents its plan for approval. Choosing **Start Building** switches the conversation to Build so it can carry the plan out; **Keep Planning** keeps it in Plan to refine it. Drafting a plan keeps the conversation in its current mode, and pressing **Run** switches it to Build. Threads saved in the former Architect mode reopen in Plan mode.
+
+In Plan mode only tools reviewed as local or external reads are available, plus conversation-owned plan updates: the checklist and the canvas. These may draft, refine, and report steps, but cannot change project files or external systems. Project mutation, external mutation, terminal execution, subagents, sibling threads, and MCP tools without an explicit read-only annotation are withheld rather than merely discouraged. Shell-free Git and GitHub/GitLab pull-request tools remain available for research. The selected mode is saved with the thread, so reopening a plan does not silently restore Build tools. You can switch modes by hand at any time from the mode selector.
 
 ## Drafting a plan
 
-Describe what you want done. If the task warrants it, the agent calls the `draft_plan` tool, which draws the plan on a canvas rather than writing it out as prose. You can also ask for a plan directly.
+Describe what you want done. If the task warrants a flowchart, the agent calls the `draft_plan` tool, which draws the plan on the canvas rather than writing it out as prose, and replaces the checklist's steps with the drafted ones. You can also ask for a plan directly.
 
-Open the canvas with the branch icon in the Agent Panel toolbar, or with the `agent: open architect` action. It opens over the workspace rather than in a tab, because a plan belongs to a conversation rather than to your project.
+Open the canvas from the checklist, with the **Architect View** button in the Agent Panel toolbar, or with the `agent: open architect view` action. It opens over the workspace rather than in a tab, because a plan belongs to a conversation rather than to your project.
 
 Each **step** is one meaningful unit of work and carries:
 
@@ -45,7 +55,7 @@ Each **connection** says when one step leads to another:
 
 Pointing a connection back at an earlier step forms a loop, which is how you express "go back and fix it if the tests fail". A node can also loop into itself (`from == to`). Use a condition or a positive `max_repeats` and a way out: `max_repeats: 3` allows three edge traversals after the initial visit, not three total visits. Unlimited unconditional loops with no exit are blocked; run safety limits still apply.
 
-Architect mode can read and search your project but cannot change it through native tools. Drawing a plan and carrying it out are separate jobs.
+Plan mode can read and search your project but cannot change it through native tools. Drawing a plan and carrying it out are separate jobs.
 
 Step and connection IDs must be non-blank and unique within their graph. Nested graphs have separate namespaces, so a child ID can repeat under different parents. Drafting rejects ambiguous IDs before changing the current plan; it never silently renames a proposed step or redirects its connections.
 
@@ -103,7 +113,7 @@ Node chats and node execution have distinct persisted roles from helpers created
 
 ## Background agent terminals
 
-Native terminal commands that yield to the background appear as tabs in the owning workspace's terminal panel. The tab shares the original terminal and output; inspecting it does not rerun the command. It does not steal focus or open a dock in Architect mode. Switch to **Code** and open **Terminal** to inspect it.
+Native terminal commands that yield to the background appear as tabs in the owning workspace's terminal panel. The tab shares the original terminal and output; inspecting it does not rerun the command. It does not steal focus or open a dock while the canvas is open. Switch to **Code** and open **Terminal** to inspect it.
 
 In the thread, the command's card says **Background** instead of spinning, and a **Background Commands** row above the message box lists every command still running. From that list you can show a command in the Terminal panel or stop it, one at a time or all at once. Stopping a background command, from the list or from its card, leaves the agent's current work alone.
 
@@ -178,7 +188,7 @@ The main conversation has these coordinator tools:
 - `edit_architect_plan` previews targeted graph edits and applies only the returned preview token after permission approval. Operations insert/remove nodes and edges, reconnect edges, move nodes on the canvas, or replace file surfaces with `set_file_surface`; moves do not reparent nodes.
 - `wait_architect_run` subscribes to execution transitions or user-input waits for up to 30 seconds. It returns immediately for available events, failures or stopped execution, or pending user input. Follow its event cursor rather than repeatedly polling. This is an on-demand observer, not a new agent started automatically in the background.
 
-Execution controls require **Build** mode and configured tool permission approval. Topology editing is also available in **Architect** mode but cannot start execution or approve locks. Step agents cannot control sibling steps.
+Execution controls require **Build** mode and configured tool permission approval. Topology editing is also available in **Plan** mode but cannot start execution or approve locks. Step agents cannot control sibling steps.
 
 Pending step briefs and models can be changed during execution. Active work must be interrupted first, then revised and resumed. Approved brief revisions preserve locks and checkpoints; completed briefs cannot be rewritten. Model changes affect subsequent visits, never past conversations. Approval is rejected if the plan changes while permission is pending.
 

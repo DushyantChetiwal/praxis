@@ -41,7 +41,7 @@ Quickly finds files by matching glob patterns (like "\*_/_.js"), returning match
 
 ### `git_status`, `git_diff`, `git_branches`, `git_remotes`, and `git_show`
 
-Inspect repository state through Zed's Git backend without invoking a shell. These tools cover working-tree status, staged/worktree/merge-base diffs, local and remote branches, remote URLs, and commit metadata with changed-file names. They are available in Plan and Architect modes because their API surface contains no Git mutation operation.
+Inspect repository state through Zed's Git backend without invoking a shell. These tools cover working-tree status, staged/worktree/merge-base diffs, local and remote branches, remote URLs, and commit metadata with changed-file names. They are available in Plan mode because their API surface contains no Git mutation operation.
 
 ### `grep`
 
@@ -156,3 +156,7 @@ To configure a subagent's model, reasoning effort, and speed, see [Subagent Mode
 Carries out two to six independent steps of the agent's checklist at the same time, one subagent per step. The conversation shows a card for each step's agent while it works: whether it is still running, the files it has changed, and a preview of its conversation. From a card you can stop that step or open its agent full screen. The checklist marks each step done as soon as its agent finishes, without waiting for the others.
 
 If two steps try to change the same file, the first one keeps it and the other reports what it could not change, so the agent can finish that part itself.
+
+### `update_plan`
+
+Keeps the agent's checklist for a task with several steps, shown above the message box with each step's progress. The checklist is the conversation's plan, so **Open in Architect View** shows the same steps on the canvas, where you can rename, reorder, add, or connect them, or give a step a goal, rules, files, or a model of its own. The agent sees those changes and builds on the checklist as it stands. See [The checklist and the canvas](./architect.md#the-checklist-and-the-canvas).

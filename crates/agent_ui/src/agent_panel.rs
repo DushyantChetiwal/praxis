@@ -5876,6 +5876,11 @@ impl AgentPanel {
         let thread_ref = thread.read(cx);
         let graph = thread_ref.architect_status_graph()?;
         let run = thread_ref.architect_run();
+        // A plan that is still only a checklist is already shown above the
+        // message box. This card is for plans shaped on the canvas and runs.
+        if run.is_none() && graph.is_plain_checklist() {
+            return None;
+        }
 
         // Counted through nested plans, as Run counts what is left to lock.
         let step_count = graph.step_count_deeply();
@@ -12420,6 +12425,7 @@ mod tests {
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Default::default(),
             checklist: None,
+            step_progress: None,
         };
 
         let thread_store = cx.update(|cx| ThreadStore::global(cx));

@@ -447,30 +447,47 @@ impl ArchitectPane {
     }
 
     fn collect_run_statuses(thread: &Thread) -> HashMap<NodePath, String> {
-        if thread.architect_run().is_none() {
-            return HashMap::new();
+        let mut statuses: HashMap<NodePath, String> = if thread.architect_run().is_some() {
+            agent::architect_run_readiness(thread)["steps"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|step| {
+                    let path = NodePath(
+                        step["path"]
+                            .as_array()?
+                            .iter()
+                            .map(|part| part.as_str().map(NodeId::from))
+                            .collect::<Option<Vec<_>>>()?,
+                    );
+                    Some((
+                        path,
+                        step.get("display_status")
+                            .unwrap_or(&step["status"])
+                            .as_str()?
+                            .to_string(),
+                    ))
+                })
+                .collect()
+        } else {
+            HashMap::default()
+        };
+        // The checklist is the plan's top-level steps, so how far the agent
+        // says each has got shows here too, wherever a run has not said.
+        if let Some(graph) = thread.architect_graph() {
+            for node in &graph.nodes {
+                let status = match thread.step_status(node) {
+                    agent::PlanStepStatus::InProgress => "in_progress",
+                    agent::PlanStepStatus::Completed => "completed",
+                    agent::PlanStepStatus::Cancelled => "cancelled",
+                    agent::PlanStepStatus::Pending => continue,
+                };
+                statuses
+                    .entry(NodePath::root(node.id.clone()))
+                    .or_insert_with(|| status.to_string());
+            }
         }
-        agent::architect_run_readiness(thread)["steps"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|step| {
-                let path = NodePath(
-                    step["path"]
-                        .as_array()?
-                        .iter()
-                        .map(|part| part.as_str().map(NodeId::from))
-                        .collect::<Option<Vec<_>>>()?,
-                );
-                Some((
-                    path,
-                    step.get("display_status")
-                        .unwrap_or(&step["status"])
-                        .as_str()?
-                        .to_string(),
-                ))
-            })
-            .collect()
+        statuses
     }
 
     fn node_run_status(&self, id: &NodeId) -> Option<&str> {

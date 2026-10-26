@@ -1312,6 +1312,9 @@ impl ArchitectPane {
                                     } else if self.node_run_status(&node.id) == Some("interrupted")
                                     {
                                         ("interrupted", Color::Warning)
+                                    } else if self.node_run_status(&node.id) == Some("in_progress")
+                                    {
+                                        ("in progress", Color::Info)
                                     } else if node.locked {
                                         ("settled", Color::Success)
                                     } else if run_active {
@@ -2465,6 +2468,8 @@ impl ArchitectPane {
         // else about it, so it is marked in the title rather than in the chips.
         let done = self.node_is_complete(&node) && !running;
         let skipped = self.node_run_status(&node.id) == Some("skipped");
+        // The agent is on this step by the checklist, outside a run.
+        let in_progress = !running && self.node_run_status(&node.id) == Some("in_progress");
         let queued = run_active && !running && !done && !failed && !skipped;
         let status = if running {
             "running"
@@ -2478,6 +2483,8 @@ impl ArchitectPane {
             "cancelled"
         } else if self.node_run_status(&node.id) == Some("interrupted") {
             "interrupted"
+        } else if in_progress {
+            "in progress"
         } else if queued {
             "queued"
         } else if node.locked {
@@ -2485,7 +2492,7 @@ impl ArchitectPane {
         } else {
             "draft"
         };
-        let status_color = if running {
+        let status_color = if running || in_progress {
             Color::Info
         } else if failed {
             Color::Error

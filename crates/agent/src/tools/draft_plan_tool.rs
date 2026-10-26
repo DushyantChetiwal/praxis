@@ -19,6 +19,11 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 /// Drafting keeps the conversation in its current mode. Unless the user asked
 /// you to carry the plan out, stop after drafting and let them review it.
 ///
+/// The plan's top-level steps are also the checklist kept with `update_plan`:
+/// one list, shown above the message box and on the canvas. Drafting replaces
+/// the checklist's steps with the drafted ones; a step that keeps its id keeps
+/// its progress. Keep marking progress on the drafted steps with `update_plan`.
+///
 /// ### Choose the right tool
 /// Use draft_plan to create a plan or deliberately replace the whole graph, not
 /// to patch one step. Inspect the authoritative graph with inspect_architect_plan

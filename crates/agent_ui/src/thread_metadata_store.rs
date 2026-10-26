@@ -1857,6 +1857,7 @@ mod tests {
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Default::default(),
             checklist: None,
+            step_progress: None,
         }
     }
 

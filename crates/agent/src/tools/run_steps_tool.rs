@@ -14,7 +14,6 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use util::ResultExt as _;
 
 use super::update_plan_tool::{MAX_STEP_LENGTH, plan_entries};
 use crate::{
@@ -325,12 +324,25 @@ impl RunStepsTool {
         }
     }
 
-    fn store_checklist(&self, checklist: &[PlanStep], cx: &mut gpui::AsyncApp) {
-        self.thread
-            .update(cx, |thread, _| {
-                thread.set_agent_checklist(checklist.to_vec())
-            })
-            .log_err();
+    /// Marks steps on the checklist as the plan has it now, so whatever
+    /// changed meanwhile on the canvas is kept, and returns the checklist that
+    /// results.
+    fn mark_steps(
+        &self,
+        names: &[String],
+        status: PlanStepStatus,
+        cx: &mut gpui::AsyncApp,
+    ) -> Result<Vec<PlanStep>> {
+        self.thread.update(cx, |thread, cx| {
+            let mut checklist = thread.agent_checklist();
+            for name in names {
+                set_status(&mut checklist, name, status);
+            }
+            if let Err(error) = thread.set_agent_checklist(&checklist, cx) {
+                log::warn!("Could not update the checklist: {error}");
+            }
+            thread.agent_checklist()
+        })
     }
 }
 
@@ -373,21 +385,16 @@ impl AgentTool for RunStepsTool {
                     error: format!("Failed to receive tool input: {error}"),
                 })?;
             validate(&input.steps).map_err(|error| RunStepsToolOutput::Error { error })?;
-            let mut checklist = self
-                .thread
-                .read_with(cx, |thread, _| thread.agent_checklist().to_vec())
-                .map_err(|error| RunStepsToolOutput::Error {
-                    error: format!("The conversation these steps belong to is gone: {error}"),
-                })?;
             let names: Vec<String> = input
                 .steps
                 .iter()
                 .map(|step| step.step.trim().to_string())
                 .collect();
-            for name in &names {
-                set_status(&mut checklist, name, PlanStepStatus::InProgress);
-            }
-            self.store_checklist(&checklist, cx);
+            let checklist = self
+                .mark_steps(&names, PlanStepStatus::InProgress, cx)
+                .map_err(|error| RunStepsToolOutput::Error {
+                    error: format!("The conversation these steps belong to is gone: {error}"),
+                })?;
             event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&checklist));
 
             // Each step's progress is reported on this call as it changes, so
@@ -452,9 +459,14 @@ impl AgentTool for RunStepsTool {
                     }
                 };
                 event_stream.update_fields(|update| update.meta(parallel_steps_meta(&progress)));
-                set_status(&mut checklist, name, status);
-                self.store_checklist(&checklist, cx);
-                event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&checklist));
+                match self.mark_steps(std::slice::from_ref(name), status, cx) {
+                    Ok(checklist) => {
+                        event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&checklist))
+                    }
+                    Err(error) => log::debug!(
+                        "The conversation closed before its checklist changed: {error:#}"
+                    ),
+                }
                 results[index] = Some((subagent.map(|subagent| subagent.id()), result));
             }
 
@@ -479,6 +491,10 @@ impl AgentTool for RunStepsTool {
                 .collect();
             let text = outcome_text(&outcomes);
             event_stream.update_fields(|update| update.content(vec![text.into()]));
+            let checklist = self
+                .thread
+                .read_with(cx, |thread, _| thread.agent_checklist())
+                .unwrap_or_default();
             Ok(RunStepsToolOutput::Finished {
                 steps: outcomes,
                 checklist,
@@ -493,8 +509,9 @@ impl AgentTool for RunStepsTool {
         event_stream: ToolCallEventStream,
         _cx: &mut App,
     ) -> Result<()> {
-        if let RunStepsToolOutput::Finished { steps, checklist } = output {
-            event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&checklist));
+        // The checklist is left to the plan, which a reopened conversation
+        // shows as it stands now.
+        if let RunStepsToolOutput::Finished { steps, .. } = output {
             let text = outcome_text(&steps);
             let progress = finished_progress(&steps);
             event_stream.update_fields(|update| {
