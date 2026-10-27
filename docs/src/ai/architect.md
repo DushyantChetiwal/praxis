@@ -15,7 +15,7 @@ For a task with several steps, the Praxis Agent keeps a checklist with the `upda
 - Anything else a step carries is optional: a goal, rules, files, a model, a nested plan, a conversation of its own, or a lock. The agent's checklist updates never remove a step that has any of these, and in a plan with branches they add new steps after the last ones rather than rearranging it.
 - While a plan runs, the run keeps the checklist up to date, and the agent's own checklist updates are refused until the run finishes or is stopped.
 
-The Architect status card in the Agent Panel appears once a plan has more to it than a checklist: branches, step details, or a run.
+The checklist is the Agent Panel's only view of the plan. To see branches and step details, open a step's conversation, allow what a running step asks for, or stop a run, open the Architect View.
 
 ## Plan and Build modes
 
