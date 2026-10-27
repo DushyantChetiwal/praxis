@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v2 as acp;
 use anyhow::{Context as _, Result, ensure};
-use gpui::{App, Global, Task};
+use gpui::{App, AppContext as _, Global, Task};
 use serde_json::{Value, json};
 
 use super::{crypto, ensure_inside, required, resolve_project_path, transcript};
