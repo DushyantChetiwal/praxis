@@ -1300,6 +1300,7 @@ private fun UserBubble(text: String, modifier: Modifier = Modifier, label: Strin
     }
 }
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun OutboxBubble(item: OutboxItem, canSendNow: Boolean, canSteer: Boolean, vm: MainViewModel) {
     val label = stringResource(
@@ -1455,6 +1456,7 @@ private fun FileChip(name: String, onRemove: (() -> Unit)? = null) {
     }
 }
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun AttachmentRow(files: List<FileAttachment>, attaching: UploadState?, vm: MainViewModel) {
     Column(
