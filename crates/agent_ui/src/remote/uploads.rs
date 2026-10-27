@@ -468,7 +468,7 @@ mod tests {
         std::fs::create_dir_all(root.join(".praxis/uploads")).unwrap();
         std::fs::write(root.join(".praxis/uploads/a.txt"), "a").unwrap();
         std::fs::write(directory.path().join("outside.txt"), "x").unwrap();
-        let roots = vec![("project".to_string(), root.clone())];
+        let roots = vec![("project".to_string(), root)];
         let links =
             attachments(&roots, &json!({"files": ["project/.praxis/uploads/a.txt"]})).unwrap();
         let [acp::ContentBlock::ResourceLink(link)] = links.as_slice() else {
