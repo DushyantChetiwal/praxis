@@ -99,6 +99,7 @@ data class OutboxItem(
     val steer: Boolean = false,
     val fingerprint: String = io.github.dushyantchetiwal.praxis.remote.data.transcriptFingerprint(text),
     val images: List<io.github.dushyantchetiwal.praxis.remote.data.PromptImage> = emptyList(),
+    val files: List<io.github.dushyantchetiwal.praxis.remote.data.FileAttachment> = emptyList(),
 ) {
     fun canRestoreDraft(activeSession: String?, draft: String): Boolean =
         state == OutboxState.Unconfirmed && session == activeSession && draft.isBlank()
@@ -152,6 +153,19 @@ data class FilesState(
     val error: String? = null,
     val file: FileContent? = null,
 )
+
+/** A file going from the phone to the computer, or how it ended until dismissed. */
+data class UploadState(
+    val name: String,
+    val sent: Long = 0L,
+    val size: Long? = null,
+    /** The project path it was saved to, once it is complete. */
+    val savedPath: String? = null,
+    val error: String? = null,
+) {
+    val active: Boolean get() = savedPath == null && error == null
+    val fraction: Float? get() = size?.let { total -> if (total == 0L) 1f else (sent.toFloat() / total).coerceIn(0f, 1f) }
+}
 
 /** The one file downloading, or the result of the last download until dismissed. */
 data class DownloadState(
@@ -250,6 +264,8 @@ data class DeviceUi(
     val threads: ThreadsState = ThreadsState(),
     val files: FilesState = FilesState(),
     val download: DownloadState? = null,
+    /** A Files-tab upload into the folder being browsed. */
+    val upload: UploadState? = null,
     val outbox: List<OutboxItem> = emptyList(),
     val answered: Set<String> = emptySet(),
     val busyPermissions: Set<String> = emptySet(),

@@ -138,6 +138,23 @@ import io.github.dushyantchetiwal.praxis.remote.data.PlanStep
 import io.github.dushyantchetiwal.praxis.remote.data.TerminalTask
 import io.github.dushyantchetiwal.praxis.remote.TerminalsState
 import io.github.dushyantchetiwal.praxis.remote.ui.theme.OnlineGreen
+import io.github.dushyantchetiwal.praxis.remote.UploadState
+import io.github.dushyantchetiwal.praxis.remote.data.FileAttachment
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.layout.widthIn
 
 @Composable
 fun ChatTab(ui: DeviceUi, vm: MainViewModel) {
@@ -1038,7 +1055,7 @@ private fun UserMessageRow(entry: Entry, expanded: Boolean, onToggle: () -> Unit
         Surface(
             color = MaterialTheme.colorScheme.primaryContainer,
             contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-            shape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp),
+            shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp),
         ) {
             Column {
                 Row(
@@ -1067,45 +1084,90 @@ private fun UserMessageRow(entry: Entry, expanded: Boolean, onToggle: () -> Unit
 @Composable
 private fun MessageRow(entry: Entry, expanded: Boolean, onToggle: () -> Unit, details: @Composable () -> Unit) {
     val preview = remember(entry.text) { firstLine(entry.text).take(160) }
-    Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
-        Column {
-            TextButton(onClick = onToggle, modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
-                    Text(stringResource(when (entry.role) {
-                        "user" -> R.string.chat_user_header
-                        "assistant" -> R.string.chat_agent_header
-                        else -> R.string.chat_notice_header
-                    }))
-                    if (preview.isNotBlank()) Text(preview, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
-                }
+    val scheme = MaterialTheme.colorScheme
+    val agent = entry.role == "assistant"
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(MaterialTheme.shapes.medium)
+                .clickable(onClick = onToggle)
+                .padding(horizontal = 4.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Box(
+                Modifier
+                    .padding(top = 1.dp)
+                    .size(22.dp)
+                    .background(if (agent) scheme.primaryContainer else scheme.surfaceContainerHigh, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
                 Icon(
-                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                    contentDescription = stringResource(if (expanded) R.string.action_collapse else R.string.action_expand),
+                    if (agent) Icons.Outlined.AutoAwesome else Icons.Outlined.Info,
+                    contentDescription = null,
+                    tint = if (agent) scheme.primary else scheme.onSurfaceVariant,
+                    modifier = Modifier.size(13.dp),
                 )
             }
-            if (expanded) Box(Modifier.padding(12.dp)) { details() }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    stringResource(if (agent) R.string.chat_agent_header else R.string.chat_notice_header),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = scheme.onSurfaceVariant,
+                )
+                if (!expanded && preview.isNotBlank()) {
+                    Text(
+                        preview,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+            }
+            Icon(
+                if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = stringResource(if (expanded) R.string.action_collapse else R.string.action_expand),
+                tint = scheme.outline,
+                modifier = Modifier.size(20.dp),
+            )
         }
+        if (expanded) Box(Modifier.padding(start = 36.dp, end = 4.dp, bottom = 8.dp)) { details() }
     }
 }
 
 @Composable
 private fun ThinkingRow(expanded: Boolean, onToggle: () -> Unit, details: @Composable () -> Unit) {
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        shape = RoundedCornerShape(10.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column {
-            TextButton(onClick = onToggle, modifier = Modifier.fillMaxWidth()) {
-                Text(stringResource(R.string.chat_thinking), modifier = Modifier.weight(1f), textAlign = TextAlign.Start)
-                Icon(
-                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                    contentDescription = stringResource(if (expanded) R.string.action_collapse else R.string.action_expand),
-                )
-            }
-            if (expanded) {
-                Box(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp)) { details() }
-            }
+    val scheme = MaterialTheme.colorScheme
+    Column(Modifier.fillMaxWidth().padding(start = 32.dp)) {
+        Row(
+            Modifier
+                .clip(MaterialTheme.shapes.small)
+                .clickable(onClick = onToggle)
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                stringResource(R.string.chat_thinking),
+                style = MaterialTheme.typography.bodySmall,
+                fontStyle = FontStyle.Italic,
+                color = scheme.onSurfaceVariant,
+            )
+            Icon(
+                if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = stringResource(if (expanded) R.string.action_collapse else R.string.action_expand),
+                tint = scheme.outline,
+                modifier = Modifier.padding(start = 2.dp).size(18.dp),
+            )
+        }
+        if (expanded) {
+            Box(
+                Modifier
+                    .padding(start = 4.dp, end = 4.dp, top = 2.dp, bottom = 8.dp)
+                    .background(scheme.surfaceContainerLow, MaterialTheme.shapes.small)
+                    .padding(10.dp),
+            ) { details() }
         }
     }
 }
@@ -1220,7 +1282,7 @@ private fun UserBubble(text: String, modifier: Modifier = Modifier, label: Strin
             Surface(
                 color = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                shape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp),
+                shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp),
             ) {
                 SelectionContainer {
                     Text(text, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
@@ -1238,6 +1300,7 @@ private fun UserBubble(text: String, modifier: Modifier = Modifier, label: Strin
     }
 }
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun OutboxBubble(item: OutboxItem, canSendNow: Boolean, canSteer: Boolean, vm: MainViewModel) {
     val label = stringResource(
@@ -1249,8 +1312,20 @@ private fun OutboxBubble(item: OutboxItem, canSendNow: Boolean, canSteer: Boolea
         },
     )
     Column(horizontalAlignment = Alignment.End, modifier = Modifier.fillMaxWidth()) {
-        UserBubble(item.text.ifBlank { stringResource(R.string.image_message) }, Modifier.alpha(0.7f), label)
+        val text = item.text.ifBlank {
+            if (item.images.isNotEmpty()) stringResource(R.string.image_message) else item.files.joinToString { it.name }
+        }
+        UserBubble(text, Modifier.alpha(0.7f), label)
         if (item.images.isNotEmpty()) ImagePreviews(item.images)
+        if (item.files.isNotEmpty() && item.text.isNotBlank()) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            ) {
+                item.files.forEach { file -> key(file.id) { FileChip(file.name) } }
+            }
+        }
         if (item.state == OutboxState.Unconfirmed) {
             TextButton(onClick = { vm.restorePromptDraft(item) }, enabled = vm.canRestorePromptDraft(item)) {
                 Text(stringResource(R.string.action_restore_draft))
@@ -1348,22 +1423,113 @@ private fun ImagePreviews(images: List<PromptImage>, onRemove: ((String) -> Unit
 }
 
 @Composable
-private fun Composer(ui: DeviceUi, vm: MainViewModel, generating: Boolean) {
-    Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
-        Column {
-            if (vm.composerImages.isNotEmpty()) ImagePreviews(vm.composerImages, vm::removeImage)
-            if (vm.preparingImage) Text(stringResource(R.string.image_preparing), modifier = Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.bodySmall)
-            if (generating && ui.currentWindow()?.thread?.sendNow == true && vm.hasPrompt && !vm.preparingImage) {
-                Row(Modifier.align(Alignment.End)) {
-                    if (ui.currentWindow()?.thread?.steering == true) TextButton(onClick = { vm.sendPrompt(steer = true) }) {
-                        Text(stringResource(R.string.action_steer))
-                    }
-                    TextButton(onClick = { vm.sendPrompt(sendNow = true) }) {
-                        Text(stringResource(R.string.action_send_now))
-                    }
+private fun FileChip(name: String, onRemove: (() -> Unit)? = null) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(color = scheme.surfaceContainerHighest, shape = CircleShape) {
+        Row(
+            Modifier.padding(start = 10.dp, end = if (onRemove == null) 12.dp else 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.AutoMirrored.Outlined.InsertDriveFile,
+                contentDescription = null,
+                tint = scheme.onSurfaceVariant,
+                modifier = Modifier.size(15.dp),
+            )
+            Text(
+                name,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 6.dp, top = 7.dp, bottom = 7.dp).widthIn(max = 180.dp),
+            )
+            if (onRemove != null) {
+                IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = stringResource(R.string.attach_remove, name),
+                        modifier = Modifier.size(14.dp),
+                    )
                 }
             }
-            ComposerInput(ui, vm, generating)
+        }
+    }
+}
+
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun AttachmentRow(files: List<FileAttachment>, attaching: UploadState?, vm: MainViewModel) {
+    Column(
+        Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (files.isNotEmpty()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                files.forEach { file -> key(file.id) { FileChip(file.name) { vm.removeFile(file.id) } } }
+            }
+        }
+        attaching?.let { upload -> UploadProgress(upload, onCancel = vm::cancelAttach) }
+    }
+}
+
+/** A file on its way to the computer: its name, how far along it is, and Cancel. */
+@Composable
+internal fun UploadProgress(upload: UploadState, onCancel: () -> Unit, modifier: Modifier = Modifier) {
+    Column(modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                upload.name,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            val size = upload.size
+            if (size != null) {
+                Text(
+                    stringResource(R.string.download_progress, formatBytes(upload.sent), formatBytes(size)),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(onClick = onCancel) { Text(stringResource(R.string.action_cancel)) }
+        }
+        val fraction = upload.fraction
+        if (fraction == null) {
+            LinearProgressIndicator(Modifier.fillMaxWidth())
+        } else {
+            LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+        }
+    }
+}
+
+@Composable
+private fun Composer(ui: DeviceUi, vm: MainViewModel, generating: Boolean) {
+    val scheme = MaterialTheme.colorScheme
+    Column(Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 4.dp, bottom = 10.dp)) {
+        if (generating && ui.currentWindow()?.thread?.sendNow == true && vm.hasPrompt && !vm.preparingImage) {
+            Row(Modifier.align(Alignment.End)) {
+                if (ui.currentWindow()?.thread?.steering == true) TextButton(onClick = { vm.sendPrompt(steer = true) }) {
+                    Text(stringResource(R.string.action_steer))
+                }
+                TextButton(onClick = { vm.sendPrompt(sendNow = true) }) {
+                    Text(stringResource(R.string.action_send_now))
+                }
+            }
+        }
+        Surface(color = scheme.surfaceContainerHigh, shape = RoundedCornerShape(26.dp), modifier = Modifier.fillMaxWidth()) {
+            Column {
+                if (vm.composerImages.isNotEmpty()) ImagePreviews(vm.composerImages, vm::removeImage)
+                if (vm.composerFiles.isNotEmpty() || vm.attaching != null) AttachmentRow(vm.composerFiles, vm.attaching, vm)
+                if (vm.preparingImage) {
+                    Text(
+                        stringResource(R.string.image_preparing),
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                ComposerInput(ui, vm, generating)
+            }
         }
     }
 }
@@ -1372,30 +1538,61 @@ private fun Composer(ui: DeviceUi, vm: MainViewModel, generating: Boolean) {
 @Composable
 private fun ComposerInput(ui: DeviceUi, vm: MainViewModel, generating: Boolean) {
     val stopTarget = ui.stopTarget()
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let(vm::addImage) }
+    val scheme = MaterialTheme.colorScheme
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> uri?.let(vm::addImage) }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(vm::attachFile) }
+    var menu by remember { mutableStateOf(false) }
+    val imageInput = ui.currentWindow()?.thread?.imageInput == true
+    val canAddImage = imageInput && !vm.preparingImage && vm.composerImages.size < 4
+    val canAddFile = vm.canUpload && vm.attaching?.active != true
     Row(
-        Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+        Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
         verticalAlignment = Alignment.Bottom,
     ) {
-        val imageLabel = stringResource(if (ui.currentWindow()?.thread?.imageInput == true) R.string.image_attach else R.string.image_unsupported)
-        TooltipBox(positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
-            tooltip = { PlainTooltip { Text(imageLabel) } }, state = rememberTooltipState()) {
-            IconButton(onClick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
-                enabled = ui.currentWindow()?.thread?.imageInput == true && !vm.preparingImage && vm.composerImages.size < 4) {
-                Icon(Icons.Outlined.AddPhotoAlternate, contentDescription = imageLabel)
+        Box {
+            val attachLabel = stringResource(R.string.attach_menu)
+            IconButton(onClick = { menu = true }, enabled = ui.device != null && (canAddImage || canAddFile)) {
+                Icon(Icons.Outlined.Add, contentDescription = attachLabel)
+            }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(if (imageInput) R.string.image_attach else R.string.image_unsupported)) },
+                    leadingIcon = { Icon(Icons.Outlined.AddPhotoAlternate, contentDescription = null) },
+                    enabled = canAddImage,
+                    onClick = {
+                        menu = false
+                        imagePicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(if (vm.canUpload) R.string.attach_file else R.string.attach_unsupported)) },
+                    leadingIcon = { Icon(Icons.Outlined.AttachFile, contentDescription = null) },
+                    enabled = canAddFile,
+                    onClick = {
+                        menu = false
+                        filePicker.launch(arrayOf("*/*"))
+                    },
+                )
             }
         }
-        OutlinedTextField(
+        TextField(
             value = vm.composer,
             onValueChange = { vm.composer = it },
             placeholder = { Text(stringResource(R.string.composer_placeholder)) },
             enabled = ui.device != null,
             maxLines = 6,
-            shape = RoundedCornerShape(24.dp),
+            textStyle = MaterialTheme.typography.bodyMedium,
+            colors = TextFieldDefaults.colors(
+                focusedContainerColor = Color.Transparent,
+                unfocusedContainerColor = Color.Transparent,
+                disabledContainerColor = Color.Transparent,
+                focusedIndicatorColor = Color.Transparent,
+                unfocusedIndicatorColor = Color.Transparent,
+                disabledIndicatorColor = Color.Transparent,
+            ),
             modifier = Modifier.weight(1f),
         )
         if (stopTarget != null) {
-            Spacer(Modifier.width(6.dp))
             val stopLabel = stringResource(if (stopTarget == StopTarget.Plan) R.string.action_stop_plan else R.string.action_stop)
             TooltipBox(
                 positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
@@ -1406,22 +1603,27 @@ private fun ComposerInput(ui: DeviceUi, vm: MainViewModel, generating: Boolean) 
                     onClick = { if (stopTarget == StopTarget.Plan) vm.architectAction(run = false) else vm.stopGenerating() },
                     enabled = stopTarget == StopTarget.Plan || !ui.stopping,
                     colors = IconButtonDefaults.filledTonalIconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer,
-                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                        containerColor = scheme.errorContainer,
+                        contentColor = scheme.onErrorContainer,
                     ),
-                    modifier = Modifier.size(52.dp),
+                    modifier = Modifier.padding(bottom = 4.dp).size(44.dp),
                 ) {
                     Icon(Icons.Filled.Stop, contentDescription = stopLabel)
                 }
             }
+            Spacer(Modifier.width(4.dp))
         }
-        Spacer(Modifier.width(6.dp))
         FilledIconButton(
             onClick = { vm.sendPrompt() },
-            enabled = ui.device != null && vm.hasPrompt && !vm.preparingImage,
-            modifier = Modifier.size(52.dp),
+            enabled = ui.device != null && vm.hasPrompt && !vm.preparingImage && vm.attaching?.active != true,
+            shape = CircleShape,
+            modifier = Modifier.padding(end = 2.dp, bottom = 4.dp).size(44.dp),
         ) {
-            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(if (generating) R.string.action_queue else R.string.action_send))
+            Icon(
+                Icons.AutoMirrored.Filled.Send,
+                contentDescription = stringResource(if (generating) R.string.action_queue else R.string.action_send),
+                modifier = Modifier.size(20.dp),
+            )
         }
     }
 }

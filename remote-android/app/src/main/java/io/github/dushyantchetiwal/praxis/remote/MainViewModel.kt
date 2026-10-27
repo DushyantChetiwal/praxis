@@ -51,6 +51,11 @@ import io.github.dushyantchetiwal.praxis.remote.data.RemoteChannel
 import io.github.dushyantchetiwal.praxis.remote.data.PromptImage
 import io.github.dushyantchetiwal.praxis.remote.data.prepareImage
 import io.github.dushyantchetiwal.praxis.remote.data.uploadImage
+import io.github.dushyantchetiwal.praxis.remote.data.FileAttachment
+import io.github.dushyantchetiwal.praxis.remote.data.MAX_ATTACHED_FILES
+import io.github.dushyantchetiwal.praxis.remote.data.UploadTooLargeException
+import io.github.dushyantchetiwal.praxis.remote.data.readPickedFile
+import io.github.dushyantchetiwal.praxis.remote.data.uploadFile
 import io.github.dushyantchetiwal.praxis.remote.data.MAX_PROMPT_IMAGES
 import io.github.dushyantchetiwal.praxis.remote.data.MAX_RETAINED_IMAGES
 import io.github.dushyantchetiwal.praxis.remote.data.RemoteViewScope
@@ -232,7 +237,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val composerImages: List<PromptImage> get() = imageDrafts[imageDraftKey()].orEmpty()
     var preparingImage by mutableStateOf(false)
         private set
-    val hasPrompt: Boolean get() = composer.isNotBlank() || composerImages.isNotEmpty()
+    private val fileDrafts = mutableStateMapOf<String, List<FileAttachment>>()
+    val composerFiles: List<FileAttachment> get() = fileDrafts[imageDraftKey()].orEmpty()
+    /** The file being attached to the next message, while it uploads. */
+    var attaching by mutableStateOf<UploadState?>(null)
+        private set
+    private var attachJob: Job? = null
+    private var uploadJob: Job? = null
+    /** Whether the computer accepts files from the phone. */
+    val canUpload: Boolean get() = d.status?.uploadLimit != null
+    val hasPrompt: Boolean get() = composer.isNotBlank() || composerImages.isNotEmpty() || composerFiles.isNotEmpty()
     var liveRelayEnabled by mutableStateOf(store.liveRelayEnabled)
         private set
 
@@ -265,6 +279,95 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun removeImage(id: String) {
         imageDrafts[imageDraftKey()] = composerImages.filterNot { it.id == id }
+    }
+
+    private fun uploadFailure(error: Exception, name: String): String = when (error) {
+        is UploadTooLargeException -> str(R.string.upload_too_large, formatSize(error.limit))
+        else -> error.message ?: str(R.string.upload_failed, name.ifEmpty { str(R.string.upload_unnamed) })
+    }
+
+    private fun formatSize(bytes: Long): String = io.github.dushyantchetiwal.praxis.remote.ui.formatBytes(bytes)
+
+    /** Uploads a file into the project and attaches it to the next message. */
+    fun attachFile(uri: Uri) {
+        val limit = d.status?.uploadLimit ?: return
+        if (attaching?.active == true || d.device == null) return
+        if (composerFiles.size >= MAX_ATTACHED_FILES) {
+            message(str(R.string.attach_limit, MAX_ATTACHED_FILES))
+            return
+        }
+        val draft = imageDraftKey()
+        val scope = requestScope()
+        val target = windowArgs { put("attachment", true) }
+        attaching = UploadState(str(R.string.upload_preparing))
+        attachJob = viewModelScope.launch {
+            var name = ""
+            try {
+                val file = readPickedFile(getApplication(), uri, limit)
+                name = file.name
+                attaching = UploadState(file.name, size = file.bytes.size.toLong())
+                val path = uploadFile(file, target, { sent -> attaching = attaching?.copy(sent = sent) }) { op, args ->
+                    praxis(op, args, scope)
+                }
+                fileDrafts[draft] = fileDrafts[draft].orEmpty() + FileAttachment(file.id, file.name, path)
+                attaching = null
+            } catch (error: CancellationException) {
+                attaching = null
+                throw error
+            } catch (error: Exception) {
+                attaching = null
+                message(uploadFailure(error, name))
+            }
+        }
+    }
+
+    fun cancelAttach() {
+        attachJob?.cancel()
+        attachJob = null
+        attaching = null
+    }
+
+    fun removeFile(id: String) {
+        fileDrafts[imageDraftKey()] = composerFiles.filterNot { it.id == id }
+    }
+
+    /** Uploads a file into the folder the Files tab is showing. */
+    fun uploadToFolder(uri: Uri) {
+        val limit = d.status?.uploadLimit ?: return
+        val folder = d.files.path
+        if (folder.isEmpty() || d.device == null || d.upload?.active == true) return
+        val gen = generation
+        val target = windowArgs { put("path", folder) }
+        edit { copy(upload = UploadState(str(R.string.upload_preparing))) }
+        uploadJob = viewModelScope.launch {
+            var name = ""
+            try {
+                val file = readPickedFile(getApplication(), uri, limit)
+                name = file.name
+                if (gen == generation) edit { copy(upload = UploadState(file.name, size = file.bytes.size.toLong())) }
+                val path = uploadFile(file, target, { sent ->
+                    if (gen == generation) edit { copy(upload = upload?.copy(sent = sent)) }
+                }) { op, args -> praxis(op, args) }
+                if (gen != generation) return@launch
+                edit { copy(upload = upload?.copy(savedPath = path)) }
+                if (d.files.path == folder && d.files.file == null) listDir(folder)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (gen == generation) edit { copy(upload = upload?.copy(error = uploadFailure(error, name))) }
+            }
+        }
+    }
+
+    fun cancelUpload() {
+        uploadJob?.cancel()
+        uploadJob = null
+        edit { copy(upload = null) }
+    }
+
+    fun dismissUpload() {
+        if (d.upload?.active == true) return
+        edit { copy(upload = null) }
     }
 
     val builtInClientId: String = BuildConfig.GITHUB_CLIENT_ID.trim()
@@ -527,6 +630,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (explicit) {
             store.clearAccount()
             imageDrafts.clear()
+            fileDrafts.clear()
             closeDetailCache()
             detailCache = newDetailCache()
         } else store.clearToken()
@@ -769,6 +873,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pollJob = null
         downloadJob?.cancel()
         downloadJob = null
+        uploadJob?.cancel()
+        uploadJob = null
+        attachJob?.cancel()
+        attachJob = null
+        attaching = null
         generation++
         resetWatcher()
         pollFailures = 0
@@ -1122,8 +1231,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun sendPrompt(sendNow: Boolean = false, steer: Boolean = false) {
         val text = composer.trim()
         val images = composerImages
+        val files = composerFiles
         val draft = imageDraftKey()
-        if ((text.isEmpty() && images.isEmpty()) || d.device == null || preparingImage) return
+        if ((text.isEmpty() && images.isEmpty() && files.isEmpty()) || d.device == null || preparingImage) return
+        if (attaching?.active == true) return
         if (images.isNotEmpty() && d.currentWindow()?.thread?.imageInput != true) {
             message(str(R.string.image_unsupported))
             return
@@ -1135,6 +1246,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             put("send_now", sendNow)
             put("steer", steer)
             session?.let { put("session_id", it) }
+            if (files.isNotEmpty()) put("files", org.json.JSONArray(files.map { it.path }))
         }
         val item = OutboxItem(
             id = ++outboxSeq,
@@ -1144,11 +1256,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             session = session,
             baseIndex = d.thread?.takeIf { it.sessionId == session }?.entries?.maxOfOrNull { it.index } ?: -1,
             images = images,
+            files = files,
             fingerprint = io.github.dushyantchetiwal.praxis.remote.data.promptFingerprint(text, images),
         )
         edit { copy(outbox = outbox + item) }
         composer = ""
         imageDrafts.remove(draft)
+        fileDrafts.remove(draft)
         viewModelScope.launch {
             try {
                 if (images.isNotEmpty()) {
@@ -1176,10 +1290,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 requestPoll()
             } catch (error: CancellationException) {
                 if (images.isNotEmpty() && imageDrafts[draft].isNullOrEmpty()) imageDrafts[draft] = images
+                if (files.isNotEmpty() && fileDrafts[draft].isNullOrEmpty()) fileDrafts[draft] = files
                 throw error
             } catch (error: Exception) {
                 if (scope != requestScope()) {
                     if (images.isNotEmpty() && imageDrafts[draft].isNullOrEmpty()) imageDrafts[draft] = images
+                    if (files.isNotEmpty() && fileDrafts[draft].isNullOrEmpty()) fileDrafts[draft] = files
                     return@launch
                 }
                 edit { copy(outbox = outbox.map {
@@ -1192,14 +1308,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun canRestorePromptDraft(item: OutboxItem): Boolean = d.outbox.any {
-        it.id == item.id && composerImages.isEmpty() && it.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)
+        it.id == item.id && composerImages.isEmpty() && composerFiles.isEmpty() &&
+            it.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)
     }
 
     fun restorePromptDraft(item: OutboxItem) {
         val retained = d.outbox.firstOrNull { it.id == item.id } ?: return
-        if (composerImages.isNotEmpty() || !retained.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)) return
+        if (composerImages.isNotEmpty() || composerFiles.isNotEmpty() ||
+            !retained.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)) return
         composer = retained.text
         imageDrafts[imageDraftKey()] = retained.images
+        fileDrafts[imageDraftKey()] = retained.files
         edit { copy(outbox = outbox.filterNot { it.id == retained.id }) }
     }
 

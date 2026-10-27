@@ -33,6 +33,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.outlined.FileDownload
+import androidx.compose.material.icons.outlined.FileUpload
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderOff
 import androidx.compose.material3.CircularProgressIndicator
@@ -73,6 +74,7 @@ import io.github.dushyantchetiwal.praxis.remote.DownloadState
 import io.github.dushyantchetiwal.praxis.remote.FilesState
 import io.github.dushyantchetiwal.praxis.remote.MainViewModel
 import io.github.dushyantchetiwal.praxis.remote.R
+import io.github.dushyantchetiwal.praxis.remote.UploadState
 import io.github.dushyantchetiwal.praxis.remote.data.DirEntry
 import io.github.dushyantchetiwal.praxis.remote.data.DownloadSink
 import io.github.dushyantchetiwal.praxis.remote.data.FileContent
@@ -98,10 +100,17 @@ fun FilesTab(ui: DeviceUi, vm: MainViewModel) {
         }
     }
     val downloading = ui.download?.active == true
+    val uploadPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(vm::uploadToFolder)
+    }
+    val canUpload = vm.canUpload && ui.upload?.active != true && !files.loading
 
     Column(Modifier.fillMaxSize()) {
         ui.download?.let { download ->
             DownloadBar(download, vm, Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+        }
+        ui.upload?.let { upload ->
+            UploadBar(upload, vm, Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
         }
         Box(Modifier.weight(1f)) {
             if (file != null) {
@@ -111,7 +120,7 @@ fun FilesTab(ui: DeviceUi, vm: MainViewModel) {
                     DownloadButton(entry, ui.download, enabled = !downloading, onDownload = onDownload)
                 }
             } else {
-                DirectoryListing(files, vm) { entry ->
+                DirectoryListing(files, vm, canUpload, onUpload = { uploadPicker.launch(arrayOf("*/*")) }) { entry ->
                     DownloadButton(entry, ui.download, enabled = !downloading && !files.loading, onDownload = onDownload)
                 }
             }
@@ -182,6 +191,36 @@ private fun DownloadBar(download: DownloadState, vm: MainViewModel, modifier: Mo
     }
 }
 
+/** Progress of the upload into the folder shown, or how it ended. */
+@Composable
+private fun UploadBar(upload: UploadState, vm: MainViewModel, modifier: Modifier = Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    val error = upload.error
+    Surface(
+        color = if (error != null) scheme.errorContainer else scheme.secondaryContainer,
+        contentColor = if (error != null) scheme.onErrorContainer else scheme.onSecondaryContainer,
+        shape = MaterialTheme.shapes.medium,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        if (upload.active) {
+            UploadProgress(upload, onCancel = vm::cancelUpload, Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp))
+        } else {
+            Row(Modifier.padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    error ?: stringResource(R.string.upload_saved, upload.savedPath ?: upload.name),
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f).padding(vertical = 10.dp),
+                )
+                IconButton(onClick = vm::dismissUpload) {
+                    Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.action_dismiss))
+                }
+            }
+        }
+    }
+}
+
 private fun openDownload(context: Context, uri: Uri, name: String) {
     val intent = Intent(Intent.ACTION_VIEW)
         .setDataAndType(uri, mimeTypeFor(name))
@@ -217,13 +256,28 @@ private fun DownloadButton(entry: DirEntry, download: DownloadState?, enabled: B
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DirectoryListing(files: FilesState, vm: MainViewModel, fileAction: @Composable (DirEntry) -> Unit) {
+private fun DirectoryListing(
+    files: FilesState,
+    vm: MainViewModel,
+    canUpload: Boolean,
+    onUpload: () -> Unit,
+    fileAction: @Composable (DirEntry) -> Unit,
+) {
     val segments = files.path.split('/').filter { it.isNotEmpty() }
     if (segments.isNotEmpty()) {
         BackHandler { vm.listDir(segments.dropLast(1).joinToString("/")) }
     }
     Column(Modifier.fillMaxSize()) {
-        Breadcrumbs(segments, vm::listDir)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) { Breadcrumbs(segments, vm::listDir) }
+            // Files go into a project folder, not the list of projects.
+            if (segments.isNotEmpty() && vm.canUpload) {
+                TextButton(onClick = onUpload, enabled = canUpload, modifier = Modifier.padding(end = 4.dp)) {
+                    Icon(Icons.Outlined.FileUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Text(stringResource(R.string.upload_action), modifier = Modifier.padding(start = 6.dp))
+                }
+            }
+        }
         if (files.loading) LinearProgressIndicator(Modifier.fillMaxWidth()) else HorizontalDivider()
         PullToRefreshBox(
             isRefreshing = false,

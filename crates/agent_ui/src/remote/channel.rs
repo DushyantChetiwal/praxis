@@ -500,7 +500,10 @@ impl Channel {
         log::info!("Praxis Remote unpaired {:?}", phone.info.name);
         self.sync_relay();
         self.watches.remove(phone_id);
-        cx.update(|cx| super::images::clear(phone_id, cx));
+        cx.update(|cx| {
+            super::images::clear(phone_id, cx);
+            super::uploads::clear(phone_id, cx);
+        });
         self.phones_dirty = true;
         self.publish_now = true;
         self.report_phones(cx)

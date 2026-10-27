@@ -445,3 +445,86 @@ pub fn increase_buffer_font_size(cx: &mut App) {
 pub fn decrease_buffer_font_size(cx: &mut App) {
     adjust_buffer_font_size(cx, |size| size - px(1.0));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use collections::HashSet;
+
+    const PRAXIS_THEME: &[u8] = include_bytes!("../../../assets/themes/praxis/praxis.json");
+    const ONE_THEME: &[u8] = include_bytes!("../../../assets/themes/one/one.json");
+
+    fn style_keys(family: &serde_json::Value) -> HashSet<String> {
+        family["themes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|theme| theme["style"].as_object())
+            .flat_map(|style| style.keys().cloned())
+            .collect()
+    }
+
+    fn colors_in(value: &serde_json::Value, found: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(text) if text.starts_with('#') => found.push(text.clone()),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    colors_in(item, found);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for field in fields.values() {
+                    colors_in(field, found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn bundled_praxis_theme_is_the_default() {
+        let family = deserialize_user_theme(PRAXIS_THEME).unwrap();
+        assert_eq!(family.name, "Praxis");
+        for (name, appearance) in [
+            (::settings::DEFAULT_LIGHT_THEME, AppearanceContent::Light),
+            (::settings::DEFAULT_DARK_THEME, AppearanceContent::Dark),
+        ] {
+            assert!(
+                family
+                    .themes
+                    .iter()
+                    .any(|theme| theme.name == name && theme.appearance == appearance),
+                "the Praxis theme family is missing {name}"
+            );
+        }
+
+        let defaults: serde_json::Value =
+            ::settings::parse_json_with_comments(&::settings::default_settings()).unwrap();
+        assert_eq!(defaults["theme"]["light"], ::settings::DEFAULT_LIGHT_THEME);
+        assert_eq!(defaults["theme"]["dark"], ::settings::DEFAULT_DARK_THEME);
+    }
+
+    #[test]
+    fn bundled_praxis_theme_uses_only_valid_colors_and_known_keys() {
+        let praxis: serde_json::Value = serde_json::from_slice(PRAXIS_THEME).unwrap();
+        let one: serde_json::Value = serde_json::from_slice(ONE_THEME).unwrap();
+        let known_keys = style_keys(&one);
+        let unknown_keys = style_keys(&praxis)
+            .into_iter()
+            .filter(|key| !known_keys.contains(key))
+            .collect::<Vec<_>>();
+        assert!(
+            unknown_keys.is_empty(),
+            "unknown theme keys: {unknown_keys:?}"
+        );
+
+        let mut colors = Vec::new();
+        colors_in(&praxis["themes"], &mut colors);
+        assert!(colors.len() > 200);
+        let invalid = colors
+            .iter()
+            .filter(|color| try_parse_color(color).is_err())
+            .collect::<Vec<_>>();
+        assert!(invalid.is_empty(), "invalid theme colors: {invalid:?}");
+    }
+}
