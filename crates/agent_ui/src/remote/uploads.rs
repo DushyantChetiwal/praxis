@@ -75,10 +75,7 @@ pub(super) fn destination(roots: &[(String, PathBuf)], args: &Value) -> Result<D
 /// A file name that is safe on every desktop: the last path component, with
 /// characters Windows refuses removed and its reserved device names avoided.
 pub(super) fn safe_file_name(name: &str) -> Result<String> {
-    let last = name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or_default();
+    let last = name.rsplit(['/', '\\']).next().unwrap_or_default();
     let mut cleaned: String = last
         .chars()
         .filter(|character| {
@@ -103,7 +100,10 @@ pub(super) fn safe_file_name(name: &str) -> Result<String> {
         let upper = stem.to_ascii_uppercase();
         (upper.starts_with("COM") || upper.starts_with("LPT"))
             && upper.len() == 4
-            && upper.chars().nth(3).is_some_and(|digit| digit.is_ascii_digit())
+            && upper
+                .chars()
+                .nth(3)
+                .is_some_and(|digit| digit.is_ascii_digit())
     };
     if reserved {
         cleaned.insert(0, '_');
@@ -244,10 +244,7 @@ impl Uploads {
             "The file chunk is empty or too large."
         );
         let upload = self.get(phone, id)?;
-        ensure!(
-            upload.saved_path.is_none(),
-            "That upload is already saved."
-        );
+        ensure!(upload.saved_path.is_none(), "That upload is already saved.");
         let end = offset
             .checked_add(bytes.len())
             .context("invalid chunk offset")?;
@@ -397,10 +394,7 @@ mod tests {
     #[test]
     fn file_names_are_safe_on_every_desktop() {
         assert_eq!(safe_file_name("photo.jpg").unwrap(), "photo.jpg");
-        assert_eq!(
-            safe_file_name("../../etc/passwd").unwrap(),
-            "passwd"
-        );
+        assert_eq!(safe_file_name("../../etc/passwd").unwrap(), "passwd");
         assert_eq!(
             safe_file_name("C:\\Users\\me\\report.pdf").unwrap(),
             "report.pdf"
@@ -426,7 +420,10 @@ mod tests {
         assert_eq!(save(&uploads, "a.txt", b"two", true).unwrap(), "a (1).txt");
         assert_eq!(std::fs::read(uploads.join("a.txt")).unwrap(), b"one");
         assert_eq!(std::fs::read(uploads.join("a (1).txt")).unwrap(), b"two");
-        assert_eq!(std::fs::read_to_string(uploads.join(".gitignore")).unwrap(), "*\n");
+        assert_eq!(
+            std::fs::read_to_string(uploads.join(".gitignore")).unwrap(),
+            "*\n"
+        );
         assert_eq!(
             save(directory.path(), "README", b"x", false).unwrap(),
             "README"
@@ -472,11 +469,8 @@ mod tests {
         std::fs::write(root.join(".praxis/uploads/a.txt"), "a").unwrap();
         std::fs::write(directory.path().join("outside.txt"), "x").unwrap();
         let roots = vec![("project".to_string(), root.clone())];
-        let links = attachments(
-            &roots,
-            &json!({"files": ["project/.praxis/uploads/a.txt"]}),
-        )
-        .unwrap();
+        let links =
+            attachments(&roots, &json!({"files": ["project/.praxis/uploads/a.txt"]})).unwrap();
         let [acp::ContentBlock::ResourceLink(link)] = links.as_slice() else {
             panic!("expected one link, got {links:?}");
         };

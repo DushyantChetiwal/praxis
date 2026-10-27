@@ -513,7 +513,10 @@ mod tests {
             .into_iter()
             .filter(|key| !known_keys.contains(key))
             .collect::<Vec<_>>();
-        assert!(unknown_keys.is_empty(), "unknown theme keys: {unknown_keys:?}");
+        assert!(
+            unknown_keys.is_empty(),
+            "unknown theme keys: {unknown_keys:?}"
+        );
 
         let mut colors = Vec::new();
         colors_in(&praxis["themes"], &mut colors);
