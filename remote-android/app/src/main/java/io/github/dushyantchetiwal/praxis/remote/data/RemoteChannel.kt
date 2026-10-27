@@ -361,7 +361,13 @@ data class WindowInfo(
     val projectsLabel: String? get() = projects.filter { it.isNotBlank() }.joinToString(", ").ifEmpty { null }
 }
 
-data class Status(val device: String?, val windows: List<WindowInfo>, val openFolder: Boolean = false)
+data class Status(
+    val device: String?,
+    val windows: List<WindowInfo>,
+    val openFolder: Boolean = false,
+    /** The largest file the computer accepts from the phone, or null when it cannot take uploads. */
+    val uploadLimit: Long? = null,
+)
 
 data class QueuedMessage(val id: String, val text: String, val steer: Boolean)
 data class QueuePage(val entries: List<QueuedMessage>, val nextOffset: Int?, val total: Int)
@@ -495,6 +501,7 @@ fun parseSnapshot(json: String?): Snapshot? {
 fun parseStatus(o: JSONObject): Status = Status(
     device = o.str("device"),
     openFolder = o.obj("capabilities")?.bool("open_folder") == true,
+    uploadLimit = o.obj("capabilities")?.obj("file_upload")?.long("max_bytes")?.takeIf { it > 0 },
     windows = o.arr("windows")?.objects()?.mapNotNull(::parseWindow).orEmpty(),
 )
 

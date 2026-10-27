@@ -12,6 +12,17 @@
     <string name="image_message">Image message</string>
     <string name="image_preparing">Preparing image…</string>
     <string name="image_unsupported">Select a vision-capable model to attach images.</string>
+    <string name="attach_menu">Attach</string>
+    <string name="attach_file">Attach file</string>
+    <string name="attach_unsupported">Update Praxis on your computer to attach files.</string>
+    <string name="attach_remove">Remove %1$s</string>
+    <string name="attach_limit">Attach up to %1$d files to one message.</string>
+    <string name="upload_action">Upload</string>
+    <string name="upload_preparing">Reading the file…</string>
+    <string name="upload_saved">Saved to %1$s</string>
+    <string name="upload_too_large">Files must be at most %1$s. Choose a smaller file.</string>
+    <string name="upload_failed">%1$s could not be uploaded. Try again.</string>
+    <string name="upload_unnamed">The file</string>
     <string name="image_limit">Attach up to four images. Finish or restore pending image messages before adding more.</string>
     <string name="image_failed">The image could not be prepared or uploaded. Your draft can be restored.</string>
 

@@ -19590,8 +19590,8 @@ mod tests {
             parsed["theme"],
             serde_json::json!({
                 "mode": "system",
-                "light": "One Light",
-                "dark": "One Dark"
+                "light": "Praxis Light",
+                "dark": "Praxis Dark"
             })
         );
 

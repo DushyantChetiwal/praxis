@@ -30,6 +30,7 @@ mod questions;
 mod relay;
 mod store;
 mod transcript;
+mod uploads;
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -390,6 +391,28 @@ fn handle_paired(
             Err(error) => Task::ready(Err(error)),
         };
     }
+    if op == "file_begin" {
+        let result = with_workspace(window, cx, |workspace, _, cx| {
+            anyhow::ensure!(!phone.is_empty(), "Uploads require an authenticated phone");
+            let roots = project_roots(workspace, cx);
+            if args.get("attachment").and_then(Value::as_bool) != Some(true) {
+                let path = required(args, "path")?;
+                let (root_name, relative) = split_project_path(&roots, path)?;
+                if is_private(workspace, root_name, relative, cx) {
+                    bail!("{path} is private, so Praxis will not save files there");
+                }
+            }
+            uploads::destination(&roots, args)
+        })
+        .and_then(|destination| uploads::begin(phone, destination, args, cx));
+        return Task::ready(result);
+    }
+    if matches!(op, "file_chunk" | "file_finish" | "file_discard") {
+        if phone.is_empty() {
+            return Task::ready(Err(anyhow!("Uploads require an authenticated phone")));
+        }
+        return uploads::handle(phone, op, args, cx);
+    }
     let result = match op {
         "status" => Ok(status(device, cx)),
         "host_folders" => {
@@ -443,6 +466,7 @@ fn handle_paired(
             } else {
                 Vec::new()
             };
+            content.extend(uploads::attachments(&project_roots(workspace, cx), args)?);
             if !text.trim().is_empty() {
                 content.insert(0, acp::ContentBlock::Text(acp::TextContent::new(text)));
             }
@@ -939,7 +963,14 @@ fn status(device: &str, cx: &App) -> Value {
             ))
         })
         .collect();
-    json!({ "device": device, "windows": windows, "capabilities": { "open_folder": true } })
+    json!({
+        "device": device,
+        "windows": windows,
+        "capabilities": {
+            "open_folder": true,
+            "file_upload": { "max_bytes": uploads::MAX_UPLOAD_BYTES },
+        },
+    })
 }
 
 fn window_status(id: u64, active: bool, workspace: &Entity<Workspace>, cx: &App) -> Value {
@@ -1870,6 +1901,32 @@ fn snapshot_message_text(content: &acp_thread::MessageContent, cx: &App) -> Stri
     }
 }
 
+/// What the phone matches a message it sent against. Files it attached
+/// arrive as links after the text, which the phone did not type.
+fn user_message_fingerprint(content: &acp_thread::MessageContent, cx: &App) -> String {
+    let blocks = content.source_blocks();
+    if let Some(fingerprint) = images::fingerprint(blocks) {
+        return fingerprint;
+    }
+    let only_attachments = blocks.iter().all(|block| {
+        matches!(
+            block,
+            acp::ContentBlock::Text(_) | acp::ContentBlock::ResourceLink(_)
+        )
+    });
+    if only_attachments {
+        let text: String = blocks
+            .iter()
+            .filter_map(|block| match block {
+                acp::ContentBlock::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        return transcript::fingerprint(text.trim());
+    }
+    transcript::fingerprint(snapshot_message_text(content, cx).trim())
+}
+
 fn transcript_entry(
     index: usize,
     entry: &AgentThreadEntry,
@@ -1891,11 +1948,7 @@ fn transcript_entry(
     if !include_details {
         value["details_pending"] = json!(true);
         if let AgentThreadEntry::UserMessage(message) = entry {
-            value["fingerprint"] = json!(
-                images::fingerprint(message.content.source_blocks()).unwrap_or_else(|| {
-                    transcript::fingerprint(snapshot_message_text(&message.content, cx).trim())
-                })
-            );
+            value["fingerprint"] = json!(user_message_fingerprint(&message.content, cx));
         }
     }
     if let AgentThreadEntry::AssistantMessage(message) = entry
