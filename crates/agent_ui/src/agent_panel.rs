@@ -5913,21 +5913,19 @@ impl AgentPanel {
             .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))?;
         let thread_ref = thread.read(cx);
         let graph = thread_ref.architect_status_graph()?;
-        let run = thread_ref.architect_run();
+        // A drafted plan is reached from the Architect View button and the
+        // checklist; only a run needs controls here.
+        let run = thread_ref
+            .architect_run()
+            .filter(|run| run.is_running())?;
 
-        // Counted through nested plans, as Run counts what is left to lock.
-        let step_count = graph.step_count_deeply();
-        let locked_count = graph.locked_step_count_deeply();
-        let nested_count = graph.nodes.iter().filter(|node| node.has_subplan()).count();
-        let running = run.is_some_and(agent::ArchitectRun::is_running);
         // A step running in a thread of its own is followed, and its requests
         // allowed, by showing that thread in this panel.
         let plan_session_id = self
             .active_thread_view(cx)
             .map(|view| view.read(cx).thread.read(cx).session_id().clone());
         let step_session_id = run
-            .filter(|_| running)
-            .and_then(agent::ArchitectRun::step_thread)
+            .step_thread()
             .map(|step_thread| step_thread.read(cx).session_id().clone())
             .filter(|session_id| Some(session_id) != plan_session_id.as_ref());
         let conversation_view = self.active_conversation_view().cloned();
@@ -5943,42 +5941,6 @@ impl AgentPanel {
                 .and_then(|view| view.read(cx).active_thread().cloned())
                 .is_some_and(|view| view.read(cx).thread.read(cx).session_id() == session_id)
         });
-        // A plan that is settled and sound can be run from here, without
-        // switching to the canvas only to press Run. Not while the conversation
-        // is answering, since the run would start by interrupting it.
-        let conversation_idle = self.active_thread_view(cx).is_some_and(|thread_view| {
-            matches!(
-                thread_view.read(cx).thread.read(cx).status(),
-                acp_thread::ThreadStatus::Idle
-            )
-        });
-        let ready_to_run = !running
-            && conversation_idle
-            && step_count > 0
-            && graph.is_fully_locked_deeply()
-            && graph.blocking_problems().is_empty();
-        let run_label = if run.is_some() { "Run Again" } else { "Run" };
-
-        fn run_plan(this: &mut AgentPanel, cx: &mut Context<AgentPanel>) {
-            let Some(thread_view) = this.active_thread_view(cx) else {
-                return;
-            };
-            let thread_view = thread_view.read(cx);
-            let acp_thread = thread_view.thread.clone();
-            let Some(thread) = thread_view.as_native_thread(cx) else {
-                return;
-            };
-            let Some(graph) = thread.read(cx).architect_graph().cloned() else {
-                return;
-            };
-            if let Err(error) = agent::start_architect_run(thread, acp_thread, graph, cx) {
-                let error = anyhow!("{error}");
-                this.workspace
-                    .update(cx, |workspace, cx| workspace.show_error(error, cx))
-                    .log_err();
-            }
-            cx.notify();
-        }
 
         fn open_canvas(this: &mut AgentPanel, window: &mut Window, cx: &mut Context<AgentPanel>) {
             this.defer_open_architect_workspace(window, cx);
@@ -6023,23 +5985,6 @@ impl AgentPanel {
             }
         }
 
-        let mut summary = match step_count {
-            0 => "No steps yet".to_string(),
-            1 => "1 step".to_string(),
-            count => format!("{count} steps"),
-        };
-        if nested_count > 0 {
-            summary.push_str(&format!(" · {nested_count} nested"));
-        }
-        // With no steps, "all locked" would be vacuously true.
-        if step_count > 0 {
-            if locked_count == step_count {
-                summary.push_str(" · all locked");
-            } else {
-                summary.push_str(&format!(" · {locked_count} of {step_count} locked"));
-            }
-        }
-
         let card = v_flex()
             .id("architect-status")
             .w_full()
@@ -6048,18 +5993,8 @@ impl AgentPanel {
             .py_1p5()
             .rounded_md()
             .border_1()
-            .border_color(if running {
-                cx.theme().status().info_border
-            } else {
-                cx.theme().colors().border
-            })
-            // Tinted while running, so a glance at the panel says whether the
-            // plan is being carried out or merely drafted.
-            .bg(if running {
-                cx.theme().status().info_background
-            } else {
-                cx.theme().colors().elevated_surface_background
-            })
+            .border_color(cx.theme().status().info_border)
+            .bg(cx.theme().status().info_background)
             .child(
                 h_flex()
                     .w_full()
@@ -6070,32 +6005,20 @@ impl AgentPanel {
                             .gap_1()
                             .min_w_0()
                             .child(
-                                Icon::new(if running {
-                                    IconName::PlayFilled
-                                } else {
-                                    IconName::ListTree
-                                })
-                                .size(IconSize::XSmall)
-                                .color(if running {
-                                    Color::Info
-                                } else {
-                                    Color::Muted
-                                }),
+                                Icon::new(IconName::PlayFilled)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Info),
                             )
                             .child(
                                 // Loops can take a run past the number of steps, so
                                 // the step taken is shown without a total to exceed.
-                                Label::new(match run {
-                                    Some(run) if running => running_label(run),
-                                    _ if step_count == 0 => "Plan not started".to_string(),
-                                    _ => "Plan drafted".to_string(),
-                                })
-                                .size(LabelSize::Small)
-                                .color(if running { Color::Info } else { Color::Default })
-                                .truncate(),
+                                Label::new(running_label(run))
+                                    .size(LabelSize::Small)
+                                    .color(Color::Info)
+                                    .truncate(),
                             ),
                     )
-                    .child(if running {
+                    .child(
                         h_flex()
                             .gap_0p5()
                             .when_some(step_session_id, |this, step_session_id| {
@@ -6144,147 +6067,72 @@ impl AgentPanel {
                                 )
                             })
                             .child(
-                        Button::new("architect-status-stop", "Stop")
-                            .label_size(LabelSize::XSmall)
-                            .style(ButtonStyle::Subtle)
-                            .color(Color::Warning)
-                            .tooltip(Tooltip::text(
-                                "Stop the run. The plan and everything done so far are kept.",
-                            ))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                let Some(thread_view) = this.active_thread_view(cx) else {
-                                    return;
-                                };
-                                let thread_view = thread_view.read(cx);
-                                let acp_thread = thread_view.thread.clone();
-                                let Some(thread) = thread_view.as_native_thread(cx) else {
-                                    return;
-                                };
-                                // Stops the turn the run is waiting on as well as
-                                // the run, as the canvas's Stop does.
-                                agent::stop_architect_run(&thread, Some(&acp_thread), cx);
-                            })),
-                            )
-                            .into_any_element()
-                    } else {
-                        h_flex()
-                            .gap_0p5()
-                            .when(ready_to_run, |this| {
-                                this.child(
-                                    Button::new("architect-status-run", run_label)
-                                        .label_size(LabelSize::XSmall)
-                                        .style(ButtonStyle::Tinted(TintColor::Accent))
-                                        .start_icon(
-                                            Icon::new(IconName::PlayFilled).size(IconSize::XSmall),
-                                        )
-                                        .tooltip(Tooltip::text(if run.is_some() {
-                                            "Run the plan again from the start. The latest \
-                                             run's results are replaced."
-                                        } else {
-                                            "Run the plan, one step at a time, without leaving \
-                                             Editor View"
-                                        }))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            run_plan(this, cx);
-                                        })),
-                                )
-                            })
-                            .child(
-                                Button::new("architect-status-open", "Open")
+                                Button::new("architect-status-stop", "Stop")
                                     .label_size(LabelSize::XSmall)
                                     .style(ButtonStyle::Subtle)
-                                    .end_icon(
-                                        Icon::new(IconName::ArrowUpRight).size(IconSize::XSmall),
-                                    )
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                    .color(Color::Warning)
+                                    .tooltip(Tooltip::text(
+                                        "Stop the run. The plan and everything done so far are \
+                                         kept.",
+                                    ))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.stop_propagation();
-                                        open_canvas(this, window, cx);
+                                        let Some(thread_view) = this.active_thread_view(cx) else {
+                                            return;
+                                        };
+                                        let thread_view = thread_view.read(cx);
+                                        let acp_thread = thread_view.thread.clone();
+                                        let Some(thread) = thread_view.as_native_thread(cx) else {
+                                            return;
+                                        };
+                                        // Stops the turn the run is waiting on as well as
+                                        // the run, as the canvas's Stop does.
+                                        agent::stop_architect_run(&thread, Some(&acp_thread), cx);
                                     })),
-                            )
-                            .into_any_element()
-                    }),
+                            ),
+                    ),
             )
             .child(
-                Label::new(match run.and_then(|run| run.outcome.as_ref()) {
-                    Some(outcome) => outcome.summary(graph),
-                    // While running, the step being carried out is more use than
-                    // a count of the plan, and the trail says how deep it is.
-                    None if running => run
-                        .map(|run| step_trail(graph, run))
-                        .unwrap_or_else(|| summary.clone()),
-                    None => summary,
-                })
-                .size(LabelSize::XSmall)
-                .color(if running { Color::Info } else { Color::Muted }),
+                // The step being carried out, with a trail saying how deep it is.
+                Label::new(step_trail(graph, run))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Info),
             )
-            // How far through locking the plan is, which is what the user is
-            // working towards before a run can start.
-            //
-            // Only while drafting. Once a run has started every step is locked by
-            // definition, so the bar would sit permanently full: a bright rule
-            // welded to the bottom of the card, saying nothing.
-            .when(step_count > 0 && !running, |this| {
-                let fraction = locked_count as f32 / step_count as f32;
-                this.child(
-                    div()
-                        .w_full()
-                        .mt_0p5()
-                        .h(px(2.0))
-                        .rounded_full()
-                        .bg(cx.theme().colors().element_background)
-                        .child(
-                            div()
-                                .h_full()
-                                .w(relative(fraction.clamp(0.0, 1.0)))
-                                .rounded_full()
-                                .bg(if locked_count == step_count {
-                                    cx.theme().status().success.opacity(0.8)
-                                } else {
-                                    cx.theme().colors().text_accent
-                                }),
-                        ),
-                )
-            })
             .on_click(cx.listener(|this, _, window, cx| open_canvas(this, window, cx)));
 
-        let timeline = run.and_then(|run| {
-            let history_len = run.history().len();
-            (history_len > 0).then(|| {
-                v_flex()
-                    .w_full()
-                    .gap_0p5()
-                    .child(
-                        h_flex()
-                            .id("architect-run-history-toggle")
-                            .w_full()
-                            .gap_1()
-                            .px_1()
-                            .py_0p5()
-                            .cursor_pointer()
-                            .child(Disclosure::new(
-                                "architect-run-history-disclosure",
-                                self.architect_timeline_expanded,
+        let history_len = run.history().len();
+        let timeline = (history_len > 0).then(|| {
+            v_flex()
+                .w_full()
+                .gap_0p5()
+                .child(
+                    h_flex()
+                        .id("architect-run-history-toggle")
+                        .w_full()
+                        .gap_1()
+                        .px_1()
+                        .py_0p5()
+                        .cursor_pointer()
+                        .child(Disclosure::new(
+                            "architect-run-history-disclosure",
+                            self.architect_timeline_expanded,
+                        ))
+                        .child(
+                            Label::new(format!(
+                                "Run history · {history_len} {}",
+                                if history_len == 1 { "step" } else { "steps" }
                             ))
-                            .child(
-                                Label::new(format!(
-                                    "Run history · {history_len} {}",
-                                    if history_len == 1 { "step" } else { "steps" }
-                                ))
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.architect_timeline_expanded =
-                                    !this.architect_timeline_expanded;
-                                cx.notify();
-                            })),
-                    )
-                    .when(self.architect_timeline_expanded, |this| {
-                        this.child(Self::render_run_timeline(run, cx))
-                    })
-            })
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.architect_timeline_expanded = !this.architect_timeline_expanded;
+                            cx.notify();
+                        })),
+                )
+                .when(self.architect_timeline_expanded, |this| {
+                    this.child(Self::render_run_timeline(run, cx))
+                })
         });
 
         // Matched insets on every side, so the card sits in the panel rather
