@@ -6310,9 +6310,10 @@ pub(crate) mod tests {
         let (conversation_view, cx) =
             setup_conversation_view(StubAgentServer::new(connection), cx).await;
         add_to_workspace_with_size(conversation_view.clone(), true, cx);
-        let (root, conversation) = active_thread(&conversation_view, cx).read_with(cx, |view, _| {
-            (view.thread.clone(), view.conversation.clone())
-        });
+        let (root, conversation) = active_thread(&conversation_view, cx)
+            .read_with(cx, |view, _| {
+                (view.thread.clone(), view.conversation.clone())
+            });
         let finished = acp_v2::SessionId::new("finished-subagent");
         let running = acp_v2::SessionId::new("running-subagent");
         root.update(cx, |thread, cx| {
