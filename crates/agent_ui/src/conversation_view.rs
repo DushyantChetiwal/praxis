@@ -6316,19 +6316,21 @@ pub(crate) mod tests {
             });
         let finished = acp_v2::SessionId::new("finished-subagent");
         let running = acp_v2::SessionId::new("running-subagent");
-        root.update(cx, |thread, cx| {
-            for (tool_call_id, session_id, status) in [
-                (
-                    "spawn-finished",
-                    &finished,
-                    acp_v1::ToolCallStatus::Completed,
-                ),
-                (
-                    "spawn-running",
-                    &running,
-                    acp_v1::ToolCallStatus::InProgress,
-                ),
-            ] {
+        for (tool_call_id, session_id, status) in [
+            (
+                "spawn-finished",
+                &finished,
+                acp_v1::ToolCallStatus::Completed,
+            ),
+            (
+                "spawn-running",
+                &running,
+                acp_v1::ToolCallStatus::InProgress,
+            ),
+        ] {
+            // One entry per update, as a streaming agent adds them, so the
+            // view handles each new entry before the next arrives.
+            root.update(cx, |thread, cx| {
                 let spawn = acp_v1::ToolCall::new(tool_call_id, "Sub-agent")
                     .name("spawn_agent")
                     .status(status)
@@ -6342,8 +6344,9 @@ pub(crate) mod tests {
                         .expect("sub-agent session info"),
                     )]));
                 thread.upsert_tool_call(spawn, cx).expect("spawning tool");
-            }
-        });
+            });
+            cx.run_until_parked();
+        }
 
         // Reopening a conversation builds a new view over its thread.
         let reopened = conversation_view.update_in(cx, |view, window, cx| {
