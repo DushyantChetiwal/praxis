@@ -738,6 +738,35 @@ fn resolve_outcome_from_selection(
     Some(selected_choice.build_outcome(is_allow))
 }
 
+/// Loads the output a reopened conversation left out of these tool calls, so
+/// their opened cards, exports, and the phone can show it.
+pub(crate) fn load_deferred_tool_call_details(
+    thread: &Entity<AcpThread>,
+    tool_call_ids: impl IntoIterator<Item = acp_v2::ToolCallId>,
+    cx: &mut App,
+) -> Task<Result<()>> {
+    let (connection, session_id, deferred) = {
+        let thread = thread.read(cx);
+        let connection: Option<Rc<agent::NativeAgentConnection>> =
+            thread.connection().clone().downcast();
+        let deferred = tool_call_ids
+            .into_iter()
+            .filter(|id| {
+                thread
+                    .tool_call(id)
+                    .is_some_and(|(_, call)| call.details_deferred())
+            })
+            .collect::<HashSet<_>>();
+        (connection, thread.session_id().clone(), deferred)
+    };
+    match connection {
+        Some(connection) if !deferred.is_empty() => {
+            connection.load_tool_call_details(&session_id, deferred, cx)
+        }
+        _ => Task::ready(Ok(())),
+    }
+}
+
 /// Whether a call's sub-agents may still be working, so their conversations
 /// must be loaded for their permission requests and progress to show.
 fn is_live_subagent_call(call: &ToolCall) -> bool {
@@ -1913,21 +1942,28 @@ impl ConversationView {
             }
             AcpThreadEvent::NewEntry => {
                 let len = thread.read(cx).entries().len();
-                let index = len - 1;
                 if let Some(active) = self.thread_view(&session_id) {
                     let entry_view_state = active.read(cx).entry_view_state.clone();
                     let list_state = active.read(cx).list_state.clone();
-                    entry_view_state.update(cx, |view_state, cx| {
-                        view_state.sync_entry(index, thread, window, cx);
-                        list_state.splice_focusable(
-                            index..index,
-                            [view_state
-                                .entry(index)
-                                .and_then(|entry| entry.focus_handle(cx))],
-                        );
+                    // One update can add several entries, and their events all
+                    // arrive after it, so add every entry the view lacks.
+                    let added = entry_view_state.update(cx, |view_state, cx| {
+                        let start = view_state.synced_len().min(len);
+                        for index in start..len {
+                            view_state.sync_entry(index, thread, window, cx);
+                            list_state.splice_focusable(
+                                index..index,
+                                [view_state
+                                    .entry(index)
+                                    .and_then(|entry| entry.focus_handle(cx))],
+                            );
+                        }
+                        start..len
                     });
                     active.update(cx, |active, cx| {
-                        active.sync_elicitation_state_for_entry(index, window, cx);
+                        for index in added {
+                            active.sync_elicitation_state_for_entry(index, window, cx);
+                        }
                         active.sync_editor_mode(cx);
                         active.sync_generating_indicator(cx);
                     });
@@ -6299,6 +6335,35 @@ pub(crate) mod tests {
         );
         active_thread(&conversation_view, cx).read_with(cx, |view, cx| {
             assert_eq!(view.thread.read(cx).session_id(), &root_session_id);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_entries_added_in_one_update_each_get_a_view(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+        add_to_workspace_with_size(conversation_view.clone(), true, cx);
+        let view = active_thread(&conversation_view, cx);
+        let thread = view.read_with(cx, |view, _| view.thread.clone());
+        thread.update(cx, |thread, cx| {
+            for tool_call_id in ["first-read", "second-read"] {
+                thread
+                    .upsert_tool_call(
+                        acp_v1::ToolCall::new(tool_call_id, "Read a file")
+                            .status(acp_v1::ToolCallStatus::Completed),
+                        cx,
+                    )
+                    .expect("tool entry");
+            }
+        });
+        cx.run_until_parked();
+
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.thread.read(cx).entries().len(), 2);
+            assert_eq!(view.entry_view_state.read(cx).synced_len(), 2);
+            assert_thread_list_item_count_matches_entries(view, cx);
         });
     }
 

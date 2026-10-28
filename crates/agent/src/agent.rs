@@ -2743,6 +2743,30 @@ impl NativeAgentConnection {
             .map(|session| session.thread.clone())
     }
 
+    /// Sends the output of tool calls that a reopened conversation shows with
+    /// only their title and status, once their cards are opened.
+    pub fn load_tool_call_details(
+        &self,
+        session_id: &acp_v2::SessionId,
+        tool_call_ids: HashSet<acp_v2::ToolCallId>,
+        cx: &mut App,
+    ) -> Task<Result<()>> {
+        let Some((thread, acp_thread)) = self
+            .0
+            .read(cx)
+            .sessions
+            .get(session_id)
+            .map(|session| (session.thread.clone(), session.acp_thread.clone()))
+        else {
+            return Task::ready(Err(anyhow!("That conversation is no longer open.")));
+        };
+        let events = thread.update(cx, |thread, cx| {
+            thread.replay_tool_call_details(&tool_call_ids, cx)
+        });
+        let applied = Self::handle_thread_events(events, acp_thread, None, cx);
+        cx.spawn(async move |_| applied.await.map(|_| ()))
+    }
+
     /// Forwards to [`NativeAgent::ensure_skills_scan_started`]. The
     /// agent panel calls this from its three user-interaction trigger
     /// points (input box focus, slash-autocomplete invocation, and
@@ -6919,6 +6943,112 @@ mod internal_tests {
                     .next()
                     .map(|block| block.to_markdown(cx)),
                 Some("retained context")
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_history_details_load_when_a_reopened_card_opens(cx: &mut TestAppContext) {
+        init_test(cx);
+        let (connection, agent, project, acp_thread) = setup_native_agent_session(cx).await;
+        let session_id = acp_thread.read_with(cx, |thread, _| thread.session_id().clone());
+        let thread = cx.update(|cx| native_thread_for_session(&agent, &session_id, cx));
+        let mut saved_thread = thread.read_with(cx, |thread, cx| thread.to_db(cx)).await;
+        let tool_use_id = language_model::LanguageModelToolUseId::from("read_main");
+        let file = language_model::LanguageModelToolResultContent::from("fn main() {}\n");
+        let input = json!({ "path": "a/main.rs" });
+        saved_thread
+            .messages
+            .push(Arc::new(Message::Agent(crate::AgentMessage {
+                content: vec![crate::AgentMessageContent::ToolUse(
+                    language_model::LanguageModelToolUse {
+                        id: tool_use_id.clone(),
+                        name: crate::ReadFileTool::NAME.into(),
+                        raw_input: input.to_string(),
+                        input: language_model::LanguageModelToolUseInput::Json(input),
+                        is_input_complete: true,
+                        thought_signature: None,
+                    },
+                )],
+                tool_results: [(
+                    tool_use_id.clone(),
+                    language_model::LanguageModelToolResult {
+                        tool_use_id,
+                        tool_name: crate::ReadFileTool::NAME.into(),
+                        is_error: false,
+                        content: vec![file.clone()],
+                        output: Some(serde_json::to_value(&file).expect("raw output")),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            })));
+        let restored_session_id = acp_v2::SessionId::new("reopened-file-read");
+        let database = cx
+            .update(|cx| ThreadsDatabase::connect(cx))
+            .await
+            .expect("thread database should connect");
+        database
+            .save_thread(
+                restored_session_id.clone(),
+                saved_thread,
+                PathList::new(&[Path::new("/a")]),
+            )
+            .await
+            .expect("the conversation should save");
+
+        let restored = cx
+            .update(|cx| {
+                connection.clone().load_session(
+                    restored_session_id.clone(),
+                    project,
+                    PathList::new(&[Path::new("/a")]),
+                    None,
+                    cx,
+                )
+            })
+            .await
+            .expect("the conversation should reopen");
+        cx.run_until_parked();
+        let tool_call_id = restored.read_with(cx, |thread, cx| {
+            let Some(acp_thread::AgentThreadEntry::ToolCall(call)) = thread.entries().last() else {
+                panic!("the file read should replay as a tool call");
+            };
+            assert!(call.details_deferred());
+            assert!(call.content().is_empty());
+            assert!(call.raw_output.is_none());
+            assert!(!call.to_markdown(cx).contains("fn main()"));
+            call.id.clone()
+        });
+        let restored_thread =
+            cx.update(|cx| native_thread_for_session(&agent, &restored_session_id, cx));
+        restored_thread.read_with(cx, |thread, _| {
+            let result = thread
+                .last_message()
+                .and_then(|message| message.as_agent_message())
+                .and_then(|message| message.tool_results.values().next())
+                .expect("the file read result");
+            assert_eq!(result.output, None, "the file is kept once, as content");
+        });
+
+        cx.update(|cx| {
+            connection.load_tool_call_details(
+                &restored_session_id,
+                [tool_call_id.clone()].into_iter().collect(),
+                cx,
+            )
+        })
+        .await
+        .expect("opening the card loads its output");
+        cx.run_until_parked();
+        restored.read_with(cx, |thread, cx| {
+            let (_, call) = thread.tool_call(&tool_call_id).expect("the tool call");
+            assert!(!call.details_deferred());
+            assert!(call.to_markdown(cx).contains("fn main() {}"));
+            assert_eq!(
+                call.raw_output,
+                Some(serde_json::to_value(&file).expect("raw output"))
             );
         });
     }

@@ -1488,6 +1488,10 @@ impl ThreadView {
                 thread.release_tool_call_render_cache(id, cx);
             }
         });
+        if expanded {
+            super::load_deferred_tool_call_details(&self.thread, [id.clone()], cx)
+                .detach_and_log_err(cx);
+        }
         cx.notify();
     }
 
@@ -8699,14 +8703,35 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut App,
     ) -> Task<Result<()>> {
-        let thread = self.thread.read(cx);
-        let thread_title = thread
-            .title()
-            .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into())
-            .to_string();
-        let markdown = thread.to_markdown(cx);
-
-        open_markdown_in_workspace(thread_title, markdown, workspace, window, cx)
+        let deferred = self
+            .thread
+            .read(cx)
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                AgentThreadEntry::ToolCall(call) if call.details_deferred() => {
+                    Some(call.id.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let thread = self.thread.clone();
+        // The export includes the output a reopened conversation shows only
+        // in opened cards.
+        let load = super::load_deferred_tool_call_details(&thread, deferred, cx);
+        window.spawn(cx, async move |cx| {
+            load.await.log_err();
+            let open = cx.update(|window, cx| {
+                let acp_thread = thread.read(cx);
+                let thread_title = acp_thread
+                    .title()
+                    .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into())
+                    .to_string();
+                let markdown = acp_thread.to_markdown(cx);
+                open_markdown_in_workspace(thread_title, markdown, workspace, window, cx)
+            })?;
+            open.await
+        })
     }
 
     pub(crate) fn sync_editor_mode(&mut self, cx: &mut Context<Self>) {
@@ -9745,7 +9770,8 @@ impl ThreadView {
         let should_show_raw_input = Self::tool_call_shows_raw_input(tool_call);
 
         let has_content = !tool_call.content().is_empty()
-            || (should_show_raw_input && tool_call.raw_input.is_some());
+            || (should_show_raw_input && tool_call.raw_input.is_some())
+            || tool_call.details_deferred();
 
         let is_collapsible = has_content && !needs_confirmation;
         let is_open = self

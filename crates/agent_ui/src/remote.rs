@@ -1480,6 +1480,18 @@ fn thread(workspace: &Entity<Workspace>, args: &Value, cx: &App) -> Result<Value
     if args.get("entry_index").is_some() {
         required(args, "session_id")?;
     }
+    let (thread, owner) = requested_acp_thread(workspace, args, cx)?;
+    requested_thread_snapshot(&thread, owner.as_ref(), args, cx)
+}
+
+fn requested_acp_thread(
+    workspace: &Entity<Workspace>,
+    args: &Value,
+    cx: &App,
+) -> Result<(
+    Entity<acp_thread::AcpThread>,
+    Option<Entity<agent::Thread>>,
+)> {
     let conversation_view = conversation_view(workspace, cx)?;
     let conversation = conversation_view.read(cx);
     let owner = conversation.as_native_thread(cx);
@@ -1497,7 +1509,26 @@ fn thread(workspace: &Entity<Workspace>, args: &Value, cx: &App) -> Result<Value
             .map(|view| view.read(cx).thread.clone())
             .context("the conversation has not loaded yet")?,
     };
-    requested_thread_snapshot(&thread, owner.as_ref(), args, cx)
+    Ok((thread, owner))
+}
+
+/// A reopened conversation leaves the output of older tool calls out until
+/// it is asked for, so it is loaded before the phone is sent an entry.
+fn deferred_entry_details(
+    thread: &Entity<acp_thread::AcpThread>,
+    args: &Value,
+    cx: &mut App,
+) -> Option<Task<Result<()>>> {
+    let index = usize::try_from(args.get("entry_index")?.as_u64()?).ok()?;
+    let tool_call_id = match thread.read(cx).entries().get(index)? {
+        AgentThreadEntry::ToolCall(call) if call.details_deferred() => call.id.clone(),
+        _ => return None,
+    };
+    Some(crate::conversation_view::load_deferred_tool_call_details(
+        thread,
+        [tool_call_id],
+        cx,
+    ))
 }
 
 fn requested_thread_snapshot(
@@ -1623,6 +1654,25 @@ fn request_thread_source(
     args: &Value,
     cx: &mut App,
 ) -> Task<Result<Value>> {
+    if let Ok((thread, _)) = requested_acp_thread(workspace, args, cx)
+        && let Some(details) = deferred_entry_details(&thread, args, cx)
+    {
+        let workspace = workspace.clone();
+        let args = args.clone();
+        return cx.spawn(async move |cx| {
+            details.await?;
+            cx.update(|cx| loaded_thread_source(&workspace, &args, cx))
+                .await
+        });
+    }
+    loaded_thread_source(workspace, args, cx)
+}
+
+fn loaded_thread_source(
+    workspace: &Entity<Workspace>,
+    args: &Value,
+    cx: &mut App,
+) -> Task<Result<Value>> {
     let error = match thread(workspace, args, cx) {
         Ok(snapshot) => return Task::ready(Ok(snapshot)),
         Err(error) => error,
@@ -1654,6 +1704,9 @@ fn request_thread_source(
     };
     cx.spawn(async move |cx| {
         let thread = load.await?;
+        if let Some(details) = cx.update(|cx| deferred_entry_details(&thread, &args, cx)) {
+            details.await?;
+        }
         cx.update(|cx| requested_thread_snapshot(&thread, None, &args, cx))
     })
 }
@@ -1950,6 +2003,12 @@ fn transcript_entry(
         if let AgentThreadEntry::UserMessage(message) = entry {
             value["fingerprint"] = json!(user_message_fingerprint(&message.content, cx));
         }
+    }
+    // Its output loads when the phone asks for this entry's details.
+    if let AgentThreadEntry::ToolCall(call) = entry
+        && call.details_deferred()
+    {
+        value["details_pending"] = json!(true);
     }
     if let AgentThreadEntry::AssistantMessage(message) = entry
         && message
@@ -2698,6 +2757,60 @@ mod tests {
             assert!(entries.len() < source.len());
             assert_eq!(entries.last().expect("newest entry")["index"], 19);
         }
+    }
+
+    #[gpui::test]
+    async fn deferred_tool_output_stays_pending_for_the_phone(cx: &mut gpui::TestAppContext) {
+        use acp_thread::AgentConnection as _;
+        use agent_client_protocol::schema::v1 as acp_v1;
+        use std::rc::Rc;
+        use util::path_list::PathList;
+
+        crate::conversation_view::tests::init_test(cx);
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+        });
+        let filesystem = project::FakeFs::new(cx.executor());
+        filesystem.insert_tree("/", json!({ "project": {} })).await;
+        let project = project::Project::test(filesystem.clone(), [Path::new("/project")], cx).await;
+        let connection = cx.update(|cx| {
+            let store = agent::ThreadStore::global(cx);
+            Rc::new(agent::NativeAgentConnection(agent::NativeAgent::new(
+                store,
+                agent::Templates::new(),
+                filesystem,
+                cx,
+            )))
+        });
+        let session = cx
+            .update(|cx| {
+                connection
+                    .clone()
+                    .new_session(project, PathList::new(&[Path::new("/project")]), cx)
+            })
+            .await
+            .expect("session");
+        session.update(cx, |thread, cx| {
+            thread
+                .upsert_tool_call(
+                    acp_v1::ToolCall::new("reopened-read", "Read a file")
+                        .status(acp_v1::ToolCallStatus::Completed)
+                        .meta(acp_v1::Meta::from_iter([(
+                            acp_thread::TOOL_DETAILS_DEFERRED_META_KEY.into(),
+                            true.into(),
+                        )])),
+                    cx,
+                )
+                .expect("tool entry");
+        });
+        cx.read(|cx| {
+            let snapshot = thread_snapshot(session.read(cx), None, TRANSCRIPT_BUDGET, true, cx);
+            assert_eq!(
+                snapshot["entries"][0]["details_pending"], true,
+                "the phone asks for output a reopened conversation left out"
+            );
+        });
     }
 
     #[gpui::test]
