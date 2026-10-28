@@ -80,7 +80,11 @@ use zed::{
 
 use crate::zed::{CrashHandler, OpenRequestKind, eager_load_active_theme_and_icon_theme};
 
-#[cfg(feature = "mimalloc")]
+// Tracy's memory profiling installs its own allocator.
+#[cfg(any(
+    feature = "mimalloc",
+    all(target_os = "windows", not(feature = "tracy"))
+))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

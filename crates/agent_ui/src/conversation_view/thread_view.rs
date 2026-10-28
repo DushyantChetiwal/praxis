@@ -12256,6 +12256,38 @@ impl ThreadView {
             .and_then(|connected| connected.threads.get(session_id))
     }
 
+    /// Loads a finished sub-agent's conversation once its card is opened.
+    pub(crate) fn load_subagent_for_card(
+        &mut self,
+        session_id: acp_v2::SessionId,
+        card_id: acp_v2::ToolCallId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let load = match self.server_view.update(cx, |server_view, cx| {
+            server_view.ensure_subagent_thread_loaded(session_id, window, cx)
+        }) {
+            Ok(load) => load,
+            Err(error) => {
+                log::debug!("Could not load a sub-agent conversation: {error:#}");
+                return;
+            }
+        };
+        cx.spawn(async move |this, cx| {
+            let result = load.await;
+            this.update(cx, |this, cx| {
+                // A card left saying it is loading would never change.
+                if result.is_err() {
+                    this.entry_view_state
+                        .update(cx, |state, _cx| state.collapse_tool_call(&card_id));
+                }
+                cx.notify();
+            })?;
+            result
+        })
+        .detach_and_log_err(cx);
+    }
+
     /// A call that runs several steps side by side, shown as one card per
     /// step's agent, each following its agent while it works.
     fn render_parallel_steps_tool_call(
@@ -12432,9 +12464,17 @@ impl ThreadView {
                 .into_any_element()
         });
 
-        let has_expandable_content = thread
-            .as_ref()
-            .map_or(false, |thread| !thread.read(cx).entries().is_empty());
+        // A finished sub-agent's conversation is loaded only when its card is
+        // opened, so the card can open before that conversation exists.
+        let unloaded_session_id = card
+            .session
+            .filter(|_| thread_view.is_none() && !is_running)
+            .map(|session| session.session_id.clone());
+        let is_loading = is_expanded && unloaded_session_id.is_some();
+        let has_expandable_content = unloaded_session_id.is_some()
+            || thread
+                .as_ref()
+                .map_or(false, |thread| !thread.read(cx).entries().is_empty());
 
         let tooltip_meta_description = if is_expanded {
             "Click to Collapse"
@@ -12567,6 +12607,17 @@ impl ThreadView {
                                                     state.toggle_tool_call_expansion(&card_id);
                                                     state.is_tool_call_expanded(&card_id)
                                                 });
+                                            if expanded
+                                                && let Some(session_id) =
+                                                    unloaded_session_id.clone()
+                                            {
+                                                this.load_subagent_for_card(
+                                                    session_id,
+                                                    card_id.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
                                             this.refresh_thread_search(window, cx);
                                             telemetry::event!("Subagent Toggled", expanded);
                                             cx.notify();
@@ -12596,6 +12647,20 @@ impl ThreadView {
                         )
                     }),
             )
+            .when(is_loading, |this| {
+                this.child(
+                    h_flex()
+                        .px_2()
+                        .py_1()
+                        .border_t_1()
+                        .border_color(self.tool_card_border_color(cx))
+                        .child(
+                            Label::new("Loading conversation…")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
+                )
+            })
             .when_some(thread_view, |this, thread_view| {
                 let thread = &thread_view.read(cx).thread;
                 let tv_session_id = thread.read(cx).session_id();

@@ -288,6 +288,7 @@ jobs:
           cargo test --locked -p agent_ui --lib test_deferred_tool_input_
           cargo test --locked -p agent_ui --lib test_thread_search_
           cargo test --locked -p agent_ui --lib test_mixed_assistant_content_
+          cargo test --locked -p agent_ui --lib test_subagents_load_on_demand_
 
       - name: Test remote transport and image input
         run: |
