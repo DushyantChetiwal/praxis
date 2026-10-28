@@ -1000,13 +1000,23 @@ class WorkflowContractTests(unittest.TestCase):
         for name in validation.EXPECTED_JOBS:
             self.assertIn(f"name: {name}\n", self.workflow)
 
-    def test_native_path_matrix_is_required_on_all_three_client_platforms(self):
-        for platform, runner in [("Linux", "ubuntu-24.04"), ("Windows", "windows-2022"), ("macOS", "macos-15")]:
+    def test_native_path_tests_gate_linux_and_windows_and_run_weekly_on_macos(self):
+        for platform, runner in [("Linux", "ubuntu-24.04"), ("Windows", "windows-2022")]:
             name = f"Architect graph tests ({platform})"
             self.assertIn(name, validation.EXPECTED_JOBS)
             self.assertIn(f"- name: {name}\n            runner: {runner}", self.workflow)
         self.assertIn("run: cargo test --locked -p path --lib", self.workflow)
         self.assertIn("fail-fast: false", self.workflow)
+        self.assertNotIn("Architect graph tests (macOS)", validation.EXPECTED_JOBS)
+        self.assertNotIn("runner: macos", self.workflow)
+        weekly = (SCRIPT.parent.parent / ".github/workflows/macos_path_checks.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("schedule:\n    - cron:", weekly)
+        self.assertIn("workflow_dispatch:", weekly)
+        self.assertIn("runs-on: macos-15", weekly)
+        self.assertIn("run: cargo test --locked -p architect --lib", weekly)
+        self.assertIn("run: cargo test --locked -p path --lib", weekly)
 
     def test_full_receipt_checks_every_job_and_reuse_has_explicit_aggregate(self):
         receipt = self.workflow.split("  full-receipt:\n", 1)[1].split("  source-validated:\n", 1)[0]
