@@ -738,6 +738,17 @@ fn resolve_outcome_from_selection(
     Some(selected_choice.build_outcome(is_allow))
 }
 
+/// Whether a call's sub-agents may still be working, so their conversations
+/// must be loaded for their permission requests and progress to show.
+fn is_live_subagent_call(call: &ToolCall) -> bool {
+    matches!(
+        call.status(),
+        ToolCallStatus::Pending
+            | ToolCallStatus::WaitingForConfirmation
+            | ToolCallStatus::InProgress
+    )
+}
+
 fn affects_thread_metadata(event: &AcpThreadEvent) -> bool {
     match event {
         AcpThreadEvent::NewEntry
@@ -1633,12 +1644,17 @@ impl ConversationView {
             cx.observe(&action_log, |_, _, cx| cx.notify()),
         ];
 
+        // A finished sub-agent's conversation loads when its card is opened.
+        // Each one can hold hundreds of megabytes of history, so loading every
+        // one with its parent made reopening a conversation cost gigabytes.
         let subagent_sessions = thread
             .read(cx)
             .entries()
             .iter()
             .flat_map(|entry| match entry {
-                AgentThreadEntry::ToolCall(call) => call.subagent_session_ids().cloned().collect(),
+                AgentThreadEntry::ToolCall(call) if is_live_subagent_call(call) => {
+                    call.subagent_session_ids().cloned().collect()
+                }
                 _ => Vec::new(),
             })
             .collect::<Vec<_>>();
@@ -6283,6 +6299,89 @@ pub(crate) mod tests {
         );
         active_thread(&conversation_view, cx).read_with(cx, |view, cx| {
             assert_eq!(view.thread.read(cx).session_id(), &root_session_id);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_subagents_load_on_demand_when_their_card_opens(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new().with_supports_load_session(true);
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection), cx).await;
+        add_to_workspace_with_size(conversation_view.clone(), true, cx);
+        let (root, conversation) = active_thread(&conversation_view, cx)
+            .read_with(cx, |view, _| {
+                (view.thread.clone(), view.conversation.clone())
+            });
+        let finished = acp_v2::SessionId::new("finished-subagent");
+        let running = acp_v2::SessionId::new("running-subagent");
+        for (tool_call_id, session_id, status) in [
+            (
+                "spawn-finished",
+                &finished,
+                acp_v1::ToolCallStatus::Completed,
+            ),
+            (
+                "spawn-running",
+                &running,
+                acp_v1::ToolCallStatus::InProgress,
+            ),
+        ] {
+            // One entry per update, as a streaming agent adds them, so the
+            // view handles each new entry before the next arrives.
+            root.update(cx, |thread, cx| {
+                let spawn = acp_v1::ToolCall::new(tool_call_id, "Sub-agent")
+                    .name("spawn_agent")
+                    .status(status)
+                    .meta(acp_v1::Meta::from_iter([(
+                        acp_thread::SUBAGENT_SESSION_INFO_META_KEY.into(),
+                        serde_json::to_value(acp_thread::SubagentSessionInfo {
+                            session_id: session_id.clone(),
+                            message_start_index: 0,
+                            message_end_index: None,
+                        })
+                        .expect("sub-agent session info"),
+                    )]));
+                thread.upsert_tool_call(spawn, cx).expect("spawning tool");
+            });
+            cx.run_until_parked();
+        }
+
+        // Reopening a conversation builds a new view over its thread.
+        let reopened = conversation_view.update_in(cx, |view, window, cx| {
+            view.new_thread_view(root.clone(), conversation.clone(), false, None, window, cx)
+        });
+        cx.run_until_parked();
+        conversation_view.read_with(cx, |view, _| {
+            let threads = &view.as_connected().expect("connected").threads;
+            assert!(
+                threads.contains_key(&running),
+                "a running sub-agent must load so its requests and progress show"
+            );
+            assert!(
+                !threads.contains_key(&finished),
+                "a finished sub-agent must not load until its card is opened"
+            );
+        });
+
+        reopened.update_in(cx, |view, window, cx| {
+            view.load_subagent_for_card(
+                finished.clone(),
+                acp_v2::ToolCallId::new("spawn-finished"),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        conversation_view.read_with(cx, |view, _| {
+            assert!(
+                view.as_connected()
+                    .expect("connected")
+                    .threads
+                    .contains_key(&finished),
+                "opening the card loads the sub-agent's conversation"
+            );
         });
     }
 

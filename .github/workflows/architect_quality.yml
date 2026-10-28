@@ -214,14 +214,14 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
+      # macOS runners are often unavailable for hours, so macOS runs these
+      # tests weekly in macos_path_checks.yml instead of gating every change.
       matrix:
         include:
           - name: Architect graph tests (Linux)
             runner: ubuntu-24.04
           - name: Architect graph tests (Windows)
             runner: windows-2022
-          - name: Architect graph tests (macOS)
-            runner: macos-15
     steps:
       - name: Check out the selected source
         uses: actions/checkout@v7
@@ -288,6 +288,7 @@ jobs:
           cargo test --locked -p agent_ui --lib test_deferred_tool_input_
           cargo test --locked -p agent_ui --lib test_thread_search_
           cargo test --locked -p agent_ui --lib test_mixed_assistant_content_
+          cargo test --locked -p agent_ui --lib test_subagents_load_on_demand_
 
       - name: Test remote transport and image input
         run: |

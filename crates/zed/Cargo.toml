@@ -248,6 +248,9 @@ nix = { workspace = true, features = ["user"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 etw_tracing.workspace = true
+# The system heap keeps freed memory committed after a burst of allocations,
+# while mimalloc returns it to Windows.
+mimalloc = "0.1"
 windows = { workspace = true, features = ["Win32_System_Console", "Win32_System_Pipes"] }
 gpui = { workspace = true, features = ["profiler", "windows-manifest"] }
 

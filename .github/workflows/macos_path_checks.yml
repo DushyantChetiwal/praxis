@@ -1,0 +1,52 @@
+# The Architect graph and host-aware path tests gate every change on Linux and
+# Windows. macOS runners are often unavailable for hours, so macOS runs the
+# same tests once a week, ahead of the weekly macOS build, and on demand.
+name: macOS path checks
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag, or commit to check
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-path-checks-${{ inputs.source_ref || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  macos:
+    name: Architect graph tests (macOS)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out the selected source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: architect-tests
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Test the Architect graph and runner
+        run: cargo test --locked -p architect --lib
+
+      - name: Test host-aware path primitives
+        run: cargo test --locked -p path --lib
