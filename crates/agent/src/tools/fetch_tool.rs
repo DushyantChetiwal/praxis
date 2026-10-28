@@ -225,6 +225,10 @@ impl AgentTool for FetchTool {
         acp::ToolKind::Fetch
     }
 
+    fn defers_history_details() -> bool {
+        true
+    }
+
     fn allow_in_restricted_mode() -> bool {
         false
     }

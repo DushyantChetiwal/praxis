@@ -109,6 +109,10 @@ impl AgentTool for GrepTool {
         acp::ToolKind::Search
     }
 
+    fn defers_history_details() -> bool {
+        true
+    }
+
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,

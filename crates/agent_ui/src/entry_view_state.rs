@@ -233,6 +233,11 @@ impl EntryViewState {
         self.entries.get(index)
     }
 
+    /// How many of the thread's entries have views here.
+    pub fn synced_len(&self) -> usize {
+        self.entries.len()
+    }
+
     pub fn sync_entry(
         &mut self,
         index: usize,

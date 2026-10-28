@@ -219,6 +219,10 @@ impl AgentTool for ReadFileTool {
         acp::ToolKind::Read
     }
 
+    fn defers_history_details() -> bool {
+        true
+    }
+
     fn initial_title(
         &self,
         input: Result<Self::Input, serde_json::Value>,

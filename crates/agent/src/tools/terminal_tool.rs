@@ -357,6 +357,10 @@ impl AgentTool for TerminalTool {
         acp_v2::ToolKind::Execute
     }
 
+    fn defers_history_details() -> bool {
+        true
+    }
+
     fn allow_in_restricted_mode() -> bool {
         false
     }
@@ -405,6 +409,10 @@ impl AgentTool for SandboxedTerminalTool {
 
     fn kind() -> acp_v2::ToolKind {
         acp_v2::ToolKind::Execute
+    }
+
+    fn defers_history_details() -> bool {
+        true
     }
 
     fn allow_in_restricted_mode() -> bool {

@@ -122,6 +122,14 @@ pub fn meta_with_tool_name(tool_name: &str) -> acp_v2::Meta {
     acp_v2::Meta::from_iter([(TOOL_NAME_META_KEY.into(), tool_name.into())])
 }
 
+/// Marks a tool call replayed from history with only its title and status.
+/// Its output loads from the agent when its card is opened.
+pub const TOOL_DETAILS_DEFERRED_META_KEY: &str = "praxis_details_deferred";
+
+pub fn meta_with_deferred_details() -> acp_v2::Meta {
+    acp_v2::Meta::from_iter([(TOOL_DETAILS_DEFERRED_META_KEY.into(), true.into())])
+}
+
 /// Key used in ACP `AvailableCommand` meta to record which source produced a
 /// slash command, so the completion popup can group commands by category.
 pub const COMMAND_CATEGORY_META_KEY: &str = "command_category";
@@ -2160,6 +2168,16 @@ impl ToolCall {
                 .tool_name
                 .as_ref()
                 .is_some_and(|name| name == "run_steps")
+    }
+
+    /// Whether this call's output was left out when its conversation was
+    /// reopened, to be loaded when its card is opened.
+    pub fn details_deferred(&self) -> bool {
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.get(TOOL_DETAILS_DEFERRED_META_KEY))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
     }
 
     /// The sessions of every agent this call started.
@@ -7683,10 +7701,15 @@ impl AcpThread {
                 if let Some((user_message_index, _)) = self.last_user_message() {
                     // Completed tool output makes this a tool-result refusal, not a
                     // refusal of the user's prompt, so its history must be retained.
-                    let has_completed_tool_output = self.entries.iter()
+                    let has_completed_tool_output = self
+                        .entries
+                        .iter()
                         .skip(user_message_index + 1)
-                        .any(|entry| matches!(entry, AgentThreadEntry::ToolCall(call)
-                            if call.status() == ToolCallStatus::Completed && call.raw_output.is_some()));
+                        .any(|entry| {
+                            matches!(entry, AgentThreadEntry::ToolCall(call)
+                            if call.status() == ToolCallStatus::Completed
+                                && (call.raw_output.is_some() || call.details_deferred()))
+                        });
                     if !has_completed_tool_output {
                         let range = user_message_index..self.entries.len();
                         if range.start < range.end {

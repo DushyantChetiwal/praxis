@@ -1499,8 +1499,8 @@ impl AgentMessage {
             }
 
             if include_debug_output
-                && let Some(output) = tool_result.output.as_ref()
-                && let Ok(output) = serde_json::to_string_pretty(output)
+                && let Some(output) = tool_result_output(tool_result)
+                && let Ok(output) = serde_json::to_string_pretty(output.as_ref())
             {
                 writeln!(markdown, "**Debug Output**:\n\n```json\n{output}\n```\n").ok();
             }
@@ -2645,6 +2645,76 @@ impl Thread {
         rx
     }
 
+    /// Sends the output of tool calls that [`Self::replay`] sent with only
+    /// their title and status, for cards that have been opened since.
+    pub fn replay_tool_call_details(
+        &self,
+        tool_call_ids: &HashSet<acp_v2::ToolCallId>,
+        cx: &mut Context<Self>,
+    ) -> mpsc::UnboundedReceiver<Result<ThreadEvent>> {
+        let (tx, rx) = mpsc::unbounded();
+        let stream = ThreadEventStream::new(tx);
+        for (message_ix, message) in self.messages.iter().enumerate() {
+            let Message::Agent(agent_message) = &**message else {
+                continue;
+            };
+            for content in &agent_message.content {
+                let AgentMessageContent::ToolUse(tool_use) = content else {
+                    continue;
+                };
+                let tool_call_id = scoped_tool_call_id(message_ix, &tool_use.id);
+                if !tool_call_ids.contains(&tool_call_id) {
+                    continue;
+                }
+                if let Some(tool) = self.replay_tool(tool_use, cx)
+                    && let Ok(input) = tool_use.input.clone().into_json()
+                {
+                    let tool_result = agent_message.tool_results.get(&tool_use.id);
+                    self.replay_tool_call_output(
+                        &tool,
+                        tool_use,
+                        &tool_call_id,
+                        input,
+                        tool_result,
+                        &stream,
+                        cx,
+                    );
+                }
+                // Cleared either way, so a card never waits on output it can't get.
+                stream.update_tool_call_fields(&tool_call_id, |update| {
+                    update.meta(None::<acp_v2::Meta>)
+                });
+            }
+        }
+        rx
+    }
+
+    /// Recorded tool calls use the model-facing name, so a terminal call is
+    /// always keyed as `terminal` and resolves to the non-sandboxed
+    /// `TerminalTool` here, even if it originally ran under
+    /// `SandboxedTerminalTool`. That's safe because both variants share the
+    /// same `replay` behavior; replay only reconstructs UI state and never
+    /// re-runs the command or re-applies sandbox policy.
+    fn replay_tool(
+        &self,
+        tool_use: &LanguageModelToolUse,
+        cx: &App,
+    ) -> Option<Arc<dyn AnyAgentTool>> {
+        self.tools.get(tool_use.name.as_ref()).cloned().or_else(|| {
+            self.context_server_registry
+                .read(cx)
+                .servers()
+                .find_map(|(_, tools)| tools.get(tool_use.name.as_ref()).cloned())
+        })
+    }
+
+    fn replayed_status(tool_result: Option<&LanguageModelToolResult>) -> acp_v2::ToolCallStatus {
+        match tool_result {
+            Some(result) if !result.is_error => acp_v2::ToolCallStatus::Completed,
+            _ => acp_v2::ToolCallStatus::Failed,
+        }
+    }
+
     fn replay_tool_call(
         &self,
         tool_use: &LanguageModelToolUse,
@@ -2661,40 +2731,14 @@ impl Thread {
         }
 
         let tool_call_id = scoped_tool_call_id(owning_message_ix, &tool_use.id);
-        let output = tool_result
-            .as_ref()
-            .and_then(|result| result.output.clone());
-        let replay_content = tool_result.and_then(Self::tool_result_content_for_replay);
-        let status = tool_result
-            .as_ref()
-            .map_or(acp_v2::ToolCallStatus::Failed, |result| {
-                if result.is_error {
-                    acp_v2::ToolCallStatus::Failed
-                } else {
-                    acp_v2::ToolCallStatus::Completed
-                }
-            });
+        let status = Self::replayed_status(tool_result);
 
-        // Recorded tool calls use the model-facing name, so a terminal call is
-        // always keyed as `terminal` and resolves to the non-sandboxed
-        // `TerminalTool` here, even if it originally ran under
-        // `SandboxedTerminalTool`. That's safe because both variants share the
-        // same `replay` behavior; replay only reconstructs UI state and never
-        // re-runs the command or re-applies sandbox policy.
-        let tool = self.tools.get(tool_use.name.as_ref()).cloned().or_else(|| {
-            self.context_server_registry
-                .read(cx)
-                .servers()
-                .find_map(|(_, tools)| {
-                    if let Some(tool) = tools.get(tool_use.name.as_ref()) {
-                        Some(tool.clone())
-                    } else {
-                        None
-                    }
-                })
-        });
-
-        let Some(tool) = tool else {
+        let Some(tool) = self.replay_tool(tool_use, cx) else {
+            let output = tool_result
+                .and_then(tool_result_output)
+                .map(std::borrow::Cow::into_owned);
+            let replay_content = tool_result
+                .and_then(|result| Self::tool_result_content_for_replay(result, output.is_some()));
             // Tool not found (e.g., MCP server not connected after restart),
             // but still display the saved result if available.
             stream.send_tool_call(
@@ -2724,8 +2768,46 @@ impl Thread {
         let kind = tool.kind();
         stream.send_tool_call(&tool_call_id, &tool_use.name, title, kind, input.clone());
 
+        // A long conversation is mostly the output of calls like these, which
+        // shows only in an opened card. It is sent when the card is opened.
+        if tool.defers_history_details() && tool_result.is_some_and(|result| !result.is_error) {
+            stream.update_tool_call_fields(&tool_call_id, |update| {
+                update
+                    .status(status)
+                    .meta(acp_thread::meta_with_deferred_details())
+            });
+            return;
+        }
+        self.replay_tool_call_output(
+            &tool,
+            tool_use,
+            &tool_call_id,
+            input,
+            tool_result,
+            stream,
+            cx,
+        );
+    }
+
+    fn replay_tool_call_output(
+        &self,
+        tool: &Arc<dyn AnyAgentTool>,
+        tool_use: &LanguageModelToolUse,
+        tool_call_id: &acp_v2::ToolCallId,
+        input: serde_json::Value,
+        tool_result: Option<&LanguageModelToolResult>,
+        stream: &ThreadEventStream,
+        cx: &mut Context<Self>,
+    ) {
+        let status = Self::replayed_status(tool_result);
+        let output = tool_result
+            .and_then(tool_result_output)
+            .map(std::borrow::Cow::into_owned);
+        let replay_content = tool_result
+            .and_then(|result| Self::tool_result_content_for_replay(result, output.is_some()));
+
         if let Some(content) = replay_content {
-            stream.update_tool_call_fields(&tool_call_id, |update| update.content(content));
+            stream.update_tool_call_fields(tool_call_id, |update| update.content(content));
         }
 
         if let Some(output) = output.clone() {
@@ -2747,7 +2829,7 @@ impl Thread {
             }
         }
 
-        stream.update_tool_call_fields(&tool_call_id, |update| {
+        stream.update_tool_call_fields(tool_call_id, |update| {
             let update = update.status(status);
             if let Some(output) = output {
                 update.raw_output(output)
@@ -2771,12 +2853,13 @@ impl Thread {
 
     fn tool_result_content_for_replay(
         tool_result: &LanguageModelToolResult,
+        has_output: bool,
     ) -> Option<Vec<acp_v2::ToolCallContent>> {
         let has_image = tool_result
             .content
             .iter()
             .any(|part| matches!(part, LanguageModelToolResultContent::Image(_)));
-        if !has_image && tool_result.output.is_some() {
+        if !has_image && has_output {
             return None;
         }
 
@@ -2937,7 +3020,11 @@ impl Thread {
             title_generation_error: None,
             pending_summary_generation: None,
             summary: db_thread.detailed_summary,
-            messages: db_thread.messages,
+            messages: db_thread
+                .messages
+                .into_iter()
+                .map(without_duplicate_outputs)
+                .collect(),
             retained_history_revision: 0,
             user_store: project.read(cx).user_store(),
             running_turn: None,
@@ -5605,6 +5692,7 @@ impl Thread {
                         .content
                         .push(LanguageModelToolResultContent::Text(notes.into()));
                 }
+                drop_duplicate_output(&mut tool_result);
                 this.pending_message()
                     .tool_results
                     .insert(tool_result.tool_use_id.clone(), tool_result);
@@ -5634,6 +5722,7 @@ impl Thread {
             }) {
                 return;
             }
+            drop_duplicate_output(&mut tool_result);
             // Keep late terminal output on its frozen owner, never on a reused
             // message index after rewind or on the successor's pending message.
             let mut agent_message = agent_message.clone();
@@ -7904,6 +7993,13 @@ where
         Ok(())
     }
 
+    /// Whether a finished call is replayed from history with only its title
+    /// and status, its output sent when its card is opened. For tools whose
+    /// output can be large and shows only in an opened card.
+    fn defers_history_details() -> bool {
+        false
+    }
+
     fn erase(self) -> Arc<dyn AnyAgentTool> {
         Arc::new(Erased(Arc::new(self)))
     }
@@ -7960,6 +8056,10 @@ pub trait AnyAgentTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Result<()>;
+    /// See [`AgentTool::defers_history_details`].
+    fn defers_history_details(&self) -> bool {
+        false
+    }
 }
 
 impl<T> AnyAgentTool for Erased<Arc<T>>
@@ -8048,6 +8148,10 @@ where
         let output = serde_json::from_value(output)?;
         self.0.replay(input, output, event_stream, cx)
     }
+
+    fn defers_history_details(&self) -> bool {
+        T::defers_history_details()
+    }
 }
 
 /// Builds the ACP-facing tool call id for a tool use in the message at
@@ -8065,6 +8169,67 @@ pub(crate) fn scoped_tool_call_id(
     // `message_ix` is non-zero-padded decimal, so the `:` delimiter is always
     // unambiguous -- this would break if the index were zero-padded.
     acp_v2::ToolCallId::new(format!("{message_ix}:{tool_use_id}"))
+}
+
+/// Tools whose raw output is exactly their one piece of model-facing content.
+/// Their results keep it once, as content, and rebuild the raw output on
+/// replay. Files the agent read were most of a long conversation, twice over.
+fn output_duplicates_content(tool_name: &str) -> bool {
+    tool_name == ReadFileTool::NAME
+}
+
+fn rebuilt_output(result: &LanguageModelToolResult) -> Option<serde_json::Value> {
+    match result.content.as_slice() {
+        [content] if !result.is_error && output_duplicates_content(&result.tool_name) => {
+            serde_json::to_value(content).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Drops a result's raw output only when it can be rebuilt exactly, so a
+/// result whose content was capped or given notes keeps its own output.
+fn drop_duplicate_output(result: &mut LanguageModelToolResult) {
+    if result.output.is_some() && rebuilt_output(result).as_ref() == result.output.as_ref() {
+        result.output = None;
+    }
+}
+
+/// A result's raw output, rebuilt from its content when it was dropped as a
+/// duplicate.
+fn tool_result_output(
+    result: &LanguageModelToolResult,
+) -> Option<std::borrow::Cow<'_, serde_json::Value>> {
+    match &result.output {
+        Some(output) => Some(std::borrow::Cow::Borrowed(output)),
+        None => rebuilt_output(result).map(std::borrow::Cow::Owned),
+    }
+}
+
+fn without_duplicate_outputs(mut message: Arc<Message>) -> Arc<Message> {
+    let has_duplicates = message.as_agent_message().is_some_and(|agent_message| {
+        agent_message
+            .tool_results
+            .values()
+            .any(|result| result.output.is_some() && output_duplicates_content(&result.tool_name))
+    });
+    if !has_duplicates {
+        return message;
+    }
+    if let Some(Message::Agent(agent_message)) = Arc::get_mut(&mut message) {
+        for result in agent_message.tool_results.values_mut() {
+            drop_duplicate_output(result);
+        }
+        return message;
+    }
+    let Some(agent_message) = message.as_agent_message() else {
+        return message;
+    };
+    let mut agent_message = agent_message.clone();
+    for result in agent_message.tool_results.values_mut() {
+        drop_duplicate_output(result);
+    }
+    Arc::new(Message::Agent(agent_message))
 }
 
 #[derive(Clone)]
@@ -12693,6 +12858,198 @@ mod tests {
                 .get(&missing_tool_call_id)
                 .map(String::as_str),
             Some("missing_image_tool")
+        );
+    }
+
+    struct DeferredReplayTool;
+
+    impl AgentTool for DeferredReplayTool {
+        type Input = ();
+        type Output = String;
+
+        const NAME: &'static str = "deferred_replay_tool";
+
+        fn kind() -> acp_v2::ToolKind {
+            acp_v2::ToolKind::Read
+        }
+
+        fn defers_history_details() -> bool {
+            true
+        }
+
+        fn initial_title(
+            &self,
+            _input: Result<Self::Input, serde_json::Value>,
+            _cx: &mut App,
+        ) -> SharedString {
+            "Read a large file".into()
+        }
+
+        fn run(
+            self: Arc<Self>,
+            _input: ToolInput<Self::Input>,
+            _event_stream: ToolCallEventStream,
+            _cx: &mut App,
+        ) -> Task<Result<Self::Output, Self::Output>> {
+            Task::ready(Ok(String::new()))
+        }
+
+        fn replay(
+            &self,
+            _input: Self::Input,
+            output: Self::Output,
+            event_stream: ToolCallEventStream,
+            _cx: &mut App,
+        ) -> Result<()> {
+            event_stream.update_fields(|update| update.content(vec![output.into()]));
+            Ok(())
+        }
+    }
+
+    async fn tool_call_updates(
+        mut events: mpsc::UnboundedReceiver<Result<ThreadEvent>>,
+    ) -> Vec<acp_v2::ToolCallUpdate> {
+        let mut updates = Vec::new();
+        while let Some(event) = events.next().await {
+            if let ThreadEvent::ToolCallUpdate(acp_thread::ToolCallUpdate::V2(update)) =
+                event.expect("replay event")
+            {
+                updates.push(update);
+            }
+        }
+        updates
+    }
+
+    #[gpui::test]
+    async fn history_details_load_when_their_card_opens(cx: &mut TestAppContext) {
+        let (thread, _event_stream, _) = setup_thread_for_test(cx).await;
+        let tool_use_id = LanguageModelToolUseId::from("large_read");
+        let tool_call_id = scoped_tool_call_id(0, &tool_use_id);
+
+        let replay = cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.add_tool(DeferredReplayTool);
+                let mut tool_results = IndexMap::default();
+                tool_results.insert(
+                    tool_use_id.clone(),
+                    LanguageModelToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        tool_name: DeferredReplayTool::NAME.into(),
+                        is_error: false,
+                        content: vec!["file contents".into()],
+                        output: Some(json!("file contents")),
+                    },
+                );
+                thread.messages.push(Arc::new(Message::Agent(AgentMessage {
+                    content: vec![AgentMessageContent::ToolUse(LanguageModelToolUse {
+                        id: tool_use_id.clone(),
+                        name: DeferredReplayTool::NAME.into(),
+                        raw_input: "null".to_string(),
+                        input: language_model::LanguageModelToolUseInput::Json(json!(null)),
+                        is_input_complete: true,
+                        thought_signature: None,
+                    })],
+                    tool_results,
+                    reasoning_details: None,
+                })));
+                thread.replay(cx)
+            })
+        });
+        let replayed = tool_call_updates(replay).await;
+        assert!(
+            replayed
+                .iter()
+                .all(|update| !update.content.is_value() && !update.raw_output.is_value()),
+            "a reopened conversation must not hold the output of a closed card"
+        );
+        assert!(replayed.iter().any(|update| {
+            update.status == MaybeUndefined::Value(acp_v2::ToolCallStatus::Completed)
+                && update.meta == MaybeUndefined::Value(acp_thread::meta_with_deferred_details())
+        }));
+
+        let details = cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                let requested = [tool_call_id.clone()].into_iter().collect::<HashSet<_>>();
+                thread.replay_tool_call_details(&requested, cx)
+            })
+        });
+        let details = tool_call_updates(details).await;
+        assert!(
+            details
+                .iter()
+                .all(|update| update.tool_call_id == tool_call_id)
+        );
+        assert!(details.iter().any(|update| {
+            update.content
+                == MaybeUndefined::Value(vec![acp_v2::ToolCallContent::from("file contents")])
+        }));
+        assert!(
+            details
+                .iter()
+                .any(|update| update.raw_output == MaybeUndefined::Value(json!("file contents")))
+        );
+        assert_eq!(
+            details.last().map(|update| &update.meta),
+            Some(&MaybeUndefined::Null),
+            "once loaded, the card must not ask again"
+        );
+    }
+
+    #[test]
+    fn history_details_store_file_reads_once() {
+        let file = LanguageModelToolResultContent::from("fn main() {}");
+        let raw = serde_json::to_value(&file).expect("raw output");
+        let read = |tool_name: &str, content: Vec<LanguageModelToolResultContent>| {
+            LanguageModelToolResult {
+                tool_use_id: LanguageModelToolUseId::from("read"),
+                tool_name: tool_name.into(),
+                is_error: false,
+                content,
+                output: Some(raw.clone()),
+            }
+        };
+
+        let mut duplicate = read(ReadFileTool::NAME, vec![file.clone()]);
+        drop_duplicate_output(&mut duplicate);
+        assert_eq!(duplicate.output, None);
+        assert_eq!(
+            tool_result_output(&duplicate).map(std::borrow::Cow::into_owned),
+            Some(raw.clone()),
+            "the raw output is rebuilt exactly for replay"
+        );
+
+        let mut noted = read(ReadFileTool::NAME, vec![file.clone(), "A note".into()]);
+        drop_duplicate_output(&mut noted);
+        assert_eq!(
+            noted.output,
+            Some(raw.clone()),
+            "content given notes differs"
+        );
+
+        let mut other_tool = read("terminal", vec![file.clone()]);
+        drop_duplicate_output(&mut other_tool);
+        assert_eq!(other_tool.output, Some(raw.clone()));
+
+        let loaded = without_duplicate_outputs(Arc::new(Message::Agent(AgentMessage {
+            tool_results: [(
+                LanguageModelToolUseId::from("read"),
+                read(ReadFileTool::NAME, vec![file]),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        })));
+        let stored = loaded
+            .as_agent_message()
+            .and_then(|message| message.tool_results.values().next())
+            .expect("stored result");
+        assert_eq!(
+            stored.output, None,
+            "saved conversations shed the copy on load"
+        );
+        assert_eq!(
+            tool_result_output(stored).map(std::borrow::Cow::into_owned),
+            Some(raw)
         );
     }
 
