@@ -2737,9 +2737,8 @@ impl Thread {
             let output = tool_result
                 .and_then(tool_result_output)
                 .map(std::borrow::Cow::into_owned);
-            let replay_content = tool_result.and_then(|result| {
-                Self::tool_result_content_for_replay(result, output.is_some())
-            });
+            let replay_content = tool_result
+                .and_then(|result| Self::tool_result_content_for_replay(result, output.is_some()));
             // Tool not found (e.g., MCP server not connected after restart),
             // but still display the saved result if available.
             stream.send_tool_call(
@@ -13021,7 +13020,11 @@ mod tests {
 
         let mut noted = read(ReadFileTool::NAME, vec![file.clone(), "A note".into()]);
         drop_duplicate_output(&mut noted);
-        assert_eq!(noted.output, Some(raw.clone()), "content given notes differs");
+        assert_eq!(
+            noted.output,
+            Some(raw.clone()),
+            "content given notes differs"
+        );
 
         let mut other_tool = read("terminal", vec![file.clone()]);
         drop_duplicate_output(&mut other_tool);
@@ -13040,7 +13043,10 @@ mod tests {
             .as_agent_message()
             .and_then(|message| message.tool_results.values().next())
             .expect("stored result");
-        assert_eq!(stored.output, None, "saved conversations shed the copy on load");
+        assert_eq!(
+            stored.output, None,
+            "saved conversations shed the copy on load"
+        );
         assert_eq!(
             tool_result_output(stored).map(std::borrow::Cow::into_owned),
             Some(raw)

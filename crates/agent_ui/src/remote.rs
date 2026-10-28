@@ -1488,10 +1488,7 @@ fn requested_acp_thread(
     workspace: &Entity<Workspace>,
     args: &Value,
     cx: &App,
-) -> Result<(
-    Entity<acp_thread::AcpThread>,
-    Option<Entity<agent::Thread>>,
-)> {
+) -> Result<(Entity<acp_thread::AcpThread>, Option<Entity<agent::Thread>>)> {
     let conversation_view = conversation_view(workspace, cx)?;
     let conversation = conversation_view.read(cx);
     let owner = conversation.as_native_thread(cx);

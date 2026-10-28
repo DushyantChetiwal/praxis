@@ -7701,11 +7701,15 @@ impl AcpThread {
                 if let Some((user_message_index, _)) = self.last_user_message() {
                     // Completed tool output makes this a tool-result refusal, not a
                     // refusal of the user's prompt, so its history must be retained.
-                    let has_completed_tool_output = self.entries.iter()
+                    let has_completed_tool_output = self
+                        .entries
+                        .iter()
                         .skip(user_message_index + 1)
-                        .any(|entry| matches!(entry, AgentThreadEntry::ToolCall(call)
+                        .any(|entry| {
+                            matches!(entry, AgentThreadEntry::ToolCall(call)
                             if call.status() == ToolCallStatus::Completed
-                                && (call.raw_output.is_some() || call.details_deferred())));
+                                && (call.raw_output.is_some() || call.details_deferred()))
+                        });
                     if !has_completed_tool_output {
                         let range = user_message_index..self.entries.len();
                         if range.start < range.end {
