@@ -3176,8 +3176,6 @@ impl Thread {
         crate::sandboxing::sandbox_worktree_writable_paths(self.project.read(cx), cx)
     }
 
-    /// A field added here must also go in `StreamingSaveKey`, unless saving it
-    /// can wait until the response finishes streaming.
     /// Roughly what the model-facing history holds, by kind, for memory
     /// diagnostics.
     pub fn memory_footprint(&self) -> HistoryFootprint {
@@ -3188,7 +3186,7 @@ impl Thread {
         for message in &self.messages {
             match &**message {
                 Message::User(user_message) => {
-                    for content in &user_message.content {
+                    for content in user_message.content.iter() {
                         footprint.user_bytes += match content {
                             UserMessageContent::Text(text) => text.len(),
                             UserMessageContent::Mention { content, .. } => content.len(),
@@ -3251,6 +3249,8 @@ impl Thread {
         footprint
     }
 
+    /// A field added here must also go in `StreamingSaveKey`, unless saving it
+    /// can wait until the response finishes streaming.
     pub fn to_db(&self, cx: &App) -> Task<DbThread> {
         let initial_project_snapshot = self.initial_project_snapshot.clone();
         let mut thread = DbThread {
