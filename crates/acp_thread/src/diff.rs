@@ -392,12 +392,14 @@ impl Diff {
         unified_diff: &str,
         language_registry: Arc<LanguageRegistry>,
     ) -> Result<Self> {
-        let (base_text, new_text) = sparse_texts_from_unified_diff(unified_diff)?;
+        // The rebuilt texts are padded to each hunk's rows, often thousands of
+        // empty lines, so they are rebuilt again only when the edit is opened.
+        sparse_texts_from_unified_diff(unified_diff)?;
         Ok(Self::Historical(HistoricalDiff {
             path,
             base_text_exists: true,
-            base_text: base_text.into(),
-            new_text: new_text.into(),
+            base_text: Arc::from(""),
+            new_text: Arc::from(""),
             unified_diff: Some(unified_diff.into()),
             language_registry,
             view: None,
@@ -415,12 +417,17 @@ impl Diff {
         if snapshot.view.is_some() {
             return false;
         }
+        let (base_text, new_text) = match snapshot.texts() {
+            Ok(texts) => texts,
+            Err(error) => {
+                log::error!("Could not show a saved edit of {}: {error:#}", snapshot.path);
+                return false;
+            }
+        };
         snapshot.view = Some(Self::finalized_data(
             snapshot.path.clone(),
-            snapshot
-                .base_text_exists
-                .then(|| snapshot.base_text.to_string()),
-            snapshot.new_text.to_string(),
+            snapshot.base_text_exists.then_some(base_text),
+            new_text,
             snapshot.language_registry.clone(),
             cx,
         ));
@@ -498,7 +505,10 @@ impl Diff {
         match self {
             Self::Pending(PendingDiff { base_text, .. }) => base_text,
             Self::Finalized(FinalizedDiff { base_text, .. }) => base_text,
-            Self::Historical(HistoricalDiff { base_text, .. }) => base_text,
+            Self::Historical(snapshot) => snapshot
+                .view
+                .as_ref()
+                .map_or(&snapshot.base_text, |view| &view.base_text),
         }
     }
 
@@ -600,9 +610,10 @@ impl Diff {
                 base_text.as_ref() != old_text
                     || !new_buffer.read(cx).as_rope().chunks().equals_str(new_text)
             }
-            Diff::Historical(snapshot) => {
-                snapshot.base_text.as_ref() != old_text || snapshot.new_text.as_ref() != new_text
-            }
+            Diff::Historical(snapshot) => match snapshot.texts() {
+                Ok((base_text, text)) => base_text != old_text || text != new_text,
+                Err(_) => true,
+            },
         }
     }
 }
@@ -810,13 +821,24 @@ impl PendingDiff {
 
 pub struct HistoricalDiff {
     path: String,
+    /// Empty when `unified_diff` is set.
     base_text: Arc<str>,
     base_text_exists: bool,
+    /// Empty when `unified_diff` is set.
     new_text: Arc<str>,
-    /// Set when the texts were rebuilt from this diff and hold only its hunks.
+    /// Set when the texts are rebuilt from this diff and hold only its hunks.
     unified_diff: Option<Arc<str>>,
     language_registry: Arc<LanguageRegistry>,
     view: Option<FinalizedDiff>,
+}
+
+impl HistoricalDiff {
+    fn texts(&self) -> Result<(String, String)> {
+        match &self.unified_diff {
+            Some(unified_diff) => sparse_texts_from_unified_diff(unified_diff),
+            None => Ok((self.base_text.to_string(), self.new_text.to_string())),
+        }
+    }
 }
 
 /// Rebuilt texts are padded with empty lines up to this row at most, so a
@@ -1030,6 +1052,11 @@ mod tests {
         });
         diff.read_with(cx, |diff, cx| {
             assert!(diff.buffer().is_none());
+            assert!(
+                diff.base_text().is_empty(),
+                "the padded texts are rebuilt only when the edit is opened"
+            );
+
             assert_eq!(
                 diff.to_markdown(cx),
                 format!(
