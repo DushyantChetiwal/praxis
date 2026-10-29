@@ -1,6 +1,7 @@
 package io.github.dushyantchetiwal.praxis.remote.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -49,6 +50,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberTooltipState
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -72,6 +74,7 @@ import io.github.dushyantchetiwal.praxis.remote.DeviceUi
 import io.github.dushyantchetiwal.praxis.remote.MainViewModel
 import io.github.dushyantchetiwal.praxis.remote.R
 import io.github.dushyantchetiwal.praxis.remote.Tab
+import io.github.dushyantchetiwal.praxis.remote.data.RemoteConnection
 import io.github.dushyantchetiwal.praxis.remote.data.WindowInfo
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -360,7 +363,8 @@ private fun DeviceHeader(state: AppState, ui: DeviceUi, vm: MainViewModel) {
         }
     }
     val reported = ui.banners.filter { (key, banner) -> ui.dismissedBanners[key] != banner }
-    if (banners.isEmpty() && reported.isEmpty() && state.update == null) return
+    val connection = ui.currentWindow()?.connection?.takeIf { it.disconnected || it.reconnecting }
+    if (banners.isEmpty() && reported.isEmpty() && state.update == null && connection == null) return
     Column(
         Modifier
             .fillMaxWidth()
@@ -369,7 +373,42 @@ private fun DeviceHeader(state: AppState, ui: DeviceUi, vm: MainViewModel) {
     ) {
         state.update?.let { UpdateBanner(it, onDismiss = vm::dismissUpdate) }
         banners.forEach { BannerRow(it) }
+        connection?.let { RemoteConnectionRow(it, busy = ui.reconnecting, onReconnect = vm::reconnectRemote) }
         reported.forEach { (key, banner) -> BannerRow(banner, onDismiss = { vm.dismissBanner(key) }) }
+    }
+}
+
+/** A lost remote project stops the agent's file work, so its reconnect stays in view. */
+@Composable
+private fun RemoteConnectionRow(connection: RemoteConnection, busy: Boolean, onReconnect: () -> Unit) {
+    if (!connection.disconnected) {
+        BannerRow(Banner(stringResource(R.string.remote_reconnecting, connection.host), error = false))
+        return
+    }
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        color = scheme.errorContainer,
+        contentColor = scheme.onErrorContainer,
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Outlined.LinkOff, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
+                Text(
+                    stringResource(R.string.remote_disconnected, connection.host),
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                Text(stringResource(R.string.remote_disconnected_body), style = MaterialTheme.typography.bodySmall)
+            }
+            TextButton(onClick = onReconnect, enabled = !busy) {
+                Text(stringResource(R.string.action_reconnect))
+            }
+        }
     }
 }
 

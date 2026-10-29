@@ -356,9 +356,17 @@ data class WindowInfo(
     val active: Boolean,
     val thread: ThreadSummary?,
     val architect: Architect?,
+    /** Set when the window's project lives on a remote host, such as WSL or SSH. */
+    val connection: RemoteConnection? = null,
 ) {
     /** The window's projects, or null when it has none open. */
     val projectsLabel: String? get() = projects.filter { it.isNotBlank() }.joinToString(", ").ifEmpty { null }
+}
+
+/** How a window reaches the remote host its project lives on. */
+data class RemoteConnection(val host: String, val state: String) {
+    val disconnected: Boolean get() = state == "disconnected"
+    val reconnecting: Boolean get() = state == "connecting" || state == "reconnecting"
 }
 
 data class Status(
@@ -520,6 +528,10 @@ private fun parseWindow(o: JSONObject): WindowInfo? {
                 stepNumber = a.int("step_number") ?: 0,
                 outcome = a.str("outcome"),
             )
+        },
+        connection = o.obj("connection")?.let { c ->
+            val host = c.str("host")?.takeIf { it.isNotBlank() } ?: return@let null
+            RemoteConnection(host = host, state = c.str("state") ?: return@let null)
         },
     )
 }

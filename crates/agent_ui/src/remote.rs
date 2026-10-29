@@ -44,9 +44,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, Global, Task, TaskExt as _, WeakEntity,
+    App, AppContext as _, AsyncApp, Context, Entity, Focusable as _, Global, Task, TaskExt as _,
+    WeakEntity,
 };
 use http_client::HttpClient;
+use remote_connection::RemoteConnectionModal;
 use serde_json::{Value, json};
 use util::ResultExt as _;
 use util::rel_path::RelPath;
@@ -654,6 +656,25 @@ fn handle_paired(
             view.update(cx, |view, cx| view.retry_generation(cx));
             Ok(json!({ "retrying": true }))
         }),
+        "reconnect" => with_workspace(window, cx, |workspace, window, cx| {
+            let (host, state) = remote_connection(workspace, cx)
+                .context("This window has no remote project to reconnect.")?;
+            let reopening = workspace
+                .read(cx)
+                .active_modal::<RemoteConnectionModal>(cx)
+                .is_some();
+            if state == remote::ConnectionState::Disconnected && !reopening {
+                // The disconnected overlay owns reopening the project. Its
+                // action is registered on the workspace, which only a focus
+                // inside it reaches, so dispatch from the active pane.
+                let focus_handle = workspace.read(cx).focus_handle(cx);
+                window.defer(cx, move |window, cx| {
+                    focus_handle.dispatch_action(&zed_actions::remote::Reconnect, window, cx);
+                });
+                return Ok(json!({ "host": host, "state": "reconnecting" }));
+            }
+            Ok(connection_status(host, state, reopening))
+        }),
         "dismiss_error" => with_workspace(window, cx, |workspace, _, cx| {
             required(args, "session_id")?;
             let view = requested_root_view(workspace, args, cx)?;
@@ -983,13 +1004,47 @@ fn window_status(id: u64, active: bool, workspace: &Entity<Workspace>, cx: &App)
     let architect = panel
         .as_ref()
         .and_then(|panel| architect_summary(panel, cx));
+    let connection = remote_connection(workspace, cx).map(|(host, state)| {
+        let reopening = workspace
+            .read(cx)
+            .active_modal::<RemoteConnectionModal>(cx)
+            .is_some();
+        connection_status(host, state, reopening)
+    });
     json!({
         "window": id,
         "projects": projects,
         "active": active,
         "thread": thread,
         "architect": architect,
+        "connection": connection,
     })
+}
+
+/// The host a window's remote project lives on, and its connection's state.
+fn remote_connection(
+    workspace: &Entity<Workspace>,
+    cx: &App,
+) -> Option<(String, remote::ConnectionState)> {
+    let project = workspace.read(cx).project().read(cx);
+    Some((
+        project.remote_connection_options(cx)?.display_name(),
+        project.remote_connection_state(cx)?,
+    ))
+}
+
+/// A reopen started from the disconnected overlay or the phone leaves the
+/// old client disconnected until it succeeds, so it reads as reconnecting.
+fn connection_status(host: String, state: remote::ConnectionState, reopening: bool) -> Value {
+    let state = match state {
+        remote::ConnectionState::Connected => "connected",
+        remote::ConnectionState::Connecting => "connecting",
+        remote::ConnectionState::Disconnected if !reopening => "disconnected",
+        remote::ConnectionState::HeartbeatMissed
+        | remote::ConnectionState::Reconnecting
+        | remote::ConnectionState::Disconnected => "reconnecting",
+    };
+    json!({ "host": host, "state": state })
 }
 
 fn project_roots(workspace: &Entity<Workspace>, cx: &App) -> Vec<(String, PathBuf)> {
@@ -2542,6 +2597,22 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn remote_connection_offers_reconnect_only_when_nothing_is_reopening() {
+        use remote::ConnectionState;
+        let state = |connection, reopening| {
+            connection_status("Debian".to_string(), connection, reopening)["state"].clone()
+        };
+        assert_eq!(state(ConnectionState::Disconnected, false), "disconnected");
+        assert_eq!(state(ConnectionState::Disconnected, true), "reconnecting");
+        assert_eq!(state(ConnectionState::Reconnecting, false), "reconnecting");
+        assert_eq!(state(ConnectionState::HeartbeatMissed, false), "reconnecting");
+        assert_eq!(state(ConnectionState::Connecting, false), "connecting");
+        assert_eq!(state(ConnectionState::Connected, true), "connected");
+        let status = connection_status("Debian".to_string(), ConnectionState::Connected, false);
+        assert_eq!(status["host"], "Debian");
     }
 
     #[test]

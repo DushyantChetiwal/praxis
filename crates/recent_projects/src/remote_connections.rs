@@ -1014,6 +1014,113 @@ mod tests {
             .unwrap();
     }
 
+    #[gpui::test]
+    async fn test_reconnect_action_reopens_a_disconnected_remote_project(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        use crate::disconnected_overlay::DisconnectedOverlay;
+        use gpui::Focusable as _;
+
+        let app_state = init_test(cx);
+        let executor = cx.executor();
+
+        cx.update(|cx| {
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+        });
+        server_cx.update(|cx| {
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+        });
+
+        let (opts, server_session, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        let remote_fs = FakeFs::new(server_cx.executor());
+        remote_fs
+            .insert_tree(path!("/project"), json!({ "main.rs": "fn main() {}" }))
+            .await;
+
+        server_cx.update(HeadlessProject::init);
+        let http_client = Arc::new(BlockedHttpClient);
+        let node_runtime = NodeRuntime::unavailable();
+        let languages = Arc::new(language::LanguageRegistry::new(server_cx.executor()));
+        let proxy = Arc::new(ExtensionHostProxy::new());
+        let headless_state = |session| HeadlessAppState {
+            session,
+            fs: remote_fs.clone(),
+            http_client: http_client.clone(),
+            node_runtime: node_runtime.clone(),
+            languages: languages.clone(),
+            extension_host_proxy: proxy.clone(),
+            startup_time: std::time::Instant::now(),
+        };
+        let _headless =
+            server_cx.new(|cx| HeadlessProject::new(headless_state(server_session), false, cx));
+        drop(connect_guard);
+
+        let mut async_cx = cx.to_async();
+        let window = open_remote_project(
+            opts.clone(),
+            vec![PathBuf::from(path!("/project"))],
+            app_state,
+            workspace::OpenOptions::default(),
+            &mut async_cx,
+        )
+        .await
+        .expect("initial open should succeed");
+        executor.run_until_parked();
+
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .unwrap();
+        workspace.update(cx, |workspace, cx| {
+            let client = workspace
+                .project()
+                .read(cx)
+                .remote_client()
+                .expect("should have remote client");
+            client.update(cx, |client, cx| client.force_server_not_running(cx));
+        });
+        executor.run_until_parked();
+        assert!(
+            workspace.read_with(cx, |workspace, cx| {
+                workspace.active_modal::<DisconnectedOverlay>(cx).is_some()
+            }),
+            "losing the server should show the disconnected overlay"
+        );
+
+        let (server_session, connect_guard) =
+            RemoteClient::fake_server_with_opts(&opts, cx, server_cx);
+        let _headless =
+            server_cx.new(|cx| HeadlessProject::new(headless_state(server_session), false, cx));
+        drop(connect_guard);
+
+        // Praxis Remote reconnects from the active pane, away from the
+        // overlay's own button.
+        cx.update_window(window.into(), |_, window, cx| {
+            let focus_handle = workspace.read(cx).focus_handle(cx);
+            focus_handle.dispatch_action(&zed_actions::remote::Reconnect, window, cx);
+        })
+        .unwrap();
+        executor.run_until_parked();
+
+        assert!(
+            workspace.read_with(cx, |workspace, cx| {
+                workspace.active_modal::<DisconnectedOverlay>(cx).is_none()
+            }),
+            "reconnecting should dismiss the overlay"
+        );
+        let state = window
+            .read_with(cx, |multi_workspace, cx| {
+                let project = multi_workspace.workspace().read(cx).project().read(cx);
+                project.remote_connection_state(cx)
+            })
+            .unwrap();
+        assert_eq!(
+            state,
+            Some(remote::ConnectionState::Connected),
+            "the reconnect action should reopen the project"
+        );
+    }
+
     fn init_test(cx: &mut TestAppContext) -> Arc<AppState> {
         cx.update(|cx| {
             let state = AppState::test(cx);

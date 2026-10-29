@@ -261,6 +261,18 @@ pub mod dev {
     );
 }
 
+pub mod remote {
+    use gpui::actions;
+
+    actions!(
+        remote,
+        [
+            /// Reconnects this window to its remote project after the connection was lost.
+            Reconnect,
+        ]
+    );
+}
+
 pub mod remote_debug {
     use gpui::actions;
 

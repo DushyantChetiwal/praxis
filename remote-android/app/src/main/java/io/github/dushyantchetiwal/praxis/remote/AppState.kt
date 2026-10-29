@@ -281,6 +281,8 @@ data class DeviceUi(
     val confirmingStop: Boolean = false,
     val retrying: Boolean = false,
     val compacting: Boolean = false,
+    /** Whether the phone is asking Praxis to reconnect the window's remote project. */
+    val reconnecting: Boolean = false,
     val startingThread: Boolean = false,
 ) {
     val thread: ThreadView? get() = history.thread

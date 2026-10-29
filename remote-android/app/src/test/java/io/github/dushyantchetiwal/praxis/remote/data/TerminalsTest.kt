@@ -9,6 +9,21 @@ import org.junit.Test
 
 class TerminalsTest {
     @Test
+    fun aWindowReportsItsRemoteConnection() {
+        val status = parseStatus(JSONObject("""{"windows":[
+            {"window":1,"projects":["app"],"connection":{"host":"Debian","state":"disconnected"}},
+            {"window":2,"projects":["app"],"connection":{"host":"Debian","state":"reconnecting"}},
+            {"window":3,"projects":["app"],"connection":null},
+            {"window":4,"projects":["app"],"connection":{"state":"disconnected"}}]}"""))
+        val (lost, reopening, local, unnamed) = status.windows.map { it.connection }
+        assertEquals(RemoteConnection("Debian", "disconnected"), lost)
+        assertTrue(lost!!.disconnected && !lost.reconnecting)
+        assertTrue(reopening!!.reconnecting && !reopening.disconnected)
+        assertNull(local)
+        assertNull(unnamed)
+    }
+
+    @Test
     fun aThreadSummaryReportsTheTurnErrorRetriesAndBackgroundCommands() {
         val status = parseStatus(JSONObject("""{"windows":[{"window":1,"projects":[],"thread":{
             "session_id":"s","queued":0,"pending":[],
