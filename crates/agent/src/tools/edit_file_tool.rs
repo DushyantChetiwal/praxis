@@ -347,6 +347,63 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn historical_diff_replay_redraws_saved_edits_from_their_diff(cx: &mut TestAppContext) {
+        let original = (1..=40).map(|row| format!("line {row}\n")).collect::<String>();
+        let (edit_tool, _project, _action_log, _fs, _thread) =
+            setup_test(cx, json!({"file.txt": original})).await;
+        let output = cx
+            .update(|cx| {
+                edit_tool.clone().run(
+                    ToolInput::resolved(EditFileToolInput {
+                        path: "root/file.txt".into(),
+                        edits: vec![Edit {
+                            old_text: "line 30\n".into(),
+                            new_text: "line thirty\n".into(),
+                        }],
+                    }),
+                    ToolCallEventStream::test().0,
+                    cx,
+                )
+            })
+            .await
+            .expect("edit succeeds");
+        let saved = serde_json::to_value(&output).expect("saved output");
+        assert!(
+            saved.get("old_text").is_none() && saved.get("new_text").is_none(),
+            "a saved edit keeps neither version of the file: {saved}"
+        );
+        assert!(
+            saved["diff"]
+                .as_str()
+                .is_some_and(|diff| diff.contains("+line thirty"))
+        );
+
+        let (events, mut receiver) = ToolCallEventStream::test();
+        cx.update(|cx| {
+            edit_tool
+                .replay(
+                    EditFileToolInput {
+                        path: "root/file.txt".into(),
+                        edits: Vec::new(),
+                    },
+                    serde_json::from_value(saved).expect("saved output reloads"),
+                    events,
+                    cx,
+                )
+                .expect("replay saved edit");
+        });
+        let diff = receiver.expect_diff().await;
+        diff.update(cx, |diff, cx| assert!(diff.materialize(cx)));
+        cx.run_until_parked();
+        diff.read_with(cx, |diff, cx| {
+            assert!(diff.has_revealed_range(cx));
+            let new_text = diff.buffer().expect("opened edit").read(cx).text();
+            assert_eq!(new_text.lines().nth(29), Some("line thirty"));
+            assert_eq!(diff.base_text().lines().nth(29), Some("line 30"));
+        });
+    }
+
+    #[gpui::test]
     async fn test_streaming_edit_granular_edits(cx: &mut TestAppContext) {
         let (edit_tool, _project, _action_log, _fs, _thread) =
             setup_test(cx, json!({"file.txt": "line 1\nline 2\nline 3\n"})).await;

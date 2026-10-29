@@ -113,7 +113,10 @@ fn start_memory_usage_logging(
     let (diagnostics_sender, mut diagnostics_receiver) = futures::channel::mpsc::unbounded();
     cx.spawn(async move |cx| {
         while diagnostics_receiver.next().await.is_some() {
-            cx.update(|cx| log_worktree_diagnostics(&workspace_store, &projects, cx));
+            cx.update(|cx| {
+                log_worktree_diagnostics(&workspace_store, &projects, cx);
+                log_entity_diagnostics(&projects, cx);
+            });
         }
     })
     .detach();
@@ -254,6 +257,61 @@ fn log_worktree_diagnostics(
             "worktree diagnostics: projects {project_count}, orphaned projects {orphaned_project_count}, stores {store_count}, slots {worktree_slots}, live {live_worktrees}, visible {visible_worktrees}, strong {strong_handles}, dead weak {dead_weak_handles}, loading {loading_worktrees}, entries {total_entries}, visible entries {visible_entries}, largest none",
         ),
     }
+}
+
+const LOGGED_ENTITY_TYPES: usize = 24;
+
+/// Names the kinds of state that pile up, which resident memory alone can't.
+fn log_entity_diagnostics(projects: &ProjectRegistry, cx: &App) {
+    let counts = cx.live_entity_counts();
+    let total: usize = counts.iter().map(|(_, count)| count).sum();
+    let most_numerous = counts
+        .iter()
+        .take(LOGGED_ENTITY_TYPES)
+        .map(|(name, count)| format!("{} {count}", short_type_name(name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    log::info!("entity diagnostics: {total} live; {most_numerous}");
+
+    let mut seen_buffers = HashSet::new();
+    let mut buffer_bytes = 0;
+    for project in projects.borrow().iter().filter_map(WeakEntity::upgrade) {
+        for buffer in project.read(cx).buffer_store().read(cx).buffers() {
+            if seen_buffers.insert(buffer.entity_id()) {
+                buffer_bytes += buffer.read(cx).len();
+            }
+        }
+    }
+    log::info!(
+        "buffer diagnostics: {} open in projects, {} MiB of text",
+        seen_buffers.len(),
+        buffer_bytes / (1024 * 1024)
+    );
+}
+
+/// Shortens `agent::thread::Thread` to `agent::Thread`, including inside generics.
+fn short_type_name(name: &str) -> String {
+    fn push_path(path: &str, short: &mut String) {
+        match (path.split_once("::"), path.rsplit_once("::")) {
+            (Some((first, _)), Some((_, last))) => {
+                short.push_str(first);
+                short.push_str("::");
+                short.push_str(last);
+            }
+            _ => short.push_str(path),
+        }
+    }
+    let mut short = String::with_capacity(name.len());
+    let mut path_start = 0;
+    for (index, character) in name.char_indices() {
+        if !(character.is_alphanumeric() || character == '_' || character == ':') {
+            push_path(&name[path_start..index], &mut short);
+            short.push(character);
+            path_start = index + character.len_utf8();
+        }
+    }
+    push_path(&name[path_start..], &mut short);
+    short
 }
 
 pub async fn upload_previous_minidumps(client: Arc<Client>) -> anyhow::Result<()> {
