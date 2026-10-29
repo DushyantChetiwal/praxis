@@ -3884,6 +3884,15 @@ fn stop_reason_from_v1(reason: &acp_v1::StopReason) -> Option<acp_v2::StopReason
     })
 }
 
+/// See [`AcpThread::memory_footprint`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TranscriptFootprint {
+    pub entries: usize,
+    pub tool_calls: usize,
+    pub tool_input_bytes: usize,
+    pub tool_output_bytes: usize,
+}
+
 pub struct AcpThread {
     session_info: AgentSessionInfo,
     parent_session_id: Option<acp_v2::SessionId>,
@@ -4342,6 +4351,28 @@ impl AcpThread {
 
     pub fn entries(&self) -> &[AgentThreadEntry] {
         &self.entries
+    }
+
+    /// Roughly what the transcript's tool calls hold besides their formatted
+    /// text, for memory diagnostics.
+    pub fn memory_footprint(&self) -> TranscriptFootprint {
+        let mut footprint = TranscriptFootprint {
+            entries: self.entries.len(),
+            ..Default::default()
+        };
+        for entry in &self.entries {
+            let AgentThreadEntry::ToolCall(call) = entry else {
+                continue;
+            };
+            footprint.tool_calls += 1;
+            if let Some(input) = &call.raw_input {
+                footprint.tool_input_bytes += util::size::estimated_json_heap_bytes(input);
+            }
+            if let Some(output) = &call.raw_output {
+                footprint.tool_output_bytes += util::size::estimated_json_heap_bytes(output);
+            }
+        }
+        footprint
     }
 
     pub fn notices(&self) -> &[(usize, acp_v2::Notice)] {

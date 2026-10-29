@@ -260,32 +260,129 @@ fn log_worktree_diagnostics(
 }
 
 const LOGGED_ENTITY_TYPES: usize = 24;
+const LOGGED_LARGEST_ENTITY_TYPES: usize = 12;
 
-/// Names the kinds of state that pile up, which resident memory alone can't.
+fn mebibytes(bytes: usize) -> String {
+    format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+}
+
+/// Names the kinds of state that pile up and roughly what they hold, which
+/// resident memory alone can't. Heap sizes are estimates.
 fn log_entity_diagnostics(projects: &ProjectRegistry, cx: &App) {
     let counts = cx.live_entity_counts();
-    let total: usize = counts.iter().map(|(_, count)| count).sum();
+    let total: usize = counts.iter().map(|entity_type| entity_type.count).sum();
+    let inline_total: usize = counts
+        .iter()
+        .map(|entity_type| entity_type.count * entity_type.inline_size)
+        .sum();
     let most_numerous = counts
         .iter()
         .take(LOGGED_ENTITY_TYPES)
-        .map(|(name, count)| format!("{} {count}", short_type_name(name)))
+        .map(|entity_type| {
+            format!("{} {}", short_type_name(entity_type.name), entity_type.count)
+        })
         .collect::<Vec<_>>()
         .join(", ");
-    log::info!("entity diagnostics: {total} live; {most_numerous}");
+    log::info!(
+        "entity diagnostics: {total} live, {} inline; {most_numerous}",
+        mebibytes(inline_total)
+    );
 
-    let mut seen_buffers = HashSet::new();
-    let mut buffer_bytes = 0;
+    let mut by_inline_bytes = counts;
+    by_inline_bytes.sort_by_key(|entity_type| {
+        std::cmp::Reverse(entity_type.count * entity_type.inline_size)
+    });
+    let largest = by_inline_bytes
+        .iter()
+        .take(LOGGED_LARGEST_ENTITY_TYPES)
+        .map(|entity_type| {
+            format!(
+                "{} {} x {} B = {}",
+                short_type_name(entity_type.name),
+                entity_type.count,
+                entity_type.inline_size,
+                mebibytes(entity_type.count * entity_type.inline_size)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    log::info!("entity inline sizes: {largest}");
+
+    let mut threads = 0;
+    let mut history = agent::HistoryFootprint::default();
+    cx.for_each_live_entity::<agent::Thread>(|thread| {
+        threads += 1;
+        let footprint = thread.memory_footprint();
+        history.messages += footprint.messages;
+        history.user_bytes += footprint.user_bytes;
+        history.text_bytes += footprint.text_bytes;
+        history.thinking_bytes += footprint.thinking_bytes;
+        history.tool_input_bytes += footprint.tool_input_bytes;
+        history.tool_result_bytes += footprint.tool_result_bytes;
+        history.provider_state_bytes += footprint.provider_state_bytes;
+    });
+    log::info!(
+        "history diagnostics: {threads} threads, {} messages, about {}: tool inputs {}, \
+         tool results {}, thinking {}, provider state {}, replies {}, user {}",
+        history.messages,
+        mebibytes(history.total_bytes()),
+        mebibytes(history.tool_input_bytes),
+        mebibytes(history.tool_result_bytes),
+        mebibytes(history.thinking_bytes),
+        mebibytes(history.provider_state_bytes),
+        mebibytes(history.text_bytes),
+        mebibytes(history.user_bytes),
+    );
+
+    let mut transcripts = 0;
+    let mut transcript = acp_thread::TranscriptFootprint::default();
+    cx.for_each_live_entity::<acp_thread::AcpThread>(|thread| {
+        transcripts += 1;
+        let footprint = thread.memory_footprint();
+        transcript.entries += footprint.entries;
+        transcript.tool_calls += footprint.tool_calls;
+        transcript.tool_input_bytes += footprint.tool_input_bytes;
+        transcript.tool_output_bytes += footprint.tool_output_bytes;
+    });
+    let mut markdowns = 0;
+    let mut parsed_markdowns = 0;
+    let mut markdown_source_bytes = 0;
+    let mut markdown_parsed_bytes = 0;
+    cx.for_each_live_entity::<markdown::Markdown>(|markdown| {
+        let footprint = markdown.memory_footprint();
+        markdowns += 1;
+        parsed_markdowns += usize::from(footprint.parsed);
+        markdown_source_bytes += footprint.source_bytes;
+        markdown_parsed_bytes += footprint.parsed_bytes;
+    });
+    log::info!(
+        "transcript diagnostics: {transcripts} transcripts, {} entries, {} tool calls \
+         holding about {} of inputs and {} of outputs; {markdowns} markdown blocks \
+         ({parsed_markdowns} parsed) holding {} of text and {} parsed",
+        transcript.entries,
+        transcript.tool_calls,
+        mebibytes(transcript.tool_input_bytes),
+        mebibytes(transcript.tool_output_bytes),
+        mebibytes(markdown_source_bytes),
+        mebibytes(markdown_parsed_bytes),
+    );
+
+    let mut project_buffers = HashSet::new();
     for project in projects.borrow().iter().filter_map(WeakEntity::upgrade) {
         for buffer in project.read(cx).buffer_store().read(cx).buffers() {
-            if seen_buffers.insert(buffer.entity_id()) {
-                buffer_bytes += buffer.read(cx).len();
-            }
+            project_buffers.insert(buffer.entity_id());
         }
     }
+    let mut buffers = 0;
+    let mut buffer_bytes = 0;
+    cx.for_each_live_entity::<language::Buffer>(|buffer| {
+        buffers += 1;
+        buffer_bytes += buffer.len();
+    });
     log::info!(
-        "buffer diagnostics: {} open in projects, {} MiB of text",
-        seen_buffers.len(),
-        buffer_bytes / (1024 * 1024)
+        "buffer diagnostics: {buffers} live holding {} of text, {} open in projects",
+        mebibytes(buffer_bytes),
+        project_buffers.len(),
     );
 }
 

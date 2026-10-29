@@ -47,7 +47,7 @@ use language_model::{
     LanguageModelId, LanguageModelImage, LanguageModelProviderId, LanguageModelRegistry,
     LanguageModelRequest, LanguageModelRequestMessage, LanguageModelRequestTool,
     LanguageModelToolResult, LanguageModelToolResultContent, LanguageModelToolUse,
-    LanguageModelToolUseId, MessageContent, ProviderErrorCategory, Role, SelectedModel, Speed,
+    LanguageModelToolUseId, LanguageModelToolUseInput, MessageContent, ProviderErrorCategory, Role, SelectedModel, Speed,
     StopReason, TokenUsage, ZED_CLOUD_PROVIDER_ID,
 };
 use project::{Project, trusted_worktrees::TrustedWorktrees};
@@ -1573,6 +1573,29 @@ impl AgentMessage {
             messages.push(user_message);
         }
         messages
+    }
+}
+
+/// See [`Thread::memory_footprint`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HistoryFootprint {
+    pub messages: usize,
+    pub user_bytes: usize,
+    pub text_bytes: usize,
+    pub thinking_bytes: usize,
+    pub tool_input_bytes: usize,
+    pub tool_result_bytes: usize,
+    pub provider_state_bytes: usize,
+}
+
+impl HistoryFootprint {
+    pub fn total_bytes(&self) -> usize {
+        self.user_bytes
+            + self.text_bytes
+            + self.thinking_bytes
+            + self.tool_input_bytes
+            + self.tool_result_bytes
+            + self.provider_state_bytes
     }
 }
 
@@ -3146,6 +3169,79 @@ impl Thread {
 
     /// A field added here must also go in `StreamingSaveKey`, unless saving it
     /// can wait until the response finishes streaming.
+    /// Roughly what the model-facing history holds, by kind, for memory
+    /// diagnostics.
+    pub fn memory_footprint(&self) -> HistoryFootprint {
+        let mut footprint = HistoryFootprint {
+            messages: self.messages.len(),
+            ..Default::default()
+        };
+        for message in &self.messages {
+            match &**message {
+                Message::User(user_message) => {
+                    for content in &user_message.content {
+                        footprint.user_bytes += match content {
+                            UserMessageContent::Text(text) => text.len(),
+                            UserMessageContent::Mention { content, .. } => content.len(),
+                            UserMessageContent::Image(image) => image.len(),
+                        };
+                    }
+                }
+                Message::Agent(agent_message) => {
+                    for content in &agent_message.content {
+                        match content {
+                            AgentMessageContent::Text(text) => footprint.text_bytes += text.len(),
+                            AgentMessageContent::Thinking { text, signature } => {
+                                footprint.thinking_bytes += text.len();
+                                footprint.provider_state_bytes +=
+                                    signature.as_ref().map_or(0, String::len);
+                            }
+                            AgentMessageContent::RedactedThinking(data) => {
+                                footprint.provider_state_bytes += data.len();
+                            }
+                            AgentMessageContent::ToolUse(tool_use) => {
+                                footprint.tool_input_bytes += tool_use.raw_input.len()
+                                    + match &tool_use.input {
+                                        LanguageModelToolUseInput::Json(input) => {
+                                            util::size::estimated_json_heap_bytes(input)
+                                        }
+                                        LanguageModelToolUseInput::Text(input) => input.len(),
+                                    };
+                            }
+                        }
+                    }
+                    if let Some(details) = &agent_message.reasoning_details {
+                        footprint.provider_state_bytes +=
+                            util::size::estimated_json_heap_bytes(details);
+                    }
+                    for result in agent_message.tool_results.values() {
+                        for content in &result.content {
+                            footprint.tool_result_bytes += match content {
+                                LanguageModelToolResultContent::Text(text) => text.len(),
+                                LanguageModelToolResultContent::Image(image) => image.len(),
+                            };
+                        }
+                        if let Some(output) = &result.output {
+                            footprint.tool_result_bytes +=
+                                util::size::estimated_json_heap_bytes(output);
+                        }
+                    }
+                }
+                Message::Compaction(CompactionInfo::Summary(summary)) => {
+                    footprint.text_bytes += summary.len();
+                }
+                Message::Compaction(CompactionInfo::ProviderNative { items, .. }) => {
+                    footprint.provider_state_bytes += items
+                        .iter()
+                        .map(util::size::estimated_json_heap_bytes)
+                        .sum::<usize>();
+                }
+                Message::Resume | Message::LoopGuard(_) | Message::BackgroundWake(_) => {}
+            }
+        }
+        footprint
+    }
+
     pub fn to_db(&self, cx: &App) -> Task<DbThread> {
         let initial_project_snapshot = self.initial_project_snapshot.clone();
         let mut thread = DbThread {
@@ -13180,6 +13276,58 @@ mod tests {
             "the latest compaction may still replay messages after the one before it"
         );
         assert_eq!(provider_state(&messages[4]), (true, true));
+    }
+
+    #[gpui::test]
+    async fn history_details_report_memory_footprint(cx: &mut TestAppContext) {
+        let (thread, _event_stream, _fake) = setup_thread_for_test(cx).await;
+        thread.update(cx, |thread, _| {
+            let before = thread.memory_footprint();
+            let tool_use_id = LanguageModelToolUseId::from("read");
+            thread.messages.push(Arc::new(Message::Agent(AgentMessage {
+                content: vec![
+                    AgentMessageContent::Text("reply".into()),
+                    AgentMessageContent::Thinking {
+                        text: "thinking".into(),
+                        signature: Some("sig".into()),
+                    },
+                    AgentMessageContent::ToolUse(LanguageModelToolUse {
+                        id: tool_use_id.clone(),
+                        name: ReadFileTool::NAME.into(),
+                        raw_input: r#"{"path":"a.rs"}"#.into(),
+                        input: LanguageModelToolUseInput::Json(json!({ "path": "a.rs" })),
+                        is_input_complete: true,
+                        thought_signature: None,
+                    }),
+                ],
+                tool_results: [(
+                    tool_use_id.clone(),
+                    LanguageModelToolResult {
+                        tool_use_id,
+                        tool_name: ReadFileTool::NAME.into(),
+                        is_error: false,
+                        content: vec!["fn main() {}".into()],
+                        output: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                reasoning_details: None,
+            })));
+            let after = thread.memory_footprint();
+            assert_eq!(after.messages, before.messages + 1);
+            assert_eq!(after.text_bytes - before.text_bytes, "reply".len());
+            assert_eq!(after.thinking_bytes - before.thinking_bytes, "thinking".len());
+            assert_eq!(after.provider_state_bytes - before.provider_state_bytes, 3);
+            assert_eq!(
+                after.tool_result_bytes - before.tool_result_bytes,
+                "fn main() {}".len()
+            );
+            assert!(
+                after.tool_input_bytes - before.tool_input_bytes > r#"{"path":"a.rs"}"#.len(),
+                "both the raw and the parsed input count"
+            );
+        });
     }
 
     #[test]

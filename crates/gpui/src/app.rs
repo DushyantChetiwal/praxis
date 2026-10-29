@@ -1273,8 +1273,14 @@ impl App {
 
     /// How many entities of each type are alive, most numerous first, for
     /// diagnosing memory growth. Entities being updated right now are left out.
-    pub fn live_entity_counts(&self) -> Vec<(&'static str, usize)> {
+    pub fn live_entity_counts(&self) -> Vec<LiveEntityType> {
         self.entities.live_entity_counts()
+    }
+
+    /// Calls `f` with every live entity of type `T`, for diagnosing memory
+    /// growth. Entities being updated right now are left out.
+    pub fn for_each_live_entity<T: 'static>(&self, f: impl FnMut(&T)) {
+        self.entities.for_each_live_entity(f);
     }
 
     /// Switches the platform between headless and windowed modes.
