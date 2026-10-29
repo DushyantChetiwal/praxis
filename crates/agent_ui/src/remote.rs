@@ -2608,7 +2608,10 @@ mod tests {
         assert_eq!(state(ConnectionState::Disconnected, false), "disconnected");
         assert_eq!(state(ConnectionState::Disconnected, true), "reconnecting");
         assert_eq!(state(ConnectionState::Reconnecting, false), "reconnecting");
-        assert_eq!(state(ConnectionState::HeartbeatMissed, false), "reconnecting");
+        assert_eq!(
+            state(ConnectionState::HeartbeatMissed, false),
+            "reconnecting"
+        );
         assert_eq!(state(ConnectionState::Connecting, false), "connecting");
         assert_eq!(state(ConnectionState::Connected, true), "connected");
         let status = connection_status("Debian".to_string(), ConnectionState::Connected, false);

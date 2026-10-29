@@ -102,7 +102,9 @@ impl DisconnectedOverlay {
     ) {
         let project = workspace.project().read(cx);
         if project.remote_connection_state(cx) != Some(ConnectionState::Disconnected)
-            || workspace.active_modal::<RemoteConnectionModal>(cx).is_some()
+            || workspace
+                .active_modal::<RemoteConnectionModal>(cx)
+                .is_some()
         {
             return;
         }
@@ -132,7 +134,10 @@ impl DisconnectedOverlay {
         };
         let (app_state, paths) = {
             let workspace = workspace.read(cx);
-            (workspace.app_state().clone(), workspace_paths(workspace, cx))
+            (
+                workspace.app_state().clone(),
+                workspace_paths(workspace, cx),
+            )
         };
         reopen_remote_project(connection_options.clone(), paths, app_state, window, cx);
     }
