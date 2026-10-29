@@ -1280,9 +1280,10 @@ impl Markdown {
         let needs_loading = !parsed.language_names.is_empty()
             || !parsed.language_paths.is_empty()
             || parsed.has_untagged_code_block
-            || parsed.events.iter().any(|(_, event)| {
-                matches!(event, MarkdownEvent::Start(MarkdownTag::Image { .. }))
-            });
+            || parsed
+                .events
+                .iter()
+                .any(|(_, event)| matches!(event, MarkdownEvent::Start(MarkdownTag::Image { .. })));
         if needs_loading {
             return None;
         }
@@ -5366,7 +5367,10 @@ mod tests {
         });
         cx.run_until_parked();
         markdown.update(cx, |markdown, cx| {
-            assert!(!markdown.memory_footprint().parsed, "nothing laid it out yet");
+            assert!(
+                !markdown.memory_footprint().parsed,
+                "nothing laid it out yet"
+            );
             markdown.ensure_parsed(cx);
             assert!(markdown.pending_parse.is_none());
             assert!(
@@ -5396,7 +5400,9 @@ mod tests {
             );
         });
         cx.run_until_parked();
-        code.read_with(cx, |markdown, _| assert!(markdown.memory_footprint().parsed));
+        code.read_with(cx, |markdown, _| {
+            assert!(markdown.memory_footprint().parsed)
+        });
     }
 
     #[gpui::test]
