@@ -7,7 +7,7 @@ use collections::{HashMap, HashSet};
 use gpui::{App, AppContext, AsyncApp, Context, Entity, SharedString, Subscription, Task};
 use itertools::Itertools;
 use language::{
-    Anchor, Buffer, Capability, LanguageRegistry, OffsetRangeExt as _, Point, TextBuffer,
+    Anchor, Bias, Buffer, Capability, LanguageRegistry, OffsetRangeExt as _, Point, TextBuffer,
 };
 use markdown::Markdown;
 use multi_buffer::{MultiBuffer, PathKey, excerpt_context_lines};
@@ -361,6 +361,7 @@ impl Diff {
             multibuffer,
             path,
             base_text,
+            unified_diff: None,
             new_buffer,
             _update_diff: task,
         }
@@ -391,12 +392,14 @@ impl Diff {
         unified_diff: &str,
         language_registry: Arc<LanguageRegistry>,
     ) -> Result<Self> {
-        let (base_text, new_text) = sparse_texts_from_unified_diff(unified_diff)?;
+        // The rebuilt texts are padded to each hunk's rows, often thousands of
+        // empty lines, so they are rebuilt again only when the edit is opened.
+        sparse_texts_from_unified_diff(unified_diff)?;
         Ok(Self::Historical(HistoricalDiff {
             path,
             base_text_exists: true,
-            base_text: base_text.into(),
-            new_text: new_text.into(),
+            base_text: Arc::from(""),
+            new_text: Arc::from(""),
             unified_diff: Some(unified_diff.into()),
             language_registry,
             view: None,
@@ -414,12 +417,20 @@ impl Diff {
         if snapshot.view.is_some() {
             return false;
         }
+        let (base_text, new_text) = match snapshot.texts() {
+            Ok(texts) => texts,
+            Err(error) => {
+                log::error!(
+                    "Could not show a saved edit of {}: {error:#}",
+                    snapshot.path
+                );
+                return false;
+            }
+        };
         snapshot.view = Some(Self::finalized_data(
             snapshot.path.clone(),
-            snapshot
-                .base_text_exists
-                .then(|| snapshot.base_text.to_string()),
-            snapshot.new_text.to_string(),
+            snapshot.base_text_exists.then_some(base_text),
+            new_text,
             snapshot.language_registry.clone(),
             cx,
         ));
@@ -497,7 +508,10 @@ impl Diff {
         match self {
             Self::Pending(PendingDiff { base_text, .. }) => base_text,
             Self::Finalized(FinalizedDiff { base_text, .. }) => base_text,
-            Self::Historical(HistoricalDiff { base_text, .. }) => base_text,
+            Self::Historical(snapshot) => snapshot
+                .view
+                .as_ref()
+                .map_or(&snapshot.base_text, |view| &view.base_text),
         }
     }
 
@@ -530,6 +544,14 @@ impl Diff {
     }
 
     pub fn to_markdown(&self, cx: &App) -> String {
+        if let Self::Finalized(FinalizedDiff {
+            path,
+            unified_diff: Some(unified_diff),
+            ..
+        }) = self
+        {
+            return format!("Diff: {path}\n```diff\n{}\n```\n", unified_diff.trim_end());
+        }
         if let Self::Historical(snapshot) = self {
             return match &snapshot.unified_diff {
                 Some(unified_diff) => format!(
@@ -591,9 +613,10 @@ impl Diff {
                 base_text.as_ref() != old_text
                     || !new_buffer.read(cx).as_rope().chunks().equals_str(new_text)
             }
-            Diff::Historical(snapshot) => {
-                snapshot.base_text.as_ref() != old_text || snapshot.new_text.as_ref() != new_text
-            }
+            Diff::Historical(snapshot) => match snapshot.texts() {
+                Ok((base_text, text)) => base_text != old_text || text != new_text,
+                Err(_) => true,
+            },
         }
     }
 }
@@ -653,36 +676,70 @@ impl PendingDiff {
             .unwrap_or(MultiBuffer::DEFAULT_TITLE.into())
             .into();
         let replica_id = new_buffer.replica_id();
-
-        // Replace the buffer in the multibuffer with the snapshot
-        let buffer = cx.new(|cx| {
-            let language = self.new_buffer.read(cx).language().cloned();
-            let buffer = TextBuffer::new_normalized(
-                replica_id,
-                cx.entity_id().as_non_zero_u64().into(),
-                self.new_buffer.read(cx).line_ending(),
-                self.new_buffer.read(cx).as_rope().clone(),
-            );
-            let mut buffer = Buffer::build(buffer, None, Capability::ReadWrite, cx);
-            buffer.set_language(language, cx);
-            buffer
-        });
-
-        let buffer_diff = cx.spawn({
-            let buffer = buffer.clone();
-            async move |_this, cx| {
-                buffer.update(cx, |buffer, _| buffer.parsing_idle()).await;
-                build_buffer_diff(base_text, true, &buffer, cx).await
-            }
-        });
+        let line_ending = new_buffer.line_ending();
+        let language = new_buffer.language().cloned();
+        let new_text = new_buffer.as_rope().clone();
+        let context_lines = excerpt_context_lines(cx);
 
         let update_diff = cx.spawn(async move |this, cx| {
-            let buffer_diff = buffer_diff.await?;
+            // A finished edit only ever shows its hunks. Copies of both whole
+            // versions would cost two syntax trees of the file for every edit
+            // in the conversation, so keep just the hunks at their own rows.
+            let (shown_base_text, shown_new_text, unified_diff) = cx
+                .background_spawn(async move {
+                    let new_text = new_text.to_string();
+                    let unified_diff = language::unified_diff_with_context(
+                        &base_text,
+                        &new_text,
+                        0,
+                        0,
+                        context_lines,
+                    );
+                    match sparse_texts_from_unified_diff(&unified_diff) {
+                        Ok((shown_base_text, shown_new_text)) => {
+                            (shown_base_text, shown_new_text, Some(unified_diff))
+                        }
+                        Err(error) => {
+                            log::debug!("Showing a whole file for an edit: {error:#}");
+                            (base_text.to_string(), new_text, None)
+                        }
+                    }
+                })
+                .await;
+
+            let buffer = cx.new(|cx| {
+                let text_buffer = TextBuffer::new_normalized(
+                    replica_id,
+                    cx.entity_id().as_non_zero_u64().into(),
+                    line_ending,
+                    text::Rope::from(shown_new_text.as_str()),
+                );
+                let mut buffer = Buffer::build(text_buffer, None, Capability::ReadWrite, cx);
+                buffer.set_language(language, cx);
+                buffer
+            });
+            buffer.update(cx, |buffer, _| buffer.parsing_idle()).await;
+            let buffer_diff = build_buffer_diff(shown_base_text.into(), true, &buffer, cx).await?;
+
             this.update(cx, |this, cx| {
+                if let Diff::Finalized(finalized) = this {
+                    finalized.unified_diff = unified_diff.map(Arc::from);
+                }
                 let multibuffer = this
                     .multibuffer()
+                    .cloned()
                     .ok_or_else(|| anyhow::anyhow!("Live diff lost its multibuffer"))?;
                 multibuffer.update(cx, |multibuffer, cx| {
+                    let ranges = {
+                        let snapshot = buffer.read(cx).snapshot();
+                        ranges
+                            .into_iter()
+                            .map(|range| {
+                                snapshot.clip_point(range.start, Bias::Left)
+                                    ..snapshot.clip_point(range.end, Bias::Left)
+                            })
+                            .collect::<Vec<_>>()
+                    };
                     let path_key = PathKey::for_buffer(&buffer, cx);
                     multibuffer.clear(cx);
                     multibuffer.set_excerpts_for_path(
@@ -703,6 +760,7 @@ impl PendingDiff {
         FinalizedDiff {
             path,
             base_text: self.base_text.clone(),
+            unified_diff: None,
             multibuffer: self.multibuffer.clone(),
             new_buffer: self.new_buffer.clone(),
             _update_diff: update_diff,
@@ -766,13 +824,24 @@ impl PendingDiff {
 
 pub struct HistoricalDiff {
     path: String,
+    /// Empty when `unified_diff` is set.
     base_text: Arc<str>,
     base_text_exists: bool,
+    /// Empty when `unified_diff` is set.
     new_text: Arc<str>,
-    /// Set when the texts were rebuilt from this diff and hold only its hunks.
+    /// Set when the texts are rebuilt from this diff and hold only its hunks.
     unified_diff: Option<Arc<str>>,
     language_registry: Arc<LanguageRegistry>,
     view: Option<FinalizedDiff>,
+}
+
+impl HistoricalDiff {
+    fn texts(&self) -> Result<(String, String)> {
+        match &self.unified_diff {
+            Some(unified_diff) => sparse_texts_from_unified_diff(unified_diff),
+            None => Ok((self.base_text.to_string(), self.new_text.to_string())),
+        }
+    }
 }
 
 /// Rebuilt texts are padded with empty lines up to this row at most, so a
@@ -846,6 +915,8 @@ fn push_hunk_side(
 pub struct FinalizedDiff {
     path: String,
     base_text: Arc<str>,
+    /// Set once a finished live edit has dropped the rest of the file.
+    unified_diff: Option<Arc<str>>,
     new_buffer: Entity<Buffer>,
     multibuffer: Entity<MultiBuffer>,
     _update_diff: Task<Result<()>>,
@@ -984,6 +1055,11 @@ mod tests {
         });
         diff.read_with(cx, |diff, cx| {
             assert!(diff.buffer().is_none());
+            assert!(
+                diff.base_text().is_empty(),
+                "the padded texts are rebuilt only when the edit is opened"
+            );
+
             assert_eq!(
                 diff.to_markdown(cx),
                 format!(
@@ -1095,6 +1171,50 @@ mod tests {
             assert_eq!(diff.base_text().as_ref(), "before\n");
             assert!(diff.has_revealed_range(cx));
             assert!(diff.buffer().is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn test_finished_live_edits_keep_only_their_hunks(cx: &mut TestAppContext) {
+        historical_diff_languages(cx);
+        let original = (1..=400)
+            .map(|row| format!("line {row}\n"))
+            .collect::<String>();
+        let edited = original.replace("line 200\n", "line two hundred\n");
+        let buffer = cx.new(|cx| Buffer::local(original.clone(), cx));
+        let diff = cx.new(|cx| Diff::new(buffer.clone(), cx));
+        buffer.update(cx, |buffer, cx| buffer.set_text(edited.clone(), cx));
+        cx.run_until_parked();
+        diff.update(cx, |diff, cx| diff.finalize(cx));
+        cx.run_until_parked();
+
+        diff.read_with(cx, |diff, cx| {
+            let shown_buffers = diff
+                .multibuffer()
+                .expect("finished edit")
+                .read(cx)
+                .all_buffers();
+            assert_eq!(shown_buffers.len(), 1);
+            let shown = shown_buffers
+                .into_iter()
+                .next()
+                .expect("shown buffer")
+                .read(cx)
+                .text();
+            assert!(
+                shown.len() < original.len() / 4,
+                "a finished edit must not keep the whole file: {} bytes",
+                shown.len()
+            );
+            assert_eq!(shown.lines().nth(197), Some("line 198"));
+            assert_eq!(shown.lines().nth(199), Some("line two hundred"));
+            assert!(diff.to_markdown(cx).contains("+line two hundred"));
+            assert_eq!(diff.base_text().as_ref(), original);
+            assert_eq!(
+                diff.buffer().expect("edited buffer").read(cx).text(),
+                edited,
+                "discarding an interrupted edit still needs the edited buffer"
+            );
         });
     }
 
