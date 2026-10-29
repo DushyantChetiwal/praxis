@@ -13164,8 +13164,14 @@ mod tests {
             else {
                 panic!("expected thinking");
             };
-            assert_eq!(text, "Weighing the options", "the transcript keeps its text");
-            (signature.is_some(), agent_message.reasoning_details.is_some())
+            assert_eq!(
+                text, "Weighing the options",
+                "the transcript keeps its text"
+            );
+            (
+                signature.is_some(),
+                agent_message.reasoning_details.is_some(),
+            )
         };
         assert_eq!(provider_state(&messages[0]), (false, false));
         assert_eq!(
