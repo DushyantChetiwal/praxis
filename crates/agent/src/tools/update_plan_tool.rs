@@ -19,14 +19,17 @@ pub(super) const MAX_STEP_LENGTH: usize = 300;
 /// above the message box, on the desktop and on their phone.
 ///
 /// Use it when a task takes several distinct steps or more than a few turns:
-/// list the steps before you start, then update it as each one starts and
-/// finishes, so the user can follow along without reading every message. Skip
-/// it for quick, single-step requests.
+/// list the steps before you start, then let it drive the work, so the user
+/// can follow along without reading every message. Skip it for quick,
+/// single-step requests.
 ///
+/// - Work one step at a time. Set a step `in_progress` when you start it, and
+///   as soon as it is done, mark it `completed` and set the next one
+///   `in_progress` in the same update. Never save several completions for one
+///   update at the end.
 /// - Send the whole checklist every time; it replaces the previous one. Send
 ///   an empty list to clear it.
-/// - Keep at most one step `in_progress`, and mark a step `completed` as soon
-///   as it is done rather than all at the end.
+/// - Keep exactly one step `in_progress` while there is work left.
 /// - Add, reword or drop steps as you learn more. Mark a step you abandon
 ///   `cancelled` instead of silently removing it.
 /// - Write each step as a short, user-facing action, such as "Add the retry
@@ -81,16 +84,33 @@ impl PlanStepStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum UpdatePlanToolOutput {
-    Updated { completed: usize, total: usize },
-    Error { error: String },
+    Updated {
+        completed: usize,
+        total: usize,
+        /// How to keep the checklist in step with the work, when this update
+        /// fell behind it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    Error {
+        error: String,
+    },
 }
 
 impl From<UpdatePlanToolOutput> for LanguageModelToolResultContent {
     fn from(output: UpdatePlanToolOutput) -> Self {
         match output {
             UpdatePlanToolOutput::Updated { total: 0, .. } => "Checklist cleared.".into(),
-            UpdatePlanToolOutput::Updated { completed, total } => {
-                format!("Checklist updated: {completed} of {total} steps done.").into()
+            UpdatePlanToolOutput::Updated {
+                completed,
+                total,
+                note,
+            } => {
+                let summary = format!("Checklist updated: {completed} of {total} steps done.");
+                match note {
+                    Some(note) => format!("{summary} {note}").into(),
+                    None => summary.into(),
+                }
             }
             UpdatePlanToolOutput::Error { error } => error.into(),
         }
@@ -225,13 +245,50 @@ pub(crate) fn repeated_wait_note(waits: u32, steps: &[PlanStep]) -> String {
     )
 }
 
-fn summarize(steps: &[PlanStep]) -> UpdatePlanToolOutput {
+/// Asks for the checklist to follow the work step by step when an update
+/// batched several completions or left no step in progress.
+fn pacing_note(before: &[PlanStep], after: &[PlanStep]) -> Option<String> {
+    let newly_completed = after
+        .iter()
+        .filter(|step| step.status == PlanStepStatus::Completed)
+        .filter(|step| {
+            !before.iter().any(|earlier| {
+                earlier.step.trim() == step.step.trim()
+                    && earlier.status == PlanStepStatus::Completed
+            })
+        })
+        .count();
+    let mut notes = Vec::new();
+    if newly_completed > 1 {
+        notes.push(format!(
+            "You marked {newly_completed} steps completed in one update. Mark each step \
+             completed the moment it finishes, in its own update."
+        ));
+    }
+    let has_pending = after
+        .iter()
+        .any(|step| step.status == PlanStepStatus::Pending);
+    let has_in_progress = after
+        .iter()
+        .any(|step| step.status == PlanStepStatus::InProgress);
+    if has_pending && !has_in_progress {
+        notes.push(
+            "No step is in_progress. Set the step you work on next to in_progress before \
+             you start it."
+                .to_string(),
+        );
+    }
+    (!notes.is_empty()).then(|| notes.join(" "))
+}
+
+fn summarize(before: &[PlanStep], steps: &[PlanStep]) -> UpdatePlanToolOutput {
     UpdatePlanToolOutput::Updated {
         completed: steps
             .iter()
             .filter(|step| step.status == PlanStepStatus::Completed)
             .count(),
         total: steps.len(),
+        note: pacing_note(before, steps),
     }
 }
 
@@ -285,18 +342,19 @@ impl AgentTool for UpdatePlanTool {
             validate(&input.steps).map_err(|error| UpdatePlanToolOutput::Error { error })?;
             // The plan may keep steps the checklist left out, so what is shown
             // and reported is the checklist as the plan now has it.
-            let checklist = self
+            let (before, checklist) = self
                 .thread
                 .update(cx, |thread, cx| {
+                    let before = thread.agent_checklist();
                     thread.set_agent_checklist(&input.steps, cx)?;
-                    Ok::<_, String>(thread.agent_checklist())
+                    Ok::<_, String>((before, thread.agent_checklist()))
                 })
                 .map_err(|error| UpdatePlanToolOutput::Error {
                     error: format!("The conversation this checklist belongs to is gone: {error}"),
                 })?
                 .map_err(|error| UpdatePlanToolOutput::Error { error })?;
             event_stream.update_plan(AGENT_PLAN_ID, plan_entries(&checklist));
-            Ok(summarize(&checklist))
+            Ok(summarize(&before, &checklist))
         })
     }
 
@@ -407,6 +465,7 @@ mod tests {
             UpdatePlanToolOutput::Updated {
                 completed: 1,
                 total: 2,
+                note: None,
             }
         ));
 
@@ -477,6 +536,7 @@ mod tests {
             UpdatePlanToolOutput::Updated {
                 completed: 1,
                 total: 3,
+                note: None,
             }
         ));
         thread.read_with(cx, |thread, _| {
@@ -490,6 +550,43 @@ mod tests {
                 ["Read the loader", "Write the docs", "Add the retry setting"]
             );
         });
+    }
+
+    #[test]
+    fn updates_that_fall_behind_the_work_are_told_to_go_step_by_step() {
+        let before = vec![
+            step("Read the loader", PlanStepStatus::InProgress),
+            step("Add the setting", PlanStepStatus::Pending),
+            step("Write the docs", PlanStepStatus::Pending),
+        ];
+        let next = vec![
+            step("Read the loader", PlanStepStatus::Completed),
+            step("Add the setting", PlanStepStatus::InProgress),
+            step("Write the docs", PlanStepStatus::Pending),
+        ];
+        assert_eq!(pacing_note(&before, &next), None);
+
+        let batched = vec![
+            step("Read the loader", PlanStepStatus::Completed),
+            step("Add the setting", PlanStepStatus::Completed),
+            step("Write the docs", PlanStepStatus::InProgress),
+        ];
+        let note = pacing_note(&before, &batched).expect("batched completions");
+        assert!(note.contains("2 steps completed in one update"), "{note}");
+
+        let idle = vec![
+            step("Read the loader", PlanStepStatus::Completed),
+            step("Add the setting", PlanStepStatus::Pending),
+            step("Write the docs", PlanStepStatus::Pending),
+        ];
+        let note = pacing_note(&before, &idle).expect("nothing in progress");
+        assert!(note.contains("No step is in_progress"), "{note}");
+
+        let output: LanguageModelToolResultContent = summarize(&before, &batched).into();
+        let LanguageModelToolResultContent::Text(text) = output else {
+            panic!("expected text");
+        };
+        assert!(text.starts_with("Checklist updated: 2 of 3 steps done. You marked"));
     }
 
     #[test]
@@ -531,6 +628,7 @@ mod tests {
         let accepted = UpdatePlanToolOutput::Updated {
             completed: 1,
             total: 2,
+            note: None,
         };
         let tool = UpdatePlanTool::new(WeakEntity::new_invalid());
         cx.update(|cx| tool.replay(checklist(), accepted, stream, cx))
