@@ -1243,8 +1243,62 @@ impl Markdown {
     pub fn ensure_parsed(&mut self, cx: &mut Context<Self>) {
         if self.parsing_deferred {
             self.parsing_deferred = false;
+            if self.pending_parse.is_none()
+                && let Some(parsed) = self.parse_now()
+            {
+                // Laid out this frame, so nothing else needs telling.
+                self.should_reparse = false;
+                self.parsed_markdown = parsed;
+                self.images_by_source_offset.clear();
+                return;
+            }
             self.parse(cx);
         }
+    }
+
+    /// Parses a short source that needs nothing loaded, such as a tool
+    /// call's title, so text laid out for the first time never shows a frame
+    /// without it. Anything else is parsed in the background.
+    fn parse_now(&self) -> Option<ParsedMarkdown> {
+        const MAX_IMMEDIATE_PARSE_LEN: usize = 1024;
+        if self.source.len() > MAX_IMMEDIATE_PARSE_LEN || self.options.render_mermaid_diagrams {
+            return None;
+        }
+        if self.options.parse_links_only {
+            return Some(ParsedMarkdown {
+                events: Arc::from(parse_links_only(self.source.as_ref())),
+                source: self.source.clone(),
+                ..ParsedMarkdown::default()
+            });
+        }
+        let parsed = parse_markdown_with_options(
+            &self.source,
+            self.options.parse_html,
+            self.options.parse_heading_slugs,
+            self.options.render_metadata_blocks,
+        );
+        let needs_loading = !parsed.language_names.is_empty()
+            || !parsed.language_paths.is_empty()
+            || parsed.has_untagged_code_block
+            || parsed.events.iter().any(|(_, event)| {
+                matches!(event, MarkdownEvent::Start(MarkdownTag::Image { .. }))
+            });
+        if needs_loading {
+            return None;
+        }
+        let mut parsed = ParsedMarkdown {
+            source: self.source.clone(),
+            events: Arc::from(parsed.events),
+            root_block_starts: Arc::from(parsed.root_block_starts),
+            html_blocks: parsed.html_blocks,
+            metadata_blocks: parsed.metadata_blocks,
+            heading_slugs: parsed.heading_slugs,
+            footnote_definitions: parsed.footnote_definitions,
+            link_definition_spans: Arc::from(parsed.link_definition_spans),
+            ..ParsedMarkdown::default()
+        };
+        parsed.code_block_highlights = Arc::new(compute_code_block_highlights(&parsed));
+        Some(parsed)
     }
 
     pub fn release_render_cache(&mut self, cx: &mut Context<Self>) {
@@ -5298,6 +5352,52 @@ impl InputHandler for MarkdownInputHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn deferred_markdown_titles_parse_when_first_laid_out(cx: &mut gpui::TestAppContext) {
+        let markdown = cx.new(|cx| {
+            Markdown::new_deferred_with_options(
+                "Read **file** `src/main.rs`".into(),
+                None,
+                None,
+                MarkdownOptions::default(),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        markdown.update(cx, |markdown, cx| {
+            assert!(!markdown.memory_footprint().parsed, "nothing laid it out yet");
+            markdown.ensure_parsed(cx);
+            assert!(markdown.pending_parse.is_none());
+            assert!(
+                markdown
+                    .parsed_markdown
+                    .events
+                    .iter()
+                    .any(|(_, event)| matches!(event, MarkdownEvent::Start(MarkdownTag::Strong))),
+                "a short title is parsed before its first frame"
+            );
+        });
+
+        let code = cx.new(|cx| {
+            Markdown::new_deferred_with_options(
+                "```rust\nfn main() {}\n```".into(),
+                None,
+                None,
+                MarkdownOptions::default(),
+                cx,
+            )
+        });
+        code.update(cx, |markdown, cx| {
+            markdown.ensure_parsed(cx);
+            assert!(
+                markdown.pending_parse.is_some(),
+                "code blocks still load their language in the background"
+            );
+        });
+        cx.run_until_parked();
+        code.read_with(cx, |markdown, _| assert!(markdown.memory_footprint().parsed));
+    }
 
     #[gpui::test]
     fn deferred_markdown_keeps_full_source_without_parsing_hidden_bodies(

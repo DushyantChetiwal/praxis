@@ -1833,11 +1833,28 @@ impl ToolCall {
         cx: &mut App,
     ) -> Entity<Markdown> {
         let text = Self::label_text(title, tool_name, kind);
+        // Most titles of a long conversation are never on screen. They are
+        // parsed when first laid out, in time for that frame.
         cx.new(|cx| {
             if title.is_none() || kind == &acp_v2::ToolKind::Execute {
-                Markdown::new_text(text, cx)
+                Markdown::new_deferred_with_options(
+                    text,
+                    None,
+                    None,
+                    MarkdownOptions {
+                        parse_links_only: true,
+                        ..MarkdownOptions::default()
+                    },
+                    cx,
+                )
             } else {
-                Markdown::new(text, Some(language_registry), None, cx)
+                Markdown::new_deferred_with_options(
+                    text,
+                    Some(language_registry),
+                    None,
+                    MarkdownOptions::default(),
+                    cx,
+                )
             }
         })
     }
@@ -17840,6 +17857,7 @@ mod tests {
                 )
                 .expect("tool call should convert")
             });
+            call.label.update(cx, |label, cx| label.ensure_parsed(cx));
             cx.run_until_parked();
             cx.read(|cx| {
                 let label = call.label.read(cx);
@@ -17938,6 +17956,7 @@ mod tests {
                 )
                 .expect("tool label update should apply");
             });
+            call.label.update(cx, |label, cx| label.ensure_parsed(cx));
             cx.run_until_parked();
             cx.read(|cx| {
                 let label = call.label.read(cx);
