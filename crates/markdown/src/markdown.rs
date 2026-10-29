@@ -5368,7 +5368,7 @@ mod tests {
         cx.run_until_parked();
         markdown.update(cx, |markdown, cx| {
             assert!(
-                !markdown.memory_footprint().parsed,
+                markdown.parsed_markdown.events.is_empty(),
                 "nothing laid it out yet"
             );
             markdown.ensure_parsed(cx);
@@ -5401,7 +5401,7 @@ mod tests {
         });
         cx.run_until_parked();
         code.read_with(cx, |markdown, _| {
-            assert!(markdown.memory_footprint().parsed)
+            assert!(!markdown.parsed_markdown.events.is_empty())
         });
     }
 
