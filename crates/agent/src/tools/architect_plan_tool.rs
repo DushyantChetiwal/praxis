@@ -1119,7 +1119,7 @@ mod tests {
         assert!(title.contains("1 affected locks"));
         assert!(title.contains("1 invalidated step checkpoints"));
         assert!(title.contains("0 retained results"));
-        assert!(title.contains("requires review: true"));
+        assert!(title.contains("requires review: false"));
         let (live, revision, sequence, run_id, control) = thread.read_with(cx, |thread, _| {
             let run = thread.architect_run().unwrap();
             assert!(!run.is_running());
