@@ -65,10 +65,10 @@ use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
     append_text_to_term, apply_config, clear_saved_screen, content_text, content_text_bounded,
-    display_offset, display_only_term_config, find_from_terminal_point, full_content_range,
-    last_non_empty_lines, make_content, new_term, open_pty, pty_options, pty_term_config, resize,
-    screen_lines, scroll_display, scroll_to_point, search_matches, selection_text,
-    set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
+    display_offset, display_only_term_config, displayed_cell_hyperlink, find_from_terminal_point,
+    full_content_range, last_non_empty_lines, make_content, new_term, open_pty, pty_options,
+    pty_term_config, resize, screen_lines, scroll_display, scroll_to_point, search_matches,
+    selection_text, set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
     spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
     update_selection as update_term_selection, update_selection_to_vi_cursor,
     update_vi_cursor_for_scroll, used_lines, vi_goto_point, vi_motion,
@@ -1050,12 +1050,13 @@ impl TerminalBuilder {
             scroll_px: px(0.),
             next_link_id: 0,
             selection_phase: SelectionPhase::Ended,
-            hyperlink_regex_searches: RegexSearches::default(),
+            hyperlink_regex_searches: None,
             vi_mode_enabled: false,
             is_remote_terminal: false,
             last_mouse_move_time: Instant::now(),
             last_hyperlink_search_position: None,
             mouse_down_hyperlink: None,
+            output_finished: false,
             #[cfg(windows)]
             shell_program: None,
             activation_script: Vec::new(),
@@ -1337,15 +1338,13 @@ impl TerminalBuilder {
                 scroll_px: px(0.),
                 next_link_id: 0,
                 selection_phase: SelectionPhase::Ended,
-                hyperlink_regex_searches: RegexSearches::new(
-                    &path_hyperlink_regexes,
-                    path_hyperlink_timeout,
-                ),
+                hyperlink_regex_searches: None,
                 vi_mode_enabled: false,
                 is_remote_terminal,
                 last_mouse_move_time: Instant::now(),
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
+                output_finished: false,
                 #[cfg(windows)]
                 shell_program,
                 activation_script: activation_script.clone(),
@@ -1545,13 +1544,18 @@ pub struct Terminal {
     scroll_px: Pixels,
     next_link_id: usize,
     selection_phase: SelectionPhase,
-    hyperlink_regex_searches: RegexSearches,
+    /// Compiled on first use: the agent keeps every command's terminal, and
+    /// few of them are ever searched for links.
+    hyperlink_regex_searches: Option<RegexSearches>,
     task: Option<TaskState>,
     vi_mode_enabled: bool,
     is_remote_terminal: bool,
     last_mouse_move_time: Instant,
     last_hyperlink_search_position: Option<GpuiPoint<Pixels>>,
     mouse_down_hyperlink: Option<HyperlinkMatch>,
+    /// Set once the output is complete, so later layouts free the rows
+    /// alacritty reserves when the grid gains lines.
+    output_finished: bool,
     #[cfg(windows)]
     shell_program: Option<String>,
     template: CopyTemplate,
@@ -1755,6 +1759,12 @@ impl Terminal {
                 }
 
                 resize(term, new_bounds);
+                // Alacritty reserves a thousand rows whenever the grid gains
+                // lines. A finished command never fills them, and the agent
+                // keeps every command's terminal for the whole conversation.
+                if self.output_finished {
+                    shrink_to_used(term);
+                }
                 if columns_changed {
                     self.reset_cwd_history();
                 }
@@ -1865,7 +1875,7 @@ impl Terminal {
                 match find_from_terminal_point(
                     term,
                     point,
-                    &mut self.hyperlink_regex_searches,
+                    regex_searches(&mut self.hyperlink_regex_searches, &self.template),
                     self.path_style,
                 ) {
                     Some(hyperlink) => {
@@ -1940,7 +1950,7 @@ impl Terminal {
         find_from_terminal_point(
             &term_lock,
             point,
-            &mut self.hyperlink_regex_searches,
+            regex_searches(&mut self.hyperlink_regex_searches, &self.template),
             self.path_style,
         )
     }
@@ -2039,10 +2049,7 @@ impl Terminal {
         self.scroll_px = px(0.);
         self.next_link_id = 0;
         self.selection_phase = SelectionPhase::Ended;
-        self.hyperlink_regex_searches = RegexSearches::new(
-            &self.template.path_hyperlink_regexes,
-            self.template.path_hyperlink_timeout,
-        );
+        self.hyperlink_regex_searches = None;
         self.vi_mode_enabled = false;
         self.last_hyperlink_search_position = None;
         self.mouse_down_hyperlink = None;
@@ -2119,8 +2126,20 @@ impl Terminal {
         self.events.push_back(InternalEvent::Clear)
     }
 
+    /// Frees the rows alacritty reserved ahead of output, now and after every
+    /// later resize. Call it once the output is complete.
     pub fn shrink_to_used(&mut self) {
+        self.output_finished = true;
         shrink_to_used(&mut self.term.lock());
+    }
+
+    /// Drops the cells laid out for the last paint, which the next paint
+    /// rebuilds anyway. Only a terminal with a live pty keeps them between
+    /// frames, since the agent keeps every finished command's terminal.
+    pub fn release_rendered_cells(&mut self) {
+        if !self.has_active_pty_resources() {
+            self.last_content.cells = Vec::new();
+        }
     }
 
     pub fn scroll_line_up(&mut self) {
@@ -2880,14 +2899,10 @@ impl Terminal {
 
             //Hyperlinks
             if self.selection_phase == SelectionPhase::Ended {
-                let mouse_cell_index =
-                    content_index_for_mouse(position, &self.last_content.terminal_bounds);
-                if let Some(link) = self
-                    .last_content
-                    .cells
-                    .get(mouse_cell_index)
-                    .and_then(|cell| cell.hyperlink())
-                {
+                let (row, column) =
+                    content_cell_for_mouse(position, &self.last_content.terminal_bounds);
+                let link = displayed_cell_hyperlink(&self.term.lock(), row, column);
+                if let Some(link) = link {
                     cx.open_url(link.uri());
                 } else if e.modifiers.secondary() {
                     self.events
@@ -3582,12 +3597,34 @@ fn normalize_script_command_name(argument: &str) -> Option<String> {
         .and_then(normalize_path_command_name)
 }
 
+fn regex_searches<'a>(
+    searches: &'a mut Option<RegexSearches>,
+    template: &CopyTemplate,
+) -> &'a mut RegexSearches {
+    searches.get_or_insert_with(|| {
+        RegexSearches::new(
+            &template.path_hyperlink_regexes,
+            template.path_hyperlink_timeout,
+        )
+    })
+}
+
+#[cfg(test)]
 fn content_index_for_mouse(pos: GpuiPoint<Pixels>, terminal_bounds: &TerminalBounds) -> usize {
+    let (row, column) = content_cell_for_mouse(pos, terminal_bounds);
+    row * terminal_bounds.num_columns() + column
+}
+
+/// The viewport row and column under the mouse.
+fn content_cell_for_mouse(
+    pos: GpuiPoint<Pixels>,
+    terminal_bounds: &TerminalBounds,
+) -> (usize, usize) {
     let col = (pos.x / terminal_bounds.cell_width()).round() as usize;
     let clamped_col = min(col, terminal_bounds.num_columns().saturating_sub(1));
     let row = (pos.y / terminal_bounds.line_height()).round() as usize;
     let clamped_row = min(row, terminal_bounds.num_lines().saturating_sub(1));
-    clamped_row * terminal_bounds.num_columns() + clamped_col
+    (clamped_row, clamped_col)
 }
 
 /// Converts an 8 bit ANSI color to its GPUI equivalent.
@@ -5108,6 +5145,92 @@ mod tests {
             );
         });
         assert_eq!(terminal.entity_id(), entity_id);
+    }
+
+    /// Finished terminals drop alacritty's reserved rows when they are laid
+    /// out again, which must never cost the output they show.
+    #[gpui::test]
+    async fn test_resizing_a_finished_terminal_keeps_its_output(cx: &mut TestAppContext) {
+        let output = (0..200)
+            .map(|line| format!("line {line}\r\n"))
+            .collect::<String>();
+        let (terminal, cx) = init_terminal_test_with_window(cx, output.as_bytes());
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.shrink_to_used();
+            for height in [80., 400., 160., 800.] {
+                terminal.set_size(TerminalBounds::new(
+                    px(20.),
+                    px(10.),
+                    bounds(point(px(0.), px(0.)), size(px(400.), px(height))),
+                ));
+                terminal.sync(window, cx);
+                let content = terminal.get_content();
+                assert!(content.contains("line 0"), "{content}");
+                assert!(content.contains("line 199"), "{content}");
+            }
+            terminal.write_output(b"after resize\r\n", cx);
+            terminal.sync(window, cx);
+            assert!(terminal.get_content().contains("after resize"));
+
+            terminal.write_output(b"\x1b[?1049halternate screen", cx);
+            terminal.sync(window, cx);
+            assert_eq!(terminal.get_content().trim(), "alternate screen");
+            terminal.write_output(b"\x1b[?1049l", cx);
+            terminal.sync(window, cx);
+            let content = terminal.get_content();
+            assert!(content.contains("line 199"), "{content}");
+            assert!(!content.contains("alternate screen"), "{content}");
+        });
+    }
+
+    #[gpui::test]
+    async fn test_link_search_compiles_on_first_use(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_terminal_test_with_window(cx, b"see https://zed.dev/ now\r\n");
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.sync(window, cx);
+            assert!(
+                terminal.hyperlink_regex_searches.is_none(),
+                "a terminal nobody searches must not compile the link patterns"
+            );
+            let link = terminal.find_hyperlink_at_point(Point { line: 0, column: 6 });
+            assert!(
+                link.as_ref()
+                    .is_some_and(|link| link.is_url && link.text.starts_with("https://zed.dev")),
+                "{link:?}"
+            );
+            assert!(terminal.hyperlink_regex_searches.is_some());
+        });
+    }
+
+    /// A finished terminal drops its laid-out cells after each paint, and its
+    /// links must stay clickable without them.
+    #[gpui::test]
+    async fn test_released_cells_keep_hyperlinks_clickable(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_terminal_test_with_window(
+            cx,
+            b"\x1b]8;;https://zed.dev/\x1b\\link\x1b]8;;\x1b\\\r\n",
+        );
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.set_size(TerminalBounds::new(
+                px(20.),
+                px(10.),
+                bounds(point(px(0.), px(0.)), size(px(400.), px(160.))),
+            ));
+            terminal.sync(window, cx);
+            assert!(!terminal.last_content.cells.is_empty());
+            terminal.release_rendered_cells();
+            assert!(terminal.last_content.cells.is_empty());
+            left_mouse_up_at(terminal, point(px(2.), px(2.)), cx);
+        });
+        assert_eq!(cx.opened_url().as_deref(), Some("https://zed.dev/"));
+
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.sync(window, cx);
+            assert!(
+                !terminal.last_content.cells.is_empty(),
+                "the next paint lays the cells out again"
+            );
+        });
     }
 
     #[gpui::test]
