@@ -420,7 +420,10 @@ impl Diff {
         let (base_text, new_text) = match snapshot.texts() {
             Ok(texts) => texts,
             Err(error) => {
-                log::error!("Could not show a saved edit of {}: {error:#}", snapshot.path);
+                log::error!(
+                    "Could not show a saved edit of {}: {error:#}",
+                    snapshot.path
+                );
                 return false;
             }
         };
