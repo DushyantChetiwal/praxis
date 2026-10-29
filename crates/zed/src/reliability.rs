@@ -279,7 +279,11 @@ fn log_entity_diagnostics(projects: &ProjectRegistry, cx: &App) {
         .iter()
         .take(LOGGED_ENTITY_TYPES)
         .map(|entity_type| {
-            format!("{} {}", short_type_name(entity_type.name), entity_type.count)
+            format!(
+                "{} {}",
+                short_type_name(entity_type.name),
+                entity_type.count
+            )
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -289,9 +293,8 @@ fn log_entity_diagnostics(projects: &ProjectRegistry, cx: &App) {
     );
 
     let mut by_inline_bytes = counts;
-    by_inline_bytes.sort_by_key(|entity_type| {
-        std::cmp::Reverse(entity_type.count * entity_type.inline_size)
-    });
+    by_inline_bytes
+        .sort_by_key(|entity_type| std::cmp::Reverse(entity_type.count * entity_type.inline_size));
     let largest = by_inline_bytes
         .iter()
         .take(LOGGED_LARGEST_ENTITY_TYPES)

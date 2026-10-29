@@ -118,12 +118,7 @@ impl EntityMap {
                 })
             })
             .collect();
-        counts.sort_by(|left, right| {
-            right
-                .count
-                .cmp(&left.count)
-                .then(left.name.cmp(right.name))
-        });
+        counts.sort_by(|left, right| right.count.cmp(&left.count).then(left.name.cmp(right.name)));
         counts
     }
 

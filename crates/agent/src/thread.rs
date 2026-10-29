@@ -47,8 +47,8 @@ use language_model::{
     LanguageModelId, LanguageModelImage, LanguageModelProviderId, LanguageModelRegistry,
     LanguageModelRequest, LanguageModelRequestMessage, LanguageModelRequestTool,
     LanguageModelToolResult, LanguageModelToolResultContent, LanguageModelToolUse,
-    LanguageModelToolUseId, LanguageModelToolUseInput, MessageContent, ProviderErrorCategory, Role, SelectedModel, Speed,
-    StopReason, TokenUsage, ZED_CLOUD_PROVIDER_ID,
+    LanguageModelToolUseId, LanguageModelToolUseInput, MessageContent, ProviderErrorCategory, Role,
+    SelectedModel, Speed, StopReason, TokenUsage, ZED_CLOUD_PROVIDER_ID,
 };
 use project::{Project, trusted_worktrees::TrustedWorktrees};
 use prompt_store::ProjectContext;
@@ -13317,7 +13317,10 @@ mod tests {
             let after = thread.memory_footprint();
             assert_eq!(after.messages, before.messages + 1);
             assert_eq!(after.text_bytes - before.text_bytes, "reply".len());
-            assert_eq!(after.thinking_bytes - before.thinking_bytes, "thinking".len());
+            assert_eq!(
+                after.thinking_bytes - before.thinking_bytes,
+                "thinking".len()
+            );
             assert_eq!(after.provider_state_bytes - before.provider_state_bytes, 3);
             assert_eq!(
                 after.tool_result_bytes - before.tool_result_bytes,

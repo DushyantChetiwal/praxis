@@ -30,7 +30,9 @@ pub fn estimated_json_heap_bytes(value: &serde_json::Value) -> usize {
         }
         serde_json::Value::Object(map) => map
             .iter()
-            .map(|(key, item)| MAP_ENTRY_OVERHEAD + key.capacity() + estimated_json_heap_bytes(item))
+            .map(|(key, item)| {
+                MAP_ENTRY_OVERHEAD + key.capacity() + estimated_json_heap_bytes(item)
+            })
             .sum(),
     }
 }
@@ -45,7 +47,9 @@ mod tests {
         assert_eq!(estimated_json_heap_bytes(&serde_json::json!(42)), 0);
         assert!(estimated_json_heap_bytes(&serde_json::json!(text)) >= 1000);
         let nested = serde_json::json!({ "edits": [{ "new_text": text }] });
-        assert!(estimated_json_heap_bytes(&nested) > 1000 + std::mem::size_of::<serde_json::Value>());
+        assert!(
+            estimated_json_heap_bytes(&nested) > 1000 + std::mem::size_of::<serde_json::Value>()
+        );
     }
 
     #[test]
