@@ -720,7 +720,6 @@ impl ArchitectPane {
                                 })),
                         )
                     })
-
                     .when(running && !paused, |this| {
                         this.child(
                             Button::new("architect-pause", "Pause")

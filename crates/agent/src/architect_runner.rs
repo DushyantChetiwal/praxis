@@ -5604,9 +5604,7 @@ mod checkpoint_tests {
     }
 
     #[gpui::test(iterations = 3)]
-    async fn unlocked_core_insert_rebases_and_resumes_without_review(
-        cx: &mut TestAppContext,
-    ) {
+    async fn unlocked_core_insert_rebases_and_resumes_without_review(cx: &mut TestAppContext) {
         let (_connection, thread, acp_thread, fake) = native_session(cx).await;
         cx.update(|cx| {
             let graph = graph();

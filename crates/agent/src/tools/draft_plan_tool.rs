@@ -933,7 +933,10 @@ mod tests {
                 )
                 .expect("surface repair");
                 assert!(repaired.is_valid);
-                assert!(repaired.ready_to_run, "a repaired plan runs without locking");
+                assert!(
+                    repaired.ready_to_run,
+                    "a repaired plan runs without locking"
+                );
                 assert!(architect::compile_spec(&repaired.graph).is_ok());
             });
         }

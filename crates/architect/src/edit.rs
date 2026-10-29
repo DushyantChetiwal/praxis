@@ -457,7 +457,6 @@ fn graph_edit_impact(graph: &ArchitectGraph, mut target: ArchitectGraph) -> Grap
     }
 }
 
-
 fn scoped_problem(parent: &NodePath, mut problem: GraphProblem) -> GraphProblem {
     for node in parent.as_slice().iter().rev() {
         problem = GraphProblem::InSubplan {

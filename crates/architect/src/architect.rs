@@ -1693,7 +1693,6 @@ impl ArchitectGraph {
         Some(node.subplan.get_or_insert_with(Default::default))
     }
 
-
     /// Whether every step here and in every nested plan is locked.
     pub fn is_fully_locked_deeply(&self) -> bool {
         !self.nodes.is_empty()

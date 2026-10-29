@@ -13338,7 +13338,10 @@ mod tests {
             thread.subagent_started_in_background(child.clone());
             thread.subagent_finished_in_background(&child, "Child finished".into(), cx);
             let notes = thread.tool_result_notes("grep");
-            assert!(notes.iter().any(|note| note == "Child finished"), "{notes:?}");
+            assert!(
+                notes.iter().any(|note| note == "Child finished"),
+                "{notes:?}"
+            );
             assert!(
                 !thread
                     .tool_result_notes("grep")

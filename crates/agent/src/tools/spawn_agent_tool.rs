@@ -141,15 +141,15 @@ impl From<SpawnAgentToolOutput> for LanguageModelToolResultContent {
             )
             .unwrap_or_else(|e| format!("Failed to serialize spawn_agent output: {e}"))
             .into(),
-            SpawnAgentToolOutput::Running { session_id, .. } => serde_json::to_string(
-                &serde_json::json!({
+            SpawnAgentToolOutput::Running { session_id, .. } => {
+                serde_json::to_string(&serde_json::json!({
                     "session_id": session_id,
                     "status": "running",
                     "note": RUNNING_NOTE,
-                }),
-            )
-            .unwrap_or_else(|e| format!("Failed to serialize spawn_agent output: {e}"))
-            .into(),
+                }))
+                .unwrap_or_else(|e| format!("Failed to serialize spawn_agent output: {e}"))
+                .into()
+            }
         }
     }
 }
@@ -447,7 +447,10 @@ mod tests {
 
         let input: SpawnAgentToolInput =
             serde_json::from_value(json!({ "label": "label", "message": "message" }))?;
-        assert!(!input.wait, "agents run in the background unless asked to wait");
+        assert!(
+            !input.wait,
+            "agents run in the background unless asked to wait"
+        );
         Ok(())
     }
 
