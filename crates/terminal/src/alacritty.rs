@@ -829,6 +829,18 @@ pub(super) fn clear_saved_screen(term: &mut Term<ZedListener>) {
 
 pub(super) fn shrink_to_used(term: &mut Term<ZedListener>) {
     term.grid_mut().truncate();
+    // The alternate screen reserves rows too whenever the terminal gains
+    // lines, and is only reachable by swapping. Entering it resets just the
+    // alternate screen; restore what the swap changes on the primary one.
+    if !term.mode().contains(TermMode::ALT_SCREEN) {
+        let selection = term.selection.take();
+        let saved_cursor = term.grid().saved_cursor.clone();
+        term.swap_alt();
+        term.grid_mut().truncate();
+        term.swap_alt();
+        term.grid_mut().saved_cursor = saved_cursor;
+        term.selection = selection;
+    }
 }
 
 /// The hyperlink of the cell shown at a row and column of the viewport.

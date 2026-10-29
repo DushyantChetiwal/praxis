@@ -5174,6 +5174,15 @@ mod tests {
             terminal.write_output(b"after resize\r\n", cx);
             terminal.sync(window, cx);
             assert!(terminal.get_content().contains("after resize"));
+
+            terminal.write_output(b"\x1b[?1049halternate screen", cx);
+            terminal.sync(window, cx);
+            assert_eq!(terminal.get_content().trim(), "alternate screen");
+            terminal.write_output(b"\x1b[?1049l", cx);
+            terminal.sync(window, cx);
+            let content = terminal.get_content();
+            assert!(content.contains("line 199"), "{content}");
+            assert!(!content.contains("alternate screen"), "{content}");
         });
     }
 
