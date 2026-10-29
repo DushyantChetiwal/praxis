@@ -2264,6 +2264,11 @@ pub struct Thread {
     ui_scroll_position: Option<gpui::ListOffset>,
     /// Weak references to running subagent threads for cancellation propagation
     running_subagents: Vec<WeakEntity<Thread>>,
+    /// Sub-agents started without waiting for them. A new turn leaves them
+    /// running; only an explicit Stop cancels them.
+    background_subagents: HashSet<acp_v2::SessionId>,
+    /// What background sub-agents reported since the agent was last told.
+    finished_subagent_notices: Vec<String>,
     /// Set while this thread carries out one of several steps running side by
     /// side, so it cannot change a file another step has already changed.
     file_claim: Option<crate::FileClaim>,
@@ -2514,6 +2519,8 @@ impl Thread {
             draft_prompt: None,
             ui_scroll_position: None,
             running_subagents: Vec::new(),
+            background_subagents: HashSet::default(),
+            finished_subagent_notices: Vec::new(),
             file_claim: None,
             step_progress: BTreeMap::default(),
             background_wake_armed: false,
@@ -3077,6 +3084,8 @@ impl Thread {
                 offset_in_item: gpui::px(sp.offset_in_item),
             }),
             running_subagents: Vec::new(),
+            background_subagents: HashSet::default(),
+            finished_subagent_notices: Vec::new(),
             file_claim: None,
             step_progress,
             background_wake_armed: false,
@@ -3443,18 +3452,45 @@ impl Thread {
         cx.emit(TerminalTaskExited);
         if self.running_turn.is_none()
             && self.background_wake_armed
-            && self.terminal_tasks.has_unreported_completions()
+            && (self.terminal_tasks.has_unreported_completions()
+                || !self.finished_subagent_notices.is_empty())
         {
             cx.emit(BackgroundTasksFinished);
         }
     }
 
-    /// A turn that ends while its background commands still run resumes the
-    /// conversation when they finish, so the agent need not wait on them.
+    /// A turn that ends while its background commands or sub-agents still run
+    /// resumes the conversation when they finish, so the agent need not wait.
     fn arm_background_wake(&mut self, cx: &mut Context<Self>) {
         self.background_wake_armed = self.parent_thread_id().is_none()
             && (self.terminal_tasks.running_in_background() > 0
-                || self.terminal_tasks.has_unreported_completions());
+                || self.terminal_tasks.has_unreported_completions()
+                || !self.background_subagents.is_empty()
+                || !self.finished_subagent_notices.is_empty());
+        self.background_task_finished(cx);
+    }
+
+    /// Only a conversation the user talks to can be resumed when background
+    /// work finishes, so only it starts sub-agents without waiting for them.
+    pub(crate) fn can_wake_for_background_work(&self) -> bool {
+        self.parent_thread_id().is_none()
+    }
+
+    pub(crate) fn subagent_started_in_background(&mut self, session_id: acp_v2::SessionId) {
+        self.background_subagents.insert(session_id);
+    }
+
+    pub(crate) fn subagent_finished_in_background(
+        &mut self,
+        session_id: &acp_v2::SessionId,
+        notice: String,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.background_subagents.remove(session_id) {
+            // Stopped by the user, who already knows it did not finish.
+            return;
+        }
+        self.finished_subagent_notices.push(notice);
         self.background_task_finished(cx);
     }
 
@@ -3464,17 +3500,20 @@ impl Thread {
         if !self.background_wake_armed || self.running_turn.is_some() {
             return Vec::new();
         }
-        let notices = self.terminal_tasks.take_finished_notices();
+        let mut notices = self.terminal_tasks.take_finished_notices();
+        notices.append(&mut self.finished_subagent_notices);
         if !notices.is_empty() {
             self.background_wake_armed = false;
         }
         notices
     }
 
-    /// Notes appended to a tool result: background commands that finished,
-    /// a nudge away from repeated waiting, and the turn's checklist review.
+    /// Notes appended to a tool result: background commands and sub-agents
+    /// that finished, a nudge away from repeated waiting, and the turn's
+    /// checklist review.
     pub(crate) fn tool_result_notes(&mut self, tool_name: &str) -> Vec<String> {
         let mut notes = self.terminal_tasks.take_finished_notices();
+        notes.append(&mut self.finished_subagent_notices);
         let waiting = matches!(
             tool_name,
             TerminalWaitTool::NAME | crate::WaitArchitectRunTool::NAME
@@ -4449,18 +4488,25 @@ impl Thread {
         // This also applies when the launching turn has already finished.
         self.terminal_tasks.cancel_all();
         self.background_wake_armed = false;
+        self.background_subagents.clear();
         self.cancel_turn(cx)
     }
 
     // Replacing a turn cancels its foreground tools, not jobs that already
     // yielded. Only explicit Stop (or thread teardown) cancels those jobs.
     pub(crate) fn cancel_turn(&mut self, cx: &mut Context<Self>) -> Task<()> {
-        for subagent in self.running_subagents.drain(..) {
-            if let Some(subagent) = subagent.upgrade() {
-                subagent
-                    .update(cx, |thread, cx| thread.request_cancel_turn(cx))
-                    .detach();
+        let running_subagents = std::mem::take(&mut self.running_subagents);
+        for subagent in running_subagents {
+            let Some(entity) = subagent.upgrade() else {
+                continue;
+            };
+            if self.background_subagents.contains(entity.read(cx).id()) {
+                self.running_subagents.push(subagent);
+                continue;
             }
+            entity
+                .update(cx, |thread, cx| thread.request_cancel_turn(cx))
+                .detach();
         }
 
         let Some(running_turn) = self.running_turn.take() else {
@@ -8727,6 +8773,11 @@ impl ToolCallEventStream {
             sandbox_grants,
             thread,
         }
+    }
+
+    /// The thread running this tool call, when it is a live thread.
+    pub(crate) fn owning_thread(&self) -> Option<WeakEntity<Thread>> {
+        self.thread.clone()
     }
 
     /// Whether the owning thread is a subagent, so prompts can say "for this
@@ -13276,6 +13327,37 @@ mod tests {
             "the latest compaction may still replay messages after the one before it"
         );
         assert_eq!(provider_state(&messages[4]), (true, true));
+    }
+
+    #[gpui::test]
+    async fn test_subagent_thread_background_results_reach_the_agent(cx: &mut TestAppContext) {
+        let (thread, _event_stream, _fake) = setup_thread_for_test(cx).await;
+        let child = acp_v2::SessionId::new("child");
+        thread.update(cx, |thread, cx| {
+            assert!(thread.can_wake_for_background_work());
+            thread.subagent_started_in_background(child.clone());
+            thread.subagent_finished_in_background(&child, "Child finished".into(), cx);
+            let notes = thread.tool_result_notes("grep");
+            assert!(notes.iter().any(|note| note == "Child finished"), "{notes:?}");
+            assert!(
+                !thread
+                    .tool_result_notes("grep")
+                    .iter()
+                    .any(|note| note == "Child finished"),
+                "a result is reported once"
+            );
+
+            thread.subagent_started_in_background(child.clone());
+            thread.cancel(cx).detach();
+            thread.subagent_finished_in_background(&child, "Stopped child".into(), cx);
+            assert!(
+                !thread
+                    .tool_result_notes("grep")
+                    .iter()
+                    .any(|note| note == "Stopped child"),
+                "a sub-agent the user stopped is not reported as finished"
+            );
+        });
     }
 
     #[gpui::test]

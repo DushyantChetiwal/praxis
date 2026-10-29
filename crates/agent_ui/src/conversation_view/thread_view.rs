@@ -12410,12 +12410,18 @@ impl ThreadView {
         let files_changed = changed_buffers.len();
         let diff_stats = DiffStats::all_files(changed_buffers, cx);
 
-        let is_running = matches!(
-            card.status,
-            ToolCallStatus::Pending
-                | ToolCallStatus::InProgress
-                | ToolCallStatus::WaitingForConfirmation
-        );
+        // A sub-agent started in the background finishes its tool call at
+        // once and keeps working in its own thread.
+        let subagent_generating = thread
+            .as_ref()
+            .is_some_and(|thread| thread.read(cx).status() == ThreadStatus::Generating);
+        let is_running = subagent_generating
+            || matches!(
+                card.status,
+                ToolCallStatus::Pending
+                    | ToolCallStatus::InProgress
+                    | ToolCallStatus::WaitingForConfirmation
+            );
 
         let is_failed = matches!(
             card.status,
