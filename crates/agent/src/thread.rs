@@ -3020,11 +3020,7 @@ impl Thread {
             title_generation_error: None,
             pending_summary_generation: None,
             summary: db_thread.detailed_summary,
-            messages: db_thread
-                .messages
-                .into_iter()
-                .map(without_redundant_outputs)
-                .collect(),
+            messages: loaded_messages(db_thread.messages),
             retained_history_revision: 0,
             user_store: project.read(cx).user_store(),
             running_turn: None,
@@ -5638,6 +5634,7 @@ impl Thread {
                         this.messages.push(compaction);
                     }
                 }
+                shed_sealed_provider_state(&mut this.messages);
                 cx.notify();
             })?;
 
@@ -8229,6 +8226,63 @@ fn drop_file_versions(result: &mut LanguageModelToolResult) {
     if has_diff || unchanged {
         output.remove("old_text");
         output.remove("new_text");
+    }
+}
+
+fn loaded_messages(messages: Vec<Arc<Message>>) -> Vec<Arc<Message>> {
+    let mut messages = messages
+        .into_iter()
+        .map(without_redundant_outputs)
+        .collect::<Vec<_>>();
+    shed_sealed_provider_state(&mut messages);
+    messages
+}
+
+/// A compaction replays only messages after the compaction before it, so
+/// anything earlier is never sent again. Those messages drop the opaque state
+/// providers need to continue a turn: thinking signatures and reasoning
+/// details. The transcript keeps every word.
+fn shed_sealed_provider_state(messages: &mut [Arc<Message>]) {
+    let is_compaction = |message: &Arc<Message>| matches!(&**message, Message::Compaction(_));
+    let Some(sealed_end) = messages
+        .iter()
+        .rposition(is_compaction)
+        .and_then(|latest| messages[..latest].iter().rposition(is_compaction))
+    else {
+        return;
+    };
+    for message in &mut messages[..sealed_end] {
+        let has_provider_state = message.as_agent_message().is_some_and(|agent_message| {
+            agent_message.reasoning_details.is_some()
+                || agent_message.content.iter().any(|content| {
+                    matches!(
+                        content,
+                        AgentMessageContent::Thinking {
+                            signature: Some(_),
+                            ..
+                        }
+                    )
+                })
+        });
+        if !has_provider_state {
+            continue;
+        }
+        if let Some(Message::Agent(agent_message)) = Arc::get_mut(message) {
+            drop_provider_state(agent_message);
+        } else if let Some(agent_message) = message.as_agent_message() {
+            let mut agent_message = agent_message.clone();
+            drop_provider_state(&mut agent_message);
+            *message = Arc::new(Message::Agent(agent_message));
+        }
+    }
+}
+
+fn drop_provider_state(agent_message: &mut AgentMessage) {
+    agent_message.reasoning_details = None;
+    for content in &mut agent_message.content {
+        if let AgentMessageContent::Thinking { signature, .. } = content {
+            *signature = None;
+        }
     }
 }
 
@@ -13083,6 +13137,43 @@ mod tests {
             tool_result_output(stored).map(std::borrow::Cow::into_owned),
             Some(raw)
         );
+    }
+
+    #[test]
+    fn history_details_shed_provider_state_before_the_previous_compaction() {
+        let agent = || {
+            Arc::new(Message::Agent(AgentMessage {
+                content: vec![AgentMessageContent::Thinking {
+                    text: "Weighing the options".into(),
+                    signature: Some("opaque signature".into()),
+                }],
+                reasoning_details: Some(Arc::new(json!({ "encrypted": "opaque" }))),
+                ..Default::default()
+            }))
+        };
+        let compaction = || {
+            let summary = CompactionInfo::Summary("Earlier".into());
+            Arc::new(Message::Compaction(summary))
+        };
+        let mut messages = vec![agent(), compaction(), agent(), compaction(), agent()];
+        shed_sealed_provider_state(&mut messages);
+
+        let provider_state = |message: &Arc<Message>| {
+            let agent_message = message.as_agent_message().expect("agent message");
+            let AgentMessageContent::Thinking { text, signature } = &agent_message.content[0]
+            else {
+                panic!("expected thinking");
+            };
+            assert_eq!(text, "Weighing the options", "the transcript keeps its text");
+            (signature.is_some(), agent_message.reasoning_details.is_some())
+        };
+        assert_eq!(provider_state(&messages[0]), (false, false));
+        assert_eq!(
+            provider_state(&messages[2]),
+            (true, true),
+            "the latest compaction may still replay messages after the one before it"
+        );
+        assert_eq!(provider_state(&messages[4]), (true, true));
     }
 
     #[test]
