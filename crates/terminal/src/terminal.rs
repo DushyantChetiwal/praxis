@@ -1056,6 +1056,7 @@ impl TerminalBuilder {
             last_mouse_move_time: Instant::now(),
             last_hyperlink_search_position: None,
             mouse_down_hyperlink: None,
+            output_finished: false,
             #[cfg(windows)]
             shell_program: None,
             activation_script: Vec::new(),
@@ -1343,6 +1344,7 @@ impl TerminalBuilder {
                 last_mouse_move_time: Instant::now(),
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
+                output_finished: false,
                 #[cfg(windows)]
                 shell_program,
                 activation_script: activation_script.clone(),
@@ -1551,6 +1553,9 @@ pub struct Terminal {
     last_mouse_move_time: Instant,
     last_hyperlink_search_position: Option<GpuiPoint<Pixels>>,
     mouse_down_hyperlink: Option<HyperlinkMatch>,
+    /// Set once the output is complete, so later layouts free the rows
+    /// alacritty reserves when the grid gains lines.
+    output_finished: bool,
     #[cfg(windows)]
     shell_program: Option<String>,
     template: CopyTemplate,
@@ -1757,7 +1762,7 @@ impl Terminal {
                 // Alacritty reserves a thousand rows whenever the grid gains
                 // lines. A finished command never fills them, and the agent
                 // keeps every command's terminal for the whole conversation.
-                if !self.has_active_pty() {
+                if self.output_finished {
                     shrink_to_used(term);
                 }
                 if columns_changed {
@@ -2121,7 +2126,10 @@ impl Terminal {
         self.events.push_back(InternalEvent::Clear)
     }
 
+    /// Frees the rows alacritty reserved ahead of output, now and after every
+    /// later resize. Call it once the output is complete.
     pub fn shrink_to_used(&mut self) {
+        self.output_finished = true;
         shrink_to_used(&mut self.term.lock());
     }
 
@@ -2129,19 +2137,9 @@ impl Terminal {
     /// rebuilds anyway. Only a terminal with a live pty keeps them between
     /// frames, since the agent keeps every finished command's terminal.
     pub fn release_rendered_cells(&mut self) {
-        if !self.has_active_pty() {
+        if !self.has_active_pty_resources() {
             self.last_content.cells = Vec::new();
         }
-    }
-
-    fn has_active_pty(&self) -> bool {
-        matches!(
-            &self.terminal_type,
-            TerminalType::Pty {
-                resources: PtyResources::Active(_),
-                ..
-            }
-        )
     }
 
     pub fn scroll_line_up(&mut self) {
@@ -5158,7 +5156,7 @@ mod tests {
             .collect::<String>();
         let (terminal, cx) = init_terminal_test_with_window(cx, output.as_bytes());
         terminal.update_in(cx, |terminal, window, cx| {
-            assert!(!terminal.has_active_pty());
+            terminal.shrink_to_used();
             for height in [80., 400., 160., 800.] {
                 terminal.set_size(TerminalBounds::new(
                     px(20.),
