@@ -1548,6 +1548,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Reopens the selected window's remote project after its connection was lost. */
+    fun reconnectRemote() {
+        if (d.reconnecting || d.currentWindow()?.connection?.disconnected != true) return
+        viewModelScope.launch {
+            edit { copy(reconnecting = true) }
+            act("reconnect", windowArgs(), str(R.string.label_could_not_reconnect))
+            edit { copy(reconnecting = false) }
+        }
+    }
+
     /** Summarizes the conversation so the agent can keep working in a long thread. */
     fun compactConversation() {
         val session = d.currentWindow()?.thread?.sessionId ?: return

@@ -1,10 +1,13 @@
+use std::{path::PathBuf, sync::Arc};
+
 use gpui::{ClickEvent, DismissEvent, EventEmitter, FocusHandle, Focusable, Render, WeakEntity};
 use project::project_settings::ProjectSettings;
-use remote::RemoteConnectionOptions;
+use remote::{ConnectionState, RemoteConnectionOptions};
+use remote_connection::RemoteConnectionModal;
 use settings::Settings;
 use ui::{ElevationIndex, Modal, ModalFooter, ModalHeader, Section, prelude::*};
 use workspace::{
-    ModalView, MultiWorkspace, OpenOptions, Workspace, notifications::DetachAndPromptErr,
+    AppState, ModalView, MultiWorkspace, OpenOptions, Workspace, notifications::DetachAndPromptErr,
 };
 
 use crate::open_remote_project;
@@ -46,6 +49,7 @@ impl DisconnectedOverlay {
         window: Option<&mut Window>,
         cx: &mut Context<Workspace>,
     ) {
+        workspace.register_action(Self::reconnect_workspace);
         let Some(window) = window else {
             return;
         };
@@ -88,38 +92,82 @@ impl DisconnectedOverlay {
         .detach();
     }
 
+    /// Lets a reconnect requested away from the overlay, such as from Praxis
+    /// Remote, reopen the project exactly like the overlay's button does.
+    fn reconnect_workspace(
+        workspace: &mut Workspace,
+        _: &zed_actions::remote::Reconnect,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let project = workspace.project().read(cx);
+        if project.remote_connection_state(cx) != Some(ConnectionState::Disconnected)
+            || workspace
+                .active_modal::<RemoteConnectionModal>(cx)
+                .is_some()
+        {
+            return;
+        }
+        let Some(connection_options) = project.remote_connection_options(cx) else {
+            return;
+        };
+        if let Some(overlay) = workspace.active_modal::<Self>(cx) {
+            overlay.update(cx, |overlay, cx| {
+                overlay.finished = true;
+                cx.emit(DismissEvent);
+            });
+        }
+        let app_state = workspace.app_state().clone();
+        let paths = workspace_paths(workspace, cx);
+        reopen_remote_project(connection_options, paths, app_state, window, cx);
+    }
+
     fn handle_reconnect(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.finished = true;
         cx.emit(DismissEvent);
 
-        if let Host::RemoteServerProject(remote_connection_options, _) = &self.host {
-            self.reconnect_to_remote_project(remote_connection_options.clone(), window, cx);
-        }
-    }
-
-    fn reconnect_to_remote_project(
-        &self,
-        connection_options: RemoteConnectionOptions,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+        let Host::RemoteServerProject(connection_options, _) = &self.host else {
+            return;
+        };
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-
-        let Some(window_handle) = window.window_handle().downcast::<MultiWorkspace>() else {
-            return;
+        let (app_state, paths) = {
+            let workspace = workspace.read(cx);
+            (
+                workspace.app_state().clone(),
+                workspace_paths(workspace, cx),
+            )
         };
+        reopen_remote_project(connection_options.clone(), paths, app_state, window, cx);
+    }
 
-        let app_state = workspace.read(cx).app_state().clone();
-        let paths = workspace
-            .read(cx)
-            .root_paths(cx)
-            .iter()
-            .map(|path| path.to_path_buf())
-            .collect();
+    fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        self.finished = true;
+        cx.emit(DismissEvent)
+    }
+}
 
-        cx.spawn_in(window, async move |_, cx| {
+fn workspace_paths(workspace: &Workspace, cx: &App) -> Vec<PathBuf> {
+    workspace
+        .root_paths(cx)
+        .iter()
+        .map(|path| path.to_path_buf())
+        .collect()
+}
+
+fn reopen_remote_project(
+    connection_options: RemoteConnectionOptions,
+    paths: Vec<PathBuf>,
+    app_state: Arc<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(window_handle) = window.window_handle().downcast::<MultiWorkspace>() else {
+        return;
+    };
+    window
+        .spawn(cx, async move |cx| {
             open_remote_project(
                 connection_options,
                 paths,
@@ -131,15 +179,9 @@ impl DisconnectedOverlay {
                 cx,
             )
             .await?;
-            Ok(())
+            anyhow::Ok(())
         })
         .detach_and_prompt_err("Failed to reconnect", window, cx, |_, _, _| None);
-    }
-
-    fn cancel(&mut self, _: &menu::Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        self.finished = true;
-        cx.emit(DismissEvent)
-    }
 }
 
 impl Render for DisconnectedOverlay {
