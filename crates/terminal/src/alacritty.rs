@@ -831,6 +831,22 @@ pub(super) fn shrink_to_used(term: &mut Term<ZedListener>) {
     term.grid_mut().truncate();
 }
 
+/// The hyperlink of the cell shown at a row and column of the viewport.
+pub(super) fn displayed_cell_hyperlink(
+    term: &Term<ZedListener>,
+    row: usize,
+    column: usize,
+) -> Option<Hyperlink> {
+    let grid = term.grid();
+    if row >= grid.screen_lines() || column >= grid.columns() {
+        return None;
+    }
+    let line = Line(row as i32 - grid.display_offset() as i32);
+    grid[line][Column(column)]
+        .hyperlink()
+        .map(terminal_hyperlink_from_alacritty)
+}
+
 pub(super) fn used_lines(term: &Term<ZedListener>) -> usize {
     if term.mode().contains(TermMode::ALT_SCREEN) {
         return term.total_lines();

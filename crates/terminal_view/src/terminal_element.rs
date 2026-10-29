@@ -1550,6 +1550,9 @@ impl Element for TerminalElement {
                     None
                 };
 
+                self.terminal
+                    .update(cx, |terminal, _| terminal.release_rendered_cells());
+
                 LayoutState {
                     hitbox,
                     batched_text_runs,

@@ -65,7 +65,8 @@ use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittySearch, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtySender, RegexSearches,
     append_text_to_term, apply_config, clear_saved_screen, content_text, content_text_bounded,
-    display_offset, display_only_term_config, find_from_terminal_point, full_content_range,
+    display_offset, display_only_term_config, displayed_cell_hyperlink, find_from_terminal_point,
+    full_content_range,
     last_non_empty_lines, make_content, new_term, open_pty, pty_options, pty_term_config, resize,
     screen_lines, scroll_display, scroll_to_point, search_matches, selection_text,
     set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
@@ -2129,6 +2130,15 @@ impl Terminal {
         shrink_to_used(&mut self.term.lock());
     }
 
+    /// Drops the cells laid out for the last paint, which the next paint
+    /// rebuilds anyway. Only a terminal with a live pty keeps them between
+    /// frames, since the agent keeps every finished command's terminal.
+    pub fn release_rendered_cells(&mut self) {
+        if !self.has_active_pty() {
+            self.last_content.cells = Vec::new();
+        }
+    }
+
     fn has_active_pty(&self) -> bool {
         matches!(
             &self.terminal_type,
@@ -2896,14 +2906,10 @@ impl Terminal {
 
             //Hyperlinks
             if self.selection_phase == SelectionPhase::Ended {
-                let mouse_cell_index =
-                    content_index_for_mouse(position, &self.last_content.terminal_bounds);
-                if let Some(link) = self
-                    .last_content
-                    .cells
-                    .get(mouse_cell_index)
-                    .and_then(|cell| cell.hyperlink())
-                {
+                let (row, column) =
+                    content_cell_for_mouse(position, &self.last_content.terminal_bounds);
+                let link = displayed_cell_hyperlink(&self.term.lock(), row, column);
+                if let Some(link) = link {
                     cx.open_url(link.uri());
                 } else if e.modifiers.secondary() {
                     self.events
@@ -3598,12 +3604,22 @@ fn normalize_script_command_name(argument: &str) -> Option<String> {
         .and_then(normalize_path_command_name)
 }
 
+#[cfg(test)]
 fn content_index_for_mouse(pos: GpuiPoint<Pixels>, terminal_bounds: &TerminalBounds) -> usize {
+    let (row, column) = content_cell_for_mouse(pos, terminal_bounds);
+    row * terminal_bounds.num_columns() + column
+}
+
+/// The viewport row and column under the mouse.
+fn content_cell_for_mouse(
+    pos: GpuiPoint<Pixels>,
+    terminal_bounds: &TerminalBounds,
+) -> (usize, usize) {
     let col = (pos.x / terminal_bounds.cell_width()).round() as usize;
     let clamped_col = min(col, terminal_bounds.num_columns().saturating_sub(1));
     let row = (pos.y / terminal_bounds.line_height()).round() as usize;
     let clamped_row = min(row, terminal_bounds.num_lines().saturating_sub(1));
-    clamped_row * terminal_bounds.num_columns() + clamped_col
+    (clamped_row, clamped_col)
 }
 
 /// Converts an 8 bit ANSI color to its GPUI equivalent.
@@ -5150,6 +5166,37 @@ mod tests {
             terminal.write_output(b"after resize\r\n", cx);
             terminal.sync(window, cx);
             assert!(terminal.get_content().contains("after resize"));
+        });
+    }
+
+    /// A finished terminal drops its laid-out cells after each paint, and its
+    /// links must stay clickable without them.
+    #[gpui::test]
+    async fn test_released_cells_keep_hyperlinks_clickable(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_terminal_test_with_window(
+            cx,
+            b"\x1b]8;;https://zed.dev/\x1b\\link\x1b]8;;\x1b\\\r\n",
+        );
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.set_size(TerminalBounds::new(
+                px(20.),
+                px(10.),
+                bounds(point(px(0.), px(0.)), size(px(400.), px(160.))),
+            ));
+            terminal.sync(window, cx);
+            assert!(!terminal.last_content.cells.is_empty());
+            terminal.release_rendered_cells();
+            assert!(terminal.last_content.cells.is_empty());
+            left_mouse_up_at(terminal, point(px(2.), px(2.)), cx);
+        });
+        assert_eq!(cx.opened_url().as_deref(), Some("https://zed.dev/"));
+
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.sync(window, cx);
+            assert!(
+                !terminal.last_content.cells.is_empty(),
+                "the next paint lays the cells out again"
+            );
         });
     }
 
