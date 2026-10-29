@@ -1,6 +1,6 @@
 use crate::{App, AppContext, GpuiBorrow, VisualContext, Window, seal::Sealed};
 use anyhow::{Context as _, Result};
-use collections::FxHashSet;
+use collections::{FxHashMap, FxHashSet};
 use derive_more::{Deref, DerefMut};
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use slotmap::{KeyData, SecondaryMap, SlotMap};
@@ -57,6 +57,7 @@ pub(crate) struct EntityMap {
     entities: SecondaryMap<EntityId, Box<dyn Any>>,
     pub accessed_entities: RefCell<FxHashSet<EntityId>>,
     ref_counts: Arc<RwLock<EntityRefCounts>>,
+    type_names: FxHashMap<TypeId, &'static str>,
 }
 
 #[doc(hidden)]
@@ -85,7 +86,26 @@ impl EntityMap {
                     entity_handles: HashMap::default(),
                 },
             })),
+            type_names: FxHashMap::default(),
         }
+    }
+
+    /// How many entities of each type are alive, most numerous first.
+    /// Entities being updated right now are left out.
+    pub fn live_entity_counts(&self) -> Vec<(&'static str, usize)> {
+        let mut counts = FxHashMap::<TypeId, usize>::default();
+        for entity in self.entities.values() {
+            *counts.entry((**entity).type_id()).or_default() += 1;
+        }
+        let mut counts: Vec<_> = counts
+            .into_iter()
+            .map(|(type_id, count)| {
+                let name = self.type_names.get(&type_id).copied();
+                (name.unwrap_or("unknown"), count)
+            })
+            .collect();
+        counts.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(right.0)));
+        counts
     }
 
     #[doc(hidden)]
@@ -127,6 +147,9 @@ impl EntityMap {
     {
         let mut accessed_entities = self.accessed_entities.get_mut();
         accessed_entities.insert(slot.entity_id);
+        self.type_names
+            .entry(TypeId::of::<T>())
+            .or_insert_with(type_name::<T>);
 
         let handle = slot.0;
         self.entities.insert(handle.entity_id, Box::new(entity));
@@ -1241,6 +1264,30 @@ mod test {
                 .collect::<Vec<i32>>(),
             vec![1, 2],
         );
+    }
+
+    #[test]
+    fn test_live_entity_counts_group_entities_by_type() {
+        let mut entity_map = EntityMap::new();
+        let mut handles = Vec::new();
+        for index in 0..3 {
+            let slot = entity_map.reserve::<TestEntity>();
+            handles.push(entity_map.insert(slot, TestEntity { i: index }));
+        }
+        let slot = entity_map.reserve::<String>();
+        let text = entity_map.insert(slot, String::from("text"));
+
+        let test_entity = std::any::type_name::<TestEntity>();
+        let string = std::any::type_name::<String>();
+        assert_eq!(
+            entity_map.live_entity_counts(),
+            vec![(test_entity, 3), (string, 1)]
+        );
+
+        drop(handles);
+        drop(text);
+        entity_map.take_dropped();
+        assert_eq!(entity_map.live_entity_counts(), Vec::new());
     }
 
     #[test]

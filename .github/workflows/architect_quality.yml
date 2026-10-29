@@ -291,6 +291,7 @@ jobs:
           cargo test --locked -p agent_ui --lib test_subagents_load_on_demand_
           cargo test --locked -p agent --lib history_details_
           cargo test --locked -p agent_ui --lib test_entries_added_in_one_update_
+          cargo test --locked -p gpui --lib test_live_entity_counts_
 
       - name: Test remote transport and image input
         run: |

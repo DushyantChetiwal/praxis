@@ -62,22 +62,28 @@ pub struct PartialEdit {
     pub new_text: Option<String>,
 }
 
+/// `Error` comes first because untagged variants are tried in order, and only
+/// its required `error` tells the two apart now that `Success` saves no text.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum EditSessionOutput {
-    Success {
-        #[serde(alias = "original_path")]
-        input_path: PathBuf,
-        new_text: String,
-        old_text: Arc<String>,
-        #[serde(default)]
-        diff: String,
-    },
     Error {
         error: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_path: Option<PathBuf>,
         #[serde(default, skip_serializing_if = "String::is_empty")]
+        diff: String,
+    },
+    Success {
+        #[serde(alias = "original_path")]
+        input_path: PathBuf,
+        /// The file versions are left out of the saved conversation, where
+        /// they were most of its size. `diff` redraws the card on its own.
+        #[serde(default, skip_serializing)]
+        new_text: String,
+        #[serde(default, skip_serializing)]
+        old_text: Arc<String>,
+        #[serde(default)]
         diff: String,
     },
 }
@@ -245,16 +251,23 @@ impl EditSessionContext {
                 input_path,
                 old_text,
                 new_text,
-                ..
+                diff,
             } => {
-                event_stream.update_diff(cx.new(|_| {
+                let path = input_path.to_string_lossy().into_owned();
+                let language_registry = self.language_registry.clone();
+                // Conversations saved before only the diff was kept still
+                // carry both versions of the file.
+                let historical = if old_text.is_empty() && new_text.is_empty() {
+                    Diff::historical_from_unified_diff(path, &diff, language_registry)?
+                } else {
                     Diff::historical(
-                        input_path.to_string_lossy().into_owned(),
+                        path,
                         Some(old_text.to_string()),
                         new_text,
-                        self.language_registry.clone(),
+                        language_registry,
                     )
-                }));
+                };
+                event_stream.update_diff(cx.new(|_| historical));
                 Ok(())
             }
             EditSessionOutput::Error { .. } => Ok(()),

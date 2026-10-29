@@ -1271,6 +1271,12 @@ impl App {
         self.platform.quit();
     }
 
+    /// How many entities of each type are alive, most numerous first, for
+    /// diagnosing memory growth. Entities being updated right now are left out.
+    pub fn live_entity_counts(&self) -> Vec<(&'static str, usize)> {
+        self.entities.live_entity_counts()
+    }
+
     /// Switches the platform between headless and windowed modes.
     ///
     /// On Linux, headless means no display server: windows opened afterwards lay out and handle

@@ -378,9 +378,29 @@ impl Diff {
             base_text_exists: old_text.is_some(),
             base_text: old_text.unwrap_or_default().into(),
             new_text: new_text.into(),
+            unified_diff: None,
             language_registry,
             view: None,
         })
+    }
+
+    /// A saved edit that kept only its unified diff. Opening it shows the
+    /// same hunks without either full version of the file.
+    pub fn historical_from_unified_diff(
+        path: String,
+        unified_diff: &str,
+        language_registry: Arc<LanguageRegistry>,
+    ) -> Result<Self> {
+        let (base_text, new_text) = sparse_texts_from_unified_diff(unified_diff)?;
+        Ok(Self::Historical(HistoricalDiff {
+            path,
+            base_text_exists: true,
+            base_text: base_text.into(),
+            new_text: new_text.into(),
+            unified_diff: Some(unified_diff.into()),
+            language_registry,
+            view: None,
+        }))
     }
 
     pub fn is_historical(&self) -> bool {
@@ -511,7 +531,14 @@ impl Diff {
 
     pub fn to_markdown(&self, cx: &App) -> String {
         if let Self::Historical(snapshot) = self {
-            return format!("Diff: {}\n```\n{}\n```\n", snapshot.path, snapshot.new_text);
+            return match &snapshot.unified_diff {
+                Some(unified_diff) => format!(
+                    "Diff: {}\n```diff\n{}\n```\n",
+                    snapshot.path,
+                    unified_diff.trim_end()
+                ),
+                None => format!("Diff: {}\n```\n{}\n```\n", snapshot.path, snapshot.new_text),
+            };
         }
         let buffer_text = self
             .multibuffer()
@@ -742,8 +769,78 @@ pub struct HistoricalDiff {
     base_text: Arc<str>,
     base_text_exists: bool,
     new_text: Arc<str>,
+    /// Set when the texts were rebuilt from this diff and hold only its hunks.
+    unified_diff: Option<Arc<str>>,
     language_registry: Arc<LanguageRegistry>,
     view: Option<FinalizedDiff>,
+}
+
+/// Rebuilt texts are padded with empty lines up to this row at most, so a
+/// corrupt hunk header can't allocate without bound.
+const MAX_REBUILT_ROWS: u32 = 1 << 22;
+
+/// Places each hunk at its own line numbers, with empty lines between hunks,
+/// so the rebuilt texts differ exactly where the saved edit did and hunks far
+/// apart still show as separate excerpts.
+fn sparse_texts_from_unified_diff(unified_diff: &str) -> Result<(String, String)> {
+    let mut base_text = String::new();
+    let mut new_text = String::new();
+    if unified_diff.trim().is_empty() {
+        return Ok((base_text, new_text));
+    }
+    let files = patch::parse_patch(unified_diff)?;
+    ensure!(files.len() <= 1, "a saved edit's diff covers one file");
+    let mut base_rows = 0;
+    let mut new_rows = 0;
+    for hunk in files.iter().flat_map(|file| &file.hunks) {
+        // The unchanged lines before a hunk are as many on either side, so a
+        // side with lines places both. Diff writers disagree on where an
+        // empty side starts.
+        let gap = if hunk.old_count > 0 {
+            hunk.old_start.saturating_sub(1).checked_sub(base_rows)
+        } else {
+            hunk.new_start.saturating_sub(1).checked_sub(new_rows)
+        }
+        .ok_or_else(|| anyhow!("hunks overlap or are out of order"))?;
+        push_hunk_side(
+            &mut base_text,
+            &mut base_rows,
+            gap,
+            hunk.old_count,
+            &hunk.old_text,
+        )?;
+        push_hunk_side(
+            &mut new_text,
+            &mut new_rows,
+            gap,
+            hunk.new_count,
+            &hunk.new_text,
+        )?;
+    }
+    Ok((base_text, new_text))
+}
+
+fn push_hunk_side(
+    text: &mut String,
+    written_rows: &mut u32,
+    gap: u32,
+    count: u32,
+    lines: &str,
+) -> Result<()> {
+    let end_row = written_rows
+        .checked_add(gap)
+        .and_then(|first_row| first_row.checked_add(count))
+        .filter(|end_row| *end_row <= MAX_REBUILT_ROWS)
+        .ok_or_else(|| anyhow!("hunk is beyond the rebuilt text's limit"))?;
+    for _ in 0..gap {
+        text.push('\n');
+    }
+    text.push_str(lines);
+    if !lines.is_empty() && !lines.ends_with('\n') {
+        text.push('\n');
+    }
+    *written_rows = end_row;
+    Ok(())
 }
 
 pub struct FinalizedDiff {
@@ -869,6 +966,76 @@ mod tests {
             assert!(buffer.upgrade().is_none(), "collapsed buffer retained");
             assert!(multibuffer.upgrade().is_none(), "collapsed diff retained");
         }
+    }
+
+    #[gpui::test]
+    fn historical_diffs_rebuild_saved_hunks_from_unified_diffs(cx: &mut TestAppContext) {
+        let languages = historical_diff_languages(cx);
+        let old_text = (1..=40)
+            .map(|row| format!("line {row}\n"))
+            .collect::<String>();
+        let new_text = old_text
+            .replace("line 5\n", "line five\n")
+            .replace("line 30\n", "line 30\nline 30.5\n");
+        let unified_diff = language::unified_diff(&old_text, &new_text);
+        let diff = cx.new(|_| {
+            Diff::historical_from_unified_diff("saved.txt".into(), &unified_diff, languages)
+                .expect("saved diff")
+        });
+        diff.read_with(cx, |diff, cx| {
+            assert!(diff.buffer().is_none());
+            assert_eq!(
+                diff.to_markdown(cx),
+                format!(
+                    "Diff: saved.txt\n```diff\n{}\n```\n",
+                    unified_diff.trim_end()
+                )
+            );
+        });
+
+        diff.update(cx, |diff, cx| assert!(diff.materialize(cx)));
+        cx.run_until_parked();
+        diff.read_with(cx, |diff, cx| {
+            let new_lines = diff.buffer().expect("opened diff").read(cx).text();
+            let new_lines = new_lines.lines().collect::<Vec<_>>();
+            assert_eq!(new_lines[4], "line five", "hunks keep their rows");
+            assert_eq!(new_lines[30], "line 30.5");
+            assert_eq!(new_lines[15], "", "rows between hunks are left empty");
+            assert_eq!(diff.base_text().lines().nth(4), Some("line 5"));
+            let shown = diff
+                .multibuffer()
+                .expect("opened diff")
+                .read(cx)
+                .snapshot(cx)
+                .text();
+            assert!(shown.contains("line five") && shown.contains("line 30.5"));
+            assert!(
+                !shown.contains("\n\n\n"),
+                "distant hunks stay separate excerpts: {shown:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn sparse_texts_place_hunks_from_either_diff_convention() {
+        assert_eq!(
+            sparse_texts_from_unified_diff("").expect("no changes"),
+            (String::new(), String::new())
+        );
+        let created = language::unified_diff("", "first\nsecond\n");
+        assert_eq!(
+            sparse_texts_from_unified_diff(&created).expect("created file"),
+            (String::new(), "first\nsecond\n".to_string())
+        );
+        assert_eq!(
+            sparse_texts_from_unified_diff("@@ -2,0 +3,1 @@\n+inserted\n")
+                .expect("insertion without context"),
+            ("\n\n".to_string(), "\n\ninserted\n".to_string())
+        );
+        assert!(
+            sparse_texts_from_unified_diff("@@ -4194305,1 +4194305,1 @@\n-a\n+b\n").is_err(),
+            "a corrupt header can't pad without bound"
+        );
     }
 
     #[gpui::test(iterations = 5)]

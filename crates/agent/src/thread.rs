@@ -3020,11 +3020,7 @@ impl Thread {
             title_generation_error: None,
             pending_summary_generation: None,
             summary: db_thread.detailed_summary,
-            messages: db_thread
-                .messages
-                .into_iter()
-                .map(without_duplicate_outputs)
-                .collect(),
+            messages: loaded_messages(db_thread.messages),
             retained_history_revision: 0,
             user_store: project.read(cx).user_store(),
             running_turn: None,
@@ -5638,6 +5634,7 @@ impl Thread {
                         this.messages.push(compaction);
                     }
                 }
+                shed_sealed_provider_state(&mut this.messages);
                 cx.notify();
             })?;
 
@@ -8206,19 +8203,108 @@ fn tool_result_output(
     }
 }
 
-fn without_duplicate_outputs(mut message: Arc<Message>) -> Arc<Message> {
-    let has_duplicates = message.as_agent_message().is_some_and(|agent_message| {
-        agent_message
-            .tool_results
-            .values()
-            .any(|result| result.output.is_some() && output_duplicates_content(&result.tool_name))
+/// Tools whose output was saved with both full versions of the edited file
+/// next to the unified diff that redraws its card on its own.
+fn output_keeps_file_versions(tool_name: &str) -> bool {
+    tool_name == EditFileTool::NAME || tool_name == WriteFileTool::NAME
+}
+
+/// Edits saved by earlier builds drop their file versions when the diff can
+/// stand in for them. Those versions were most of a long conversation.
+fn drop_file_versions(result: &mut LanguageModelToolResult) {
+    if !output_keeps_file_versions(&result.tool_name) {
+        return;
+    }
+    let Some(serde_json::Value::Object(output)) = &mut result.output else {
+        return;
+    };
+    let has_diff = output
+        .get("diff")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|diff| !diff.is_empty());
+    let unchanged = output.get("old_text") == output.get("new_text");
+    if has_diff || unchanged {
+        output.remove("old_text");
+        output.remove("new_text");
+    }
+}
+
+fn loaded_messages(messages: Vec<Arc<Message>>) -> Vec<Arc<Message>> {
+    let mut messages = messages
+        .into_iter()
+        .map(without_redundant_outputs)
+        .collect::<Vec<_>>();
+    shed_sealed_provider_state(&mut messages);
+    messages
+}
+
+/// A compaction replays only messages after the compaction before it, so
+/// anything earlier is never sent again. Those messages drop the opaque state
+/// providers need to continue a turn: thinking signatures and reasoning
+/// details. The transcript keeps every word.
+fn shed_sealed_provider_state(messages: &mut [Arc<Message>]) {
+    let is_compaction = |message: &Arc<Message>| matches!(&**message, Message::Compaction(_));
+    let Some(sealed_end) = messages
+        .iter()
+        .rposition(is_compaction)
+        .and_then(|latest| messages[..latest].iter().rposition(is_compaction))
+    else {
+        return;
+    };
+    for message in &mut messages[..sealed_end] {
+        let has_provider_state = message.as_agent_message().is_some_and(|agent_message| {
+            agent_message.reasoning_details.is_some()
+                || agent_message.content.iter().any(|content| {
+                    matches!(
+                        content,
+                        AgentMessageContent::Thinking {
+                            signature: Some(_),
+                            ..
+                        }
+                    )
+                })
+        });
+        if !has_provider_state {
+            continue;
+        }
+        if let Some(Message::Agent(agent_message)) = Arc::get_mut(message) {
+            drop_provider_state(agent_message);
+        } else if let Some(agent_message) = message.as_agent_message() {
+            let mut agent_message = agent_message.clone();
+            drop_provider_state(&mut agent_message);
+            *message = Arc::new(Message::Agent(agent_message));
+        }
+    }
+}
+
+fn drop_provider_state(agent_message: &mut AgentMessage) {
+    agent_message.reasoning_details = None;
+    for content in &mut agent_message.content {
+        if let AgentMessageContent::Thinking { signature, .. } = content {
+            *signature = None;
+        }
+    }
+}
+
+fn drop_redundant_output(result: &mut LanguageModelToolResult) {
+    drop_duplicate_output(result);
+    drop_file_versions(result);
+}
+
+fn without_redundant_outputs(mut message: Arc<Message>) -> Arc<Message> {
+    let has_redundant_output = message.as_agent_message().is_some_and(|agent_message| {
+        agent_message.tool_results.values().any(|result| {
+            result.output.is_some()
+                && (output_duplicates_content(&result.tool_name)
+                    || output_keeps_file_versions(&result.tool_name))
+        })
     });
-    if !has_duplicates {
+    if !has_redundant_output {
         return message;
     }
     if let Some(Message::Agent(agent_message)) = Arc::get_mut(&mut message) {
         for result in agent_message.tool_results.values_mut() {
-            drop_duplicate_output(result);
+            drop_redundant_output(result);
         }
         return message;
     }
@@ -8227,7 +8313,7 @@ fn without_duplicate_outputs(mut message: Arc<Message>) -> Arc<Message> {
     };
     let mut agent_message = agent_message.clone();
     for result in agent_message.tool_results.values_mut() {
-        drop_duplicate_output(result);
+        drop_redundant_output(result);
     }
     Arc::new(Message::Agent(agent_message))
 }
@@ -13030,7 +13116,7 @@ mod tests {
         drop_duplicate_output(&mut other_tool);
         assert_eq!(other_tool.output, Some(raw.clone()));
 
-        let loaded = without_duplicate_outputs(Arc::new(Message::Agent(AgentMessage {
+        let loaded = without_redundant_outputs(Arc::new(Message::Agent(AgentMessage {
             tool_results: [(
                 LanguageModelToolUseId::from("read"),
                 read(ReadFileTool::NAME, vec![file]),
@@ -13051,6 +13137,103 @@ mod tests {
             tool_result_output(stored).map(std::borrow::Cow::into_owned),
             Some(raw)
         );
+    }
+
+    #[test]
+    fn history_details_shed_provider_state_before_the_previous_compaction() {
+        let agent = || {
+            Arc::new(Message::Agent(AgentMessage {
+                content: vec![AgentMessageContent::Thinking {
+                    text: "Weighing the options".into(),
+                    signature: Some("opaque signature".into()),
+                }],
+                reasoning_details: Some(Arc::new(json!({ "encrypted": "opaque" }))),
+                ..Default::default()
+            }))
+        };
+        let compaction = || {
+            let summary = CompactionInfo::Summary("Earlier".into());
+            Arc::new(Message::Compaction(summary))
+        };
+        let mut messages = vec![agent(), compaction(), agent(), compaction(), agent()];
+        shed_sealed_provider_state(&mut messages);
+
+        let provider_state = |message: &Arc<Message>| {
+            let agent_message = message.as_agent_message().expect("agent message");
+            let AgentMessageContent::Thinking { text, signature } = &agent_message.content[0]
+            else {
+                panic!("expected thinking");
+            };
+            assert_eq!(
+                text, "Weighing the options",
+                "the transcript keeps its text"
+            );
+            (
+                signature.is_some(),
+                agent_message.reasoning_details.is_some(),
+            )
+        };
+        assert_eq!(provider_state(&messages[0]), (false, false));
+        assert_eq!(
+            provider_state(&messages[2]),
+            (true, true),
+            "the latest compaction may still replay messages after the one before it"
+        );
+        assert_eq!(provider_state(&messages[4]), (true, true));
+    }
+
+    #[test]
+    fn history_details_store_edits_as_diffs() {
+        let edit = |tool_name: &str, output: serde_json::Value| LanguageModelToolResult {
+            tool_use_id: LanguageModelToolUseId::from("edit"),
+            tool_name: tool_name.into(),
+            is_error: false,
+            content: vec!["Edited root/file.rs successfully".into()],
+            output: Some(output),
+        };
+        let diff = "@@ -1,1 +1,1 @@\n-fn old() {}\n+fn new() {}\n";
+        let saved = json!({
+            "input_path": "root/file.rs",
+            "old_text": "fn old() {}\n",
+            "new_text": "fn new() {}\n",
+            "diff": diff,
+        });
+
+        let loaded = without_redundant_outputs(Arc::new(Message::Agent(AgentMessage {
+            tool_results: [(
+                LanguageModelToolUseId::from("edit"),
+                edit(EditFileTool::NAME, saved.clone()),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        })));
+        let stored = loaded
+            .as_agent_message()
+            .and_then(|message| message.tool_results.values().next())
+            .expect("stored result");
+        assert_eq!(
+            stored.output,
+            Some(json!({ "input_path": "root/file.rs", "diff": diff })),
+            "saved conversations shed both file versions on load"
+        );
+
+        let mut without_diff = edit(
+            WriteFileTool::NAME,
+            json!({ "input_path": "root/file.rs", "old_text": "a\n", "new_text": "b\n" }),
+        );
+        drop_file_versions(&mut without_diff);
+        assert!(
+            without_diff
+                .output
+                .as_ref()
+                .is_some_and(|output| output.get("new_text").is_some()),
+            "an edit saved without a diff keeps the versions it is drawn from"
+        );
+
+        let mut other_tool = edit("terminal", saved.clone());
+        drop_file_versions(&mut other_tool);
+        assert_eq!(other_tool.output, Some(saved));
     }
 
     #[gpui::test]
