@@ -348,7 +348,9 @@ mod tests {
 
     #[gpui::test]
     async fn historical_diff_replay_redraws_saved_edits_from_their_diff(cx: &mut TestAppContext) {
-        let original = (1..=40).map(|row| format!("line {row}\n")).collect::<String>();
+        let original = (1..=40)
+            .map(|row| format!("line {row}\n"))
+            .collect::<String>();
         let (edit_tool, _project, _action_log, _fs, _thread) =
             setup_test(cx, json!({"file.txt": original})).await;
         let output = cx

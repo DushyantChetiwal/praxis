@@ -802,8 +802,20 @@ fn sparse_texts_from_unified_diff(unified_diff: &str) -> Result<(String, String)
             hunk.new_start.saturating_sub(1).checked_sub(new_rows)
         }
         .ok_or_else(|| anyhow!("hunks overlap or are out of order"))?;
-        push_hunk_side(&mut base_text, &mut base_rows, gap, hunk.old_count, &hunk.old_text)?;
-        push_hunk_side(&mut new_text, &mut new_rows, gap, hunk.new_count, &hunk.new_text)?;
+        push_hunk_side(
+            &mut base_text,
+            &mut base_rows,
+            gap,
+            hunk.old_count,
+            &hunk.old_text,
+        )?;
+        push_hunk_side(
+            &mut new_text,
+            &mut new_rows,
+            gap,
+            hunk.new_count,
+            &hunk.new_text,
+        )?;
     }
     Ok((base_text, new_text))
 }
@@ -959,7 +971,9 @@ mod tests {
     #[gpui::test]
     fn historical_diffs_rebuild_saved_hunks_from_unified_diffs(cx: &mut TestAppContext) {
         let languages = historical_diff_languages(cx);
-        let old_text = (1..=40).map(|row| format!("line {row}\n")).collect::<String>();
+        let old_text = (1..=40)
+            .map(|row| format!("line {row}\n"))
+            .collect::<String>();
         let new_text = old_text
             .replace("line 5\n", "line five\n")
             .replace("line 30\n", "line 30\nline 30.5\n");
@@ -972,7 +986,10 @@ mod tests {
             assert!(diff.buffer().is_none());
             assert_eq!(
                 diff.to_markdown(cx),
-                format!("Diff: saved.txt\n```diff\n{}\n```\n", unified_diff.trim_end())
+                format!(
+                    "Diff: saved.txt\n```diff\n{}\n```\n",
+                    unified_diff.trim_end()
+                )
             );
         });
 

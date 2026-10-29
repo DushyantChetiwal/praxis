@@ -260,7 +260,12 @@ impl EditSessionContext {
                 let historical = if old_text.is_empty() && new_text.is_empty() {
                     Diff::historical_from_unified_diff(path, &diff, language_registry)?
                 } else {
-                    Diff::historical(path, Some(old_text.to_string()), new_text, language_registry)
+                    Diff::historical(
+                        path,
+                        Some(old_text.to_string()),
+                        new_text,
+                        language_registry,
+                    )
                 };
                 event_stream.update_diff(cx.new(|_| historical));
                 Ok(())
