@@ -1051,7 +1051,7 @@ impl TerminalBuilder {
             scroll_px: px(0.),
             next_link_id: 0,
             selection_phase: SelectionPhase::Ended,
-            hyperlink_regex_searches: RegexSearches::default(),
+            hyperlink_regex_searches: None,
             vi_mode_enabled: false,
             is_remote_terminal: false,
             last_mouse_move_time: Instant::now(),
@@ -1338,10 +1338,7 @@ impl TerminalBuilder {
                 scroll_px: px(0.),
                 next_link_id: 0,
                 selection_phase: SelectionPhase::Ended,
-                hyperlink_regex_searches: RegexSearches::new(
-                    &path_hyperlink_regexes,
-                    path_hyperlink_timeout,
-                ),
+                hyperlink_regex_searches: None,
                 vi_mode_enabled: false,
                 is_remote_terminal,
                 last_mouse_move_time: Instant::now(),
@@ -1546,7 +1543,9 @@ pub struct Terminal {
     scroll_px: Pixels,
     next_link_id: usize,
     selection_phase: SelectionPhase,
-    hyperlink_regex_searches: RegexSearches,
+    /// Compiled on first use: the agent keeps every command's terminal, and
+    /// few of them are ever searched for links.
+    hyperlink_regex_searches: Option<RegexSearches>,
     task: Option<TaskState>,
     vi_mode_enabled: bool,
     is_remote_terminal: bool,
@@ -1872,7 +1871,7 @@ impl Terminal {
                 match find_from_terminal_point(
                     term,
                     point,
-                    &mut self.hyperlink_regex_searches,
+                    regex_searches(&mut self.hyperlink_regex_searches, &self.template),
                     self.path_style,
                 ) {
                     Some(hyperlink) => {
@@ -1947,7 +1946,7 @@ impl Terminal {
         find_from_terminal_point(
             &term_lock,
             point,
-            &mut self.hyperlink_regex_searches,
+            regex_searches(&mut self.hyperlink_regex_searches, &self.template),
             self.path_style,
         )
     }
@@ -2046,10 +2045,7 @@ impl Terminal {
         self.scroll_px = px(0.);
         self.next_link_id = 0;
         self.selection_phase = SelectionPhase::Ended;
-        self.hyperlink_regex_searches = RegexSearches::new(
-            &self.template.path_hyperlink_regexes,
-            self.template.path_hyperlink_timeout,
-        );
+        self.hyperlink_regex_searches = None;
         self.vi_mode_enabled = false;
         self.last_hyperlink_search_position = None;
         self.mouse_down_hyperlink = None;
@@ -3602,6 +3598,18 @@ fn normalize_script_command_name(argument: &str) -> Option<String> {
         .and_then(|package_name| package_name.to_str())
         .and_then(|package_name| package_name.strip_suffix("-cli").or(Some(package_name)))
         .and_then(normalize_path_command_name)
+}
+
+fn regex_searches<'a>(
+    searches: &'a mut Option<RegexSearches>,
+    template: &CopyTemplate,
+) -> &'a mut RegexSearches {
+    searches.get_or_insert_with(|| {
+        RegexSearches::new(
+            &template.path_hyperlink_regexes,
+            template.path_hyperlink_timeout,
+        )
+    })
 }
 
 #[cfg(test)]
@@ -5166,6 +5174,25 @@ mod tests {
             terminal.write_output(b"after resize\r\n", cx);
             terminal.sync(window, cx);
             assert!(terminal.get_content().contains("after resize"));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_link_search_compiles_on_first_use(cx: &mut TestAppContext) {
+        let (terminal, cx) = init_terminal_test_with_window(cx, b"see https://zed.dev/ now\r\n");
+        terminal.update_in(cx, |terminal, window, cx| {
+            terminal.sync(window, cx);
+            assert!(
+                terminal.hyperlink_regex_searches.is_none(),
+                "a terminal nobody searches must not compile the link patterns"
+            );
+            let link = terminal.find_hyperlink_at_point(Point { line: 0, column: 6 });
+            assert!(
+                link.as_ref()
+                    .is_some_and(|link| link.is_url && link.text.starts_with("https://zed.dev")),
+                "{link:?}"
+            );
+            assert!(terminal.hyperlink_regex_searches.is_some());
         });
     }
 
