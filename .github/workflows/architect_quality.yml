@@ -455,6 +455,7 @@ jobs:
           cargo test --locked -p agent --lib test_native_terminal_registration_handoff_is_cancellation_safe
           cargo test --locked -p terminal --lib bounded_content
           cargo test --locked -p terminal --lib process_tree
+          cargo test --locked -p terminal --lib test_resizing_a_finished_terminal_
           cargo test --locked -p acp_thread --lib test_terminal_bounded_capture_reports_live_and_cached_truncation
           cargo test --locked -p agent --lib terminal_tool
           cargo test --locked -p agent --lib built_in_tool_schemas_are_normalized

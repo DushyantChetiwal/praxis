@@ -1755,6 +1755,12 @@ impl Terminal {
                 }
 
                 resize(term, new_bounds);
+                // Alacritty reserves a thousand rows whenever the grid gains
+                // lines. A finished command never fills them, and the agent
+                // keeps every command's terminal for the whole conversation.
+                if !self.has_active_pty() {
+                    shrink_to_used(term);
+                }
                 if columns_changed {
                     self.reset_cwd_history();
                 }
@@ -2121,6 +2127,16 @@ impl Terminal {
 
     pub fn shrink_to_used(&mut self) {
         shrink_to_used(&mut self.term.lock());
+    }
+
+    fn has_active_pty(&self) -> bool {
+        matches!(
+            &self.terminal_type,
+            TerminalType::Pty {
+                resources: PtyResources::Active(_),
+                ..
+            }
+        )
     }
 
     pub fn scroll_line_up(&mut self) {
@@ -5108,6 +5124,33 @@ mod tests {
             );
         });
         assert_eq!(terminal.entity_id(), entity_id);
+    }
+
+    /// Finished terminals drop alacritty's reserved rows when they are laid
+    /// out again, which must never cost the output they show.
+    #[gpui::test]
+    async fn test_resizing_a_finished_terminal_keeps_its_output(cx: &mut TestAppContext) {
+        let output = (0..200)
+            .map(|line| format!("line {line}\r\n"))
+            .collect::<String>();
+        let (terminal, cx) = init_terminal_test_with_window(cx, output.as_bytes());
+        terminal.update_in(cx, |terminal, window, cx| {
+            assert!(!terminal.has_active_pty());
+            for height in [80., 400., 160., 800.] {
+                terminal.set_size(TerminalBounds::new(
+                    px(20.),
+                    px(10.),
+                    bounds(point(px(0.), px(0.)), size(px(400.), px(height))),
+                ));
+                terminal.sync(window, cx);
+                let content = terminal.get_content();
+                assert!(content.contains("line 0"), "{content}");
+                assert!(content.contains("line 199"), "{content}");
+            }
+            terminal.write_output(b"after resize\r\n", cx);
+            terminal.sync(window, cx);
+            assert!(terminal.get_content().contains("after resize"));
+        });
     }
 
     #[gpui::test]
