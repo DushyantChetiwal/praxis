@@ -6029,22 +6029,26 @@ impl AgentPanel {
             .and_then(|thread_view| thread_view.read(cx).as_native_thread(cx))?;
         self.restore_architect_if_needed(thread.clone(), true, window, cx);
 
-        // Counted through nested plans, the same way Run counts what is left.
-        let graph = thread.read(cx).architect_graph();
-        let step_count = graph.map_or(0, architect::ArchitectGraph::step_count_deeply);
-        let settled = graph.map_or(0, architect::ArchitectGraph::locked_step_count_deeply);
+        // The plan's top-level steps are the checklist, so its progress is
+        // how far the plan has got.
+        let checklist = thread.read(cx).agent_checklist();
+        let step_count = checklist.len();
+        let completed = checklist
+            .iter()
+            .filter(|step| step.status == agent::PlanStepStatus::Completed)
+            .count();
 
         let tooltip = match step_count {
             0 => "Open Architect View. Ask the agent to draft a plan, and it appears here."
                 .to_string(),
-            1 => format!("Open Architect View: {settled} of 1 step settled"),
-            count => format!("Open Architect View: {settled} of {count} steps settled"),
+            1 => format!("Open Architect View: {completed} of 1 step done"),
+            count => format!("Open Architect View: {completed} of {count} steps done"),
         };
         // Progress at a glance from Editor View, without switching to find out.
         let label: SharedString = if step_count == 0 {
             "Architect View".into()
         } else {
-            format!("Architect View {settled}/{step_count}").into()
+            format!("Architect View {completed}/{step_count}").into()
         };
 
         Some(

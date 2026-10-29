@@ -303,21 +303,9 @@ impl PlanRun {
         }
     }
 
-    /// A saved or rebased draft may await review, but its addresses and routing
-    /// must remain valid. Execution still uses the full readiness check.
+    /// A saved or rebased draft's addresses and routing must remain valid.
     pub fn validate_structure(graph: &ArchitectGraph) -> Result<(), RunRefusal> {
-        fn only_unlocked(problem: &GraphProblem) -> bool {
-            match problem {
-                GraphProblem::Unlocked(_) => true,
-                GraphProblem::InSubplan { problem, .. } => only_unlocked(problem),
-                _ => false,
-            }
-        }
-        let problems: Vec<_> = graph
-            .blocking_problems()
-            .into_iter()
-            .filter(|problem| !only_unlocked(problem))
-            .collect();
+        let problems = graph.blocking_problems();
         if problems.is_empty() {
             Ok(())
         } else {
@@ -2105,41 +2093,10 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_plan_with_an_unlocked_step_blocks_the_whole_run() {
+    fn unlocked_steps_at_any_depth_can_run() {
         let mut graph = nested_graph();
-        graph
-            .node_mut(&NodeId("handlers".into()))
-            .unwrap()
-            .subplan
-            .as_deref_mut()
-            .unwrap()
-            .set_locked(&NodeId("parse".into()), false);
-
-        let refusal = PlanRun::start(&graph).unwrap_err();
-        let RunRefusal::NotReady(problems) = refusal else {
-            panic!("expected the unlocked nested step to be reported");
-        };
-        assert!(
-            problems
-                .iter()
-                .any(|problem| matches!(problem, GraphProblem::InSubplan { .. })),
-            "got {problems:?}"
-        );
-    }
-
-    #[test]
-    fn a_step_cannot_be_locked_while_its_sub_plan_is_still_open() {
-        let mut graph = nested_graph();
-        assert!(graph.can_lock(&NodeId("handlers".into())));
-
-        graph
-            .node_mut(&NodeId("handlers".into()))
-            .unwrap()
-            .subplan
-            .as_deref_mut()
-            .unwrap()
-            .set_locked(&NodeId("parse".into()), false);
-        assert!(!graph.can_lock(&NodeId("handlers".into())));
+        graph.unlock_all();
+        assert!(PlanRun::start(&graph).is_ok());
     }
 
     // ── handoff ───────────────────────────────────────────────────────────
@@ -3413,19 +3370,16 @@ mod tests {
     }
 
     #[test]
-    fn unlocked_draft_can_be_rebased_but_cannot_start_before_review() {
+    fn unlocked_draft_can_be_rebased_and_started() {
         let mut graph = plain_graph(&["a", "join", "b"], &[("a", "join"), ("b", "join")]);
         graph.node_mut(&id("b")).unwrap().locked = false;
         let run = PlanRun::rebase_remaining(&graph, &[path(&["a"])]).unwrap();
         run.validate_checkpoint(&graph).unwrap();
         assert_eq!(run.current(), path(&["b"]));
         assert!(!graph.node(&id("b")).unwrap().locked);
-        assert!(matches!(
-            PlanRun::start(&graph),
-            Err(RunRefusal::NotReady(_))
-        ));
-        // Capture warnings remain attached to the draft; structural validation
-        // neither approves locks nor rewrites the requirements being reviewed.
+        assert!(PlanRun::start(&graph).is_ok());
+        // Capture warnings remain attached to the draft, and structural
+        // validation does not rewrite them.
         assert_eq!(graph.steps_without_capture(), vec![id("a"), id("b")]);
         graph.edges.push(ArchitectEdge::new("bad", "b", "missing"));
         assert!(PlanRun::validate_structure(&graph).is_err());

@@ -291,8 +291,7 @@ pub enum GraphProblem {
     Unreachable(NodeId),
     /// A conditional connection with no statement or question to evaluate.
     EmptyCondition(EdgeId),
-    /// A step still open for deliberation.
-    Unlocked(NodeId),
+
     /// A loop that always goes round again: every step in it goes on only by
     /// unconditional, unlimited connections, all of which a run takes, so it
     /// could never leave the loop.
@@ -345,7 +344,7 @@ impl Display for GraphProblem {
             GraphProblem::EmptyCondition(id) => {
                 write!(formatter, "connection {} has an empty condition", id.0)
             }
-            GraphProblem::Unlocked(id) => write!(formatter, "{id} is not locked yet"),
+
             GraphProblem::EndlessLoop(id) => write!(
                 formatter,
                 "{id} is in a loop with no way out; give one of its connections a condition or a \
@@ -421,7 +420,7 @@ impl GraphProblem {
                 }
                 None => "A connection needs its condition".to_string(),
             },
-            GraphProblem::Unlocked(id) => format!("\"{}\" is not locked yet", title(id)),
+
             GraphProblem::EndlessLoop(id) => format!(
                 "\"{}\" is in a loop with no way out; give one of its connections a condition \
                  or a repeat limit",
@@ -527,7 +526,6 @@ pub enum GraphMutationError {
     NodeNotFound { path: NodePath },
     MissingSubplan { path: NodePath },
     Locked { path: NodePath },
-    NestedPlanUnlocked { path: NodePath },
     EdgeNotFound { graph: NodePath, edge: EdgeId },
 }
 
@@ -546,10 +544,7 @@ impl Display for GraphMutationError {
             GraphMutationError::Locked { path } => {
                 write!(formatter, "the step at {path} is locked")
             }
-            GraphMutationError::NestedPlanUnlocked { path } => write!(
-                formatter,
-                "the step at {path} cannot be locked while its nested plan is unlocked"
-            ),
+
             GraphMutationError::EdgeNotFound { graph, edge } => {
                 if graph.is_empty() {
                     write!(formatter, "the connection {} does not exist", edge.0)
@@ -1582,8 +1577,8 @@ impl ArchitectGraph {
     /// Changes a step's lock state while preserving nested-plan invariants.
     ///
     /// Unlocking the addressed step is allowed, but a child cannot be unlocked
-    /// through a locked containing step. Locking a step is refused until every
-    /// nested step is locked.
+    /// through a locked containing step. Locking a step also locks every step
+    /// in its nested plans, so nothing stays open inside a settled step.
     pub fn set_locked_at(
         &mut self,
         path: &NodePath,
@@ -1593,12 +1588,8 @@ impl ArchitectGraph {
         let node = graph
             .node_mut(&id)
             .ok_or_else(|| GraphMutationError::NodeNotFound { path: path.clone() })?;
-        if locked
-            && node
-                .subplan()
-                .is_some_and(|subplan| !subplan.is_fully_locked_deeply())
-        {
-            return Err(GraphMutationError::NestedPlanUnlocked { path: path.clone() });
+        if locked && let Some(subplan) = node.subplan.as_deref_mut() {
+            subplan.lock_all();
         }
         node.locked = locked;
         Ok(())
@@ -1702,13 +1693,6 @@ impl ArchitectGraph {
         Some(node.subplan.get_or_insert_with(Default::default))
     }
 
-    /// Whether a step may be locked. A step that contains a plan cannot be
-    /// settled while any part of that plan is still being argued about.
-    pub fn can_lock(&self, id: &NodeId) -> bool {
-        self.node(id)
-            .and_then(|node| node.subplan())
-            .is_none_or(|subplan| subplan.is_fully_locked_deeply())
-    }
 
     /// Whether every step here and in every nested plan is locked.
     pub fn is_fully_locked_deeply(&self) -> bool {
@@ -1741,18 +1725,12 @@ impl ArchitectGraph {
 
     /// Everything that has to be fixed before a plan can be run.
     ///
-    /// This is the structural problems plus the steps still open for
-    /// deliberation: running a half-argued plan is how a plan stops being worth
-    /// making. Compiling a spec and driving a run both gate on this, so the two
-    /// can never disagree about what "ready" means.
+    /// These are the structural problems here and in every nested plan. Locks
+    /// only protect steps from edits; an unlocked step is ready to run.
+    /// Compiling a spec and driving a run both gate on this, so the two can
+    /// never disagree about what "ready" means.
     pub fn blocking_problems(&self) -> Vec<GraphProblem> {
         let mut problems = self.problems();
-        problems.extend(
-            self.nodes
-                .iter()
-                .filter(|node| !node.locked)
-                .map(|node| GraphProblem::Unlocked(node.id.clone())),
-        );
         for node in &self.nodes {
             let Some(subplan) = node.subplan() else {
                 continue;
@@ -3062,13 +3040,15 @@ mod tests {
     }
 
     #[test]
-    fn problems_describe_steps_by_title() {
+    fn unlocked_steps_do_not_block_a_run() {
         let mut graph = ArchitectGraph::default();
         graph.add_node(ArchitectNode::new("draft-step", "Draft the change"));
-        assert_eq!(
-            GraphProblem::Unlocked(NodeId("draft-step".into())).describe(&graph),
-            "\"Draft the change\" is not locked yet"
-        );
+        let mut inner = ArchitectGraph::default();
+        inner.add_node(ArchitectNode::new("child", "Child"));
+        let mut parent = ArchitectNode::new("parent", "Parent");
+        parent.subplan = Some(Box::new(inner));
+        graph.add_node(parent);
+        assert_eq!(graph.blocking_problems(), vec![]);
     }
 
     #[test]
@@ -3360,7 +3340,7 @@ mod tests {
     }
 
     #[test]
-    fn locking_a_parent_requires_its_nested_plan_to_be_settled() {
+    fn locking_a_parent_locks_its_nested_plan() {
         let mut inner = ArchitectGraph::default();
         inner.add_node(ArchitectNode::new("child", "Child"));
         let mut parent = ArchitectNode::new("parent", "Parent");
@@ -3369,17 +3349,9 @@ mod tests {
         graph.add_node(parent);
         let parent = NodePath::from(NodeId::from("parent"));
 
-        assert_eq!(
-            graph.set_locked_at(&parent, true),
-            Err(GraphMutationError::NestedPlanUnlocked {
-                path: parent.clone()
-            })
-        );
-        graph
-            .set_locked_at(&NodePath::from(vec!["parent".into(), "child".into()]), true)
-            .unwrap();
         graph.set_locked_at(&parent, true).unwrap();
         assert!(graph.node(&NodeId::from("parent")).unwrap().locked);
+        assert!(graph.is_fully_locked_deeply());
     }
 
     fn two_level_plan() -> ArchitectGraph {

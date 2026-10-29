@@ -1778,12 +1778,7 @@ fn preview_architect_graph_update_with_budget(
                 .into_iter()
                 .map(|problem| problem.to_string())
                 .collect();
-            let requires_review = graph_paths(&prepared.graph).iter().any(|path| {
-                prepared
-                    .graph
-                    .node_at(path)
-                    .is_some_and(|node| !node.locked)
-            });
+
             let reason = if active {
                 Some("Stop the run before applying a graph update.".to_string())
             } else {
@@ -1805,7 +1800,9 @@ fn preview_architect_graph_update_with_budget(
                 "can_rebase": can_rebase,
                 "can_apply": can_rebase && checkpoint_fits && !active,
                 "ready_to_run": !prepared.graph.is_empty() && run_problems.is_empty() && can_rebase && checkpoint_fits,
-                "requires_review": requires_review,
+                // Kept for previews stored by earlier builds. Unlocked steps
+                // no longer need review before a run.
+                "requires_review": false,
                 "run_problems": run_problems,
                 "changed_steps": prepared.changed_steps,
                 "affected_locks": prepared.affected_locks,
@@ -5607,7 +5604,7 @@ mod checkpoint_tests {
     }
 
     #[gpui::test(iterations = 3)]
-    async fn unlocked_core_insert_rebases_and_requires_review_before_resume(
+    async fn unlocked_core_insert_rebases_and_resumes_without_review(
         cx: &mut TestAppContext,
     ) {
         let (_connection, thread, acp_thread, fake) = native_session(cx).await;
@@ -5636,15 +5633,15 @@ mod checkpoint_tests {
         )
         .unwrap();
         assert!(core.is_valid);
-        assert!(!core.ready_to_run);
+        assert!(core.ready_to_run);
         assert!(!core.graph.node_at(&path("inserted")).unwrap().locked);
         let preview = thread.read_with(cx, |thread, _| {
             preview_architect_graph_update(thread, &core.graph, &core.invalidated_steps)
         });
         assert_eq!(preview["can_apply"], true);
         assert_eq!(preview["can_rebase"], true);
-        assert_eq!(preview["ready_to_run"], false);
-        assert_eq!(preview["requires_review"], true);
+        assert_eq!(preview["ready_to_run"], true);
+        assert_eq!(preview["requires_review"], false);
         cx.update(|cx| {
             apply_architect_graph_update(&thread, core.graph.clone(), &core.invalidated_steps, cx)
                 .unwrap();
@@ -5656,12 +5653,6 @@ mod checkpoint_tests {
             let run = thread.architect_run().unwrap();
             assert_eq!(run.history().len(), 1);
             run.snapshot().checkpoint.unwrap()
-        });
-        cx.update(|cx| {
-            assert!(matches!(
-                resume_architect_run(thread.clone(), acp_thread.clone(), cx),
-                Err(ArchitectRunStartError::Refused(RunRefusal::NotReady(_)))
-            ));
         });
         thread.read_with(cx, |thread, _| {
             assert_eq!(
@@ -5678,28 +5669,16 @@ mod checkpoint_tests {
             .unwrap()
             .checkpoint
             .unwrap();
-        let mut restored =
-            RunState::from_checkpoint(persisted).expect("unlocked is awaiting review, not corrupt");
+        let mut restored = RunState::from_checkpoint(persisted).expect("restorable checkpoint");
         let unlocked = restored.graph.clone();
         assert!(restored.halted);
-        assert!(matches!(
-            restored.prepare_resume(&unlocked),
-            Err(ArchitectRunStartError::Refused(RunRefusal::NotReady(_)))
-        ));
+        assert!(restored.prepare_resume(&unlocked).is_ok());
         cx.update(|cx| {
-            thread.update(cx, |thread, cx| {
-                thread.update_architect_graph(
-                    |graph| {
-                        graph.lock_all();
-                    },
-                    cx,
-                );
-            });
             resume_architect_run(thread.clone(), acp_thread.clone(), cx).unwrap();
             let owner = thread.read(cx);
             let state = owner.architect_run().unwrap().control().unwrap().borrow();
             assert_eq!(&state.graph, owner.architect_graph().unwrap());
-            assert!(state.graph.node_at(&path("inserted")).unwrap().locked);
+            assert!(!state.graph.node_at(&path("inserted")).unwrap().locked);
         });
         for expected in ["b", "join", "inserted"] {
             cx.run_until_parked();
@@ -6239,12 +6218,9 @@ mod checkpoint_tests {
         let mut restored = RunState::from_checkpoint(state.checkpoint()).unwrap();
         assert_eq!(serde_json::to_value(&restored.lanes).unwrap(), before);
         let unlocked = restored.graph.clone();
-        assert!(restored.prepare_resume(&unlocked).is_err());
-        let mut reviewed = unlocked;
-        reviewed.lock_all();
-        restored.prepare_resume(&reviewed).unwrap();
+        restored.prepare_resume(&unlocked).unwrap();
         assert_eq!(restored.lanes[0].next, Decision::Run(pending));
-        assert_eq!(restored.graph, reviewed);
+        assert_eq!(restored.graph, unlocked);
     }
 
     #[test]

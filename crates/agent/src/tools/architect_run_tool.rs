@@ -111,7 +111,7 @@ pub struct ArchitectConversationSelector {
 /// previews and approved updates, including set_file_surface. Existing-file
 /// surfaces are planning/concurrency declarations, not write restrictions;
 /// revise_step cannot change them. Stop and preview a surface edit, review its
-/// validation and reopened locks, then approve apply. draft_plan replaces the
+/// validation, then approve apply. draft_plan replaces the
 /// graph wholesale and is not a checkpoint-preserving recovery tool.
 ///
 /// Choose one action and only its fields:
@@ -132,7 +132,7 @@ pub struct ArchitectConversationSelector {
 /// Requests are capped at 32768 serialized bytes. Approval rechecks graph/run
 /// state; inspect again if stale. Models affect subsequent visits, not history.
 /// For a file-surface conflict after new-file discovery, inspect the error and
-/// preview a targeted surface/routing repair, review reopened locks, then resume.
+/// preview a targeted surface/routing repair, apply it, then resume.
 /// Completed results are retained; surfaces are advisory planning declarations
 /// enforced at dispatch, not tool write restrictions or a filesystem sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

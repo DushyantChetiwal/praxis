@@ -222,14 +222,12 @@ impl Render for ArchitectStatusItem {
         let graph = thread.architect_graph();
         let status = if pane.is_running(cx) {
             "running"
-        } else if graph.is_some_and(|graph| {
-            graph.is_fully_locked_deeply() && graph.blocking_problems().is_empty()
-        }) {
-            "ready to run"
         } else if graph.is_none_or(ArchitectGraph::is_empty) {
             "not started"
+        } else if graph.is_some_and(|graph| graph.blocking_problems().is_empty()) {
+            "ready to run"
         } else {
-            "needs review"
+            "needs fixes"
         };
 
         h_flex()
@@ -422,34 +420,22 @@ impl ArchitectPane {
     fn render_plan_header(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         let graph = self.graph(cx);
         let step_count = graph.map_or(0, |graph| graph.nodes.len());
-        let locked_count = graph.map_or(0, |graph| {
-            graph.nodes.iter().filter(|node| node.locked).count()
-        });
         // Readiness is a property of the whole plan, not of the level on
         // screen: a run started from inside a sub-plan still runs everything.
         let root = self.root_graph(cx);
         let run_step_count = root.map_or(0, ArchitectGraph::step_count_deeply);
-        let run_locked_count = root.map_or(0, ArchitectGraph::locked_step_count_deeply);
         let problems: Vec<GraphProblem> = root
             .map(ArchitectGraph::blocking_problems)
             .unwrap_or_default();
-        let all_locked = step_count > 0 && locked_count == step_count;
-        let run_open_count = run_step_count.saturating_sub(run_locked_count);
-        let ready_to_run = root.is_some_and(ArchitectGraph::is_fully_locked_deeply)
-            && root.is_some_and(|root| root.blocking_problems().is_empty());
+        let ready_to_run = run_step_count > 0 && problems.is_empty();
         let run_tooltip: SharedString = if ready_to_run {
             "Run the plan, one step at a time".into()
         } else if run_step_count == 0 {
             "Nothing to run yet. Start planning to draft steps.".into()
-        } else if !problems.is_empty() {
+        } else {
             match problems.len() {
                 1 => "Fix 1 problem first. Review Plan shows it.".into(),
                 count => format!("Fix {count} problems first. Review Plan shows them.").into(),
-            }
-        } else {
-            match run_step_count.saturating_sub(run_locked_count) {
-                1 => "Lock the last open step to run the plan.".into(),
-                open => format!("Lock the {open} open steps to run the plan.").into(),
             }
         };
 
@@ -528,14 +514,6 @@ impl ArchitectPane {
         if nested_count > 0 {
             summary.push_str(&format!(" · {nested_count} nested"));
         }
-        if step_count > 0 {
-            if all_locked {
-                summary.push_str(" · all locked");
-            } else {
-                let unlocked = step_count - locked_count;
-                summary.push_str(&format!(" · {unlocked} still open"));
-            }
-        }
 
         let plan_title = self
             .thread
@@ -554,7 +532,7 @@ impl ArchitectPane {
         } else if empty {
             "Not started"
         } else {
-            "Needs review"
+            "Needs fixes"
         };
 
         h_flex()
@@ -742,38 +720,7 @@ impl ArchitectPane {
                                 })),
                         )
                     })
-                    // Locking step by step, and inside every nested plan, is
-                    // a lot of clicks once a plan has been argued out.
-                    .when(!running && run_open_count > 0, |this| {
-                        let tooltip: SharedString = match run_open_count {
-                            1 => "Lock the last open step, wherever it is in the plan".into(),
-                            open => format!(
-                                "Lock the {open} open steps, including those in nested plans"
-                            )
-                            .into(),
-                        };
-                        this.child(if compact {
-                            IconButton::new("architect-lock-all-compact", IconName::Lock)
-                                .tab_index(0isize)
-                                .icon_size(IconSize::Small)
-                                .tooltip(Tooltip::text(tooltip))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.lock_all_steps(window, cx);
-                                }))
-                                .into_any_element()
-                        } else {
-                            Button::new("architect-lock-all", "Lock All")
-                                .tab_index(0isize)
-                                .label_size(LabelSize::Small)
-                                .style(ButtonStyle::Subtle)
-                                .start_icon(Icon::new(IconName::Lock).size(IconSize::XSmall))
-                                .tooltip(Tooltip::text(tooltip))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.lock_all_steps(window, cx);
-                                }))
-                                .into_any_element()
-                        })
-                    })
+
                     .when(running && !paused, |this| {
                         this.child(
                             Button::new("architect-pause", "Pause")

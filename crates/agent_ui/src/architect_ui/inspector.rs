@@ -2714,22 +2714,7 @@ impl ArchitectPane {
                                             .child(
                                                 Label::new(match subplan_steps {
                                                     0 => "None yet".to_string(),
-                                                    count => {
-                                                        let locked_inside = subplan_titles
-                                                            .iter()
-                                                            .filter(|(_, locked)| *locked)
-                                                            .count();
-                                                        let steps =
-                                                            count_label(count, "step", "steps");
-                                                        if locked_inside == count {
-                                                            format!("{steps} · all locked")
-                                                        } else {
-                                                            format!(
-                                                                "{steps} · {} still open",
-                                                                count - locked_inside
-                                                            )
-                                                        }
-                                                    }
+                                                    count => count_label(count, "step", "steps"),
                                                 })
                                                 .size(LabelSize::XSmall)
                                                 .color(Color::Muted),

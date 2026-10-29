@@ -2027,7 +2027,6 @@ impl ArchitectPane {
             GraphProblem::InvalidNodeId(id)
             | GraphProblem::DuplicateNode(id)
             | GraphProblem::Unreachable(id)
-            | GraphProblem::Unlocked(id)
             | GraphProblem::EndlessLoop(id)
             | GraphProblem::MissingFileSurface(id)
             | GraphProblem::InvalidFileSurface { node: id, .. }
