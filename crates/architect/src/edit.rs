@@ -442,8 +442,8 @@ fn graph_edit_impact(graph: &ArchitectGraph, mut target: ArchitectGraph) -> Grap
         }
     }
     let problems = target.blocking_problems();
-    let is_valid = problems.iter().all(only_unlocked);
-    let ready_to_run = !target.is_empty() && problems.is_empty();
+    let is_valid = problems.is_empty();
+    let ready_to_run = !target.is_empty() && is_valid;
     GraphEditPreview {
         graph: target,
         changed_steps: changed.into_iter().collect(),
@@ -454,14 +454,6 @@ fn graph_edit_impact(graph: &ArchitectGraph, mut target: ArchitectGraph) -> Grap
         is_valid,
         ready_to_run,
         requires_approval,
-    }
-}
-
-fn only_unlocked(problem: &GraphProblem) -> bool {
-    match problem {
-        GraphProblem::Unlocked(_) => true,
-        GraphProblem::InSubplan { problem, .. } => only_unlocked(problem),
-        _ => false,
     }
 }
 
@@ -1365,7 +1357,7 @@ mod tests {
             assert!(preview.affected_locks.is_empty());
             assert!(preview.routing_changes.is_empty());
             assert!(preview.is_valid);
-            assert_eq!(preview.ready_to_run, locked);
+            assert!(preview.ready_to_run, "locks do not gate a run");
             assert!(preview.requires_approval);
             assert_eq!(before, before_snapshot);
             assert_eq!(after, after_snapshot);
@@ -1495,13 +1487,9 @@ mod tests {
             );
         }
         assert!(preview.is_valid);
-        assert!(!preview.ready_to_run);
+        assert!(preview.ready_to_run, "reopened steps can still run");
         assert!(preview.requires_approval);
-        assert!(
-            preview
-                .problems
-                .contains(&GraphProblem::Unlocked("left".into()))
-        );
+        assert!(preview.problems.is_empty());
     }
 
     #[test]
@@ -1840,7 +1828,7 @@ mod tests {
         )
         .expect("bounded loop");
         assert!(preview.is_valid);
-        assert!(!preview.ready_to_run, "editing reopened the lock");
+        assert!(preview.ready_to_run, "a reopened lock does not block a run");
         edge.condition = EdgeCondition::Objective {
             statement: " ".into(),
         };
@@ -1966,7 +1954,7 @@ mod tests {
         .expect("legacy correction");
         assert!(corrected.is_valid);
         assert!(corrected.requires_approval);
-        assert!(!corrected.ready_to_run);
+        assert!(corrected.ready_to_run);
         let conflicting = preview_graph_edits(
             &graph,
             &[

@@ -520,6 +520,14 @@ pub struct Markdown {
     active_search_highlight: Option<usize>,
 }
 
+/// See [`Markdown::memory_footprint`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MarkdownFootprint {
+    pub source_bytes: usize,
+    pub parsed: bool,
+    pub parsed_bytes: usize,
+}
+
 #[derive(Clone, Copy, Default)]
 pub struct MarkdownOptions {
     pub parse_links_only: bool,
@@ -1238,6 +1246,17 @@ impl Markdown {
     /// [`ParsedMarkdown::rebalanced_markdown_for_selection`].
     pub fn context_menu_selected_markdown(&self) -> Option<&SharedString> {
         self.context_menu_selected_markdown.as_ref()
+    }
+
+    /// The text this markdown holds and the size of its parsed form, for
+    /// memory diagnostics.
+    pub fn memory_footprint(&self) -> MarkdownFootprint {
+        let events = self.parsed_markdown.events.len();
+        MarkdownFootprint {
+            source_bytes: self.source.len(),
+            parsed: events > 0,
+            parsed_bytes: events * std::mem::size_of::<(Range<usize>, MarkdownEvent)>(),
+        }
     }
 
     pub fn ensure_parsed(&mut self, cx: &mut Context<Self>) {
@@ -5424,12 +5443,22 @@ mod tests {
             assert_eq!(markdown.source(), &source);
             assert!(markdown.pending_parse.is_none());
             assert!(markdown.parsed_markdown.events.is_empty());
+            assert_eq!(
+                markdown.memory_footprint(),
+                MarkdownFootprint {
+                    source_bytes: source.len(),
+                    parsed: false,
+                    parsed_bytes: 0,
+                }
+            );
         });
         markdown.update(cx, |markdown, cx| markdown.ensure_parsed(cx));
         cx.run_until_parked();
         markdown.read_with(cx, |markdown, _| {
             assert_eq!(markdown.parsed_markdown.source, source);
             assert!(!markdown.parsed_markdown.events.is_empty());
+            let footprint = markdown.memory_footprint();
+            assert!(footprint.parsed && footprint.parsed_bytes > 0);
         });
         markdown.update(cx, |markdown, cx| {
             markdown.release_render_cache(cx);

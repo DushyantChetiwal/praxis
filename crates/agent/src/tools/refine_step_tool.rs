@@ -733,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_locking_is_atomic() {
+    fn locking_a_step_with_a_nested_plan_locks_the_plan_too() {
         let mut nested = ArchitectGraph::default();
         nested.add_node(ArchitectNode::new("child", "Child"));
         let mut parent = ArchitectNode::new("parent", "Parent");
@@ -743,7 +743,7 @@ mod tests {
         graph.add_node(parent);
         let path = NodePath::root("parent".into());
 
-        let error = apply_refinement(
+        apply_refinement(
             &mut graph,
             &path,
             RefineStepToolInput {
@@ -759,16 +759,15 @@ mod tests {
                 lock: true,
             },
         )
-        .unwrap_err();
+        .expect("locking settles the nested plan as well");
 
-        assert_eq!(
-            error,
-            GraphMutationError::NestedPlanUnlocked { path: path.clone() }
-        );
         let parent = graph.node_at(&path).unwrap();
-        assert_eq!(parent.intent, "Original");
-        assert!(parent.model.is_none());
-        assert_eq!(parent.file_surface, Some(Vec::new()));
-        assert!(!parent.locked);
+        assert_eq!(parent.intent, "Changed");
+        assert!(parent.locked);
+        assert!(
+            parent
+                .subplan()
+                .is_some_and(ArchitectGraph::is_fully_locked_deeply)
+        );
     }
 }

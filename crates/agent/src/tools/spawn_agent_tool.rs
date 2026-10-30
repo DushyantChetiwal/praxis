@@ -38,9 +38,17 @@ use crate::{AgentTool, ThreadEnvironment, ToolCallEventStream, ToolCapability, T
 /// - Do not silently choose a different model when an explicit model is unavailable unless the user allowed fallback.
 /// - A resumed session keeps its existing model, so `model` cannot be combined with `session_id`.
 ///
+/// ### Running in the background
+/// - By default the agent runs in the background and this tool returns at once
+///   with its session_id. Keep working on something that does not depend on it.
+///   Its final message arrives with a later tool result, or Praxis resumes this
+///   conversation when it finishes, so never wait or poll for it.
+/// - Set `wait` only when you cannot do anything else until it answers. Then
+///   this tool returns the agent's final message.
+///
 /// ### Output
-/// - You will receive only the agent's final message as output.
-/// - Successful calls return a session_id that you can use for follow-up messages.
+/// - You receive only the agent's final message, never its other work.
+/// - Calls return a session_id that you can use for follow-up messages.
 /// - Error results may also include a session_id if a session was already created.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +65,10 @@ pub struct SpawnAgentToolInput {
     /// Omit to preserve default behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Wait for the agent's final message instead of letting it run in the
+    /// background. Only for answers you need before you can do anything else.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wait: bool,
 }
 
 fn deserialize_session_id<'de, D>(deserializer: D) -> Result<Option<acp_v2::SessionId>, D::Error>
@@ -95,7 +107,18 @@ pub enum SpawnAgentToolOutput {
         error: String,
         session_info: Option<SubagentSessionInfo>,
     },
+    /// Started in the background; its final message reaches the agent later.
+    Running {
+        session_id: acp_v2::SessionId,
+        session_info: SubagentSessionInfo,
+        /// Always true. Tells this variant apart when a saved result is read.
+        background: bool,
+    },
 }
+
+const RUNNING_NOTE: &str = "Started in the background. Keep working on something that does not \
+    depend on it: its final message arrives with a later tool result, or Praxis resumes this \
+    conversation when it finishes. Do not wait or poll for it.";
 
 impl From<SpawnAgentToolOutput> for LanguageModelToolResultContent {
     fn from(output: SpawnAgentToolOutput) -> Self {
@@ -118,6 +141,15 @@ impl From<SpawnAgentToolOutput> for LanguageModelToolResultContent {
             )
             .unwrap_or_else(|e| format!("Failed to serialize spawn_agent output: {e}"))
             .into(),
+            SpawnAgentToolOutput::Running { session_id, .. } => {
+                serde_json::to_string(&serde_json::json!({
+                    "session_id": session_id,
+                    "status": "running",
+                    "note": RUNNING_NOTE,
+                }))
+                .unwrap_or_else(|e| format!("Failed to serialize spawn_agent output: {e}"))
+                .into()
+            }
         }
     }
 }
@@ -183,8 +215,17 @@ impl AgentTool for SpawnAgentTool {
                 message,
                 session_id,
                 model,
+                wait,
             } = input;
-            let (subagent, mut session_info) = cx.update(|cx| {
+            let owner = event_stream.owning_thread();
+            let notice_label = label.clone();
+            let (subagent, mut session_info, background_owner) = cx.update(|cx| {
+                let background_owner = owner.filter(|owner| {
+                    !wait
+                        && owner
+                            .upgrade()
+                            .is_some_and(|owner| owner.read(cx).can_wake_for_background_work())
+                });
                 let subagent = match (session_id, model) {
                     (Some(_), Some(_)) => Err(anyhow::anyhow!(
                         "model cannot be changed when resuming a subagent session"
@@ -214,8 +255,46 @@ impl AgentTool for SpawnAgentTool {
                     )]))
                 });
 
-                Ok((subagent, session_info))
+                Ok((subagent, session_info, background_owner))
             })?;
+
+            if let Some(owner) = background_owner {
+                let session_id = session_info.session_id.clone();
+                owner
+                    .update(cx, |owner, _| {
+                        owner.subagent_started_in_background(session_id.clone())
+                    })
+                    .ok();
+                cx.spawn(async move |cx| {
+                    let result = subagent.send(message, cx).await;
+                    telemetry::event!(
+                        "Subagent Completed",
+                        subagent_session = session_id.to_string(),
+                        status = if result.is_ok() { "completed" } else { "error" },
+                    );
+                    let notice = match result {
+                        Ok(output) => format!(
+                            "Sub-agent \"{notice_label}\" (session_id {session_id}) finished. \
+                             Its final message:\n\n{output}"
+                        ),
+                        Err(error) => format!(
+                            "Sub-agent \"{notice_label}\" (session_id {session_id}) failed: \
+                             {error:#}"
+                        ),
+                    };
+                    owner
+                        .update(cx, |owner, cx| {
+                            owner.subagent_finished_in_background(&session_id, notice, cx)
+                        })
+                        .ok();
+                })
+                .detach();
+                return Ok(SpawnAgentToolOutput::Running {
+                    session_id: session_info.session_id.clone(),
+                    session_info,
+                    background: true,
+                });
+            }
 
             let send_result = subagent.send(message, cx).await;
 
@@ -288,6 +367,14 @@ impl AgentTool for SpawnAgentTool {
                 session_info,
                 ..
             } => (error.into(), session_info),
+            SpawnAgentToolOutput::Running { session_info, .. } => {
+                let meta = acp_v2::Meta::from_iter([(
+                    SUBAGENT_SESSION_INFO_META_KEY.into(),
+                    serde_json::json!(&session_info),
+                )]);
+                event_stream.update_fields(|update| update.meta(meta));
+                return Ok(());
+            }
         };
 
         let meta = session_info.map(|session_info| {
@@ -335,6 +422,35 @@ mod tests {
         });
         let output: SpawnAgentToolOutput = serde_json::from_value(output_json.clone())?;
         assert_eq!(serde_json::to_value(output)?, output_json);
+        Ok(())
+    }
+
+    #[test]
+    fn test_subagent_thread_running_output_round_trips() -> Result<(), serde_json::Error> {
+        let output = SpawnAgentToolOutput::Running {
+            session_id: acp_v2::SessionId::new("child"),
+            session_info: SubagentSessionInfo {
+                session_id: acp_v2::SessionId::new("child"),
+                message_start_index: 0,
+                message_end_index: None,
+            },
+            background: true,
+        };
+        let saved = serde_json::to_value(&output)?;
+        let restored: SpawnAgentToolOutput = serde_json::from_value(saved)?;
+        assert!(matches!(restored, SpawnAgentToolOutput::Running { .. }));
+        let LanguageModelToolResultContent::Text(text) = restored.into() else {
+            panic!("expected text");
+        };
+        assert!(text.contains("\"status\":\"running\""), "{text}");
+        assert!(text.contains("Do not wait or poll"), "{text}");
+
+        let input: SpawnAgentToolInput =
+            serde_json::from_value(json!({ "label": "label", "message": "message" }))?;
+        assert!(
+            !input.wait,
+            "agents run in the background unless asked to wait"
+        );
         Ok(())
     }
 

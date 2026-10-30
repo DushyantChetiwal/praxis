@@ -57,7 +57,18 @@ pub(crate) struct EntityMap {
     entities: SecondaryMap<EntityId, Box<dyn Any>>,
     pub accessed_entities: RefCell<FxHashSet<EntityId>>,
     ref_counts: Arc<RwLock<EntityRefCounts>>,
-    type_names: FxHashMap<TypeId, &'static str>,
+    entity_types: FxHashMap<TypeId, LiveEntityType>,
+}
+
+/// How many entities of one type are alive, for diagnosing memory growth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiveEntityType {
+    /// The type's name, as given by [`std::any::type_name`].
+    pub name: &'static str,
+    /// The bytes each entity takes inline, before anything it allocates.
+    pub inline_size: usize,
+    /// How many are alive.
+    pub count: usize,
 }
 
 #[doc(hidden)]
@@ -86,26 +97,39 @@ impl EntityMap {
                     entity_handles: HashMap::default(),
                 },
             })),
-            type_names: FxHashMap::default(),
+            entity_types: FxHashMap::default(),
         }
     }
 
     /// How many entities of each type are alive, most numerous first.
     /// Entities being updated right now are left out.
-    pub fn live_entity_counts(&self) -> Vec<(&'static str, usize)> {
+    pub fn live_entity_counts(&self) -> Vec<LiveEntityType> {
         let mut counts = FxHashMap::<TypeId, usize>::default();
         for entity in self.entities.values() {
             *counts.entry((**entity).type_id()).or_default() += 1;
         }
         let mut counts: Vec<_> = counts
             .into_iter()
-            .map(|(type_id, count)| {
-                let name = self.type_names.get(&type_id).copied();
-                (name.unwrap_or("unknown"), count)
+            .filter_map(|(type_id, count)| {
+                let entity_type = self.entity_types.get(&type_id)?;
+                Some(LiveEntityType {
+                    count,
+                    ..*entity_type
+                })
             })
             .collect();
-        counts.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(right.0)));
+        counts.sort_by(|left, right| right.count.cmp(&left.count).then(left.name.cmp(right.name)));
         counts
+    }
+
+    /// Calls `f` with every live entity of type `T`, except any being updated
+    /// right now.
+    pub fn for_each_live_entity<T: 'static>(&self, mut f: impl FnMut(&T)) {
+        for entity in self.entities.values() {
+            if let Some(entity) = entity.downcast_ref::<T>() {
+                f(entity);
+            }
+        }
     }
 
     #[doc(hidden)]
@@ -147,9 +171,13 @@ impl EntityMap {
     {
         let mut accessed_entities = self.accessed_entities.get_mut();
         accessed_entities.insert(slot.entity_id);
-        self.type_names
+        self.entity_types
             .entry(TypeId::of::<T>())
-            .or_insert_with(type_name::<T>);
+            .or_insert_with(|| LiveEntityType {
+                name: type_name::<T>(),
+                inline_size: std::mem::size_of::<T>(),
+                count: 0,
+            });
 
         let handle = slot.0;
         self.entities.insert(handle.entity_id, Box::new(entity));
@@ -1277,12 +1305,29 @@ mod test {
         let slot = entity_map.reserve::<String>();
         let text = entity_map.insert(slot, String::from("text"));
 
-        let test_entity = std::any::type_name::<TestEntity>();
-        let string = std::any::type_name::<String>();
+        let counts = entity_map
+            .live_entity_counts()
+            .into_iter()
+            .map(|entity_type| (entity_type.name, entity_type.count, entity_type.inline_size))
+            .collect::<Vec<_>>();
         assert_eq!(
-            entity_map.live_entity_counts(),
-            vec![(test_entity, 3), (string, 1)]
+            counts,
+            vec![
+                (
+                    std::any::type_name::<TestEntity>(),
+                    3,
+                    std::mem::size_of::<TestEntity>()
+                ),
+                (
+                    std::any::type_name::<String>(),
+                    1,
+                    std::mem::size_of::<String>()
+                ),
+            ]
         );
+        let mut total = 0;
+        entity_map.for_each_live_entity::<TestEntity>(|entity| total += entity.i);
+        assert_eq!(total, 3);
 
         drop(handles);
         drop(text);

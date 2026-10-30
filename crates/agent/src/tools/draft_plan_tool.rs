@@ -93,8 +93,8 @@ use crate::{AgentTool, Thread, ToolCallEventStream, ToolCapability, ToolInput};
 /// again before dispatch. Ignored files are excluded from automatic discovery
 /// unless always included; explicitly declared ignored files are still checked.
 /// Newly exposed conflicts stop further dispatch while retaining completed
-/// results. Inspect, correct surfaces or serialize work, review/relock, then
-/// resume. This scheduling guard is not filesystem write enforcement.
+/// results. Inspect, correct surfaces or serialize work, then resume. This
+/// scheduling guard is not filesystem write enforcement.
 /// Unavailable discovery records a warning and falls back to declared assignments.
 /// Ambiguous root selection is rejected before saving; no file-existence checks run.
 /// Other invalid or overlapping declarations are retained on the canvas with
@@ -933,10 +933,11 @@ mod tests {
                 )
                 .expect("surface repair");
                 assert!(repaired.is_valid);
-                assert!(!repaired.ready_to_run, "repair needs lock review");
-                let mut repaired = repaired.graph;
-                repaired.lock_all();
-                assert!(architect::compile_spec(&repaired).is_ok());
+                assert!(
+                    repaired.ready_to_run,
+                    "a repaired plan runs without locking"
+                );
+                assert!(architect::compile_spec(&repaired.graph).is_ok());
             });
         }
     }

@@ -257,15 +257,10 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_graph_with_an_unlocked_step() {
+    fn compiles_a_graph_with_an_unlocked_step() {
         let mut graph = locked_graph();
         graph.set_locked(&"edit".into(), false);
-
-        let problems = compile_spec(&graph).unwrap_err();
-        assert!(
-            problems.contains(&GraphProblem::Unlocked(NodeId("edit".into()))),
-            "expected the unlocked step to be reported, got {problems:?}"
-        );
+        assert!(compile_spec(&graph).is_ok());
     }
 
     #[test]

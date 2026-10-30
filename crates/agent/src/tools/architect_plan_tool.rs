@@ -265,7 +265,7 @@ pub enum ArchitectPlanEditAction {
 /// to 32768 serialized bytes. Oversized requests/results error, not truncate.
 /// Review
 /// problem_descriptions, is_valid, can_apply, affected_locks, invalidated_steps,
-/// retained_results, requires_review, ready_to_run, and runtime recovery reasons.
+/// retained_results, ready_to_run, and runtime recovery reasons.
 /// A valid graph or can_apply=true does not mean ready_to_run=true.
 /// To apply, send only {"action":"apply","preview_token":"<returned token>"},
 /// never new edits. Tokens expire after five minutes and are single-use, consumed
@@ -274,14 +274,15 @@ pub enum ArchitectPlanEditAction {
 /// consumption, eviction, or graph/run/event drift; do not retry an old token.
 /// Apply always checks permission settings, even in Plan mode. Stop execution
 /// before applying; unsupported checkpoint rebases are refused. Execution edits
-/// reopen affected locks; this tool never approves locks, starts execution, or
-/// silently clears checkpoints. Impact includes
+/// unlock the steps they affect; locks only protect steps from edits and never
+/// block a run. This tool never starts execution or silently clears
+/// checkpoints. Impact includes
 /// changes from the frozen checkpoint, so a move on a diverged live graph can
 /// invalidate execution. Missing runtime impact fields prevent issuing a token.
 /// Rebases requiring reconstruction support flat acyclic plans only and cannot
 /// infer retained conditional verdicts or discard oversized checkpoint history.
 /// Unchanged topology can preserve existing lanes when the runtime permits it.
-/// Relock reviewed steps explicitly before resuming with control_architect_run.
+/// Resume with control_architect_run once the edit is applied.
 /// On a refused rebase, explain the reported restart requirement; do not silently
 /// replace the graph with draft_plan or discard checkpoints to force progress.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -524,7 +525,7 @@ impl EditArchitectPlanTool {
             "requires_approval": true,
             "can_apply": can_apply, "runtime": runtime,
             "impact_error": impact.as_ref().err().map(|error| format!("{error:#}")),
-            "note": "Invalidations and affected locks include runtime checkpoint impact, not just the live-graph edit. Null impact fields mean unknown, not zero; no token is issued. Apply never approves reopened locks, starts a run, or silently discards a checkpoint.",
+            "note": "Invalidations and affected locks include runtime checkpoint impact, not just the live-graph edit. Null impact fields mean unknown, not zero; no token is issued. Apply never starts a run or silently discards a checkpoint.",
         }))?;
         if let Some(token) = token {
             let now = Instant::now();
@@ -638,7 +639,7 @@ impl AgentTool for EditArchitectPlanTool {
                     )?;
                     Ok(
                         json!({"applied": true, "revision": thread.read(cx).architect_revision(),
-                        "note": "Review and explicitly approve reopened locks before execution."}),
+                        "note": "Applied. Resume or start the run when ready."}),
                     )
                 })
             }
@@ -728,7 +729,7 @@ mod tests {
             "five minutes",
             "single-use",
             "approval is denied",
-            "Relock",
+            "never block a run",
             "unsupported checkpoint rebases",
             "from == to",
             "edge traversals",
@@ -960,7 +961,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn topology_preview_never_approves_reopened_locks(cx: &mut TestAppContext) {
+    async fn topology_preview_reopens_locks_without_blocking_a_run(cx: &mut TestAppContext) {
         let (_connection, _agent, thread, _coordinator) = architect_tool_test_session(cx).await;
         plan(&thread, cx);
         permission(ToolPermissionMode::Allow, cx);
@@ -970,7 +971,7 @@ mod tests {
             {"kind": "insert_edge", "parent": [], "edge": {"id": "route", "from": "step", "to": "next"}}
         ]})).unwrap();
         let preview = cx.update(|cx| tool.preview(&input, cx)).unwrap();
-        assert_eq!(preview["ready_to_run"], false);
+        assert_eq!(preview["ready_to_run"], true);
         assert!(
             preview["affected_locks"]
                 .as_array()
@@ -978,7 +979,7 @@ mod tests {
                 .contains(&json!(["step"]))
         );
         assert_eq!(preview["can_apply"], true);
-        assert_eq!(preview["requires_review"], true);
+        assert_eq!(preview["requires_review"], false);
         assert!(preview["preview_token"].is_string());
         let (events, _receiver) = ToolCallEventStream::test();
         assert!(
@@ -1010,7 +1011,7 @@ mod tests {
         .expect("surface edit");
         let preview = cx.update(|cx| tool.preview(&input, cx)).expect("preview");
         assert_eq!(preview["can_apply"], true);
-        assert_eq!(preview["ready_to_run"], false);
+        assert_eq!(preview["ready_to_run"], true);
         assert_eq!(preview["affected_locks"], json!([["step"]]));
         thread.read_with(cx, |thread, _| {
             assert_eq!(thread.architect_graph(), Some(&graph))
@@ -1100,8 +1101,8 @@ mod tests {
         assert_eq!(preview["invalidated_steps"], json!([["step"]]));
         assert_eq!(preview["affected_locks"], json!([["step"]]));
         assert_eq!(preview["retained_results"], json!([]));
-        assert_eq!(preview["requires_review"], true);
-        assert_eq!(preview["ready_to_run"], false);
+        assert_eq!(preview["requires_review"], false);
+        assert_eq!(preview["ready_to_run"], true);
         {
             let stored = tool.previews.lock();
             let stored = stored.first().unwrap();
@@ -1118,7 +1119,7 @@ mod tests {
         assert!(title.contains("1 affected locks"));
         assert!(title.contains("1 invalidated step checkpoints"));
         assert!(title.contains("0 retained results"));
-        assert!(title.contains("requires review: true"));
+        assert!(title.contains("requires review: false"));
         let (live, revision, sequence, run_id, control) = thread.read_with(cx, |thread, _| {
             let run = thread.architect_run().unwrap();
             assert!(!run.is_running());

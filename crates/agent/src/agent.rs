@@ -12970,10 +12970,11 @@ mod internal_tests {
                     architect::RunRefusal::NothingToRun
                 ))
             ));
-            let mut unlocked = architect::ArchitectGraph::default();
-            unlocked.add_node(architect::ArchitectNode::new("draft", "Draft"));
+            let mut broken = architect::ArchitectGraph::default();
+            broken.add_node(architect::ArchitectNode::new("draft", "Draft"));
+            broken.connect("draft", "missing");
             assert!(matches!(
-                crate::start_architect_run(thread.clone(), acp_thread.clone(), unlocked, cx),
+                crate::start_architect_run(thread.clone(), acp_thread.clone(), broken, cx),
                 Err(crate::ArchitectRunStartError::Refused(
                     architect::RunRefusal::NotReady(_)
                 ))

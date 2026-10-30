@@ -24,9 +24,10 @@ const MAX_RETAINED_TASKS: usize = 32;
 pub(super) const DEFAULT_YIELD_MS: u64 = 10_000;
 pub(super) const MAX_YIELD_MS: u64 = 30_000;
 const DEFAULT_WAIT_MS: u64 = 30_000;
-/// Long enough to wait out a build or CI job in one call. Each expiry costs a
-/// model round trip and grows the context.
-const MAX_WAIT_MS: u64 = 30 * 60 * 1000;
+/// Waits are for results needed right away. Longer work should end the turn:
+/// Praxis resumes the conversation when the command finishes, without holding
+/// the turn open.
+const MAX_WAIT_MS: u64 = 2 * 60 * 1000;
 const TRUNCATION_NOTE: &str = "Output was truncated. Head/tail selections apply to the bounded terminal capture, not the complete command history.";
 /// Status checks that see the same output this far apart flag the command as
 /// possibly waiting for input or hung.
@@ -722,11 +723,12 @@ pub struct TerminalStatusToolInput {
 pub struct TerminalWaitToolInput {
     /// Task id returned by terminal in this thread.
     pub task_id: String,
-    /// Wait duration in milliseconds, from 1 through 1800000 (30 minutes)
-    /// inclusive. Defaults to 30000 when omitted or null. Exit wakes the wait
-    /// early. This is NOT a process runtime limit.
+    /// Wait duration in milliseconds, from 1 through 120000 (2 minutes)
+    /// inclusive; longer requests wait 2 minutes. Defaults to 30000 when
+    /// omitted or null. Exit wakes the wait early. This is NOT a process
+    /// runtime limit.
     #[serde(default)]
-    #[schemars(range(min = 1, max = 1800000))]
+    #[schemars(range(min = 1, max = 120000))]
     pub timeout_ms: Option<u64>,
 }
 
@@ -861,10 +863,10 @@ terminal_management_tool!(
     true,
     |_task: &TerminalTask, input: &TerminalWaitToolInput| {
         let timeout = input.timeout_ms.unwrap_or(DEFAULT_WAIT_MS);
-        if !(1..=MAX_WAIT_MS).contains(&timeout) {
+        if timeout == 0 {
             return Err(format!("timeout_ms must be between 1 and {MAX_WAIT_MS}"));
         }
-        Ok(timeout)
+        Ok(timeout.min(MAX_WAIT_MS))
     }
 );
 terminal_management_tool!(
@@ -1152,7 +1154,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn terminal_tasks_wait_accepts_long_waits_and_ends_on_cancel(cx: &mut TestAppContext) {
+    async fn terminal_tasks_wait_caps_long_waits_and_ends_on_cancel(cx: &mut TestAppContext) {
         let registry = Rc::new(TerminalTaskRegistry::default());
         let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
         let task = start(&registry, terminal.clone(), None, cx);
@@ -1161,14 +1163,14 @@ mod tests {
             Arc::new(TerminalWaitTool::new(&registry)).run(
                 ToolInput::resolved(TerminalWaitToolInput {
                     task_id: task.id.clone(),
-                    timeout_ms: Some(MAX_WAIT_MS),
+                    timeout_ms: Some(30 * 60 * 1000),
                 }),
                 stream,
                 cx,
             )
         });
         cx.run_until_parked();
-        advance(cx, 10 * 60 * 1000);
+        advance(cx, MAX_WAIT_MS - 1000);
         assert!((&mut wait).now_or_never().is_none());
 
         ToolCallEventStream::signal_cancellation_with_sender(&mut cancellation_tx);
@@ -1177,6 +1179,25 @@ mod tests {
             .now_or_never()
             .expect("cancelling the turn must end the wait immediately");
         assert!(result.is_err());
+        assert!(!terminal.was_killed());
+
+        let (stream, _events) = ToolCallEventStream::test();
+        let mut capped = cx.update(|cx| {
+            Arc::new(TerminalWaitTool::new(&registry)).run(
+                ToolInput::resolved(TerminalWaitToolInput {
+                    task_id: task.id.clone(),
+                    timeout_ms: Some(30 * 60 * 1000),
+                }),
+                stream,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        advance(cx, MAX_WAIT_MS);
+        let result = (&mut capped)
+            .now_or_never()
+            .expect("a wait longer than the cap ends at the cap");
+        assert!(result.expect("expiry").contains("still_running: true"));
         assert!(!terminal.was_killed());
     }
 
@@ -1270,7 +1291,7 @@ mod tests {
         let registry = Rc::new(TerminalTaskRegistry::default());
         let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
         let task = start(&registry, terminal.clone(), None, cx);
-        for timeout in [Some(0), Some(MAX_WAIT_MS + 1)] {
+        for timeout in [Some(0)] {
             let (stream, _events) = ToolCallEventStream::test();
             let result = cx
                 .update(|cx| {
@@ -1284,7 +1305,7 @@ mod tests {
                     )
                 })
                 .await;
-            assert!(result.unwrap_err().contains("between 1 and 1800000"));
+            assert!(result.unwrap_err().contains("between 1 and 120000"));
         }
         let (stream, _events) = ToolCallEventStream::test();
         let mut wait = cx.update(|cx| {

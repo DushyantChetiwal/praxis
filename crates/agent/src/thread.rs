@@ -47,8 +47,8 @@ use language_model::{
     LanguageModelId, LanguageModelImage, LanguageModelProviderId, LanguageModelRegistry,
     LanguageModelRequest, LanguageModelRequestMessage, LanguageModelRequestTool,
     LanguageModelToolResult, LanguageModelToolResultContent, LanguageModelToolUse,
-    LanguageModelToolUseId, MessageContent, ProviderErrorCategory, Role, SelectedModel, Speed,
-    StopReason, TokenUsage, ZED_CLOUD_PROVIDER_ID,
+    LanguageModelToolUseId, LanguageModelToolUseInput, MessageContent, ProviderErrorCategory, Role,
+    SelectedModel, Speed, StopReason, TokenUsage, ZED_CLOUD_PROVIDER_ID,
 };
 use project::{Project, trusted_worktrees::TrustedWorktrees};
 use prompt_store::ProjectContext;
@@ -1576,6 +1576,29 @@ impl AgentMessage {
     }
 }
 
+/// See [`Thread::memory_footprint`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HistoryFootprint {
+    pub messages: usize,
+    pub user_bytes: usize,
+    pub text_bytes: usize,
+    pub thinking_bytes: usize,
+    pub tool_input_bytes: usize,
+    pub tool_result_bytes: usize,
+    pub provider_state_bytes: usize,
+}
+
+impl HistoryFootprint {
+    pub fn total_bytes(&self) -> usize {
+        self.user_bytes
+            + self.text_bytes
+            + self.thinking_bytes
+            + self.tool_input_bytes
+            + self.tool_result_bytes
+            + self.provider_state_bytes
+    }
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentMessage {
     pub(crate) content: Vec<AgentMessageContent>,
@@ -2241,6 +2264,11 @@ pub struct Thread {
     ui_scroll_position: Option<gpui::ListOffset>,
     /// Weak references to running subagent threads for cancellation propagation
     running_subagents: Vec<WeakEntity<Thread>>,
+    /// Sub-agents started without waiting for them. A new turn leaves them
+    /// running; only an explicit Stop cancels them.
+    background_subagents: HashSet<acp_v2::SessionId>,
+    /// What background sub-agents reported since the agent was last told.
+    finished_subagent_notices: Vec<String>,
     /// Set while this thread carries out one of several steps running side by
     /// side, so it cannot change a file another step has already changed.
     file_claim: Option<crate::FileClaim>,
@@ -2491,6 +2519,8 @@ impl Thread {
             draft_prompt: None,
             ui_scroll_position: None,
             running_subagents: Vec::new(),
+            background_subagents: HashSet::default(),
+            finished_subagent_notices: Vec::new(),
             file_claim: None,
             step_progress: BTreeMap::default(),
             background_wake_armed: false,
@@ -3054,6 +3084,8 @@ impl Thread {
                 offset_in_item: gpui::px(sp.offset_in_item),
             }),
             running_subagents: Vec::new(),
+            background_subagents: HashSet::default(),
+            finished_subagent_notices: Vec::new(),
             file_claim: None,
             step_progress,
             background_wake_armed: false,
@@ -3142,6 +3174,79 @@ impl Thread {
     /// terminal tool uses when it actually builds the sandbox.
     pub fn sandbox_baseline_writable_paths(&self, cx: &App) -> Vec<PathBuf> {
         crate::sandboxing::sandbox_worktree_writable_paths(self.project.read(cx), cx)
+    }
+
+    /// Roughly what the model-facing history holds, by kind, for memory
+    /// diagnostics.
+    pub fn memory_footprint(&self) -> HistoryFootprint {
+        let mut footprint = HistoryFootprint {
+            messages: self.messages.len(),
+            ..Default::default()
+        };
+        for message in &self.messages {
+            match &**message {
+                Message::User(user_message) => {
+                    for content in user_message.content.iter() {
+                        footprint.user_bytes += match content {
+                            UserMessageContent::Text(text) => text.len(),
+                            UserMessageContent::Mention { content, .. } => content.len(),
+                            UserMessageContent::Image(image) => image.len(),
+                        };
+                    }
+                }
+                Message::Agent(agent_message) => {
+                    for content in &agent_message.content {
+                        match content {
+                            AgentMessageContent::Text(text) => footprint.text_bytes += text.len(),
+                            AgentMessageContent::Thinking { text, signature } => {
+                                footprint.thinking_bytes += text.len();
+                                footprint.provider_state_bytes +=
+                                    signature.as_ref().map_or(0, String::len);
+                            }
+                            AgentMessageContent::RedactedThinking(data) => {
+                                footprint.provider_state_bytes += data.len();
+                            }
+                            AgentMessageContent::ToolUse(tool_use) => {
+                                footprint.tool_input_bytes += tool_use.raw_input.len()
+                                    + match &tool_use.input {
+                                        LanguageModelToolUseInput::Json(input) => {
+                                            util::size::estimated_json_heap_bytes(input)
+                                        }
+                                        LanguageModelToolUseInput::Text(input) => input.len(),
+                                    };
+                            }
+                        }
+                    }
+                    if let Some(details) = &agent_message.reasoning_details {
+                        footprint.provider_state_bytes +=
+                            util::size::estimated_json_heap_bytes(details);
+                    }
+                    for result in agent_message.tool_results.values() {
+                        for content in &result.content {
+                            footprint.tool_result_bytes += match content {
+                                LanguageModelToolResultContent::Text(text) => text.len(),
+                                LanguageModelToolResultContent::Image(image) => image.len(),
+                            };
+                        }
+                        if let Some(output) = &result.output {
+                            footprint.tool_result_bytes +=
+                                util::size::estimated_json_heap_bytes(output);
+                        }
+                    }
+                }
+                Message::Compaction(CompactionInfo::Summary(summary)) => {
+                    footprint.text_bytes += summary.len();
+                }
+                Message::Compaction(CompactionInfo::ProviderNative { items, .. }) => {
+                    footprint.provider_state_bytes += items
+                        .iter()
+                        .map(util::size::estimated_json_heap_bytes)
+                        .sum::<usize>();
+                }
+                Message::Resume | Message::LoopGuard(_) | Message::BackgroundWake(_) => {}
+            }
+        }
+        footprint
     }
 
     /// A field added here must also go in `StreamingSaveKey`, unless saving it
@@ -3347,18 +3452,45 @@ impl Thread {
         cx.emit(TerminalTaskExited);
         if self.running_turn.is_none()
             && self.background_wake_armed
-            && self.terminal_tasks.has_unreported_completions()
+            && (self.terminal_tasks.has_unreported_completions()
+                || !self.finished_subagent_notices.is_empty())
         {
             cx.emit(BackgroundTasksFinished);
         }
     }
 
-    /// A turn that ends while its background commands still run resumes the
-    /// conversation when they finish, so the agent need not wait on them.
+    /// A turn that ends while its background commands or sub-agents still run
+    /// resumes the conversation when they finish, so the agent need not wait.
     fn arm_background_wake(&mut self, cx: &mut Context<Self>) {
         self.background_wake_armed = self.parent_thread_id().is_none()
             && (self.terminal_tasks.running_in_background() > 0
-                || self.terminal_tasks.has_unreported_completions());
+                || self.terminal_tasks.has_unreported_completions()
+                || !self.background_subagents.is_empty()
+                || !self.finished_subagent_notices.is_empty());
+        self.background_task_finished(cx);
+    }
+
+    /// Only a conversation the user talks to can be resumed when background
+    /// work finishes, so only it starts sub-agents without waiting for them.
+    pub(crate) fn can_wake_for_background_work(&self) -> bool {
+        self.parent_thread_id().is_none()
+    }
+
+    pub(crate) fn subagent_started_in_background(&mut self, session_id: acp_v2::SessionId) {
+        self.background_subagents.insert(session_id);
+    }
+
+    pub(crate) fn subagent_finished_in_background(
+        &mut self,
+        session_id: &acp_v2::SessionId,
+        notice: String,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.background_subagents.remove(session_id) {
+            // Stopped by the user, who already knows it did not finish.
+            return;
+        }
+        self.finished_subagent_notices.push(notice);
         self.background_task_finished(cx);
     }
 
@@ -3368,17 +3500,20 @@ impl Thread {
         if !self.background_wake_armed || self.running_turn.is_some() {
             return Vec::new();
         }
-        let notices = self.terminal_tasks.take_finished_notices();
+        let mut notices = self.terminal_tasks.take_finished_notices();
+        notices.append(&mut self.finished_subagent_notices);
         if !notices.is_empty() {
             self.background_wake_armed = false;
         }
         notices
     }
 
-    /// Notes appended to a tool result: background commands that finished,
-    /// a nudge away from repeated waiting, and the turn's checklist review.
+    /// Notes appended to a tool result: background commands and sub-agents
+    /// that finished, a nudge away from repeated waiting, and the turn's
+    /// checklist review.
     pub(crate) fn tool_result_notes(&mut self, tool_name: &str) -> Vec<String> {
         let mut notes = self.terminal_tasks.take_finished_notices();
+        notes.append(&mut self.finished_subagent_notices);
         let waiting = matches!(
             tool_name,
             TerminalWaitTool::NAME | crate::WaitArchitectRunTool::NAME
@@ -4353,18 +4488,25 @@ impl Thread {
         // This also applies when the launching turn has already finished.
         self.terminal_tasks.cancel_all();
         self.background_wake_armed = false;
+        self.background_subagents.clear();
         self.cancel_turn(cx)
     }
 
     // Replacing a turn cancels its foreground tools, not jobs that already
     // yielded. Only explicit Stop (or thread teardown) cancels those jobs.
     pub(crate) fn cancel_turn(&mut self, cx: &mut Context<Self>) -> Task<()> {
-        for subagent in self.running_subagents.drain(..) {
-            if let Some(subagent) = subagent.upgrade() {
-                subagent
-                    .update(cx, |thread, cx| thread.request_cancel_turn(cx))
-                    .detach();
+        let running_subagents = std::mem::take(&mut self.running_subagents);
+        for subagent in running_subagents {
+            let Some(entity) = subagent.upgrade() else {
+                continue;
+            };
+            if self.background_subagents.contains(entity.read(cx).id()) {
+                self.running_subagents.push(subagent);
+                continue;
             }
+            entity
+                .update(cx, |thread, cx| thread.request_cancel_turn(cx))
+                .detach();
         }
 
         let Some(running_turn) = self.running_turn.take() else {
@@ -8631,6 +8773,11 @@ impl ToolCallEventStream {
             sandbox_grants,
             thread,
         }
+    }
+
+    /// The thread running this tool call, when it is a live thread.
+    pub(crate) fn owning_thread(&self) -> Option<WeakEntity<Thread>> {
+        self.thread.clone()
     }
 
     /// Whether the owning thread is a subagent, so prompts can say "for this
@@ -13180,6 +13327,95 @@ mod tests {
             "the latest compaction may still replay messages after the one before it"
         );
         assert_eq!(provider_state(&messages[4]), (true, true));
+    }
+
+    #[gpui::test]
+    async fn test_subagent_thread_background_results_reach_the_agent(cx: &mut TestAppContext) {
+        let (thread, _event_stream, _fake) = setup_thread_for_test(cx).await;
+        let child = acp_v2::SessionId::new("child");
+        thread.update(cx, |thread, cx| {
+            assert!(thread.can_wake_for_background_work());
+            thread.subagent_started_in_background(child.clone());
+            thread.subagent_finished_in_background(&child, "Child finished".into(), cx);
+            let notes = thread.tool_result_notes("grep");
+            assert!(
+                notes.iter().any(|note| note == "Child finished"),
+                "{notes:?}"
+            );
+            assert!(
+                !thread
+                    .tool_result_notes("grep")
+                    .iter()
+                    .any(|note| note == "Child finished"),
+                "a result is reported once"
+            );
+
+            thread.subagent_started_in_background(child.clone());
+            thread.cancel(cx).detach();
+            thread.subagent_finished_in_background(&child, "Stopped child".into(), cx);
+            assert!(
+                !thread
+                    .tool_result_notes("grep")
+                    .iter()
+                    .any(|note| note == "Stopped child"),
+                "a sub-agent the user stopped is not reported as finished"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn history_details_report_memory_footprint(cx: &mut TestAppContext) {
+        let (thread, _event_stream, _fake) = setup_thread_for_test(cx).await;
+        thread.update(cx, |thread, _| {
+            let before = thread.memory_footprint();
+            let tool_use_id = LanguageModelToolUseId::from("read");
+            thread.messages.push(Arc::new(Message::Agent(AgentMessage {
+                content: vec![
+                    AgentMessageContent::Text("reply".into()),
+                    AgentMessageContent::Thinking {
+                        text: "thinking".into(),
+                        signature: Some("sig".into()),
+                    },
+                    AgentMessageContent::ToolUse(LanguageModelToolUse {
+                        id: tool_use_id.clone(),
+                        name: ReadFileTool::NAME.into(),
+                        raw_input: r#"{"path":"a.rs"}"#.into(),
+                        input: LanguageModelToolUseInput::Json(json!({ "path": "a.rs" })),
+                        is_input_complete: true,
+                        thought_signature: None,
+                    }),
+                ],
+                tool_results: [(
+                    tool_use_id.clone(),
+                    LanguageModelToolResult {
+                        tool_use_id,
+                        tool_name: ReadFileTool::NAME.into(),
+                        is_error: false,
+                        content: vec!["fn main() {}".into()],
+                        output: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+                reasoning_details: None,
+            })));
+            let after = thread.memory_footprint();
+            assert_eq!(after.messages, before.messages + 1);
+            assert_eq!(after.text_bytes - before.text_bytes, "reply".len());
+            assert_eq!(
+                after.thinking_bytes - before.thinking_bytes,
+                "thinking".len()
+            );
+            assert_eq!(after.provider_state_bytes - before.provider_state_bytes, 3);
+            assert_eq!(
+                after.tool_result_bytes - before.tool_result_bytes,
+                "fn main() {}".len()
+            );
+            assert!(
+                after.tool_input_bytes - before.tool_input_bytes > r#"{"path":"a.rs"}"#.len(),
+                "both the raw and the parsed input count"
+            );
+        });
     }
 
     #[test]
