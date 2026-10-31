@@ -45,11 +45,11 @@ use heck::ToSnakeCase as _;
 use language_model::{
     CompletionIntent, LanguageModel, LanguageModelCompletionError, LanguageModelCompletionEvent,
     LanguageModelId, LanguageModelImage, LanguageModelImageExt as _, LanguageModelProviderId,
-    LanguageModelRegistry,
-    LanguageModelRequest, LanguageModelRequestMessage, LanguageModelRequestTool,
-    LanguageModelToolResult, LanguageModelToolResultContent, LanguageModelToolUse,
-    LanguageModelToolUseId, LanguageModelToolUseInput, MessageContent, ProviderErrorCategory, Role,
-    SelectedModel, Speed, StopReason, TokenUsage, ZED_CLOUD_PROVIDER_ID,
+    LanguageModelRegistry, LanguageModelRequest, LanguageModelRequestMessage,
+    LanguageModelRequestTool, LanguageModelToolResult, LanguageModelToolResultContent,
+    LanguageModelToolUse, LanguageModelToolUseId, LanguageModelToolUseInput, MessageContent,
+    ProviderErrorCategory, Role, SelectedModel, Speed, StopReason, TokenUsage,
+    ZED_CLOUD_PROVIDER_ID,
 };
 use project::{Project, trusted_worktrees::TrustedWorktrees};
 use prompt_store::ProjectContext;
@@ -8392,9 +8392,10 @@ fn with_png_images(message: Arc<Message>) -> Arc<Message> {
     let Message::User(user_message) = &*message else {
         return message;
     };
-    let needs_conversion = user_message.content.iter().any(|content| {
-        matches!(content, UserMessageContent::Image(image) if !image.is_png())
-    });
+    let needs_conversion = user_message
+        .content
+        .iter()
+        .any(|content| matches!(content, UserMessageContent::Image(image) if !image.is_png()));
     if !needs_conversion {
         return message;
     }
@@ -10027,7 +10028,9 @@ impl UserMessageContent {
                     .context("This image could not be read. Choose another image.")?
                 {
                     Some(image) => Self::Image(image),
-                    None => anyhow::bail!("This image is too large to send. Choose a smaller image."),
+                    None => {
+                        anyhow::bail!("This image is too large to send. Choose a smaller image.")
+                    }
                 }
             }
             acp_v2::ContentBlock::Audio(_) => {
@@ -13391,11 +13394,17 @@ mod tests {
         let UserMessageContent::Image(image) = content else {
             panic!("expected an image");
         };
-        assert!(image.is_png(), "a JPEG must be re-encoded before it is sent");
+        assert!(
+            image.is_png(),
+            "a JPEG must be re-encoded before it is sent"
+        );
 
         assert!(
             UserMessageContent::from_content_block(
-                acp_v2::ContentBlock::Image(acp_v2::ImageContent::new("bm90IGFuIGltYWdl", "image/jpeg")),
+                acp_v2::ContentBlock::Image(acp_v2::ImageContent::new(
+                    "bm90IGFuIGltYWdl",
+                    "image/jpeg"
+                )),
                 PathStyle::local(),
             )
             .is_err(),
@@ -13415,7 +13424,9 @@ mod tests {
         let Some(Message::User(user_message)) = loaded.first().map(|message| &**message) else {
             panic!("expected the user message");
         };
-        assert!(matches!(&user_message.content[0], UserMessageContent::Text(text) if text == "look"));
+        assert!(
+            matches!(&user_message.content[0], UserMessageContent::Text(text) if text == "look")
+        );
         assert!(
             matches!(&user_message.content[1], UserMessageContent::Image(image) if image.is_png()),
             "a JPEG saved by an earlier build is repaired on load"

@@ -205,9 +205,16 @@ mod tests {
         .expect("decodes")
         .expect("fits");
         assert!(converted.is_png());
-        assert_eq!(png_dimensions(&base64_to_png_bytes(&converted.source)), (2, 2));
+        assert_eq!(
+            png_dimensions(&base64_to_png_bytes(&converted.source)),
+            (2, 2)
+        );
 
-        let unchanged = converted.clone().into_png().expect("decodes").expect("fits");
+        let unchanged = converted
+            .clone()
+            .into_png()
+            .expect("decodes")
+            .expect("fits");
         assert_eq!(unchanged.source, converted.source);
 
         assert!(
