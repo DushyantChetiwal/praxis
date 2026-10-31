@@ -299,6 +299,8 @@ jobs:
         run: |
           cargo test --locked -p agent_ui --lib remote::
           cargo test --locked -p agent_ui --lib test_remote_images_
+          cargo test --locked -p agent --lib test_phone_images_
+          cargo test --locked -p language_model --lib test_into_png_
           cargo test --locked -p recent_projects --lib test_reconnect_action_
 
       - name: Test background terminal tab inspection
