@@ -30,7 +30,13 @@ pub trait LanguageModelImageExt {
     const FORMAT: ImageFormat;
     fn from_image(data: Arc<Image>, cx: &mut App) -> Task<Option<LanguageModelImage>>;
     fn from_base64_image(data: &str, mime_type: &str) -> Result<Option<LanguageModelImage>>;
+    /// Re-encodes an image of any supported format as the PNG that every
+    /// provider is told it receives. A PNG is returned unchanged.
+    fn into_png(self) -> Result<Option<LanguageModelImage>>;
+    fn is_png(&self) -> bool;
 }
+
+const PNG_BASE64_PREFIX: &str = "iVBORw0KGgo";
 
 impl LanguageModelImageExt for LanguageModelImage {
     const FORMAT: ImageFormat = ImageFormat::Png;
@@ -61,6 +67,19 @@ impl LanguageModelImageExt for LanguageModelImage {
             .ok_or_else(|| anyhow!("unsupported image MIME type `{}`", mime_type))?;
         let bytes = base64::engine::general_purpose::STANDARD.decode(data.as_bytes())?;
         let dynamic_image = image::load_from_memory_with_format(&bytes, format)?;
+        language_model_image_from_dynamic_image(dynamic_image)
+    }
+
+    fn is_png(&self) -> bool {
+        self.source.starts_with(PNG_BASE64_PREFIX)
+    }
+
+    fn into_png(self) -> Result<Option<LanguageModelImage>> {
+        if self.is_png() {
+            return Ok(Some(self));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(self.source.as_bytes())?;
+        let dynamic_image = image::load_from_memory(&bytes)?;
         language_model_image_from_dynamic_image(dynamic_image)
     }
 }
@@ -175,6 +194,30 @@ pub fn gpui_size_to_image_size(size: Size<DevicePixels>) -> ImageSize {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    #[test]
+    fn test_into_png_converts_jpeg_and_keeps_png() {
+        let jpeg = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDwKiiivzI/uM//2Q==";
+        let converted = LanguageModelImage {
+            source: jpeg.into(),
+        }
+        .into_png()
+        .expect("decodes")
+        .expect("fits");
+        assert!(converted.is_png());
+        assert_eq!(png_dimensions(&base64_to_png_bytes(&converted.source)), (2, 2));
+
+        let unchanged = converted.clone().into_png().expect("decodes").expect("fits");
+        assert_eq!(unchanged.source, converted.source);
+
+        assert!(
+            LanguageModelImage {
+                source: "bm90IGFuIGltYWdl".into()
+            }
+            .into_png()
+            .is_err()
+        );
+    }
 
     fn base64_to_png_bytes(base64: &str) -> Vec<u8> {
         base64::engine::general_purpose::STANDARD

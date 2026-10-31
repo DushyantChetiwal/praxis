@@ -44,7 +44,8 @@ use gpui::{
 use heck::ToSnakeCase as _;
 use language_model::{
     CompletionIntent, LanguageModel, LanguageModelCompletionError, LanguageModelCompletionEvent,
-    LanguageModelId, LanguageModelImage, LanguageModelProviderId, LanguageModelRegistry,
+    LanguageModelId, LanguageModelImage, LanguageModelImageExt as _, LanguageModelProviderId,
+    LanguageModelRegistry,
     LanguageModelRequest, LanguageModelRequestMessage, LanguageModelRequestTool,
     LanguageModelToolResult, LanguageModelToolResultContent, LanguageModelToolUse,
     LanguageModelToolUseId, LanguageModelToolUseInput, MessageContent, ProviderErrorCategory, Role,
@@ -8375,6 +8376,7 @@ fn loaded_messages(messages: Vec<Arc<Message>>) -> Vec<Arc<Message>> {
     let mut messages = messages
         .into_iter()
         .map(without_redundant_outputs)
+        .map(with_png_images)
         .collect::<Vec<_>>();
     shed_sealed_provider_state(&mut messages);
     messages
@@ -8384,6 +8386,43 @@ fn loaded_messages(messages: Vec<Arc<Message>>) -> Vec<Arc<Message>> {
 /// anything earlier is never sent again. Those messages drop the opaque state
 /// providers need to continue a turn: thinking signatures and reasoning
 /// details. The transcript keeps every word.
+/// Earlier builds saved phone images as JPEG, which providers reject as
+/// mislabeled PNGs. Such a message would fail every later turn.
+fn with_png_images(message: Arc<Message>) -> Arc<Message> {
+    let Message::User(user_message) = &*message else {
+        return message;
+    };
+    let needs_conversion = user_message.content.iter().any(|content| {
+        matches!(content, UserMessageContent::Image(image) if !image.is_png())
+    });
+    if !needs_conversion {
+        return message;
+    }
+    let content = user_message
+        .content
+        .iter()
+        .cloned()
+        .map(|content| match content {
+            UserMessageContent::Image(image) if !image.is_png() => match image.into_png() {
+                Ok(Some(image)) => UserMessageContent::Image(image),
+                Ok(None) => {
+                    log::warn!("Removed a saved image too large to send");
+                    UserMessageContent::Text("[An image too large to send was removed]".into())
+                }
+                Err(error) => {
+                    log::warn!("Removed a saved image that could not be read: {error:#}");
+                    UserMessageContent::Text("[An unreadable image was removed]".into())
+                }
+            },
+            content => content,
+        })
+        .collect();
+    Arc::new(Message::User(UserMessage {
+        id: user_message.id.clone(),
+        content,
+    }))
+}
+
 fn shed_sealed_provider_state(messages: &mut [Arc<Message>]) {
     let is_compaction = |message: &Arc<Message>| matches!(&**message, Message::Compaction(_));
     let Some(sealed_end) = messages
@@ -9976,9 +10015,21 @@ impl UserMessageContent {
     pub fn from_content_block(value: acp_v2::ContentBlock, path_style: PathStyle) -> Result<Self> {
         Ok(match value {
             acp_v2::ContentBlock::Text(text_content) => Self::Text(text_content.text),
-            acp_v2::ContentBlock::Image(image_content) => Self::Image(LanguageModelImage {
-                source: image_content.data.into(),
-            }),
+            acp_v2::ContentBlock::Image(image_content) => {
+                // Providers are told every image is a PNG, and reject the
+                // JPEGs the phone sends. A rejected image stalls the whole
+                // conversation, since every turn resends it.
+                let image = LanguageModelImage {
+                    source: image_content.data.into(),
+                };
+                match image
+                    .into_png()
+                    .context("This image could not be read. Choose another image.")?
+                {
+                    Some(image) => Self::Image(image),
+                    None => anyhow::bail!("This image is too large to send. Choose a smaller image."),
+                }
+            }
             acp_v2::ContentBlock::Audio(_) => {
                 // TODO
                 Self::Text("[audio]".to_string())
@@ -13327,6 +13378,49 @@ mod tests {
             "the latest compaction may still replay messages after the one before it"
         );
         assert_eq!(provider_state(&messages[4]), (true, true));
+    }
+
+    const TINY_JPEG: &str = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDwKiiivzI/uM//2Q==";
+
+    #[test]
+    fn test_phone_images_reach_the_model_as_png() -> Result<()> {
+        let content = UserMessageContent::from_content_block(
+            acp_v2::ContentBlock::Image(acp_v2::ImageContent::new(TINY_JPEG, "image/jpeg")),
+            PathStyle::local(),
+        )?;
+        let UserMessageContent::Image(image) = content else {
+            panic!("expected an image");
+        };
+        assert!(image.is_png(), "a JPEG must be re-encoded before it is sent");
+
+        assert!(
+            UserMessageContent::from_content_block(
+                acp_v2::ContentBlock::Image(acp_v2::ImageContent::new("bm90IGFuIGltYWdl", "image/jpeg")),
+                PathStyle::local(),
+            )
+            .is_err(),
+            "an unreadable image is refused instead of stalling every later turn"
+        );
+
+        let saved = Arc::new(Message::User(UserMessage {
+            id: ClientUserMessageId::new(),
+            content: Arc::from([
+                UserMessageContent::Text("look".into()),
+                UserMessageContent::Image(LanguageModelImage {
+                    source: TINY_JPEG.into(),
+                }),
+            ]),
+        }));
+        let loaded = loaded_messages(vec![saved]);
+        let Some(Message::User(user_message)) = loaded.first().map(|message| &**message) else {
+            panic!("expected the user message");
+        };
+        assert!(matches!(&user_message.content[0], UserMessageContent::Text(text) if text == "look"));
+        assert!(
+            matches!(&user_message.content[1], UserMessageContent::Image(image) if image.is_png()),
+            "a JPEG saved by an earlier build is repaired on load"
+        );
+        Ok(())
     }
 
     #[gpui::test]
