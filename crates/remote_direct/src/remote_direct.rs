@@ -22,7 +22,7 @@ mod webrtc {
     use std::time::Duration;
 
     use agent_ui::{DirectConnection, DirectTransport, OnDirectMessage};
-    use anyhow::{Context as _, Result, anyhow};
+    use anyhow::{Result, anyhow};
     use futures::FutureExt as _;
     use futures::channel::oneshot;
     use futures::future::BoxFuture;
