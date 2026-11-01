@@ -14,6 +14,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,6 +41,9 @@ internal const val RELAY_PACKET_LIMIT = 96_000
 // relay.damus.io reset connections every few minutes. A Praxis on the older
 // list still shares relay.primal.net with this one.
 private val RELAYS = listOf("wss://relay.primal.net", "wss://nos.lol")
+private const val DIRECT_RETRY_NANOS = 30_000_000_000L
+private const val DIRECT_MAX_RETRY_NANOS = 900_000_000_000L
+private const val DIRECT_OPEN_TIMEOUT_MS = 15_000L
 
 internal fun relayAad(link: Link, direction: String): String =
     "$PROTOCOL/nostr/${link.channel}/${link.phoneId}/$direction"
@@ -74,8 +78,12 @@ internal class RelayCursor {
 data class LiveSnapshot(val channel: String, val phoneId: String, val snapshot: Snapshot)
 data class LiveConnection(val channel: String, val connected: Boolean, val epoch: String? = null)
 
-/** Relays only carry the existing paired channel's authenticated ciphertext. */
-class NostrChannel {
+/**
+ * Relays only carry the existing paired channel's authenticated ciphertext.
+ * When [directLinks] can reach Praxis peer to peer, the same packets take
+ * that route and the relays only carry its setup.
+ */
+class NostrChannel(private val directLinks: DirectLinks? = null) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var session: Session? = null
     private val _snapshots = MutableSharedFlow<LiveSnapshot>(extraBufferCapacity = 1)
@@ -121,6 +129,11 @@ class NostrChannel {
         private val cursor = RelayCursor()
         @Volatile private var epoch: String? = null
         @Volatile private var lastHello = 0L
+        @Volatile private var direct: DirectLink? = null
+        @Volatile private var directJob: Job? = null
+        @Volatile private var directFailures = 0
+        @Volatile private var directRetryAt = 0L
+        private val directInbox = Channel<String>(64)
 
         fun ready(): Boolean {
             val last = lastHello
@@ -129,6 +142,7 @@ class NostrChannel {
 
         suspend fun run() {
             var receiver: Job? = null
+            var directReceiver: Job? = null
             try {
                 val own = Keys.parse(relaySecret(link, "phone").joinToString("") { "%02x".format(it) })
                 keys = own
@@ -148,21 +162,19 @@ class NostrChannel {
                                 if (event.content().length > RELAY_PACKET_LIMIT || !event.verify() || event.author().toHex() != peer.publicKey().toHex()) continue
                                 if (event.kind().use { it.asU16() } != RELAY_KIND) continue
                                 if (event.tags().none { it.toVec() == listOf("p", own.publicKey().toHex()) }) continue
-                                val plain = RemoteCrypto.open(link.key, event.content(), relayAad(link, "desktop"))
-                                val packet = JSONObject(String(plain, Charsets.UTF_8))
-                                when (packet.str("type")) {
-                                    "response" -> packet.str("id")?.let { pending[it]?.complete(packet) }
-                                    "snapshot" -> if (cursor.accept(packet)) {
-                                        parseSnapshot(packet.obj("snapshot")?.toString())?.takeIf { session === this@Session }?.let {
-                                            _snapshots.emit(LiveSnapshot(link.channel, link.phoneId, it))
-                                        }
-                                    }
-                                }
+                                receive(event.content())
                             } catch (error: CancellationException) { throw error }
                             catch (error: Exception) { Log.w("PraxisRemote", "Ignored an invalid live packet", error) }
                             finally { event.close() }
                         }
                     } finally { notifications.close() }
+                }
+                directReceiver = scope.launch {
+                    for (blob in directInbox) {
+                        try { receive(blob) }
+                        catch (error: CancellationException) { throw error }
+                        catch (error: Exception) { Log.w("PraxisRemote", "Ignored an invalid direct packet", error) }
+                    }
                 }
                 transport.connect(Duration.ofSeconds(8))
                 transport.subscribe(ReqTarget.auto(listOf(Filter().author(peer.publicKey()).pubkey(own.publicKey()).kind(Kind(RELAY_KIND)).limit(0uL))), id = "praxis-live")
@@ -178,6 +190,7 @@ class NostrChannel {
                         lastHello = System.nanoTime()
                         failures = 0
                         if (session === this) _connection.value = LiveConnection(link.channel, true, newEpoch)
+                        connectDirect()
                         delay(15_000)
                     } else {
                         lastHello = 0
@@ -192,16 +205,70 @@ class NostrChannel {
             finally {
                 lastHello = 0
                 receiver?.cancel()
+                directJob?.cancel()
+                directInbox.close()
+                direct?.close()
+                direct = null
                 pending.values.forEach { it.completeExceptionally(ApiException(ErrorKind.Network, "The live connection closed. Check the conversation before resending.")) }
                 pending.clear()
                 withContext(NonCancellable) {
                     receiver?.cancelAndJoin()
+                    directReceiver?.cancelAndJoin()
                     withTimeoutOrNull(5_000) { client?.shutdown() }
                 }
                 client?.close()
                 keys?.close()
                 desktop?.close()
                 if (session === this) _connection.value = LiveConnection(link.channel, false)
+            }
+        }
+
+        private suspend fun receive(blob: String) {
+            val plain = RemoteCrypto.open(link.key, blob, relayAad(link, "desktop"))
+            val packet = JSONObject(String(plain, Charsets.UTF_8))
+            when (packet.str("type")) {
+                "response" -> packet.str("id")?.let { pending[it]?.complete(packet) }
+                "snapshot" -> if (cursor.accept(packet)) {
+                    parseSnapshot(packet.obj("snapshot")?.toString())?.takeIf { session === this@Session }?.let {
+                        _snapshots.emit(LiveSnapshot(link.channel, link.phoneId, it))
+                    }
+                }
+            }
+        }
+
+        /** Offers a direct link in the background; the relays carry everything until it opens. */
+        private fun connectDirect() {
+            val links = directLinks ?: return
+            if (direct?.isOpen == true || directJob?.isActive == true) return
+            if (directRetryAt != 0L && System.nanoTime() - directRetryAt < 0) return
+            directJob = scope.launch {
+                direct?.close()
+                direct = null
+                try {
+                    val opened = links.open({ message ->
+                        if (message.size <= RELAY_PACKET_LIMIT && directInbox.trySend(String(message, Charsets.UTF_8)).isFailure) {
+                            Log.d("PraxisRemote", "Dropped a direct packet while busy")
+                        }
+                    }) { offer ->
+                        val answer = exchange(UUID.randomUUID().toString(), "direct_offer", JSONObject().put("sdp", offer), attempts = 1)
+                        answer.takeIf { it.bool("ok") }?.obj("result")?.str("sdp")
+                            ?: throw ApiException(ErrorKind.Network, answer.str("error") ?: "Praxis did not accept the direct connection.")
+                    }
+                    if (session !== this@Session || job?.isActive != true) { opened.close(); return@launch }
+                    direct = opened
+                    // Networks that block peer-to-peer traffic negotiate but never open.
+                    withTimeoutOrNull(DIRECT_OPEN_TIMEOUT_MS) { while (!opened.isOpen) delay(200) }
+                        ?: throw ApiException(ErrorKind.Network, "The direct connection did not open.")
+                    directFailures = 0
+                    directRetryAt = System.nanoTime() + DIRECT_RETRY_NANOS
+                } catch (error: CancellationException) { throw error }
+                catch (error: Throwable) {
+                    // Older Praxis builds and networks that block direct links keep the relays.
+                    Log.d("PraxisRemote", "Direct connection unavailable; using relays", error)
+                    direct?.takeIf { !it.isOpen }?.let { direct = null; it.close() }
+                    directFailures++
+                    directRetryAt = System.nanoTime() + minOf(DIRECT_MAX_RETRY_NANOS, DIRECT_RETRY_NANOS shl directFailures.coerceAtMost(5))
+                }
             }
         }
 
@@ -217,23 +284,38 @@ class NostrChannel {
             val waiting = CompletableDeferred<JSONObject>()
             pending[id] = waiting
             try {
-                repeat(attempts) {
+                var remaining = attempts
+                var directTried = false
+                while (remaining > 0) {
                     val blob = RemoteCrypto.seal(link.key, plain, relayAad(link, "request"))
-                    val event = EventBuilder(Kind(RELAY_KIND), blob).tags(listOf(
-                        Tag.publicKey(peer.publicKey()),
-                        Tag.parse(listOf("salt", UUID.randomUUID().toString())),
-                    )).finalize(own)
-                    try {
-                        withTimeoutOrNull(3_000) { transport.sendEvent(event, ackPolicy = AckPolicy.none(), okTimeout = Duration.ofSeconds(2)) }
-                    } catch (error: CancellationException) { throw error }
-                    catch (error: Exception) { Log.d("PraxisRemote", "Waiting for the desktop receipt after relay publication failure", error) }
-                    finally { event.close() }
+                    val route = direct
+                    // A direct attempt that goes unanswered is retried once over the relays.
+                    val viaDirect = !directTried && route != null && route.send(blob.toByteArray(Charsets.UTF_8))
+                    if (viaDirect) {
+                        directTried = true
+                    } else {
+                        remaining--
+                        val event = EventBuilder(Kind(RELAY_KIND), blob).tags(listOf(
+                            Tag.publicKey(peer.publicKey()),
+                            Tag.parse(listOf("salt", UUID.randomUUID().toString())),
+                        )).finalize(own)
+                        try {
+                            withTimeoutOrNull(3_000) { transport.sendEvent(event, ackPolicy = AckPolicy.none(), okTimeout = Duration.ofSeconds(2)) }
+                        } catch (error: CancellationException) { throw error }
+                        catch (error: Exception) { Log.d("PraxisRemote", "Waiting for the desktop receipt after relay publication failure", error) }
+                        finally { event.close() }
+                    }
                     val answer = withTimeoutOrNull(if (op == "hello") 2_000 else 8_000) { waiting.await() }
                     if (answer != null) {
                         if (op != "hello" && answer.str("epoch") != requestEpoch) {
                             throw ApiException(ErrorKind.Timeout, "Praxis restarted. Check whether the message arrived before sending it again.")
                         }
                         return answer
+                    }
+                    // Praxis answers a hello at once, so silence means the link is gone.
+                    if (viaDirect && op == "hello" && direct === route) {
+                        direct = null
+                        route?.close()
                     }
                 }
             } finally { pending.remove(id) }

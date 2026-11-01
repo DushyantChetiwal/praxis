@@ -15420,6 +15420,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "remote_direct"
+version = "0.1.0"
+dependencies = [
+ "agent_ui",
+ "anyhow",
+ "futures 0.3.34",
+ "gpui",
+ "libwebrtc",
+ "log",
+ "parking_lot",
+]
+
+[[package]]
 name = "remote_server"
 version = "0.1.0"
 dependencies = [
@@ -23026,6 +23039,7 @@ dependencies = [
  "recent_projects",
  "release_channel",
  "remote",
+ "remote_direct",
  "remote_server",
  "repl",
  "reqwest_client",

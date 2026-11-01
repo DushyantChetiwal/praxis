@@ -758,7 +758,7 @@ class RemoteChannel(
     private val context = context.applicationContext
     private val mutex = Mutex()
     private val random = SecureRandom()
-    val live = NostrChannel()
+    val live = NostrChannel(WebRtcLinks(this.context))
     private val background = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _pending = MutableStateFlow(0)

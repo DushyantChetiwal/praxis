@@ -23,3 +23,6 @@
 -dontwarn javax.annotation.**
 -dontwarn com.google.api.client.**
 -dontwarn org.joda.time.**
+
+# WebRTC binds its Java classes from native code by name.
+-keep class org.webrtc.** { *; }
