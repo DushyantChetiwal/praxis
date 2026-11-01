@@ -156,6 +156,7 @@ mod webrtc {
                 .peer_connection
                 .create_answer(AnswerOptions::default())
                 .await?;
+            let answer_text = answer.to_string();
             self.peer_connection.set_local_description(answer).await?;
             if self.peer_connection.ice_gathering_state() == IceGatheringState::Complete {
                 finish_gathering();
@@ -168,11 +169,12 @@ mod webrtc {
                 }
             });
             gathered_signal.await.ok();
-            let answer = self
+            // The described answer includes the addresses gathered so far.
+            Ok(self
                 .peer_connection
                 .current_local_description()
-                .context("The direct connection produced no session answer.")?;
-            Ok(answer.to_string())
+                .map(|answer| answer.to_string())
+                .unwrap_or(answer_text))
         }
     }
 
@@ -236,15 +238,24 @@ mod webrtc {
                 phone_received.lock().send(buffer.data.to_vec()).ok();
             })));
 
+            // libwebrtc exposes no pending offer with its addresses, so they
+            // are handed over separately; the Android app sends them inline.
+            let (candidate_found, candidates) = mpsc::channel::<(String, i32, String)>();
+            let candidate_found = Mutex::new(candidate_found);
+            phone.on_ice_candidate(Some(Box::new(move |candidate: IceCandidate| {
+                candidate_found
+                    .lock()
+                    .send((
+                        candidate.sdp_mid(),
+                        candidate.sdp_mline_index(),
+                        candidate.candidate(),
+                    ))
+                    .ok();
+            })));
             let offer = futures::executor::block_on(phone.create_offer(OfferOptions::default()))?;
+            let offer_text = offer.to_string();
             futures::executor::block_on(phone.set_local_description(offer))?;
-            wait_until("the phone's addresses", || {
-                phone.ice_gathering_state() == IceGatheringState::Complete
-            });
-            let offer = phone
-                .current_local_description()
-                .context("the phone has an offer")?
-                .to_string();
+            let offer = offer_text;
 
             let (desktop_received, desktop_inbox) = mpsc::channel::<Vec<u8>>();
             let desktop_received = Mutex::new(desktop_received);
@@ -256,9 +267,20 @@ mod webrtc {
                 }),
             )?;
             let answer = futures::executor::block_on(desktop.answer(&offer))?;
+            assert!(
+                answer.contains("a=candidate"),
+                "the answer carries Praxis's addresses, so the phone needs no further exchange"
+            );
             futures::executor::block_on(
                 phone.set_remote_description(SessionDescription::parse(&answer, SdpType::Answer)?),
             )?;
+            wait_until("the phone's addresses", || {
+                phone.ice_gathering_state() == IceGatheringState::Complete
+            });
+            for (mid, index, candidate) in candidates.try_iter() {
+                let candidate = IceCandidate::parse(&mid, index, &candidate)?;
+                futures::executor::block_on(desktop.peer_connection.add_ice_candidate(candidate))?;
+            }
 
             wait_until("the direct link to open", || {
                 desktop.is_open() && phone_channel.state() == DataChannelState::Open
