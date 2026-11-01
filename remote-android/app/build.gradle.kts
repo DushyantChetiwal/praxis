@@ -91,6 +91,7 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.androidx.security.crypto)
     implementation(libs.androidx.exif)
+    implementation(libs.stream.webrtc.android)
     implementation(libs.nostr.sdk) {
         // Keep the app's tested Kotlin/coroutines pair; the binding only uses its stable APIs.
         exclude(group = "org.jetbrains.kotlinx", module = "kotlinx-coroutines-core")

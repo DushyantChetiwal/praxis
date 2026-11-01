@@ -22,6 +22,7 @@
 
 mod channel;
 mod crypto;
+pub(crate) mod direct;
 mod folders;
 mod github;
 mod images;

@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::crypto::{self, Key};
+use super::direct::{DirectConnection, DirectTransport, OnDirectMessage};
 use super::{Watch, channel, handle_paired, snapshot, status};
 
 // Application-specific ephemeral events: never public notes or stored DMs.
@@ -29,6 +30,8 @@ const MAX_PACKET_BYTES: usize = 96_000;
 const MAX_RECEIPTS: usize = 4096;
 const MAX_RECEIPT_BYTES: usize = 8 * 1024 * 1024;
 const REQUEST_AGE: i64 = 300;
+/// Session offers with every address are a few kilobytes.
+const MAX_OFFER_BYTES: usize = 32_000;
 
 struct Peer {
     id: String,
@@ -40,6 +43,8 @@ struct Peer {
 
 type Peers = Arc<RwLock<BTreeMap<String, Arc<Peer>>>>;
 type Packet = (Arc<Peer>, String);
+/// Open direct links by phone. Packets prefer them and use the relays otherwise.
+type Links = Arc<Mutex<HashMap<String, Arc<dyn DirectConnection>>>>;
 
 pub(super) struct Relay {
     peers: Peers,
@@ -63,11 +68,12 @@ impl Relay {
         let peers = Arc::new(RwLock::new(BTreeMap::new()));
         let (changed, changes) = async_channel::bounded(1);
         let (stop, stopped) = async_channel::bounded(1);
+        let transport = cx.update(|cx| super::direct::direct_transport(cx));
         let task = cx.update(|cx| cx.spawn({
             let peers = peers.clone();
             async move |cx| {
                 loop {
-                    let result = serve(channel.clone(), device.clone(), peers.clone(), changes.clone(), stopped.clone(), cx).await;
+                    let result = serve(channel.clone(), device.clone(), peers.clone(), transport.clone(), changes.clone(), stopped.clone(), cx).await;
                     for peer in peers.read().values() {
                         *peer.last_seen.lock() = None;
                     }
@@ -154,9 +160,60 @@ async fn until_stopped<T>(
     }
 }
 
+fn send_direct(links: &Links, phone: &str, blob: &str) -> bool {
+    let link = links.lock().get(phone).cloned();
+    link.is_some_and(|link| link.is_open() && link.send(blob.as_bytes()))
+}
+
+async fn accept_direct(
+    transport: Option<&Arc<dyn DirectTransport>>,
+    links: &Links,
+    channel: &str,
+    peer: &Arc<Peer>,
+    incoming: &Sender<Packet>,
+    args: &Value,
+) -> Result<Value> {
+    let transport = transport
+        .context("This Praxis cannot open direct connections. The relays stay in use.")?;
+    let offer = args
+        .get("sdp")
+        .and_then(Value::as_str)
+        .filter(|offer| !offer.is_empty() && offer.len() <= MAX_OFFER_BYTES)
+        .context("The direct connection offer is missing or too large.")?;
+    let aad = crypto::relay_aad(channel, &peer.id, "request");
+    let on_message: OnDirectMessage = Box::new({
+        let peer = peer.clone();
+        let incoming = incoming.clone();
+        move |message| {
+            if message.len() > MAX_PACKET_BYTES {
+                return;
+            }
+            let plain = std::str::from_utf8(&message)
+                .ok()
+                .and_then(|blob| crypto::open(&peer.key, &aad, blob).ok())
+                .and_then(|plain| String::from_utf8(plain).ok());
+            let Some(plain) = plain else {
+                log::debug!("Praxis Remote ignored a direct message it could not open");
+                return;
+            };
+            if let Err(error) = incoming.try_send((peer.clone(), plain)) {
+                log::debug!("Praxis Remote dropped a direct request: {error}");
+            }
+        }
+    });
+    // Closing a link waits on WebRTC threads, so never do it under the lock.
+    let previous = links.lock().remove(&peer.id);
+    drop(previous);
+    let (link, answer) = transport.accept(offer.to_string(), on_message).await?;
+    let previous = links.lock().insert(peer.id.clone(), link);
+    drop(previous);
+    Ok(json!({"sdp": answer}))
+}
+
 async fn network(
     channel: String,
     peers: Peers,
+    links: Links,
     changes: Receiver<()>,
     incoming: Sender<Packet>,
     outgoing: Receiver<Packet>,
@@ -226,6 +283,9 @@ async fn network(
                 blob.len() <= MAX_PACKET_BYTES,
                 "live packet exceeds the transport limit"
             );
+            if send_direct(&links, &peer.id, &blob) {
+                continue;
+            }
             let event = EventBuilder::new(Kind::from(PACKET_KIND), blob)
                 .tags([Tag::public_key(peer.phone_public)])
                 .finalize(&peer.keys)?;
@@ -347,12 +407,16 @@ async fn serve(
     channel_id: String,
     device: String,
     peers: Peers,
+    transport: Option<Arc<dyn DirectTransport>>,
     changes: Receiver<()>,
     stopped: Receiver<()>,
     cx: &mut AsyncApp,
 ) -> Result<()> {
     let epoch = crypto::random_id()?;
+    let links: Links = Arc::default();
     let (incoming, requests) = async_channel::bounded(32);
+    let direct_incoming = incoming.clone();
+    let channel_name = channel_id.clone();
     let (outgoing, responses) = async_channel::bounded(32);
     let (network_stop, network_stopped) = async_channel::bounded(1);
     let network = Tokio::spawn_result(
@@ -360,6 +424,7 @@ async fn serve(
         network(
             channel_id,
             peers.clone(),
+            links.clone(),
             changes,
             incoming,
             responses,
@@ -470,6 +535,16 @@ async fn serve(
                         watches.insert(peer.id.clone(), watch);
                         published.remove(&peer.id);
                         Ok(json!({"until": until}))
+                    } else if request.op == "direct_offer" {
+                        accept_direct(
+                            transport.as_ref(),
+                            &links,
+                            &channel_name,
+                            &peer,
+                            &direct_incoming,
+                            &request.args,
+                        )
+                        .await
                     } else if matches!(request.op.as_str(), "unpair" | "batch") {
                         Err(anyhow!("Use the GitHub channel for this operation"))
                     } else {
@@ -496,6 +571,9 @@ async fn serve(
     drop(network_stop);
     drop(outgoing);
     drop(requests);
+    drop(direct_incoming);
+    let links = std::mem::take(&mut *links.lock());
+    drop(links);
     network.await?;
     result.unwrap_or(Ok(()))
 }
@@ -522,6 +600,113 @@ mod tests {
         assert_eq!(until_stopped(&stopped, async { 42 }).await, None);
         let (_stop, stopped) = async_channel::bounded::<()>(1);
         assert_eq!(until_stopped(&stopped, async { 42 }).await, Some(42));
+    }
+
+    #[derive(Default)]
+    struct FakeLink {
+        open: std::sync::atomic::AtomicBool,
+        sent: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl DirectConnection for FakeLink {
+        fn is_open(&self) -> bool {
+            self.open.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn send(&self, message: &[u8]) -> bool {
+            self.sent.lock().push(message.to_vec());
+            true
+        }
+    }
+
+    struct FakeTransport {
+        link: Arc<FakeLink>,
+        on_message: Mutex<Option<OnDirectMessage>>,
+    }
+
+    impl DirectTransport for FakeTransport {
+        fn accept(
+            &self,
+            offer: String,
+            on_message: OnDirectMessage,
+        ) -> futures::future::BoxFuture<'static, Result<(Arc<dyn DirectConnection>, String)>>
+        {
+            *self.on_message.lock() = Some(on_message);
+            let link: Arc<dyn DirectConnection> = self.link.clone();
+            async move { Ok((link, format!("answer to {offer}"))) }.boxed()
+        }
+    }
+
+    #[test]
+    fn direct_link_carries_sealed_requests_and_falls_back_to_relays() -> Result<()> {
+        let peer = Arc::new(Peer {
+            id: "phone".into(),
+            key: [7; 32],
+            keys: Keys::generate(),
+            phone_public: Keys::generate().public_key(),
+            last_seen: Mutex::new(None),
+        });
+        let links: Links = Arc::default();
+        let (incoming, requests) = async_channel::bounded(4);
+        let offer = json!({"sdp": "offer"});
+
+        let error = futures::executor::block_on(accept_direct(
+            None, &links, "channel", &peer, &incoming, &offer,
+        ))
+        .expect_err("a Praxis without WebRTC refuses offers");
+        assert!(error.to_string().contains("relays stay in use"));
+
+        let link = Arc::new(FakeLink::default());
+        let fake = Arc::new(FakeTransport {
+            link: link.clone(),
+            on_message: Mutex::new(None),
+        });
+        let transport: Arc<dyn DirectTransport> = fake.clone();
+        assert!(
+            futures::executor::block_on(accept_direct(
+                Some(&transport),
+                &links,
+                "channel",
+                &peer,
+                &incoming,
+                &json!({}),
+            ))
+            .is_err()
+        );
+        let answer = futures::executor::block_on(accept_direct(
+            Some(&transport),
+            &links,
+            "channel",
+            &peer,
+            &incoming,
+            &offer,
+        ))?;
+        assert_eq!(answer, json!({"sdp": "answer to offer"}));
+
+        let on_message = fake
+            .on_message
+            .lock()
+            .take()
+            .context("the transport received a message handler")?;
+        let request_aad = crypto::relay_aad("channel", "phone", "request");
+        on_message(crypto::seal(&peer.key, &request_aad, b"hello")?.into_bytes());
+        let (from, plain) = requests.try_recv()?;
+        assert!(Arc::ptr_eq(&from, &peer));
+        assert_eq!(plain, "hello");
+        let desktop_aad = crypto::relay_aad("channel", "phone", "desktop");
+        on_message(crypto::seal(&peer.key, &desktop_aad, b"reflected")?.into_bytes());
+        on_message(b"not sealed".to_vec());
+        assert!(requests.is_empty(), "only sealed phone requests are accepted");
+
+        assert!(
+            !send_direct(&links, "phone", "blob"),
+            "a link that is not open leaves packets to the relays"
+        );
+        link.open.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(send_direct(&links, "phone", "blob"));
+        assert!(!send_direct(&links, "other", "blob"));
+        assert_eq!(link.sent.lock().as_slice(), [b"blob".to_vec()]);
+        Ok(())
     }
 
     fn request(epoch: &str) -> Request {

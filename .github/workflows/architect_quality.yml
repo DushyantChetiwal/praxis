@@ -302,6 +302,7 @@ jobs:
           cargo test --locked -p agent --lib test_phone_images_
           cargo test --locked -p language_model --lib test_into_png_
           cargo test --locked -p recent_projects --lib test_reconnect_action_
+          cargo test --locked -p remote_direct --lib test_direct_link_
 
       - name: Test background terminal tab inspection
         run: cargo test --locked -p terminal_view --lib background_agent_terminals_
@@ -595,7 +596,7 @@ jobs:
       - name: Check the Architect packages with Clippy
         run: >-
           ./script/clippy --locked -p architect -p agent -p agent_ui -p auto_update
-          -p context_server -p feedback -p remote -p gpui -p acp_thread
+          -p context_server -p feedback -p remote -p remote_direct -p gpui -p acp_thread
 
   full-receipt:
     name: Record original full validation
