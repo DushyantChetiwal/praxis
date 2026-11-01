@@ -52,7 +52,10 @@ mod webrtc {
             offer: String,
             on_message: OnDirectMessage,
         ) -> BoxFuture<'static, Result<(Arc<dyn DirectConnection>, String)>> {
-            let factory = self.factory.get_or_init(PeerConnectionFactory::default).clone();
+            let factory = self
+                .factory
+                .get_or_init(PeerConnectionFactory::default)
+                .clone();
             async move {
                 let connection = Arc::new(WebRtcConnection::new(&factory, on_message)?);
                 let answer = connection.answer(&offer).await?;
@@ -273,7 +276,10 @@ mod webrtc {
 
             phone.close();
             wait_until("Praxis to notice the phone left", || !desktop.is_open());
-            assert!(!desktop.send(b"after closing"), "a closed link falls back to the relays");
+            assert!(
+                !desktop.send(b"after closing"),
+                "a closed link falls back to the relays"
+            );
             Ok(())
         }
 

@@ -173,8 +173,8 @@ async fn accept_direct(
     incoming: &Sender<Packet>,
     args: &Value,
 ) -> Result<Value> {
-    let transport = transport
-        .context("This Praxis cannot open direct connections. The relays stay in use.")?;
+    let transport =
+        transport.context("This Praxis cannot open direct connections. The relays stay in use.")?;
     let offer = args
         .get("sdp")
         .and_then(Value::as_str)
@@ -696,7 +696,10 @@ mod tests {
         let desktop_aad = crypto::relay_aad("channel", "phone", "desktop");
         on_message(crypto::seal(&peer.key, &desktop_aad, b"reflected")?.into_bytes());
         on_message(b"not sealed".to_vec());
-        assert!(requests.is_empty(), "only sealed phone requests are accepted");
+        assert!(
+            requests.is_empty(),
+            "only sealed phone requests are accepted"
+        );
 
         assert!(
             !send_direct(&links, "phone", "blob"),
