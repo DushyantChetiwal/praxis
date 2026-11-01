@@ -43,6 +43,7 @@ internal const val RELAY_PACKET_LIMIT = 96_000
 private val RELAYS = listOf("wss://relay.primal.net", "wss://nos.lol")
 private const val DIRECT_RETRY_NANOS = 30_000_000_000L
 private const val DIRECT_MAX_RETRY_NANOS = 900_000_000_000L
+private const val DIRECT_OPEN_TIMEOUT_MS = 15_000L
 
 internal fun relayAad(link: Link, direction: String): String =
     "$PROTOCOL/nostr/${link.channel}/${link.phoneId}/$direction"
@@ -253,13 +254,18 @@ class NostrChannel(private val directLinks: DirectLinks? = null) {
                         answer.takeIf { it.bool("ok") }?.obj("result")?.str("sdp")
                             ?: throw ApiException(ErrorKind.Network, answer.str("error") ?: "Praxis did not accept the direct connection.")
                     }
-                    if (session === this@Session && job?.isActive == true) direct = opened else opened.close()
+                    if (session !== this@Session || job?.isActive != true) { opened.close(); return@launch }
+                    direct = opened
+                    // Networks that block peer-to-peer traffic negotiate but never open.
+                    withTimeoutOrNull(DIRECT_OPEN_TIMEOUT_MS) { while (!opened.isOpen) delay(200) }
+                        ?: throw ApiException(ErrorKind.Network, "The direct connection did not open.")
                     directFailures = 0
                     directRetryAt = System.nanoTime() + DIRECT_RETRY_NANOS
                 } catch (error: CancellationException) { throw error }
                 catch (error: Throwable) {
                     // Older Praxis builds and networks that block direct links keep the relays.
                     Log.d("PraxisRemote", "Direct connection unavailable; using relays", error)
+                    direct?.takeIf { !it.isOpen }?.let { direct = null; it.close() }
                     directFailures++
                     directRetryAt = System.nanoTime() + minOf(DIRECT_MAX_RETRY_NANOS, DIRECT_RETRY_NANOS shl directFailures.coerceAtMost(5))
                 }
