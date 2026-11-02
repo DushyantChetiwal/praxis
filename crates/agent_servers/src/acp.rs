@@ -1,3 +1,4 @@
+mod cursor_ext;
 mod debug_log;
 mod runtime;
 mod session_updates;

@@ -303,6 +303,7 @@ jobs:
           cargo test --locked -p language_model --lib test_into_png_
           cargo test --locked -p recent_projects --lib test_reconnect_action_
           cargo test --locked -p remote_direct --lib test_direct_link_
+          cargo test --locked -p agent_servers --lib cursor_ext::
 
       - name: Test background terminal tab inspection
         run: cargo test --locked -p terminal_view --lib background_agent_terminals_
