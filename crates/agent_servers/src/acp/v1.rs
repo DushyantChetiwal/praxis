@@ -6,6 +6,7 @@ use super::{
     respond_result, runtime, session_thread, terminal_auth_task_id, transport,
     with_v2_client_ingress, work_dirs_from_session_info,
 };
+use super::cursor_ext::{handle_cursor_ask_question, handle_cursor_create_plan};
 use acp_thread::{
     AgentConnection, AgentSessionInfo, AgentSessionList, AgentSessionListRequest,
     AgentSessionListResponse, ElicitationStore,
