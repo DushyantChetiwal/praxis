@@ -1515,10 +1515,7 @@ fn phone_can_open(agent_id: &project::AgentId, installed: &HashSet<project::Agen
     agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref() || installed.contains(agent_id)
 }
 
-fn installed_external_agents(
-    workspace: &Entity<Workspace>,
-    cx: &App,
-) -> HashSet<project::AgentId> {
+fn installed_external_agents(workspace: &Entity<Workspace>, cx: &App) -> HashSet<project::AgentId> {
     workspace
         .read(cx)
         .project()
