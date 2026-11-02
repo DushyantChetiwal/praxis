@@ -1,8 +1,6 @@
 //! Cursor's ACP extension methods. Cursor blocks its turn until the client
 //! answers them, so they are shown as Praxis prompts and answered from there.
 
-use std::collections::BTreeMap;
-
 use acp_thread::{AcpThread, AgentThreadEntry};
 use agent_client_protocol::Responder;
 use agent_client_protocol::schema::{
@@ -268,11 +266,9 @@ fn ask<Response, Convert>(
             }
             Err(error) => {
                 if error.code == ErrorCode::RequestCancelled {
-                    thread
-                        .update(cx, |thread, cx| {
-                            thread.cancel_elicitation(&elicitation_id, cx)
-                        })
-                        .log_err();
+                    thread.update(cx, |thread, cx| {
+                        thread.cancel_elicitation(&elicitation_id, cx)
+                    });
                 }
                 respond_err(responder, error);
             }
@@ -348,7 +344,7 @@ fn question_schema(request: &CursorAskQuestionRequest) -> acp_v2::ElicitationSch
                         .map(|option| {
                             acp_v2::EnumOption::new(option.id.clone(), option.label.clone())
                         })
-                        .collect(),
+                        .collect::<Vec<_>>(),
                 ),
                 true,
             );
@@ -362,7 +358,7 @@ fn question_schema(request: &CursorAskQuestionRequest) -> acp_v2::ElicitationSch
                             .options
                             .iter()
                             .map(|option| option.label.clone())
-                            .collect(),
+                            .collect::<Vec<String>>(),
                     ),
                 true,
             );
@@ -457,6 +453,7 @@ fn cursor_plan_response(response: acp_v2::CreateElicitationResponse) -> CursorCr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn question_request() -> CursorAskQuestionRequest {
         serde_json::from_value(serde_json::json!({
