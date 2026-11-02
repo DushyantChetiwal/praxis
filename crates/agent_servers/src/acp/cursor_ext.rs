@@ -127,7 +127,9 @@ pub(super) fn handle_cursor_ask_question(
         responder
             .respond(CursorAskQuestionResponse {
                 outcome: CursorQuestionOutcome::Skipped {
-                    reason: Some("Praxis could not find the conversation for this question.".into()),
+                    reason: Some(
+                        "Praxis could not find the conversation for this question.".into(),
+                    ),
                 },
             })
             .log_err();
@@ -166,9 +168,9 @@ pub(super) fn handle_cursor_ask_question(
         .unwrap_or("Cursor needs an answer");
     let elicitation = acp_v2::CreateElicitationRequest::new(
         acp_v2::ElicitationFormMode::new(
-            acp_v2::ElicitationSessionScope::new(thread.read_with(cx, |thread, _| {
-                thread.session_id().clone()
-            })),
+            acp_v2::ElicitationSessionScope::new(
+                thread.read_with(cx, |thread, _| thread.session_id().clone()),
+            ),
             question_schema(&request),
         ),
         message,
@@ -198,7 +200,11 @@ pub(super) fn handle_cursor_create_plan(
     };
 
     let mut message = String::new();
-    if let Some(overview) = request.overview.as_deref().filter(|text| !text.trim().is_empty()) {
+    if let Some(overview) = request
+        .overview
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
         message.push_str(overview);
         message.push_str("\n\n");
     }
@@ -220,9 +226,9 @@ pub(super) fn handle_cursor_create_plan(
     );
     let elicitation = acp_v2::CreateElicitationRequest::new(
         acp_v2::ElicitationFormMode::new(
-            acp_v2::ElicitationSessionScope::new(thread.read_with(cx, |thread, _| {
-                thread.session_id().clone()
-            })),
+            acp_v2::ElicitationSessionScope::new(
+                thread.read_with(cx, |thread, _| thread.session_id().clone()),
+            ),
             schema,
         ),
         message,
@@ -249,7 +255,9 @@ fn ask<Response, Convert>(
             thread.request_elicitation_with_id(elicitation, cx)
         }) {
             Ok(pending) => pending,
-            Err(error) => return respond_err(responder, acp_thread::elicitation::error_to_v1(error)),
+            Err(error) => {
+                return respond_err(responder, acp_thread::elicitation::error_to_v1(error));
+            }
         };
         let result: Result<_, acp::Error> = cancellation
             .run_until_cancelled(async { Ok(task.await) })
@@ -337,7 +345,9 @@ fn question_schema(request: &CursorAskQuestionRequest) -> acp_v2::ElicitationSch
                     question
                         .options
                         .iter()
-                        .map(|option| acp_v2::EnumOption::new(option.id.clone(), option.label.clone()))
+                        .map(|option| {
+                            acp_v2::EnumOption::new(option.id.clone(), option.label.clone())
+                        })
                         .collect(),
                 ),
                 true,
@@ -476,7 +486,9 @@ mod tests {
         .expect("a Cursor question request")
     }
 
-    fn accept(content: &[(&str, acp_v2::ElicitationContentValue)]) -> acp_v2::CreateElicitationResponse {
+    fn accept(
+        content: &[(&str, acp_v2::ElicitationContentValue)],
+    ) -> acp_v2::CreateElicitationResponse {
         acp_v2::CreateElicitationResponse::new(acp_v2::ElicitationAction::Accept(
             acp_v2::ElicitationAcceptAction::new().content(
                 content
@@ -496,10 +508,7 @@ mod tests {
 
         let response = cursor_question_response(
             accept(&[
-                (
-                    "q1",
-                    acp_v2::ElicitationContentValue::String("Plan".into()),
-                ),
+                ("q1", acp_v2::ElicitationContentValue::String("Plan".into())),
                 (
                     "q2",
                     acp_v2::ElicitationContentValue::StringArray(vec![
