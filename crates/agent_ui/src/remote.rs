@@ -33,6 +33,7 @@ mod store;
 mod transcript;
 mod uploads;
 
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -1472,6 +1473,7 @@ fn threads(workspace: &Entity<Workspace>, cx: &App) -> Result<Value> {
         .into_iter()
         .map(|(_, path)| path)
         .collect();
+    let installed = installed_external_agents(workspace, cx);
     let active = root_thread_view(workspace, cx)
         .ok()
         .map(|view| view.read(cx).session_id.clone());
@@ -1480,7 +1482,7 @@ fn threads(workspace: &Entity<Workspace>, cx: &App) -> Result<Value> {
         .entries()
         .filter(|metadata| {
             !metadata.archived
-                && metadata.agent_id == *agent::ZED_AGENT_ID
+                && phone_can_open(&metadata.agent_id, &installed)
                 && metadata.session_id.is_some()
                 && metadata
                     .folder_paths()
@@ -1506,6 +1508,28 @@ fn threads(workspace: &Entity<Workspace>, cx: &App) -> Result<Value> {
     Ok(json!({ "threads": threads }))
 }
 
+/// Threads of installed external agents reach the phone too, so a Cursor or
+/// other ACP conversation can be opened and driven from it. Uninstalled
+/// agents are left out: their threads cannot be resumed.
+fn phone_can_open(agent_id: &project::AgentId, installed: &HashSet<project::AgentId>) -> bool {
+    agent_id.as_ref() == agent::ZED_AGENT_ID.as_ref() || installed.contains(agent_id)
+}
+
+fn installed_external_agents(
+    workspace: &Entity<Workspace>,
+    cx: &App,
+) -> HashSet<project::AgentId> {
+    workspace
+        .read(cx)
+        .project()
+        .read(cx)
+        .agent_server_store()
+        .read(cx)
+        .external_agents()
+        .cloned()
+        .collect()
+}
+
 fn open_thread(
     workspace: &Entity<Workspace>,
     session_id: &str,
@@ -1514,17 +1538,26 @@ fn open_thread(
 ) -> Result<Value> {
     let panel = agent_panel(workspace, cx)?;
     let session_id = acp::SessionId::new(session_id.to_string());
-    let title = ThreadMetadataStore::try_global(cx)
-        .and_then(|store| {
-            store
-                .read(cx)
-                .entry_by_session(&session_id)
-                .map(|metadata| metadata.display_title())
-        })
+    let metadata = ThreadMetadataStore::try_global(cx)
+        .and_then(|store| store.read(cx).entry_by_session(&session_id).cloned())
         .context("Praxis has no conversation with that id")?;
+    // A thread opened by session id may belong to any agent, so its own agent
+    // is used rather than the one selected in the panel.
+    let agent = crate::Agent::from(metadata.agent_id.clone());
+    let thread_id = metadata.thread_id;
+    let title = metadata.display_title();
     window.defer(cx, move |window, cx| {
         panel.update(cx, |panel, cx| {
-            panel.open_thread(session_id, None, Some(title), window, cx);
+            panel.load_agent_thread(
+                agent,
+                thread_id,
+                None,
+                Some(title),
+                true,
+                crate::AgentThreadSource::AgentPanel,
+                window,
+                cx,
+            );
         });
     });
     Ok(json!({ "opened": true }))
@@ -2484,6 +2517,23 @@ fn download_chunk(roots: &[(String, PathBuf)], path: &str, offset: u64) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phone_lists_threads_of_installed_external_agents() {
+        let mut installed = HashSet::new();
+        assert!(phone_can_open(&agent::ZED_AGENT_ID, &installed));
+        let cursor = project::AgentId::new("cursor");
+        assert!(
+            !phone_can_open(&cursor, &installed),
+            "a thread whose agent is gone cannot be resumed from the phone"
+        );
+        installed.insert(cursor.clone());
+        assert!(phone_can_open(&cursor, &installed));
+        assert!(!phone_can_open(
+            &project::AgentId::new("uninstalled"),
+            &installed
+        ));
+    }
 
     fn assistant_entry(parts: &[(bool, &str)], cx: &mut App) -> AgentThreadEntry {
         let registry = Arc::new(language::LanguageRegistry::new(
