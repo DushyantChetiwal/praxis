@@ -9386,16 +9386,15 @@ fn handle_request_permission(
     cx: &mut AsyncApp,
     ctx: &ClientContext,
 ) {
-    let auto_approve = cx.update(|cx| {
-        agent_settings::AgentSettings::get_global(cx).auto_approve_external_agents
-    });
+    let auto_approve =
+        cx.update(|cx| agent_settings::AgentSettings::get_global(cx).auto_approve_external_agents);
     if auto_approve {
         if let Some(option_id) = auto_approve_permission_option(&args.options) {
             responder
                 .respond(acp::RequestPermissionResponse::new(
-                    acp::RequestPermissionOutcome::Selected(
-                        acp::SelectedPermissionOutcome::new(option_id),
-                    ),
+                    acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                        option_id,
+                    )),
                 ))
                 .log_err();
             return;
