@@ -31,7 +31,7 @@ use project::agent_server_store::{
 };
 use project::{AgentId, Project};
 use serde::Deserialize;
-use settings::{AgentConfigOptionValue, SettingsStore};
+use settings::{AgentConfigOptionValue, Settings as _, SettingsStore};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
