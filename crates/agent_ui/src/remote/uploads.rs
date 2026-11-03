@@ -455,9 +455,14 @@ mod tests {
             save(fs, &uploads, "a.txt", b"two", true).await.unwrap(),
             "a (1).txt"
         );
-        assert_eq!(filesystem.read_file_sync(uploads.join("a.txt")).unwrap(), b"one");
         assert_eq!(
-            filesystem.read_file_sync(uploads.join("a (1).txt")).unwrap(),
+            filesystem.read_file_sync(uploads.join("a.txt")).unwrap(),
+            b"one"
+        );
+        assert_eq!(
+            filesystem
+                .read_file_sync(uploads.join("a (1).txt"))
+                .unwrap(),
             b"two"
         );
         assert_eq!(
