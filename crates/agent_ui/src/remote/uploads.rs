@@ -441,34 +441,41 @@ mod tests {
 
     #[gpui::test]
     async fn saving_never_overwrites_and_ignores_attachments(cx: &mut gpui::TestAppContext) {
-        let directory = tempfile::tempdir().unwrap();
-        let fs = fs::RealFs::new(None, cx.executor());
-        let uploads = directory.path().join(".praxis").join("uploads");
+        let app_state = cx.update(workspace::AppState::test);
+        let filesystem = app_state.fs.as_fake();
+        let directory = PathBuf::from(util::path!("/project"));
+        filesystem.insert_tree(&directory, json!({})).await;
+        let fs: &dyn Fs = filesystem.as_ref();
+        let uploads = directory.join(".praxis").join("uploads");
         assert_eq!(
-            save(fs.as_ref(), &uploads, "a.txt", b"one", true)
-                .await
-                .unwrap(),
+            save(fs, &uploads, "a.txt", b"one", true).await.unwrap(),
             "a.txt"
         );
         assert_eq!(
-            save(fs.as_ref(), &uploads, "a.txt", b"two", true)
-                .await
-                .unwrap(),
+            save(fs, &uploads, "a.txt", b"two", true).await.unwrap(),
             "a (1).txt"
         );
-        assert_eq!(std::fs::read(uploads.join("a.txt")).unwrap(), b"one");
-        assert_eq!(std::fs::read(uploads.join("a (1).txt")).unwrap(), b"two");
+        assert_eq!(filesystem.read_file_sync(uploads.join("a.txt")).unwrap(), b"one");
         assert_eq!(
-            std::fs::read_to_string(uploads.join(".gitignore")).unwrap(),
-            "*\n"
+            filesystem.read_file_sync(uploads.join("a (1).txt")).unwrap(),
+            b"two"
         );
         assert_eq!(
-            save(fs.as_ref(), directory.path(), "README", b"x", false)
-                .await
+            filesystem
+                .read_file_sync(uploads.join(".gitignore"))
                 .unwrap(),
+            b"*\n"
+        );
+        assert_eq!(
+            save(fs, &directory, "README", b"x", false).await.unwrap(),
             "README"
         );
-        assert!(!directory.path().join(".gitignore").exists());
+        assert!(
+            filesystem
+                .read_file_sync(directory.join(".gitignore"))
+                .is_err(),
+            "a plain upload does not create the attachments .gitignore"
+        );
     }
 
     #[gpui::test]
@@ -490,12 +497,14 @@ mod tests {
 
     #[gpui::test]
     async fn chunks_are_ordered_idempotent_and_owner_scoped(cx: &mut gpui::TestAppContext) {
-        let directory = tempfile::tempdir().unwrap();
-        let fs = fs::RealFs::new(None, cx.executor());
+        let app_state = cx.update(workspace::AppState::test);
+        let filesystem = app_state.fs.as_fake();
+        let directory = PathBuf::from(util::path!("/project"));
+        filesystem.insert_tree(&directory, json!({})).await;
         let mut uploads = Uploads::default();
         let destination = || Destination {
-            fs: fs.clone(),
-            directory: directory.path().to_path_buf(),
+            fs: filesystem.clone(),
+            directory: directory.clone(),
             display_directory: "project".into(),
             attachment: false,
         };
