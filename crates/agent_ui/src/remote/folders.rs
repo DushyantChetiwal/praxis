@@ -180,8 +180,8 @@ mod tests {
             .await;
         let fs: &dyn Fs = filesystem.as_ref();
         let listing = list(fs, None, "Debian".into(), root.to_str().expect("path"), 0)
-        .await
-        .expect("listing");
+            .await
+            .expect("listing");
         assert_eq!(listing["host"], "Debian");
         let names: Vec<_> = listing["folders"]
             .as_array()

@@ -359,7 +359,9 @@ fn finish(phone: &str, args: &Value, cx: &mut App) -> Task<Result<Value>> {
     let phone = phone.to_string();
     cx.spawn(async move |cx| {
         let saved = cx
-            .background_spawn(async move { save(fs.as_ref(), &directory, &name, &bytes, attachment).await })
+            .background_spawn(async move {
+                save(fs.as_ref(), &directory, &name, &bytes, attachment).await
+            })
             .await;
         cx.update(|cx| {
             let saved = match saved {
@@ -481,9 +483,7 @@ mod tests {
             .expect("saved");
         assert_eq!(saved, "a.txt");
         assert_eq!(
-            filesystem
-                .read_file_sync(root.join("a.txt"))
-                .expect("read"),
+            filesystem.read_file_sync(root.join("a.txt")).expect("read"),
             b"one"
         );
     }
