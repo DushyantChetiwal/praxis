@@ -1,3 +1,4 @@
+use super::cursor_ext::{handle_cursor_ask_question, handle_cursor_create_plan};
 use super::{
     AcpDebugLog, AcpDebugMessage, AcpSession, ClientContext, ConfigOptions, FlattenAcpResult as _,
     ForegroundWork, UnsupportedVersion, drain_foreground_queue, enqueue_notification,
@@ -430,6 +431,14 @@ fn client_builder(
         )
         .on_receive_request(
             on_request!(handle_create_elicitation),
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            on_request!(handle_cursor_ask_question),
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            on_request!(handle_cursor_create_plan),
             agent_client_protocol::on_receive_request!(),
         )
         // --- Notification handlers (agent→client) ---
