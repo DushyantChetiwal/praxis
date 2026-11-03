@@ -149,7 +149,7 @@ mod tests {
             std::fs::create_dir(directory.path().join(format!("folder {index:03}")))
                 .expect("child");
         }
-        let fs = fs::RealFs::new(None, cx.background_executor().clone());
+        let fs = fs::RealFs::new(None, cx.executor());
         let path = directory.path().to_str().expect("path");
         let first = list(fs.as_ref(), None, "test".into(), path, 0)
             .await

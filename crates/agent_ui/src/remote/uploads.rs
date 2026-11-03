@@ -442,7 +442,7 @@ mod tests {
     #[gpui::test]
     async fn saving_never_overwrites_and_ignores_attachments(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
-        let fs = fs::RealFs::new(None, cx.background_executor().clone());
+        let fs = fs::RealFs::new(None, cx.executor());
         let uploads = directory.path().join(".praxis").join("uploads");
         assert_eq!(
             save(fs.as_ref(), &uploads, "a.txt", b"one", true)
@@ -491,7 +491,7 @@ mod tests {
     #[gpui::test]
     async fn chunks_are_ordered_idempotent_and_owner_scoped(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
-        let fs = fs::RealFs::new(None, cx.background_executor().clone());
+        let fs = fs::RealFs::new(None, cx.executor());
         let mut uploads = Uploads::default();
         let destination = || Destination {
             fs: fs.clone(),
