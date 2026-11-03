@@ -406,7 +406,8 @@ fn handle_paired(
                     bail!("{path} is private, so Praxis will not save files there");
                 }
             }
-            uploads::destination(&roots, args)
+            let fs = workspace.read(cx).project().read(cx).fs().clone();
+            uploads::destination(&roots, fs, args)
         })
         .and_then(|destination| uploads::begin(phone, destination, args, cx));
         return Task::ready(result);
@@ -429,13 +430,37 @@ fn handle_paired(
                 Ok(offset) => offset.unwrap_or(0),
                 Err(error) => return Task::ready(Err(error)),
             };
-            return cx.background_spawn(async move { folders::list(&path, offset) });
+            let (fs, fallback, host) = match with_workspace(window, cx, |workspace, _, cx| {
+                let project = workspace.read(cx).project().read(cx);
+                let remote = project.remote_connection_options(cx);
+                // A project on another computer starts at its own folder, since
+                // this computer's home directory is not on that filesystem.
+                let fallback = remote.as_ref().and_then(|_| {
+                    project
+                        .visible_worktrees(cx)
+                        .next()
+                        .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+                });
+                let host = remote
+                    .map(|options| options.display_name())
+                    .unwrap_or_else(|| std::env::consts::OS.to_string());
+                Ok((project.fs().clone(), fallback, host))
+            }) {
+                Ok(listing) => listing,
+                Err(error) => return Task::ready(Err(error)),
+            };
+            return cx.background_spawn(async move {
+                folders::list(fs.as_ref(), fallback, host, &path, offset).await
+            });
         }
         "open_folder" => {
             return match required(args, "path").and_then(|path| {
                 let app_state = workspace::AppState::try_global(cx)
                     .context("Praxis is still starting. Retry opening the folder.")?;
-                Ok(folders::open(path, app_state, cx))
+                let project = with_workspace(window, cx, |workspace, _, cx| {
+                    Ok(workspace.read(cx).project().clone())
+                })?;
+                Ok(folders::open(path, project, app_state, cx))
             }) {
                 Ok(task) => task,
                 Err(error) => Task::ready(Err(error)),

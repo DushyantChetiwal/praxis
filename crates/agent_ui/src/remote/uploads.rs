@@ -2,12 +2,13 @@
 //! in its Files tab or as attachments to a chat message.
 
 use std::collections::HashMap;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::v2 as acp;
 use anyhow::{Context as _, Result, ensure};
+use fs::Fs;
 use gpui::{App, AppContext as _, Global, Task};
 use serde_json::{Value, json};
 
@@ -27,6 +28,7 @@ type UploadKey = (String, String);
 
 struct Upload {
     client_id: String,
+    fs: Arc<dyn Fs>,
     directory: PathBuf,
     display_directory: String,
     attachment: bool,
@@ -44,6 +46,7 @@ impl Global for Uploads {}
 /// The folder an upload is saved into, worked out on the main thread where
 /// the project is known.
 pub(super) struct Destination {
+    fs: Arc<dyn Fs>,
     directory: PathBuf,
     display_directory: String,
     attachment: bool,
@@ -51,12 +54,17 @@ pub(super) struct Destination {
 
 /// Where `file_begin` saves: the folder the phone is browsing, or the first
 /// project folder's attachment folder for a chat message.
-pub(super) fn destination(roots: &[(String, PathBuf)], args: &Value) -> Result<Destination> {
+pub(super) fn destination(
+    roots: &[(String, PathBuf)],
+    fs: Arc<dyn Fs>,
+    args: &Value,
+) -> Result<Destination> {
     if args.get("attachment").and_then(Value::as_bool) == Some(true) {
         let (root_name, root) = roots
             .first()
             .context("Open a project folder before attaching files.")?;
         return Ok(Destination {
+            fs,
             directory: root.join(ATTACHMENTS_DIR),
             display_directory: format!("{root_name}/{ATTACHMENTS_DIR}"),
             attachment: true,
@@ -64,8 +72,8 @@ pub(super) fn destination(roots: &[(String, PathBuf)], args: &Value) -> Result<D
     }
     let (display, path) = resolve_project_path(roots, required(args, "path")?)?;
     let directory = ensure_inside(roots, &path)?;
-    ensure!(directory.is_dir(), "{display} is not a folder");
     Ok(Destination {
+        fs,
         directory,
         display_directory: display,
         attachment: false,
@@ -120,16 +128,31 @@ fn split_extension(name: &str) -> (&str, &str) {
 
 /// Writes the file under the first free name, so nothing already in the
 /// project is overwritten.
-fn save(directory: &Path, name: &str, bytes: &[u8], attachment: bool) -> Result<String> {
+async fn save(
+    fs: &dyn Fs,
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+    attachment: bool,
+) -> Result<String> {
     if attachment {
-        std::fs::create_dir_all(directory)
+        fs.create_dir(directory)
+            .await
             .with_context(|| format!("creating {}", directory.display()))?;
         // Uploads are the user's files, not the project's.
         let ignore = directory.join(".gitignore");
-        if !ignore.exists() {
-            std::fs::write(&ignore, "*\n").context("writing the uploads .gitignore")?;
+        if fs.metadata(&ignore).await?.is_none() {
+            fs.write(&ignore, b"*\n")
+                .await
+                .context("writing the uploads .gitignore")?;
         }
     }
+    let metadata = fs.metadata(directory).await?;
+    ensure!(
+        metadata.is_some_and(|metadata| metadata.is_dir),
+        "{} is not a folder",
+        directory.display()
+    );
     let (stem, extension) = split_extension(name);
     for attempt in 0..1000 {
         let candidate = if attempt == 0 {
@@ -138,20 +161,20 @@ fn save(directory: &Path, name: &str, bytes: &[u8], attachment: bool) -> Result<
             format!("{stem} ({attempt}){extension}")
         };
         let path = directory.join(&candidate);
-        let mut file = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(error).with_context(|| format!("creating {}", path.display()));
-            }
-        };
-        if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-            drop(file);
-            if let Err(cleanup) = std::fs::remove_file(&path) {
+        if fs.metadata(&path).await?.is_some() {
+            continue;
+        }
+        if let Err(error) = fs.write(&path, bytes).await {
+            if let Err(cleanup) = fs
+                .remove_file(
+                    &path,
+                    ::fs::RemoveOptions {
+                        recursive: false,
+                        ignore_if_not_exists: true,
+                    },
+                )
+                .await
+            {
                 log::warn!("Could not remove a partial upload: {cleanup}");
             }
             return Err(error).with_context(|| format!("writing {}", path.display()));
@@ -210,6 +233,7 @@ impl Uploads {
             (phone.into(), id.clone()),
             Upload {
                 client_id: client_id.into(),
+                fs: destination.fs.clone(),
                 directory: destination.directory,
                 display_directory: destination.display_directory,
                 attachment: destination.attachment,
@@ -326,6 +350,7 @@ fn finish(phone: &str, args: &Value, cx: &mut App) -> Task<Result<Value>> {
     if upload.bytes.len() != upload.size {
         return Task::ready(Err(anyhow::anyhow!("The upload is incomplete.")));
     }
+    let fs = upload.fs.clone();
     let directory = upload.directory.clone();
     let display_directory = upload.display_directory.clone();
     let name = upload.name.clone();
@@ -334,7 +359,7 @@ fn finish(phone: &str, args: &Value, cx: &mut App) -> Task<Result<Value>> {
     let phone = phone.to_string();
     cx.spawn(async move |cx| {
         let saved = cx
-            .background_spawn(async move { save(&directory, &name, &bytes, attachment) })
+            .background_spawn(async move { save(fs.as_ref(), &directory, &name, &bytes, attachment).await })
             .await;
         cx.update(|cx| {
             let saved = match saved {
@@ -412,12 +437,23 @@ mod tests {
         assert!(shortened.ends_with(".gz"));
     }
 
-    #[test]
-    fn saving_never_overwrites_and_ignores_attachments() {
+    #[gpui::test]
+    async fn saving_never_overwrites_and_ignores_attachments(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
+        let fs = fs::RealFs::new(None, cx.background_executor().clone());
         let uploads = directory.path().join(".praxis").join("uploads");
-        assert_eq!(save(&uploads, "a.txt", b"one", true).unwrap(), "a.txt");
-        assert_eq!(save(&uploads, "a.txt", b"two", true).unwrap(), "a (1).txt");
+        assert_eq!(
+            save(fs.as_ref(), &uploads, "a.txt", b"one", true)
+                .await
+                .unwrap(),
+            "a.txt"
+        );
+        assert_eq!(
+            save(fs.as_ref(), &uploads, "a.txt", b"two", true)
+                .await
+                .unwrap(),
+            "a (1).txt"
+        );
         assert_eq!(std::fs::read(uploads.join("a.txt")).unwrap(), b"one");
         assert_eq!(std::fs::read(uploads.join("a (1).txt")).unwrap(), b"two");
         assert_eq!(
@@ -425,17 +461,40 @@ mod tests {
             "*\n"
         );
         assert_eq!(
-            save(directory.path(), "README", b"x", false).unwrap(),
+            save(fs.as_ref(), directory.path(), "README", b"x", false)
+                .await
+                .unwrap(),
             "README"
         );
         assert!(!directory.path().join(".gitignore").exists());
     }
 
-    #[test]
-    fn chunks_are_ordered_idempotent_and_owner_scoped() {
+    #[gpui::test]
+    async fn saving_uses_the_project_filesystem(cx: &mut gpui::TestAppContext) {
+        let app_state = cx.update(workspace::AppState::test);
+        let filesystem = app_state.fs.as_fake();
+        let root = PathBuf::from(util::path!("/remote/project"));
+        filesystem.insert_tree(&root, json!({})).await;
+        let fs: &dyn Fs = filesystem.as_ref();
+        let saved = save(fs, &root, "a.txt", b"one", false)
+            .await
+            .expect("saved");
+        assert_eq!(saved, "a.txt");
+        assert_eq!(
+            filesystem
+                .read_file_sync(root.join("a.txt"))
+                .expect("read"),
+            b"one"
+        );
+    }
+
+    #[gpui::test]
+    async fn chunks_are_ordered_idempotent_and_owner_scoped(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
+        let fs = fs::RealFs::new(None, cx.background_executor().clone());
         let mut uploads = Uploads::default();
         let destination = || Destination {
+            fs: fs.clone(),
             directory: directory.path().to_path_buf(),
             display_directory: "project".into(),
             attachment: false,
