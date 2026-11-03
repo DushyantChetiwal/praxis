@@ -5528,6 +5528,35 @@ mod tests {
     }
 
     #[test]
+    fn auto_approval_prefers_the_broadest_allow_option() {
+        let option = |id: &str, kind: acp::PermissionOptionKind| {
+            acp::PermissionOption::new(acp::PermissionOptionId::new(id), id, kind)
+        };
+        assert_eq!(
+            auto_approve_permission_option(&[
+                option("once", acp::PermissionOptionKind::AllowOnce),
+                option("always", acp::PermissionOptionKind::AllowAlways),
+                option("reject", acp::PermissionOptionKind::RejectOnce),
+            ])
+            .map(|id| id.0.to_string()),
+            Some("always".to_string())
+        );
+        assert_eq!(
+            auto_approve_permission_option(&[option("once", acp::PermissionOptionKind::AllowOnce)])
+                .map(|id| id.0.to_string()),
+            Some("once".to_string())
+        );
+        assert_eq!(
+            auto_approve_permission_option(&[option(
+                "reject",
+                acp::PermissionOptionKind::RejectAlways
+            )]),
+            None,
+            "a request that only offers rejection is left for the user"
+        );
+    }
+
+    #[test]
     fn cursor_client_capabilities_include_parameterized_model_picker_meta() {
         let capabilities = client_capabilities_for_agent(&AgentId::new(CURSOR_ID));
         let meta = capabilities
@@ -9335,12 +9364,44 @@ fn permission_outcome_to_v1(
     }
 }
 
+/// The option Praxis picks when it answers an external agent's permission
+/// request itself: the broadest allow the agent offers.
+fn auto_approve_permission_option(
+    options: &[acp::PermissionOption],
+) -> Option<acp::PermissionOptionId> {
+    options
+        .iter()
+        .find(|option| option.kind == acp::PermissionOptionKind::AllowAlways)
+        .or_else(|| {
+            options
+                .iter()
+                .find(|option| option.kind == acp::PermissionOptionKind::AllowOnce)
+        })
+        .map(|option| option.option_id.clone())
+}
+
 fn handle_request_permission(
     args: acp::RequestPermissionRequest,
     responder: Responder<acp::RequestPermissionResponse>,
     cx: &mut AsyncApp,
     ctx: &ClientContext,
 ) {
+    let auto_approve = cx.update(|cx| {
+        agent_settings::AgentSettings::get_global(cx).auto_approve_external_agents
+    });
+    if auto_approve {
+        if let Some(option_id) = auto_approve_permission_option(&args.options) {
+            responder
+                .respond(acp::RequestPermissionResponse::new(
+                    acp::RequestPermissionOutcome::Selected(
+                        acp::SelectedPermissionOutcome::new(option_id),
+                    ),
+                ))
+                .log_err();
+            return;
+        }
+    }
+
     let thread = match session_thread(ctx, &acp_v2::SessionId::new(args.session_id.0)) {
         Ok(t) => t,
         Err(e) => return respond_err(responder, e),
