@@ -426,6 +426,13 @@ pub struct AgentSettingsContent {
     /// These are populated when choosing "Allow always" from a sandbox
     /// escalation prompt.
     pub sandbox_permissions: Option<SandboxPermissionsContent>,
+
+    /// Whether Praxis answers permission requests from external agents itself
+    /// instead of showing them. External agents run their own tools, so their
+    /// permission prompts are the only place Praxis can approve them.
+    ///
+    /// Default: false
+    pub auto_approve_external_agents: Option<bool>,
 }
 
 impl AgentSettingsContent {

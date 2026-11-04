@@ -304,6 +304,7 @@ jobs:
           cargo test --locked -p recent_projects --lib test_reconnect_action_
           cargo test --locked -p remote_direct --lib test_direct_link_
           cargo test --locked -p agent_servers --lib cursor_ext::
+          cargo test --locked -p agent_servers --lib auto_approval_
 
       - name: Test background terminal tab inspection
         run: cargo test --locked -p terminal_view --lib background_agent_terminals_

@@ -1200,6 +1200,7 @@ mod tests {
             message_editor_min_lines: 1,
             tool_permissions: Default::default(),
             sandbox_permissions: Default::default(),
+            auto_approve_external_agents: false,
             show_turn_stats: false,
             show_merge_conflict_indicator: true,
             max_idle_retained_threads: 5,

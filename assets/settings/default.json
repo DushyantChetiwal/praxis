@@ -1288,6 +1288,10 @@
       // writing outside the project, unless a grant below already covers it.
       "allow_unsandboxed": true,
     },
+    // Answer permission requests from external agents, such as Cursor, without
+    // asking. Those agents run their own tools, so their prompts are the only
+    // place Praxis can approve them.
+    "auto_approve_external_agents": false,
     // When enabled, agent edits will be displayed in single-file editors for review
     "single_file_review": false,
     // Settings for automatic agent context compaction, which summarizes earlier
