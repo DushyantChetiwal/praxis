@@ -398,15 +398,6 @@ fn handle_paired(
     if op == "file_begin" {
         let result = with_workspace(window, cx, |workspace, _, cx| {
             anyhow::ensure!(!phone.is_empty(), "Uploads require an authenticated phone");
-            anyhow::ensure!(
-                workspace
-                    .read(cx)
-                    .project()
-                    .read(cx)
-                    .remote_connection_options(cx)
-                    .is_none(),
-                "Praxis cannot save uploads to a project on another computer yet."
-            );
             let roots = project_roots(workspace, cx);
             if args.get("attachment").and_then(Value::as_bool) != Some(true) {
                 let path = required(args, "path")?;
@@ -415,8 +406,8 @@ fn handle_paired(
                     bail!("{path} is private, so Praxis will not save files there");
                 }
             }
-            let fs = workspace.read(cx).project().read(cx).fs().clone();
-            uploads::destination(&roots, fs, args)
+            let project = workspace.read(cx).project().clone();
+            uploads::destination(project, &roots, args, cx)
         })
         .and_then(|destination| uploads::begin(phone, destination, args, cx));
         return Task::ready(result);

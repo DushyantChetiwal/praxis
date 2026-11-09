@@ -9,8 +9,10 @@ use std::time::{Duration, Instant};
 use agent_client_protocol::schema::v2 as acp;
 use anyhow::{Context as _, Result, ensure};
 use fs::Fs;
-use gpui::{App, AppContext as _, Global, Task};
+use gpui::{App, AppContext as _, AsyncApp, Entity, Global, Task};
+use project::{Project, Worktree};
 use serde_json::{Value, json};
+use util::rel_path::RelPath;
 
 use super::{crypto, ensure_inside, required, resolve_project_path, transcript};
 
@@ -28,7 +30,7 @@ type UploadKey = (String, String);
 
 struct Upload {
     client_id: String,
-    fs: Arc<dyn Fs>,
+    target: UploadTarget,
     directory: PathBuf,
     display_directory: String,
     attachment: bool,
@@ -45,8 +47,16 @@ impl Global for Uploads {}
 
 /// The folder an upload is saved into, worked out on the main thread where
 /// the project is known.
+/// Where an upload is written: this computer's filesystem, or a worktree on
+/// the computer the project lives on.
+#[derive(Clone)]
+pub(super) enum UploadTarget {
+    Local(Arc<dyn Fs>),
+    Remote(Entity<Worktree>),
+}
+
 pub(super) struct Destination {
-    fs: Arc<dyn Fs>,
+    target: UploadTarget,
     directory: PathBuf,
     display_directory: String,
     attachment: bool,
@@ -55,28 +65,40 @@ pub(super) struct Destination {
 /// Where `file_begin` saves: the folder the phone is browsing, or the first
 /// project folder's attachment folder for a chat message.
 pub(super) fn destination(
+    project: Entity<Project>,
     roots: &[(String, PathBuf)],
-    fs: Arc<dyn Fs>,
     args: &Value,
+    cx: &App,
 ) -> Result<Destination> {
-    if args.get("attachment").and_then(Value::as_bool) == Some(true) {
-        let (root_name, root) = roots
-            .first()
-            .context("Open a project folder before attaching files.")?;
-        return Ok(Destination {
-            fs,
-            directory: root.join(ATTACHMENTS_DIR),
-            display_directory: format!("{root_name}/{ATTACHMENTS_DIR}"),
-            attachment: true,
-        });
-    }
-    let (display, path) = resolve_project_path(roots, required(args, "path")?)?;
-    let directory = ensure_inside(roots, &path)?;
+    let (directory, display_directory, attachment) =
+        if args.get("attachment").and_then(Value::as_bool) == Some(true) {
+            let (root_name, root) = roots
+                .first()
+                .context("Open a project folder before attaching files.")?;
+            (
+                root.join(ATTACHMENTS_DIR),
+                format!("{root_name}/{ATTACHMENTS_DIR}"),
+                true,
+            )
+        } else {
+            let (display, path) = resolve_project_path(roots, required(args, "path")?)?;
+            (ensure_inside(roots, &path)?, display, false)
+        };
+    let target = if project.read(cx).remote_connection_options(cx).is_some() {
+        let worktree = project
+            .read(cx)
+            .worktrees(cx)
+            .find(|worktree| directory.starts_with(worktree.read(cx).abs_path()))
+            .context("That folder is not inside a project folder.")?;
+        UploadTarget::Remote(worktree)
+    } else {
+        UploadTarget::Local(project.read(cx).fs().clone())
+    };
     Ok(Destination {
-        fs,
+        target,
         directory,
-        display_directory: display,
-        attachment: false,
+        display_directory,
+        attachment,
     })
 }
 
@@ -128,7 +150,7 @@ fn split_extension(name: &str) -> (&str, &str) {
 
 /// Writes the file under the first free name, so nothing already in the
 /// project is overwritten.
-async fn save(
+async fn save_local(
     fs: &dyn Fs,
     directory: &Path,
     name: &str,
@@ -184,6 +206,72 @@ async fn save(
     anyhow::bail!("Too many files named {name} already exist here. Rename the file and retry.")
 }
 
+/// Writes the file into a worktree on the computer the project lives on, which
+/// is the only way to save an upload there.
+async fn save_remote(
+    worktree: Entity<Worktree>,
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+    attachment: bool,
+    cx: &mut AsyncApp,
+) -> Result<String> {
+    let (root, path_style) = worktree.read_with(cx, |worktree, _| {
+        (worktree.abs_path().to_path_buf(), worktree.path_style())
+    });
+    let relative = directory
+        .strip_prefix(&root)
+        .with_context(|| format!("{} is not inside the project", directory.display()))?;
+    let directory_path = RelPath::new(relative, path_style)?;
+
+    if attachment {
+        for folder in [".praxis", ".praxis/uploads"] {
+            let path = RelPath::new(Path::new(folder), path_style)?;
+            if worktree.read_with(cx, |worktree, _| worktree.entry_for_path(&path).is_none()) {
+                worktree
+                    .update(cx, |worktree, cx| {
+                        worktree.create_entry(path.into_arc(), true, None, cx)
+                    })
+                    .await?;
+            }
+        }
+        // Uploads are the user's files, not the project's.
+        let ignore = RelPath::new(Path::new(".praxis/uploads/.gitignore"), path_style)?;
+        if worktree.read_with(cx, |worktree, _| worktree.entry_for_path(&ignore).is_none()) {
+            worktree
+                .update(cx, |worktree, cx| {
+                    worktree.create_entry(ignore.into_arc(), false, Some(b"*\n".to_vec()), cx)
+                })
+                .await?;
+        }
+    }
+
+    let (stem, extension) = split_extension(name);
+    for attempt in 0..1000 {
+        let candidate = if attempt == 0 {
+            name.to_string()
+        } else {
+            format!("{stem} ({attempt}){extension}")
+        };
+        let path = RelPath::new(&directory_path.as_std_path().join(&candidate), path_style)?;
+        if worktree.read_with(cx, |worktree, _| worktree.entry_for_path(&path).is_some()) {
+            continue;
+        }
+        match worktree
+            .update(cx, |worktree, cx| {
+                worktree.create_entry(path.into_arc(), false, Some(bytes.to_vec()), cx)
+            })
+            .await
+        {
+            Ok(_) => return Ok(candidate),
+            // The snapshot can lag behind a file another upload just wrote.
+            Err(error) if format!("{error:#}").contains("already exists") => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    anyhow::bail!("Too many files named {name} already exist here. Rename the file and retry.")
+}
+
 impl Uploads {
     fn prune(&mut self) {
         self.0.retain(|_, upload| upload.updated.elapsed() < EXPIRY);
@@ -233,7 +321,7 @@ impl Uploads {
             (phone.into(), id.clone()),
             Upload {
                 client_id: client_id.into(),
-                fs: destination.fs.clone(),
+                target: destination.target.clone(),
                 directory: destination.directory,
                 display_directory: destination.display_directory,
                 attachment: destination.attachment,
@@ -350,7 +438,7 @@ fn finish(phone: &str, args: &Value, cx: &mut App) -> Task<Result<Value>> {
     if upload.bytes.len() != upload.size {
         return Task::ready(Err(anyhow::anyhow!("The upload is incomplete.")));
     }
-    let fs = upload.fs.clone();
+    let target = upload.target.clone();
     let directory = upload.directory.clone();
     let display_directory = upload.display_directory.clone();
     let name = upload.name.clone();
@@ -358,11 +446,17 @@ fn finish(phone: &str, args: &Value, cx: &mut App) -> Task<Result<Value>> {
     let bytes = std::mem::take(&mut upload.bytes);
     let phone = phone.to_string();
     cx.spawn(async move |cx| {
-        let saved = cx
-            .background_spawn(async move {
-                save(fs.as_ref(), &directory, &name, &bytes, attachment).await
-            })
-            .await;
+        let saved = match target {
+            UploadTarget::Local(fs) => {
+                cx.background_spawn(async move {
+                    save_local(fs.as_ref(), &directory, &name, &bytes, attachment).await
+                })
+                .await
+            }
+            UploadTarget::Remote(worktree) => {
+                save_remote(worktree, &directory, &name, &bytes, attachment, cx).await
+            }
+        };
         cx.update(|cx| {
             let saved = match saved {
                 Ok(saved) => saved,
@@ -448,11 +542,11 @@ mod tests {
         let fs: &dyn Fs = filesystem.as_ref();
         let uploads = directory.join(".praxis").join("uploads");
         assert_eq!(
-            save(fs, &uploads, "a.txt", b"one", true).await.unwrap(),
+            save_local(fs, &uploads, "a.txt", b"one", true).await.unwrap(),
             "a.txt"
         );
         assert_eq!(
-            save(fs, &uploads, "a.txt", b"two", true).await.unwrap(),
+            save_local(fs, &uploads, "a.txt", b"two", true).await.unwrap(),
             "a (1).txt"
         );
         assert_eq!(
@@ -472,7 +566,7 @@ mod tests {
             b"*\n"
         );
         assert_eq!(
-            save(fs, &directory, "README", b"x", false).await.unwrap(),
+            save_local(fs, &directory, "README", b"x", false).await.unwrap(),
             "README"
         );
         assert!(
@@ -490,7 +584,7 @@ mod tests {
         let root = PathBuf::from(util::path!("/remote/project"));
         filesystem.insert_tree(&root, json!({})).await;
         let fs: &dyn Fs = filesystem.as_ref();
-        let saved = save(fs, &root, "a.txt", b"one", false)
+        let saved = save_local(fs, &root, "a.txt", b"one", false)
             .await
             .expect("saved");
         assert_eq!(saved, "a.txt");
@@ -508,7 +602,7 @@ mod tests {
         filesystem.insert_tree(&directory, json!({})).await;
         let mut uploads = Uploads::default();
         let destination = || Destination {
-            fs: filesystem.clone(),
+            target: UploadTarget::Local(filesystem.clone()),
             directory: directory.clone(),
             display_directory: "project".into(),
             attachment: false,
