@@ -398,6 +398,15 @@ fn handle_paired(
     if op == "file_begin" {
         let result = with_workspace(window, cx, |workspace, _, cx| {
             anyhow::ensure!(!phone.is_empty(), "Uploads require an authenticated phone");
+            anyhow::ensure!(
+                workspace
+                    .read(cx)
+                    .project()
+                    .read(cx)
+                    .remote_connection_options(cx)
+                    .is_none(),
+                "Praxis cannot save uploads to a project on another computer yet."
+            );
             let roots = project_roots(workspace, cx);
             if args.get("attachment").and_then(Value::as_bool) != Some(true) {
                 let path = required(args, "path")?;
@@ -430,13 +439,14 @@ fn handle_paired(
                 Ok(offset) => offset.unwrap_or(0),
                 Err(error) => return Task::ready(Err(error)),
             };
-            let (fs, fallback, host) = match with_workspace(window, cx, |workspace, _, cx| {
-                let project = workspace.read(cx).project().read(cx);
-                let remote = project.remote_connection_options(cx);
+            let (project, fallback, host) = match with_workspace(window, cx, |workspace, _, cx| {
+                let project = workspace.read(cx).project().clone();
+                let remote = project.read(cx).remote_connection_options(cx);
                 // A project on another computer starts at its own folder, since
                 // this computer's home directory is not on that filesystem.
                 let fallback = remote.as_ref().and_then(|_| {
                     project
+                        .read(cx)
                         .visible_worktrees(cx)
                         .next()
                         .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
@@ -444,14 +454,12 @@ fn handle_paired(
                 let host = remote
                     .map(|options| options.display_name())
                     .unwrap_or_else(|| std::env::consts::OS.to_string());
-                Ok((project.fs().clone(), fallback, host))
+                Ok((project, fallback, host))
             }) {
                 Ok(listing) => listing,
                 Err(error) => return Task::ready(Err(error)),
             };
-            return cx.background_spawn(async move {
-                folders::list(fs.as_ref(), fallback, host, &path, offset).await
-            });
+            return folders::list(project, fallback, host, &path, offset, cx);
         }
         "open_folder" => {
             return match required(args, "path").and_then(|path| {
