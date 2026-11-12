@@ -308,7 +308,6 @@ impl HeadlessProject {
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &context_server_store);
 
         session.add_request_handler(cx.weak_entity(), Self::handle_list_remote_directory);
-        session.add_request_handler(cx.weak_entity(), Self::handle_create_project_entry);
         session.add_request_handler(cx.weak_entity(), Self::handle_get_path_metadata);
         session.add_request_handler(cx.weak_entity(), Self::handle_shutdown_remote_server);
         session.add_request_handler(cx.weak_entity(), Self::handle_ping);
@@ -1320,43 +1319,6 @@ impl HeadlessProject {
         Ok(proto::ListRemoteDirectoryResponse {
             entries,
             entry_info,
-        })
-    }
-
-    /// Creates a file or folder inside a worktree, which is how a phone saves
-    /// an upload into a project on this computer.
-    pub async fn handle_create_project_entry(
-        this: Entity<Self>,
-        envelope: TypedEnvelope<proto::CreateProjectEntry>,
-        mut cx: AsyncApp,
-    ) -> Result<proto::ProjectEntryResponse> {
-        let worktree_id = WorktreeId::from_proto(envelope.payload.worktree_id);
-        let path = RelPath::from_unix_str(&envelope.payload.path)?;
-        let (fs, worktree) = this.update(&mut cx, |this, cx| {
-            (
-                this.fs.clone(),
-                this.worktree_store.read(cx).worktree_for_id(worktree_id, cx),
-            )
-        });
-        let worktree = worktree.context("no such worktree")?;
-        let abs_path = worktree.read_with(&cx, |worktree, _| {
-            worktree.abs_path().join(path.as_std_path())
-        })?;
-        if fs.metadata(&abs_path).await?.is_some() {
-            return Err(anyhow!("{} already exists", abs_path.display()));
-        }
-        if envelope.payload.is_directory {
-            fs.create_dir(&abs_path).await?;
-        } else {
-            fs.write(
-                &abs_path,
-                envelope.payload.content.as_deref().unwrap_or_default(),
-            )
-            .await?;
-        }
-        Ok(proto::ProjectEntryResponse {
-            entry: None,
-            worktree_scan_id: 0,
         })
     }
 

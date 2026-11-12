@@ -5,16 +5,19 @@ use anyhow::{Context as _, Result, bail};
 use gpui::{App, Entity, Task};
 use project::Project;
 use serde_json::{Value, json};
+use util::paths::PathStyle;
 use workspace::{AppState, OpenMode, OpenOptions, WorkspaceMatching};
 
-fn host_path(path: &str, fallback: Option<&Path>) -> Result<PathBuf> {
+/// Checks the path by the rules of the computer the project is on, since a
+/// WSL path such as `/home/me` is not absolute by Windows' rules.
+fn host_path(path: &str, fallback: Option<&Path>, path_style: PathStyle) -> Result<PathBuf> {
     let path = match path {
         "" => fallback
             .map(Path::to_path_buf)
             .unwrap_or_else(|| paths::home_dir().to_path_buf()),
         path => PathBuf::from(path),
     };
-    if !path.is_absolute() {
+    if !path_style.is_absolute(&path) {
         bail!("Enter an absolute folder path on the connected computer");
     }
     Ok(path)
@@ -30,7 +33,8 @@ pub(super) fn list(
     offset: usize,
     cx: &mut App,
 ) -> Task<Result<Value>> {
-    let path = match host_path(path, fallback.as_deref()) {
+    let path_style = project.read(cx).path_style(cx);
+    let path = match host_path(path, fallback.as_deref(), path_style) {
         Ok(path) => path,
         Err(error) => return Task::ready(Err(error)),
     };
@@ -45,12 +49,12 @@ pub(super) fn list(
             .filter(|entry| entry.is_dir)
             .filter_map(|entry| {
                 // Local listings return bare names; remote ones return full paths.
-                let full = if entry.path.is_absolute() {
+                let full = if path_style.is_absolute(&entry.path) {
                     entry.path
                 } else {
-                    path.join(&entry.path)
+                    path_style.join_path(&path, &entry.path).ok()?
                 };
-                let name = full.file_name()?.to_str()?.to_owned();
+                let name = path_style.file_name(&full)?.to_str()?.to_owned();
                 let full = full.to_str()?.to_owned();
                 Some((name, full))
             })
@@ -75,7 +79,7 @@ pub(super) fn list(
         Ok(json!({
             "host": host,
             "path": path.to_str().context("This folder path is not valid Unicode")?,
-            "parent": path.parent().and_then(Path::to_str),
+            "parent": path_style.parent(&path).and_then(Path::to_str),
             "folders": entries,
             "next_offset": (next < total).then_some(next),
         }))
@@ -88,7 +92,8 @@ pub(super) fn open(
     app_state: Arc<AppState>,
     cx: &mut App,
 ) -> Task<Result<Value>> {
-    let path = match host_path(path, None) {
+    let path_style = project.read(cx).path_style(cx);
+    let path = match host_path(path, None, path_style) {
         Ok(path) => path,
         Err(error) => return Task::ready(Err(error)),
     };
@@ -180,7 +185,29 @@ mod tests {
         assert_eq!(second["folders"].as_array().expect("folders").len(), 3);
         assert_eq!(second["next_offset"], Value::Null);
         assert!(Path::new(first["folders"][0]["path"].as_str().expect("child path")).is_absolute());
-        assert!(host_path("relative/folder", None).is_err());
+        assert!(host_path("relative/folder", None, PathStyle::local()).is_err());
+    }
+
+    #[test]
+    fn wsl_folders_are_absolute_on_any_client() {
+        let home = Path::new("/home/me");
+        assert_eq!(
+            host_path("/home/me", None, PathStyle::Unix).expect("absolute"),
+            home
+        );
+        assert_eq!(
+            host_path("", Some(home), PathStyle::Unix).expect("fallback"),
+            home
+        );
+        assert!(host_path("home/me", None, PathStyle::Unix).is_err());
+        let child = PathStyle::Unix
+            .join_path(home, "project")
+            .expect("joined");
+        assert_eq!(child.to_str(), Some("/home/me/project"));
+        assert_eq!(
+            PathStyle::Unix.parent(&child).and_then(Path::to_str),
+            Some("/home/me")
+        );
     }
 
     #[gpui::test]

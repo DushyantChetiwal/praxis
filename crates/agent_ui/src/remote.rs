@@ -50,8 +50,10 @@ use gpui::{
     WeakEntity,
 };
 use http_client::HttpClient;
+use project::{Project, ProjectPath, WorktreeSettings};
 use remote_connection::RemoteConnectionModal;
 use serde_json::{Value, json};
+use settings::Settings as _;
 use util::ResultExt as _;
 use util::rel_path::RelPath;
 use workspace::{MultiWorkspace, Workspace};
@@ -827,9 +829,10 @@ fn handle_paired(
                 .unwrap_or_default()
                 .to_string();
             return match with_workspace(window, cx, |workspace, _, cx| {
-                Ok(project_roots(workspace, cx))
+                Ok((project_roots(workspace, cx), remote_project(workspace, cx)))
             }) {
-                Ok(roots) => cx
+                Ok((roots, Some(project))) => list_remote_dir(project, roots, path, cx),
+                Ok((roots, None)) => cx
                     .background_executor()
                     .spawn(async move { list_dir(&roots, &path) }),
                 Err(error) => Task::ready(Err(error)),
@@ -841,7 +844,8 @@ fn handle_paired(
                 Err(error) => return Task::ready(Err(error)),
             };
             return match readable_roots(window, &path, cx) {
-                Ok(roots) => cx
+                Ok((roots, Some(project))) => read_remote_file(project, roots, path, cx),
+                Ok((roots, None)) => cx
                     .background_executor()
                     .spawn(async move { read_file(&roots, &path) }),
                 Err(error) => Task::ready(Err(error)),
@@ -854,7 +858,10 @@ fn handle_paired(
             };
             let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
             return match readable_roots(window, &path, cx) {
-                Ok(roots) => cx
+                Ok((_, Some(_))) => Task::ready(Err(anyhow!(
+                    "Downloading from a WSL or SSH project is not available yet. Open the file to read it."
+                ))),
+                Ok((roots, None)) => cx
                     .background_executor()
                     .spawn(async move { download_chunk(&roots, &path, offset) }),
                 Err(error) => Task::ready(Err(error)),
@@ -865,16 +872,29 @@ fn handle_paired(
     Task::ready(result)
 }
 
-/// The window's projects, once the path is known not to be private.
-fn readable_roots(window: Option<u64>, path: &str, cx: &mut App) -> Result<Vec<(String, PathBuf)>> {
+/// The window's projects, once the path is known not to be private, and the
+/// project itself when it lives on WSL or another computer.
+fn readable_roots(
+    window: Option<u64>,
+    path: &str,
+    cx: &mut App,
+) -> Result<(Vec<(String, PathBuf)>, Option<Entity<Project>>)> {
     with_workspace(window, cx, |workspace, _, cx| {
         let roots = project_roots(workspace, cx);
         let (root_name, relative) = split_project_path(&roots, path)?;
         if is_private(workspace, root_name, relative, cx) {
             bail!("{path} is private, so Praxis will not share it");
         }
-        Ok(roots)
+        Ok((roots, remote_project(workspace, cx)))
     })
+}
+
+/// The window's project when its files are on WSL or another computer, which
+/// this computer can only reach through the project.
+fn remote_project(workspace: &Entity<Workspace>, cx: &App) -> Option<Entity<Project>> {
+    let project = workspace.read(cx).project().clone();
+    let remote = project.read(cx).remote_connection_options(cx).is_some();
+    remote.then_some(project)
 }
 
 fn required<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
@@ -2391,10 +2411,147 @@ fn is_private(workspace: &Entity<Workspace>, root_name: &str, relative: &str, cx
         .any(|worktree| {
             let worktree = worktree.read(cx);
             worktree.root_name_str() == root_name
-                && worktree
-                    .as_local()
-                    .is_some_and(|local| local.is_path_private(relative))
+                && match worktree.as_local() {
+                    Some(local) => local.is_path_private(relative),
+                    None => WorktreeSettings::get(
+                        Some(settings::SettingsLocation {
+                            worktree_id: worktree.id(),
+                            path: relative,
+                        }),
+                        cx,
+                    )
+                    .is_path_private(relative),
+                }
         })
+}
+
+/// Where a path the phone names is inside a project on another computer, as
+/// the project knows it.
+fn remote_project_path(
+    project: &Entity<Project>,
+    roots: &[(String, PathBuf)],
+    path: &str,
+    cx: &App,
+) -> Result<(String, ProjectPath)> {
+    let (root_name, relative) = split_project_path(roots, path)?;
+    let worktree = project
+        .read(cx)
+        .visible_worktrees(cx)
+        .find(|worktree| worktree.read(cx).root_name_str() == root_name)
+        .context("no such project")?;
+    let relative = RelPath::new(Path::new(relative), util::paths::PathStyle::Unix)?;
+    let display = if relative.is_empty() {
+        root_name.to_string()
+    } else {
+        format!("{root_name}/{}", relative.as_unix_str())
+    };
+    Ok((
+        display,
+        ProjectPath {
+            worktree_id: worktree.read(cx).id(),
+            path: relative.into_arc(),
+        },
+    ))
+}
+
+/// Lists a folder of a project on WSL or another computer from the project's
+/// own copy of its file tree, loading an ignored folder's entries on demand.
+fn list_remote_dir(
+    project: Entity<Project>,
+    roots: Vec<(String, PathBuf)>,
+    path: String,
+    cx: &mut App,
+) -> Task<Result<Value>> {
+    if path.trim().trim_matches('/').is_empty() {
+        return Task::ready(list_dir(&roots, &path));
+    }
+    let (display, project_path) = match remote_project_path(&project, &roots, &path, cx) {
+        Ok(resolved) => resolved,
+        Err(error) => return Task::ready(Err(error)),
+    };
+    cx.spawn(async move |cx| {
+        let worktree = project
+            .read_with(cx, |project, cx| {
+                project.worktree_for_id(project_path.worktree_id, cx)
+            })
+            .context("no such project")?;
+        let unloaded = worktree.read_with(cx, |worktree, _| {
+            worktree
+                .entry_for_path(&project_path.path)
+                .map(|entry| (entry.is_dir(), entry.kind.is_unloaded(), entry.id))
+        });
+        let Some((is_dir, is_unloaded, entry_id)) = unloaded else {
+            bail!("{display} does not exist");
+        };
+        if !is_dir {
+            bail!("{display} is not a folder");
+        }
+        if is_unloaded {
+            let expand = project.update(cx, |project, cx| {
+                project.expand_entry(project_path.worktree_id, entry_id, cx)
+            });
+            if let Some(expand) = expand {
+                expand
+                    .await
+                    .with_context(|| format!("listing {display}"))?;
+            }
+        }
+        let entries = worktree.read_with(cx, |worktree, _| {
+            worktree
+                .child_entries(&project_path.path)
+                .filter_map(|entry| {
+                    let name = entry.path.file_name()?.to_string();
+                    (name != ".git").then_some((entry.is_dir(), name))
+                })
+                .collect::<Vec<_>>()
+        });
+        Ok(directory_listing(&display, entries))
+    })
+}
+
+/// Reads a text file of a project on WSL or another computer by opening it the
+/// way the editor does, since this computer cannot read that disk.
+fn read_remote_file(
+    project: Entity<Project>,
+    roots: Vec<(String, PathBuf)>,
+    path: String,
+    cx: &mut App,
+) -> Task<Result<Value>> {
+    let (display, project_path) = match remote_project_path(&project, &roots, &path, cx) {
+        Ok(resolved) => resolved,
+        Err(error) => return Task::ready(Err(error)),
+    };
+    cx.spawn(async move |cx| {
+        let size = project
+            .read_with(cx, |project, cx| {
+                let worktree = project.worktree_for_id(project_path.worktree_id, cx)?;
+                let entry = worktree.read(cx).entry_for_path(&project_path.path)?;
+                Some((entry.is_file(), entry.size))
+            });
+        match size {
+            Some((false, _)) => bail!("{display} is not a file"),
+            Some((true, size)) if size > MAX_FILE_BYTES => bail!(
+                "{display} is too large to show ({size} bytes); download it instead"
+            ),
+            // An ignored file is not in the snapshot until it is opened.
+            _ => {}
+        }
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(project_path, cx))
+            .await
+            .with_context(|| format!("reading {display}"))?;
+        let text = buffer.read_with(cx, |buffer, _| buffer.text());
+        if text.len() as u64 > MAX_FILE_BYTES {
+            bail!(
+                "{display} is too large to show ({} bytes); download it instead",
+                text.len()
+            );
+        }
+        if text.contains('\0') {
+            bail!("{display} is not a text file; download it instead");
+        }
+        Ok(text_file_json(&display, text.len() as u64, &text))
+    })
 }
 
 /// Refuses a path that leaves its project through a link.
@@ -2432,6 +2589,11 @@ fn list_dir(roots: &[(String, PathBuf)], path: &str) -> Result<Value> {
         let dir = entry.file_type()?.is_dir();
         entries.push((dir, name));
     }
+    Ok(directory_listing(&display, entries))
+}
+
+/// Folders first, then by name, cut to what one answer can carry.
+fn directory_listing(display: &str, mut entries: Vec<(bool, String)>) -> Value {
     entries.sort_by(|(a_dir, a_name), (b_dir, b_name)| {
         b_dir
             .cmp(a_dir)
@@ -2450,7 +2612,7 @@ fn list_dir(roots: &[(String, PathBuf)], path: &str) -> Result<Value> {
         listed.push(entry);
     }
     let truncated = listed.len() < total;
-    Ok(json!({ "path": display, "entries": listed, "truncated": truncated }))
+    json!({ "path": display, "entries": listed, "truncated": truncated })
 }
 
 fn read_file(roots: &[(String, PathBuf)], path: &str) -> Result<Value> {
@@ -2471,6 +2633,10 @@ fn read_file(roots: &[(String, PathBuf)], path: &str) -> Result<Value> {
         bail!("{display} is not a text file; download it instead");
     }
     let text = String::from_utf8_lossy(&bytes);
+    Ok(text_file_json(&display, metadata.len(), &text))
+}
+
+fn text_file_json(display: &str, size: u64, text: &str) -> Value {
     // Escaping makes some text longer (quotes, backslashes, control
     // characters), and the answer has to fit in one comment.
     let mut limit = FILE_LIMIT;
@@ -2484,12 +2650,12 @@ fn read_file(roots: &[(String, PathBuf)], path: &str) -> Result<Value> {
         limit = (limit * FILE_JSON_BUDGET / escaped).min(limit.saturating_sub(1));
         content = truncate(&text, limit);
     }
-    Ok(json!({
+    json!({
         "path": display,
         "truncated": text.len() > limit,
-        "size": metadata.len(),
+        "size": size,
         "content": content,
-    }))
+    })
 }
 
 /// One piece of a file, starting at `offset`. The phone asks for the pieces in
