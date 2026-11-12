@@ -142,7 +142,6 @@ fn remote_destination(
     })
 }
 
-
 /// A file name that is safe on every desktop: the last path component, with
 /// characters Windows refuses removed and its reserved device names avoided.
 pub(super) fn safe_file_name(name: &str) -> Result<String> {
@@ -590,11 +589,15 @@ mod tests {
         let fs: &dyn Fs = filesystem.as_ref();
         let uploads = directory.join(".praxis").join("uploads");
         assert_eq!(
-            save_local(fs, &uploads, "a.txt", b"one", true).await.unwrap(),
+            save_local(fs, &uploads, "a.txt", b"one", true)
+                .await
+                .unwrap(),
             "a.txt"
         );
         assert_eq!(
-            save_local(fs, &uploads, "a.txt", b"two", true).await.unwrap(),
+            save_local(fs, &uploads, "a.txt", b"two", true)
+                .await
+                .unwrap(),
             "a (1).txt"
         );
         assert_eq!(
@@ -614,7 +617,9 @@ mod tests {
             b"*\n"
         );
         assert_eq!(
-            save_local(fs, &directory, "README", b"x", false).await.unwrap(),
+            save_local(fs, &directory, "README", b"x", false)
+                .await
+                .unwrap(),
             "README"
         );
         assert!(

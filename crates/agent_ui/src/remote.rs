@@ -2491,9 +2491,7 @@ fn list_remote_dir(
                 project.expand_entry(project_path.worktree_id, entry_id, cx)
             });
             if let Some(expand) = expand {
-                expand
-                    .await
-                    .with_context(|| format!("listing {display}"))?;
+                expand.await.with_context(|| format!("listing {display}"))?;
             }
         }
         let entries = worktree.read_with(cx, |worktree, _| {
@@ -2522,17 +2520,16 @@ fn read_remote_file(
         Err(error) => return Task::ready(Err(error)),
     };
     cx.spawn(async move |cx| {
-        let size = project
-            .read_with(cx, |project, cx| {
-                let worktree = project.worktree_for_id(project_path.worktree_id, cx)?;
-                let entry = worktree.read(cx).entry_for_path(&project_path.path)?;
-                Some((entry.is_file(), entry.size))
-            });
+        let size = project.read_with(cx, |project, cx| {
+            let worktree = project.worktree_for_id(project_path.worktree_id, cx)?;
+            let entry = worktree.read(cx).entry_for_path(&project_path.path)?;
+            Some((entry.is_file(), entry.size))
+        });
         match size {
             Some((false, _)) => bail!("{display} is not a file"),
-            Some((true, size)) if size > MAX_FILE_BYTES => bail!(
-                "{display} is too large to show ({size} bytes); download it instead"
-            ),
+            Some((true, size)) if size > MAX_FILE_BYTES => {
+                bail!("{display} is too large to show ({size} bytes); download it instead")
+            }
             // An ignored file is not in the snapshot until it is opened.
             _ => {}
         }

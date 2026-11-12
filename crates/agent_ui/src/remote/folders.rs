@@ -200,9 +200,7 @@ mod tests {
             home
         );
         assert!(host_path("home/me", None, PathStyle::Unix).is_err());
-        let child = PathStyle::Unix
-            .join_path(home, "project")
-            .expect("joined");
+        let child = PathStyle::Unix.join_path(home, "project").expect("joined");
         assert_eq!(child.to_str(), Some("/home/me/project"));
         assert_eq!(
             PathStyle::Unix.parent(&child).and_then(Path::to_str),
