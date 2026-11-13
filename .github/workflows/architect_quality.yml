@@ -641,7 +641,7 @@ jobs:
               output.write("packages=" + " ".join(f"-p {name}" for name in extra) + "\n")
           PY
 
-      - name: Check the Architect packages and the changed packages with Clippy
+      - name: Check the Architect packages with Clippy
         run: >-
           ./script/clippy --locked -p architect -p agent -p agent_ui -p auto_update
           -p context_server -p feedback -p remote -p remote_direct -p gpui -p acp_thread
