@@ -1,5 +1,5 @@
 use acp_thread::AcpThread;
-use agent_client_protocol::schema::v2 as acp;
+use agent_client_protocol::v2::schema as acp;
 use futures::FutureExt as _;
 use gpui::{App, SharedString, Task, WeakEntity};
 use language_model::LanguageModelToolResultContent;

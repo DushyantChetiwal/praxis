@@ -1,18 +1,30 @@
 mod patch;
 
-use agent_client_protocol::schema::v2 as acp_v2;
+use agent_client_protocol::v2::schema as acp_v2;
 use anyhow::{Result, anyhow, ensure};
 use buffer_diff::BufferDiff;
 use collections::{HashMap, HashSet};
-use gpui::{App, AppContext, AsyncApp, Context, Entity, SharedString, Subscription, Task};
+use gpui::{
+    App, AppContext, AsyncApp, Context, Entity, SharedString, Subscription, Task, WeakEntity,
+};
 use itertools::Itertools;
 use language::{
-    Anchor, Bias, Buffer, Capability, LanguageRegistry, OffsetRangeExt as _, Point, TextBuffer,
+    Anchor, Bias, Buffer, Capability, LanguageRegistry, LineEnding, OffsetRangeExt as _, Point,
+    TextBuffer,
 };
 use markdown::Markdown;
 use multi_buffer::{MultiBuffer, PathKey, excerpt_context_lines};
-use std::{cmp::Reverse, ops::Range, path::Path, sync::Arc};
+use std::{
+    cell::{Cell, OnceCell},
+    cmp::Reverse,
+    mem,
+    ops::Range,
+    path::Path,
+    rc::Rc,
+    sync::Arc,
+};
 use util::ResultExt;
+use util::paths::PathStyle;
 
 #[derive(Debug)]
 pub struct DiffPatch {
@@ -48,7 +60,12 @@ impl DiffPatch {
                 hunks: Vec::new(),
             })
             .collect::<Vec<_>>();
-        if source.patch.is_none() {
+        // A patch in a format Zed doesn't recognize renders as if it were omitted.
+        if source
+            .patch
+            .as_ref()
+            .is_none_or(|patch| patch.format != acp_v2::DiffPatchFormat::GitPatch)
+        {
             return Self {
                 files,
                 fallback: None,
@@ -97,10 +114,6 @@ impl DiffPatch {
             .as_ref()
             .ok_or_else(|| anyhow!("no patch supplied"))?;
         ensure!(
-            patch.format == acp_v2::DiffPatchFormat::GitPatch,
-            "unsupported patch format"
-        );
-        ensure!(
             !source.changes.is_empty(),
             "patch has no reported file changes"
         );
@@ -133,15 +146,28 @@ impl DiffPatch {
                 } else {
                     paths
                 };
-                let index = change_indices
-                    .get(&paths)
-                    .copied()
+                let index = if let Some(index) = change_indices.get(&paths) {
+                    *index
+                } else if [paths.0, paths.1]
+                    .into_iter()
                     .flatten()
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "patch paths are ambiguous or do not match the reported file changes"
-                        )
-                    })?;
+                    .any(|path| !PathStyle::Windows.has_root(path))
+                {
+                    // Relative Git paths have no declared root. Only associate a
+                    // hunk when both sides identify one reported file operation.
+                    let mut matches = change_indices.iter().filter(|(reported, _)| {
+                        patch_path_matches(paths.0, reported.0)
+                            && patch_path_matches(paths.1, reported.1)
+                    });
+                    let index = matches.next().and_then(|(_, index)| *index);
+                    ensure!(matches.next().is_none(), "ambiguous relative patch paths");
+                    index
+                } else {
+                    None
+                }
+                .ok_or_else(|| {
+                    anyhow!("patch paths are ambiguous or do not match the reported file changes")
+                })?;
                 ensure!(seen.insert(index), "repeated patch file");
                 let change = source
                     .changes
@@ -151,7 +177,7 @@ impl DiffPatch {
                     matches!(change.file_type, None | Some(acp_v2::DiffFileType::Text)),
                     "text patch supplied for a non-text file"
                 );
-                if anonymous && let Some((old, new)) = diff_change_paths(change) {
+                if let Some((old, new)) = diff_change_paths(change) {
                     file.old_path = old.map(|path| path.to_string_lossy().into_owned());
                     file.new_path = new.map(|path| path.to_string_lossy().into_owned());
                 }
@@ -165,6 +191,15 @@ impl DiffPatch {
                 Ok((index, file))
             })
             .collect()
+    }
+}
+
+fn patch_path_matches(patch: Option<&Path>, reported: Option<&Path>) -> bool {
+    match (patch, reported) {
+        (None, None) => true,
+        (Some(patch), Some(reported)) if PathStyle::Windows.has_root(patch) => patch == reported,
+        (Some(patch), Some(reported)) => reported.ends_with(patch),
+        _ => false,
     }
 }
 
@@ -285,86 +320,19 @@ impl Diff {
         old_text: Option<String>,
         new_text: String,
         language_registry: Arc<LanguageRegistry>,
-        cx: &mut Context<Self>,
     ) -> Self {
-        Self::Finalized(Self::finalized_data(
-            path,
-            old_text,
-            new_text,
-            language_registry,
-            cx,
-        ))
-    }
-
-    fn finalized_data(
-        path: String,
-        old_text: Option<String>,
-        new_text: String,
-        language_registry: Arc<LanguageRegistry>,
-        cx: &mut Context<Self>,
-    ) -> FinalizedDiff {
-        let multibuffer = cx.new(|_cx| MultiBuffer::without_headers(Capability::ReadOnly));
-        let new_buffer = cx.new(|cx| Buffer::local(new_text, cx));
         let base_text_exists = old_text.is_some();
-        let base_text = old_text.clone().unwrap_or(String::new()).into();
-        let task = cx.spawn({
-            let multibuffer = multibuffer.clone();
-            let path = path.clone();
-            let buffer = new_buffer.clone();
-            async move |this, cx| {
-                let language = language_registry
-                    .load_language_for_file_path(Path::new(&path))
-                    .await
-                    .log_err();
-
-                buffer.update(cx, |buffer, cx| buffer.set_language(language.clone(), cx));
-                buffer.update(cx, |buffer, _| buffer.parsing_idle()).await;
-
-                let diff = build_buffer_diff(
-                    old_text.unwrap_or("".into()).into(),
-                    base_text_exists,
-                    &buffer,
-                    cx,
-                )
-                .await?;
-
-                multibuffer.update(cx, |multibuffer, cx| {
-                    let hunk_ranges = {
-                        let buffer = buffer.read(cx);
-                        diff.read(cx)
-                            .snapshot(cx)
-                            .hunks_intersecting_range(
-                                Anchor::min_for_buffer(buffer.remote_id())
-                                    ..Anchor::max_for_buffer(buffer.remote_id()),
-                                buffer,
-                            )
-                            .map(|diff_hunk| diff_hunk.buffer_range.to_point(buffer))
-                            .collect::<Vec<_>>()
-                    };
-
-                    multibuffer.set_excerpts_for_path(
-                        PathKey::for_buffer(&buffer, cx),
-                        buffer.clone(),
-                        hunk_ranges,
-                        excerpt_context_lines(cx),
-                        cx,
-                    );
-                    multibuffer.add_diff(diff, cx);
-                });
-
-                this.update(cx, |_, cx| cx.notify())?;
-                anyhow::Ok(())
-            }
-        });
-
-        FinalizedDiff {
-            multibuffer,
+        Self::Finalized(FinalizedDiff {
             path,
-            base_text,
+            base_text: Arc::from(old_text.unwrap_or_default()),
+            base_text_exists,
             unified_diff: None,
-            new_buffer,
-            _update_diff: task,
-        }
+            state: FinalizedDiffState::Deferred(DeferredSource {
+                new_text,
+                language_registry,
+                has_changes: OnceCell::new(),
+            }),
+        })
     }
 
     /// Saved edits must not allocate buffers, parsers, or editor state during replay.
@@ -427,13 +395,20 @@ impl Diff {
                 return false;
             }
         };
-        snapshot.view = Some(Self::finalized_data(
+        let base_text: Arc<str> = base_text.into();
+        let resolved = build_finalized(
             snapshot.path.clone(),
-            snapshot.base_text_exists.then_some(base_text),
+            snapshot.base_text_exists,
+            base_text.clone(),
             new_text,
             snapshot.language_registry.clone(),
+            cx.weak_entity(),
             cx,
-        ));
+        );
+        snapshot.view = Some(HistoricalView {
+            base_text,
+            resolved,
+        });
         cx.notify();
         true
     }
@@ -454,8 +429,16 @@ impl Diff {
             Self::Historical(snapshot) => snapshot
                 .view
                 .as_ref()
-                .is_some_and(|view| !view._update_diff.is_ready()),
+                .is_some_and(|view| !view.resolved.populated.get()),
             _ => false,
+        }
+    }
+
+    /// Restores an interrupted edit's buffer to its base text.
+    pub fn discard_partial_edit(&mut self, cx: &mut Context<Self>) {
+        let base_text = self.base_text().clone();
+        if let Some(buffer) = self.resolve_buffer(cx) {
+            buffer.update(cx, |buffer, cx| buffer.set_text(base_text.as_ref(), cx));
         }
     }
 
@@ -515,12 +498,15 @@ impl Diff {
         }
     }
 
-    /// An unopened historical edit has no buffer until explicitly materialized.
+    /// The edited buffer, when one exists: a finalized diff builds it once it
+    /// is shown, and a saved edit once it is opened.
     pub fn buffer(&self) -> Option<&Entity<Buffer>> {
         match self {
             Self::Pending(PendingDiff { new_buffer, .. }) => Some(new_buffer),
-            Self::Finalized(FinalizedDiff { new_buffer, .. }) => Some(new_buffer),
-            Self::Historical(snapshot) => snapshot.view.as_ref().map(|view| &view.new_buffer),
+            Self::Finalized(finalized) => finalized.resolved().map(|resolved| &resolved.new_buffer),
+            Self::Historical(snapshot) => {
+                snapshot.view.as_ref().map(|view| &view.resolved.new_buffer)
+            }
         }
     }
 
@@ -535,53 +521,99 @@ impl Diff {
         }
     }
 
+    /// The diff to show, when it has been built.
     pub fn multibuffer(&self) -> Option<&Entity<MultiBuffer>> {
         match self {
             Self::Pending(PendingDiff { multibuffer, .. }) => Some(multibuffer),
-            Self::Finalized(FinalizedDiff { multibuffer, .. }) => Some(multibuffer),
-            Self::Historical(snapshot) => snapshot.view.as_ref().map(|view| &view.multibuffer),
+            Self::Finalized(finalized) => {
+                finalized.resolved().map(|resolved| &resolved.multibuffer)
+            }
+            Self::Historical(snapshot) => snapshot
+                .view
+                .as_ref()
+                .map(|view| &view.resolved.multibuffer),
+        }
+    }
+
+    /// The diff to show, building a finalized diff's buffers on first use. A
+    /// saved edit has none until it is explicitly opened.
+    pub fn resolve_multibuffer(&mut self, cx: &mut Context<Self>) -> Option<Entity<MultiBuffer>> {
+        if self.is_historical() {
+            return self.multibuffer().cloned();
+        }
+        match self {
+            Self::Pending(PendingDiff { multibuffer, .. }) => Some(multibuffer.clone()),
+            Self::Finalized(finalized) => {
+                Some(finalized.with_resolved(cx.weak_entity(), cx, |resolved| {
+                    resolved.multibuffer.clone()
+                }))
+            }
+            Self::Historical(_) => None,
+        }
+    }
+
+    fn resolve_buffer(&mut self, cx: &mut Context<Self>) -> Option<Entity<Buffer>> {
+        if self.is_historical() {
+            return self.buffer().cloned();
+        }
+        match self {
+            Self::Pending(PendingDiff { new_buffer, .. }) => Some(new_buffer.clone()),
+            Self::Finalized(finalized) => Some(finalized.with_resolved(
+                cx.weak_entity(),
+                cx,
+                |resolved| resolved.new_buffer.clone(),
+            )),
+            Self::Historical(_) => None,
         }
     }
 
     pub fn to_markdown(&self, cx: &App) -> String {
-        if let Self::Finalized(FinalizedDiff {
-            path,
-            unified_diff: Some(unified_diff),
-            ..
-        }) = self
-        {
-            return format!("Diff: {path}\n```diff\n{}\n```\n", unified_diff.trim_end());
-        }
-        if let Self::Historical(snapshot) = self {
-            return match &snapshot.unified_diff {
-                Some(unified_diff) => format!(
-                    "Diff: {}\n```diff\n{}\n```\n",
-                    snapshot.path,
-                    unified_diff.trim_end()
-                ),
-                None => format!("Diff: {}\n```\n{}\n```\n", snapshot.path, snapshot.new_text),
-            };
-        }
-        let buffer_text = self
-            .multibuffer()
-            .map(|buffer| {
-                buffer
+        let (path, buffer_text) = match self {
+            Self::Pending(PendingDiff {
+                new_buffer,
+                multibuffer,
+                ..
+            }) => {
+                let buffer_text = multibuffer
                     .read(cx)
                     .all_buffers()
                     .iter()
                     .map(|buffer| buffer.read(cx).text())
-                    .join("\n")
-            })
-            .unwrap_or_default();
-        let path = match self {
-            Diff::Pending(PendingDiff {
-                new_buffer: buffer, ..
-            }) => buffer
-                .read(cx)
-                .file()
-                .map(|file| file.path().display(file.path_style(cx))),
-            Diff::Finalized(FinalizedDiff { path, .. }) => Some(path.as_str().into()),
-            Diff::Historical(HistoricalDiff { path, .. }) => Some(path.as_str().into()),
+                    .join("\n");
+                let path = new_buffer
+                    .read(cx)
+                    .file()
+                    .map(|file| file.path().display(file.path_style(cx)));
+                (path, buffer_text)
+            }
+            Self::Finalized(FinalizedDiff {
+                path,
+                unified_diff: Some(unified_diff),
+                ..
+            }) => {
+                return format!("Diff: {path}\n```diff\n{}\n```\n", unified_diff.trim_end());
+            }
+            Self::Finalized(finalized) => {
+                let buffer_text = match &finalized.state {
+                    FinalizedDiffState::Resolved(resolved) => {
+                        finalized.export_resolved(resolved, cx)
+                    }
+                    FinalizedDiffState::Deferred(deferred) => finalized
+                        .normalized_changed_text(deferred.new_text.clone())
+                        .unwrap_or_default(),
+                };
+                (Some(finalized.path.as_str().into()), buffer_text)
+            }
+            Self::Historical(snapshot) => {
+                return match &snapshot.unified_diff {
+                    Some(unified_diff) => format!(
+                        "Diff: {}\n```diff\n{}\n```\n",
+                        snapshot.path,
+                        unified_diff.trim_end()
+                    ),
+                    None => format!("Diff: {}\n```\n{}\n```\n", snapshot.path, snapshot.new_text),
+                };
+            }
         };
         format!(
             "Diff: {}\n```\n{}\n```\n",
@@ -592,12 +624,32 @@ impl Diff {
 
     pub fn has_revealed_range(&self, cx: &App) -> bool {
         self.multibuffer()
-            .is_some_and(|buffer| !buffer.read(cx).is_empty())
+            .is_some_and(|multibuffer| !multibuffer.read(cx).is_empty())
+    }
+
+    pub fn has_changes(&self, cx: &App) -> bool {
+        match self {
+            Self::Pending(PendingDiff { multibuffer, .. }) => !multibuffer.read(cx).is_empty(),
+            Self::Finalized(finalized) => match &finalized.state {
+                FinalizedDiffState::Resolved(resolved) => {
+                    finalized.resolved_has_changes(resolved, cx)
+                }
+                FinalizedDiffState::Deferred(deferred) => *deferred.has_changes.get_or_init(|| {
+                    finalized
+                        .normalized_changed_text(deferred.new_text.clone())
+                        .is_some()
+                }),
+            },
+            Self::Historical(snapshot) => match &snapshot.unified_diff {
+                Some(unified_diff) => !unified_diff.trim().is_empty(),
+                None => !snapshot.base_text_exists || snapshot.base_text != snapshot.new_text,
+            },
+        }
     }
 
     pub fn needs_update(&self, old_text: &str, new_text: &str, cx: &App) -> bool {
         match self {
-            Diff::Pending(PendingDiff {
+            Self::Pending(PendingDiff {
                 base_text,
                 new_buffer,
                 ..
@@ -605,15 +657,19 @@ impl Diff {
                 base_text.as_ref() != old_text
                     || !new_buffer.read(cx).as_rope().chunks().equals_str(new_text)
             }
-            Diff::Finalized(FinalizedDiff {
-                base_text,
-                new_buffer,
-                ..
-            }) => {
-                base_text.as_ref() != old_text
-                    || !new_buffer.read(cx).as_rope().chunks().equals_str(new_text)
+            Self::Finalized(finalized) => {
+                let FinalizedDiffState::Resolved(resolved) = &finalized.state else {
+                    return true;
+                };
+                finalized.base_text.as_ref() != old_text
+                    || !resolved
+                        .new_buffer
+                        .read(cx)
+                        .as_rope()
+                        .chunks()
+                        .equals_str(new_text)
             }
-            Diff::Historical(snapshot) => match snapshot.texts() {
+            Self::Historical(snapshot) => match snapshot.texts() {
                 Ok((base_text, text)) => base_text != old_text || text != new_text,
                 Err(_) => true,
             },
@@ -680,90 +736,94 @@ impl PendingDiff {
         let language = new_buffer.language().cloned();
         let new_text = new_buffer.as_rope().clone();
         let context_lines = excerpt_context_lines(cx);
+        let multibuffer = self.multibuffer.clone();
 
-        let update_diff = cx.spawn(async move |this, cx| {
-            // A finished edit only ever shows its hunks. Copies of both whole
-            // versions would cost two syntax trees of the file for every edit
-            // in the conversation, so keep just the hunks at their own rows.
-            let (shown_base_text, shown_new_text, unified_diff) = cx
-                .background_spawn(async move {
-                    let new_text = new_text.to_string();
-                    let unified_diff = language::unified_diff_with_context(
-                        &base_text,
-                        &new_text,
-                        0,
-                        0,
-                        context_lines,
-                    );
-                    match sparse_texts_from_unified_diff(&unified_diff) {
-                        Ok((shown_base_text, shown_new_text)) => {
-                            (shown_base_text, shown_new_text, Some(unified_diff))
+        let update_diff = cx.spawn({
+            let multibuffer = multibuffer.clone();
+            async move |this, cx| {
+                // A finished edit only ever shows its hunks. Copies of both whole
+                // versions would cost two syntax trees of the file for every edit
+                // in the conversation, so keep just the hunks at their own rows.
+                let (shown_base_text, shown_new_text, unified_diff) = cx
+                    .background_spawn(async move {
+                        let new_text = new_text.to_string();
+                        let unified_diff = language::unified_diff_with_context(
+                            &base_text,
+                            &new_text,
+                            0,
+                            0,
+                            context_lines,
+                        );
+                        match sparse_texts_from_unified_diff(&unified_diff) {
+                            Ok((shown_base_text, shown_new_text)) => {
+                                (shown_base_text, shown_new_text, Some(unified_diff))
+                            }
+                            Err(error) => {
+                                log::debug!("Showing a whole file for an edit: {error:#}");
+                                (base_text.to_string(), new_text, None)
+                            }
                         }
-                        Err(error) => {
-                            log::debug!("Showing a whole file for an edit: {error:#}");
-                            (base_text.to_string(), new_text, None)
-                        }
-                    }
-                })
-                .await;
+                    })
+                    .await;
 
-            let buffer = cx.new(|cx| {
-                let text_buffer = TextBuffer::new_normalized(
-                    replica_id,
-                    cx.entity_id().as_non_zero_u64().into(),
-                    line_ending,
-                    text::Rope::from(shown_new_text.as_str()),
-                );
-                let mut buffer = Buffer::build(text_buffer, None, Capability::ReadWrite, cx);
-                buffer.set_language(language, cx);
-                buffer
-            });
-            buffer.update(cx, |buffer, _| buffer.parsing_idle()).await;
-            let buffer_diff = build_buffer_diff(shown_base_text.into(), true, &buffer, cx).await?;
-
-            this.update(cx, |this, cx| {
-                if let Diff::Finalized(finalized) = this {
-                    finalized.unified_diff = unified_diff.map(Arc::from);
-                }
-                let multibuffer = this
-                    .multibuffer()
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("Live diff lost its multibuffer"))?;
-                multibuffer.update(cx, |multibuffer, cx| {
-                    let ranges = {
-                        let snapshot = buffer.read(cx).snapshot();
-                        ranges
-                            .into_iter()
-                            .map(|range| {
-                                snapshot.clip_point(range.start, Bias::Left)
-                                    ..snapshot.clip_point(range.end, Bias::Left)
-                            })
-                            .collect::<Vec<_>>()
-                    };
-                    let path_key = PathKey::for_buffer(&buffer, cx);
-                    multibuffer.clear(cx);
-                    multibuffer.set_excerpts_for_path(
-                        path_key,
-                        buffer,
-                        ranges,
-                        excerpt_context_lines(cx),
-                        cx,
+                let buffer = cx.new(|cx| {
+                    let text_buffer = TextBuffer::new_normalized(
+                        replica_id,
+                        cx.entity_id().as_non_zero_u64().into(),
+                        line_ending,
+                        text::Rope::from(shown_new_text.as_str()),
                     );
-                    multibuffer.add_diff(buffer_diff.clone(), cx);
+                    let mut buffer = Buffer::build(text_buffer, None, Capability::ReadWrite, cx);
+                    buffer.set_language(language, cx);
+                    buffer
                 });
+                buffer.update(cx, |buffer, _| buffer.parsing_idle()).await;
+                let buffer_diff =
+                    build_buffer_diff(shown_base_text.into(), true, &buffer, cx).await?;
 
-                cx.notify();
-                anyhow::Ok(())
-            })?
+                this.update(cx, |this, cx| {
+                    if let Diff::Finalized(finalized) = this {
+                        finalized.unified_diff = unified_diff.map(Arc::from);
+                    }
+                    multibuffer.update(cx, |multibuffer, cx| {
+                        let ranges = {
+                            let snapshot = buffer.read(cx).snapshot();
+                            ranges
+                                .into_iter()
+                                .map(|range| {
+                                    snapshot.clip_point(range.start, Bias::Left)
+                                        ..snapshot.clip_point(range.end, Bias::Left)
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        let path_key = PathKey::for_buffer(&buffer, cx);
+                        multibuffer.clear(cx);
+                        multibuffer.set_excerpts_for_path(
+                            path_key,
+                            buffer,
+                            ranges,
+                            excerpt_context_lines(cx),
+                            cx,
+                        );
+                        multibuffer.add_diff(buffer_diff.clone(), cx);
+                    });
+
+                    cx.notify();
+                })
+            }
         });
 
         FinalizedDiff {
             path,
             base_text: self.base_text.clone(),
+            base_text_exists: true,
             unified_diff: None,
-            multibuffer: self.multibuffer.clone(),
-            new_buffer: self.new_buffer.clone(),
-            _update_diff: update_diff,
+            state: FinalizedDiffState::Resolved(ResolvedFinalized {
+                new_buffer: self.new_buffer.clone(),
+                multibuffer,
+                _update_diff: update_diff,
+                populated: Rc::new(Cell::new(true)),
+            }),
         }
     }
 
@@ -832,7 +892,13 @@ pub struct HistoricalDiff {
     /// Set when the texts are rebuilt from this diff and hold only its hunks.
     unified_diff: Option<Arc<str>>,
     language_registry: Arc<LanguageRegistry>,
-    view: Option<FinalizedDiff>,
+    view: Option<HistoricalView>,
+}
+
+/// An opened saved edit: the texts it was rebuilt from and their buffers.
+struct HistoricalView {
+    base_text: Arc<str>,
+    resolved: ResolvedFinalized,
 }
 
 impl HistoricalDiff {
@@ -915,11 +981,159 @@ fn push_hunk_side(
 pub struct FinalizedDiff {
     path: String,
     base_text: Arc<str>,
+    base_text_exists: bool,
     /// Set once a finished live edit has dropped the rest of the file.
     unified_diff: Option<Arc<str>>,
+    state: FinalizedDiffState,
+}
+
+enum FinalizedDiffState {
+    Deferred(DeferredSource),
+    Resolved(ResolvedFinalized),
+}
+
+struct DeferredSource {
+    new_text: String,
+    language_registry: Arc<LanguageRegistry>,
+    has_changes: OnceCell<bool>,
+}
+
+struct ResolvedFinalized {
     new_buffer: Entity<Buffer>,
     multibuffer: Entity<MultiBuffer>,
     _update_diff: Task<Result<()>>,
+    populated: Rc<Cell<bool>>,
+}
+
+impl FinalizedDiff {
+    fn resolved(&self) -> Option<&ResolvedFinalized> {
+        match &self.state {
+            FinalizedDiffState::Resolved(resolved) => Some(resolved),
+            FinalizedDiffState::Deferred(_) => None,
+        }
+    }
+
+    fn with_resolved<T>(
+        &mut self,
+        diff: WeakEntity<Diff>,
+        cx: &mut App,
+        read: impl FnOnce(&ResolvedFinalized) -> T,
+    ) -> T {
+        match &mut self.state {
+            FinalizedDiffState::Resolved(resolved) => read(resolved),
+            FinalizedDiffState::Deferred(deferred) => {
+                let resolved = build_finalized(
+                    self.path.clone(),
+                    self.base_text_exists,
+                    self.base_text.clone(),
+                    mem::take(&mut deferred.new_text),
+                    deferred.language_registry.clone(),
+                    diff,
+                    cx,
+                );
+                let result = read(&resolved);
+                self.state = FinalizedDiffState::Resolved(resolved);
+                result
+            }
+        }
+    }
+
+    fn resolved_has_changes(&self, resolved: &ResolvedFinalized, cx: &App) -> bool {
+        if resolved.populated.get() {
+            return !resolved.multibuffer.read(cx).is_empty();
+        }
+        self.normalized_changed_text(resolved.new_buffer.read(cx).text())
+            .is_some()
+    }
+
+    fn export_resolved(&self, resolved: &ResolvedFinalized, cx: &App) -> String {
+        if resolved.populated.get() {
+            return resolved
+                .multibuffer
+                .read(cx)
+                .all_buffers()
+                .iter()
+                .map(|buffer| buffer.read(cx).text())
+                .join("\n");
+        }
+        self.normalized_changed_text(resolved.new_buffer.read(cx).text())
+            .unwrap_or_default()
+    }
+
+    fn normalized_changed_text(&self, mut new_text: String) -> Option<String> {
+        let base_text = LineEnding::normalize_arc(self.base_text.clone());
+        LineEnding::normalize(&mut new_text);
+        (!self.base_text_exists || new_text.as_str() != base_text.as_ref()).then_some(new_text)
+    }
+}
+
+/// Builds a finished edit's buffers and diff, telling `diff` once its hunks
+/// are shown so a list measuring it can grow to fit.
+fn build_finalized(
+    path: String,
+    base_text_exists: bool,
+    base_text: Arc<str>,
+    new_text: String,
+    language_registry: Arc<LanguageRegistry>,
+    diff: WeakEntity<Diff>,
+    cx: &mut App,
+) -> ResolvedFinalized {
+    let multibuffer = cx.new(|_| MultiBuffer::without_headers(Capability::ReadOnly));
+    let new_buffer = cx.new(|cx| Buffer::local(new_text, cx));
+    let populated = Rc::new(Cell::new(false));
+    let task = cx.spawn({
+        let multibuffer = multibuffer.clone();
+        let buffer = new_buffer.clone();
+        let populated = populated.clone();
+        async move |cx| {
+            let language = language_registry
+                .load_language_for_file_path(Path::new(&path))
+                .await
+                .log_err();
+            buffer.update(cx, |buffer, cx| buffer.set_language(language, cx));
+            buffer.update(cx, |buffer, _| buffer.parsing_idle()).await;
+
+            let buffer_diff = build_buffer_diff(base_text, base_text_exists, &buffer, cx).await?;
+
+            multibuffer.update(cx, |multibuffer, cx| {
+                let hunk_ranges = {
+                    let buffer = buffer.read(cx);
+                    buffer_diff
+                        .read(cx)
+                        .snapshot(cx)
+                        .hunks_intersecting_range(
+                            Anchor::min_for_buffer(buffer.remote_id())
+                                ..Anchor::max_for_buffer(buffer.remote_id()),
+                            buffer,
+                        )
+                        .map(|diff_hunk| diff_hunk.buffer_range.to_point(buffer))
+                        .collect::<Vec<_>>()
+                };
+
+                multibuffer.set_excerpts_for_path(
+                    PathKey::for_buffer(&buffer, cx),
+                    buffer.clone(),
+                    hunk_ranges,
+                    excerpt_context_lines(cx),
+                    cx,
+                );
+                multibuffer.add_diff(buffer_diff, cx);
+            });
+
+            populated.set(true);
+            if let Some(diff) = diff.upgrade() {
+                diff.update(cx, |_, cx| cx.notify());
+            }
+            anyhow::Ok(())
+        }
+    });
+
+    ResolvedFinalized {
+        new_buffer,
+        multibuffer,
+        _update_diff: task,
+        populated,
+    }
 }
 
 async fn build_buffer_diff(
@@ -950,10 +1164,9 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
     use indoc::indoc;
-    use language::{Buffer, LanguageRegistry};
+    use language::Buffer;
     use serde_json::json;
     use settings::SettingsStore;
-    use std::sync::Arc;
 
     use crate::Diff;
 
@@ -1217,7 +1430,6 @@ mod tests {
             );
         });
     }
-
     fn source(patch: &str, changes: serde_json::Value) -> acp_v2::Diff {
         serde_json::from_value(json!({
             "changes": changes,
@@ -1286,6 +1498,63 @@ mod tests {
             ))
             .is_ok()
         );
+        for (patch, changes, expected) in [
+            (
+                "--- a/src/one.rs\n+++ b/src/one.rs\n@@ -1 +1 @@\n-old\n+new\n",
+                json!([
+                    {"operation": "modify", "path": "/project/src/one.rs"},
+                    {"operation": "modify", "path": "/project/src/two.rs"}
+                ]),
+                Some((0, Some("/project/src/one.rs"), Some("/project/src/one.rs"))),
+            ),
+            (
+                "--- old.rs\n+++ new.rs\n@@ -1 +1 @@\n-old\n+new\n",
+                json!([
+                    {"operation": "move", "oldPath": "/project/old.rs", "path": "/project/new.rs"},
+                    {"operation": "move", "oldPath": "/other/old.rs", "path": "/other/different.rs"}
+                ]),
+                Some((0, Some("/project/old.rs"), Some("/project/new.rs"))),
+            ),
+            (
+                "--- /dev/null\n+++ b/added.rs\n@@ -0,0 +1 @@\n+new\n",
+                json!([{"operation": "add", "path": "/project/added.rs"}]),
+                Some((0, None, Some("/project/added.rs"))),
+            ),
+            (
+                "--- a/deleted.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n",
+                json!([{"operation": "delete", "path": "/project/deleted.rs"}]),
+                Some((0, Some("/project/deleted.rs"), None)),
+            ),
+            (
+                "--- one.rs\n+++ one.rs\n@@ -1 +1 @@\n-old\n+new\n",
+                json!([
+                    {"operation": "modify", "path": "/project/one.rs"},
+                    {"operation": "modify", "path": "/other/one.rs"}
+                ]),
+                None,
+            ),
+            (
+                "--- src/one.rs\n+++ src/one.rs\n@@ -1 +1 @@\n-old\n+new\n",
+                json!([{"operation": "modify", "path": "/project/not-src/one.rs"}]),
+                None,
+            ),
+            (
+                "--- old.rs\n+++ wrong.rs\n@@ -1 +1 @@\n-old\n+new\n",
+                json!([{"operation": "copy", "oldPath": "/project/old.rs", "path": "/project/new.rs"}]),
+                None,
+            ),
+        ] {
+            let parsed = DiffPatch::parse(&source(patch, changes));
+            if let Some((index, old, new)) = expected {
+                let parsed = parsed.expect("unique relative paths");
+                assert_eq!(parsed.len(), 1);
+                assert_eq!(parsed[0].0, index);
+                assert_eq!(parsed[0].1.old_path.as_deref(), old);
+                assert_eq!(parsed[0].1.new_path.as_deref(), new);
+            } else {
+                assert!(parsed.is_err(), "{patch}");
+            }
+        }
     }
 
     #[test]
@@ -1363,7 +1632,7 @@ mod tests {
 
     #[gpui::test]
     async fn test_patch_hunks_render_read_only_snippets(cx: &mut TestAppContext) {
-        let patch = indoc! {"
+        let patch = indoc! {r#"
             diff --git /one /one
             --- /one
             +++ /one
@@ -1384,7 +1653,25 @@ mod tests {
             +++ /added
             @@ -0,0 +1 @@
             +added
-        "};
+            diff --git "/project/\303\251t\303\251.rs" "/project/\346\226\260.rs"
+            similarity index 75%
+            rename from "/project/\303\251t\303\251.rs"
+            rename to "/project/\346\226\260.rs"
+            --- "/project/\303\251t\303\251.rs"
+            +++ "/project/\346\226\260.rs"
+            @@ -1 +1 @@
+            -old
+            +new
+            diff --git /source /copy
+            similarity index 75%
+            copy from /source
+            copy to /copy
+            --- a/source
+            +++ b/copy
+            @@ -1 +1 @@
+            -before
+            +after
+        "#};
         let source = source(
             patch,
             json!([
@@ -1392,7 +1679,9 @@ mod tests {
                 {"operation": "delete", "path": "/deleted"},
                 {"operation": "add", "path": "/added"},
                 {"operation": "modify", "path": "/image", "fileType": "binary"},
-                {"operation": "move", "oldPath": "/old", "path": "/new"}
+                {"operation": "move", "oldPath": "/old", "path": "/new"},
+                {"operation": "move", "oldPath": "/project/été.rs", "path": "/project/新.rs"},
+                {"operation": "copy", "oldPath": "/source", "path": "/copy"}
             ]),
         );
         let render = cx.update(|cx| {
@@ -1403,7 +1692,7 @@ mod tests {
         assert!(render.fallback.is_none());
         assert_eq!(
             render.files.len(),
-            5,
+            7,
             "patchless files must remain represented"
         );
         assert_eq!(render.files[0].hunks.len(), 2);
@@ -1419,6 +1708,8 @@ mod tests {
                 (0, "context\nbefore\nafter\n"),
                 (1, "deleted\n"),
                 (2, "added\n"),
+                (5, "old\nnew\n"),
+                (6, "before\nafter\n"),
             ] {
                 let buffer = render.files[file_index].hunks[0].buffer.read(cx);
                 assert!(buffer.read_only());
@@ -1461,7 +1752,11 @@ mod tests {
             source.patch.as_mut().expect("patch").format =
                 acp_v2::DiffPatchFormat::Other("_future".into());
             let render = DiffPatch::new(&source, &languages, cx);
-            assert!(render.fallback.is_some());
+            assert_eq!(render.files.len(), 1);
+            assert!(
+                render.fallback.is_none(),
+                "an unrecognized format renders from changes as if patch were omitted"
+            );
             let content = crate::ToolCallContent::DiffPatch { source, render };
             assert!(
                 content
@@ -1475,10 +1770,144 @@ mod tests {
     #[gpui::test]
     async fn test_pending_diff(cx: &mut TestAppContext) {
         let buffer = cx.new(|cx| Buffer::local("hello!", cx));
-        let _diff = cx.new(|cx| Diff::new(buffer.clone(), cx));
+        let diff = cx.new(|cx| Diff::new(buffer.clone(), cx));
+        let multibuffer = diff.update(cx, |diff, cx| diff.resolve_multibuffer(cx).expect("diff"));
         buffer.update(cx, |buffer, cx| {
             buffer.set_text("HELLO!", cx);
         });
         cx.run_until_parked();
+
+        diff.update(cx, |diff, cx| diff.finalize(cx));
+        assert_eq!(
+            diff.update(cx, |diff, cx| diff.resolve_multibuffer(cx).expect("diff")),
+            multibuffer
+        );
+        cx.run_until_parked();
+
+        buffer.update(cx, |buffer, cx| buffer.set_text("later", cx));
+        cx.run_until_parked();
+        assert_eq!(
+            multibuffer.read_with(cx, |multibuffer, cx| {
+                multibuffer
+                    .all_buffers()
+                    .iter()
+                    .map(|buffer| buffer.read(cx).text())
+                    .collect::<Vec<_>>()
+            }),
+            ["HELLO!"]
+        );
+    }
+
+    #[gpui::test]
+    async fn test_finalized_diff_export_survives_resolution(cx: &mut TestAppContext) {
+        let languages =
+            cx.update(|cx| Arc::new(LanguageRegistry::test(cx.background_executor().clone())));
+        for (old_text, new_text, expected_changes, expected_body) in [
+            (Some("same"), "same", false, ""),
+            (Some("before"), "after", true, "after"),
+            (Some("a\r\nb"), "a\r\nb", false, ""),
+            (Some("a\nb"), "a\r\nb", false, ""),
+            (None, "added", true, "added"),
+            (None, "", true, ""),
+            (Some(""), "", false, ""),
+            (Some("removed"), "", true, ""),
+        ] {
+            let diff = cx.new(|_| {
+                Diff::finalized(
+                    "test.rs".into(),
+                    old_text.map(str::to_string),
+                    new_text.to_string(),
+                    languages.clone(),
+                )
+            });
+            let exported_before = cx.update(|cx| diff.read(cx).to_markdown(cx));
+            assert_eq!(
+                exported_before,
+                format!("Diff: test.rs\n```\n{expected_body}\n```\n")
+            );
+            assert!(diff.read_with(cx, |diff, _| matches!(
+                diff,
+                Diff::Finalized(FinalizedDiff {
+                    state: FinalizedDiffState::Deferred(_),
+                    ..
+                })
+            )));
+            assert_eq!(
+                cx.update(|cx| diff.read(cx).has_changes(cx)),
+                expected_changes,
+                "unexpected has_changes before resolving {old_text:?} -> {new_text:?}"
+            );
+
+            let multibuffer =
+                diff.update(cx, |diff, cx| diff.resolve_multibuffer(cx).expect("diff"));
+            assert_eq!(
+                diff.update(cx, |diff, cx| diff.resolve_multibuffer(cx).expect("diff")),
+                multibuffer
+            );
+
+            assert_eq!(
+                cx.update(|cx| diff.read(cx).has_changes(cx)),
+                expected_changes,
+                "has_changes must not wait for the async build {old_text:?} -> {new_text:?}"
+            );
+            assert_eq!(
+                cx.update(|cx| diff.read(cx).to_markdown(cx)),
+                exported_before,
+                "export must not wait for the async build {old_text:?} -> {new_text:?}"
+            );
+
+            cx.run_until_parked();
+
+            let exported_after = cx.update(|cx| diff.read(cx).to_markdown(cx));
+            assert_eq!(
+                cx.update(|cx| diff.read(cx).has_changes(cx)),
+                expected_changes,
+                "has_changes changed when resolving {old_text:?} -> {new_text:?}"
+            );
+            assert_eq!(
+                exported_after, exported_before,
+                "export changed when resolving {old_text:?} -> {new_text:?}"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn test_discard_partial_edit_resolves_deferred_diff(cx: &mut TestAppContext) {
+        let languages =
+            cx.update(|cx| Arc::new(LanguageRegistry::test(cx.background_executor().clone())));
+        let diff = cx.new(|_| {
+            Diff::finalized(
+                "test.rs".into(),
+                Some("before".into()),
+                "after".into(),
+                languages,
+            )
+        });
+
+        assert!(
+            diff.read_with(cx, |diff, cx| diff.has_changes(cx)),
+            "deferred diff should report changes without resolution"
+        );
+
+        diff.update(cx, |diff, cx| diff.discard_partial_edit(cx));
+
+        assert_eq!(
+            diff.read_with(cx, |diff, cx| diff
+                .buffer()
+                .expect("resolved")
+                .read(cx)
+                .text()),
+            "before"
+        );
+        assert!(
+            !diff.read_with(cx, |diff, cx| diff.has_changes(cx)),
+            "discarding should clear has_changes before the async build completes"
+        );
+        cx.run_until_parked();
+        assert!(!diff.read_with(cx, |diff, cx| diff.has_changes(cx)));
+        assert_eq!(
+            diff.read_with(cx, |diff, cx| diff.to_markdown(cx)),
+            "Diff: test.rs\n```\n\n```\n"
+        );
     }
 }

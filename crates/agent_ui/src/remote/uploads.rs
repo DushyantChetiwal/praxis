@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::v2 as acp;
+use agent_client_protocol::v2::schema as acp;
 use anyhow::{Context as _, Result, ensure};
 use fs::Fs;
 use gpui::{App, AppContext as _, AsyncApp, Entity, Global, Task};

@@ -3,10 +3,7 @@
 
 use acp_thread::{AcpThread, AgentThreadEntry};
 use agent_client_protocol::Responder;
-use agent_client_protocol::schema::{
-    v1::{self as acp, ErrorCode},
-    v2 as acp_v2,
-};
+use agent_client_protocol::v2::schema as acp_v2;
 use gpui::{AsyncApp, Entity};
 use serde::{Deserialize, Serialize};
 use util::ResultExt as _;
@@ -112,7 +109,7 @@ const MAX_PLAN_MESSAGE_CHARS: usize = 4_000;
 
 pub(super) fn handle_cursor_ask_question(
     request: CursorAskQuestionRequest,
-    responder: Responder<CursorAskQuestionResponse>,
+    responder: Responder<CursorAskQuestionResponse, agent_client_protocol::V1>,
     cx: &mut AsyncApp,
     ctx: &ClientContext,
 ) {
@@ -180,7 +177,7 @@ pub(super) fn handle_cursor_ask_question(
 
 pub(super) fn handle_cursor_create_plan(
     request: CursorCreatePlanRequest,
-    responder: Responder<CursorCreatePlanResponse>,
+    responder: Responder<CursorCreatePlanResponse, agent_client_protocol::V1>,
     cx: &mut AsyncApp,
     ctx: &ClientContext,
 ) {
@@ -239,7 +236,7 @@ pub(super) fn handle_cursor_create_plan(
 fn ask<Response, Convert>(
     thread: &Entity<AcpThread>,
     elicitation: acp_v2::CreateElicitationRequest,
-    responder: Responder<Response>,
+    responder: Responder<Response, agent_client_protocol::V1>,
     cx: &mut AsyncApp,
     convert: Convert,
 ) where
@@ -254,10 +251,10 @@ fn ask<Response, Convert>(
         }) {
             Ok(pending) => pending,
             Err(error) => {
-                return respond_err(responder, acp_thread::elicitation::error_to_v1(error));
+                return respond_err(responder, agent_client_protocol::Error::from(error));
             }
         };
-        let result: Result<_, acp::Error> = cancellation
+        let result: Result<_, agent_client_protocol::Error> = cancellation
             .run_until_cancelled(async { Ok(task.await) })
             .await;
         match result {
@@ -265,7 +262,7 @@ fn ask<Response, Convert>(
                 responder.respond(convert(response)).log_err();
             }
             Err(error) => {
-                if error.code == ErrorCode::RequestCancelled {
+                if error.code == agent_client_protocol::ErrorCode::REQUEST_CANCELLED {
                     thread.update(cx, |thread, cx| {
                         thread.cancel_elicitation(&elicitation_id, cx)
                     });

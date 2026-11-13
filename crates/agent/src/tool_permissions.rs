@@ -611,6 +611,7 @@ mod tests {
             auto_approve_external_agents: false,
             show_turn_stats: false,
             show_merge_conflict_indicator: true,
+            auto_generate_thread_titles: true,
             max_idle_retained_threads: 5,
             threads_sidebar: agent_settings::ThreadsSidebarSettings {
                 auto_open: true,

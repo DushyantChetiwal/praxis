@@ -203,7 +203,7 @@ impl ArchitectPane {
         };
         let clicked = listed.iter().position(|row| row == &id);
         if let Some((anchor, clicked)) = anchor.zip(clicked) {
-            let mut ids = if modifiers.secondary() {
+            let mut ids = if modifiers.secondary(cx) {
                 self.selected_steps()
             } else {
                 Vec::new()
@@ -213,7 +213,7 @@ impl ArchitectPane {
             // Selecting cleared the anchor, but the next Shift-click should
             // still reach from the same place.
             self.outline_anchor = Some(listed[anchor].clone());
-        } else if modifiers.secondary() {
+        } else if modifiers.secondary(cx) {
             self.toggle_in_bulk_selection(id.clone(), window, cx);
             self.outline_anchor = Some(id.clone());
         } else {
