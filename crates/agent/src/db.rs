@@ -900,7 +900,7 @@ mod tests {
         .expect("query plan");
         assert!(
             plan.iter()
-                .any(|(.., detail)| detail.contains("COVERING INDEX threads_listing")),
+                .any(|(.., detail)| detail.contains("COVERING INDEX threads_list_metadata")),
             "listing threads must not read their history blobs: {plan:?}"
         );
     }
