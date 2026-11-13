@@ -180,6 +180,8 @@ class BundleSplitModes(unittest.TestCase):
         (self.root / "crates/zed/contents/stable/embedded.provisionprofile").write_text("profile")
         (self.root / "docs/brand/praxis-app-icon.svg").write_text("icon")
         (self.root / "libstdc++.so.6").write_text("library")
+        (self.root / "sdk").mkdir()
+        (self.root / "sdk/SDKSettings.plist").write_text("plist")
         driver = self.root / "bin/mock-command"
         driver.write_text("#!" + sys.executable + "\n" + MOCK_COMMAND)
         driver.chmod(0o755)
@@ -194,10 +196,13 @@ class BundleSplitModes(unittest.TestCase):
             (self.root / "script" / command).symlink_to(driver)
         for command in ("notarytool", "stapler"):
             (self.root / "xcode/usr/bin" / command).symlink_to(driver)
-        # The production script deliberately uses an absolute codesign path.
+        # The production script deliberately uses absolute codesign and
+        # PlistBuddy paths.
         (self.root / "bash-env").write_text(
             "function /usr/bin/codesign { "
             + shlex.quote(str(self.root / "bin/codesign")) + ' "$@"; }\n'
+            + 'function /usr/libexec/PlistBuddy { case "$2" in '
+            + '*CanonicalName) echo macosx26.0 ;; *Version) echo 26.0 ;; esac; }\n'
         )
 
     def run_bundle(self, platform, *arguments, environment=None, succeeds=True):
@@ -217,6 +222,7 @@ class BundleSplitModes(unittest.TestCase):
             "TMPDIR": str(self.root / "tmp"),
             "MOCK_HOST": "aarch64-apple-darwin" if platform == "mac" else "x86_64-unknown-linux-gnu",
             "SENTRY_AUTH_TOKEN": "mock-token",
+            "SDKROOT": str(self.root / "sdk"),
             "CC": "clang",
             "LLD": str(self.root / "bin" / "ld.lld"),
         })
