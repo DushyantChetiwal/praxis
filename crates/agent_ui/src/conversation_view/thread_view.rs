@@ -11,9 +11,8 @@ use std::{cell::RefCell, path::Path};
 use acp_thread::{
     Elicitation, ElicitationEntryId, ElicitationStatus, ForegroundActivity, OutputTokensUpdate,
     ParallelStep, ParallelStepStatus, SandboxAuthorizationDetails,
-    SandboxFallbackAuthorizationDetails, SandboxNotAppliedReason, SessionMessageSide,
-    SubmissionId, SubmissionResponse, SubmissionState, ToolCallLocation,
-    decode_path_escapes,
+    SandboxFallbackAuthorizationDetails, SandboxNotAppliedReason, SessionMessageSide, SubmissionId,
+    SubmissionResponse, SubmissionState, ToolCallLocation, decode_path_escapes,
 };
 use agent::{
     SandboxStatusKey, SandboxStatusRefresh, SkillLoadingIssue, SkillLoadingIssueKind,

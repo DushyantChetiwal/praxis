@@ -754,25 +754,24 @@ fn lexical_file_surface_graph(graph: &ArchitectGraph, roots: &FileSurfaceRoots) 
                 let Some((root, relative)) = file.split_once('/') else {
                     continue;
                 };
-                let (absolute, path_style) =
-                    if let Some((root_path, path_style)) = roots.get(&root.to_lowercase()) {
-                        let relative_path = Path::new(relative);
-                        if path_style.has_root(relative_path)
-                            || path_style.is_absolute(relative_path)
-                        {
-                            continue;
-                        }
-                        let absolute =
-                            path_style.normalize_lexically(path_style.join(root_path, relative));
-                        (absolute, *path_style)
-                    } else if let Some((_, path_style)) = roots
-                        .values()
-                        .find(|(_, path_style)| path_style.is_absolute(Path::new(file.as_str())))
-                    {
-                        (PathBuf::from(file.as_str()), *path_style)
-                    } else {
+                let (absolute, path_style) = if let Some((root_path, path_style)) =
+                    roots.get(&root.to_lowercase())
+                {
+                    let relative_path = Path::new(relative);
+                    if path_style.has_root(relative_path) || path_style.is_absolute(relative_path) {
                         continue;
-                    };
+                    }
+                    let absolute =
+                        path_style.normalize_lexically(path_style.join(root_path, relative));
+                    (absolute, *path_style)
+                } else if let Some((_, path_style)) = roots
+                    .values()
+                    .find(|(_, path_style)| path_style.is_absolute(Path::new(file.as_str())))
+                {
+                    (PathBuf::from(file.as_str()), *path_style)
+                } else {
+                    continue;
+                };
                 let Some(absolute) = absolute.to_str() else {
                     continue;
                 };

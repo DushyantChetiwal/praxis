@@ -28,8 +28,8 @@ use git_ui::git_panel::GitPanel;
 use gpui::{
     AnyWindowHandle, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels,
-    Point, ScrollDelta, ScrollEvent, Subscription, Task, TaskExt as _, WeakEntity, Window,
-    point, px,
+    Point, ScrollDelta, ScrollEvent, Subscription, Task, TaskExt as _, WeakEntity, Window, point,
+    px,
 };
 use project_panel::ProjectPanel;
 use settings::Settings as _;

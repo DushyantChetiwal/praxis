@@ -48,9 +48,8 @@ use language_model::{
     LanguageModelRegistry, LanguageModelRequest, LanguageModelRequestMessage,
     LanguageModelRequestTool, LanguageModelToolChoice, LanguageModelToolResult,
     LanguageModelToolResultContent, LanguageModelToolUse, LanguageModelToolUseId,
-    LanguageModelToolUseInput, MessageContent, PromptCompactionStrategy,
-    ProviderErrorCategory, Role, SelectedModel, Speed, StopReason, TokenUsage,
-    ZED_CLOUD_PROVIDER_ID,
+    LanguageModelToolUseInput, MessageContent, PromptCompactionStrategy, ProviderErrorCategory,
+    Role, SelectedModel, Speed, StopReason, TokenUsage, ZED_CLOUD_PROVIDER_ID,
 };
 use project::{Project, trusted_worktrees::TrustedWorktrees};
 use prompt_store::ProjectContext;

@@ -13387,8 +13387,6 @@ mod tests {
         });
     }
 
-
-
     #[gpui::test]
     async fn test_local_refusal_reports_one_stop(cx: &mut TestAppContext) {
         init_test(cx);
@@ -16141,9 +16139,8 @@ mod tests {
         let previous = age_tool_call_activity(&thread, &id, cx);
         thread.update(cx, |thread, cx| {
             let languages = thread.project.read(cx).languages().clone();
-            let diff = cx.new(|_| {
-                Diff::finalized("test.txt".into(), None, "new content".into(), languages)
-            });
+            let diff = cx
+                .new(|_| Diff::finalized("test.txt".into(), None, "new content".into(), languages));
             thread
                 .update_tool_call(
                     ToolCallUpdateDiff {
@@ -20063,12 +20060,6 @@ mod tests {
         assert!(cx.read(|cx| !thread.read(cx).has_pending_edit_tool_calls()));
     }
 
-
-
-
-
-
-
     #[gpui::test]
     async fn test_tool_result_refusal(cx: &mut TestAppContext) {
         use std::sync::atomic::AtomicUsize;
@@ -23112,12 +23103,6 @@ mod tests {
             }
         });
     }
-
-
-
-
-
-
 
     /// Tests that when a follow-up message is sent during generation,
     /// the first turn completing does NOT clear `running_turn` because

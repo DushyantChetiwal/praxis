@@ -504,10 +504,9 @@ impl Diff {
         match self {
             Self::Pending(PendingDiff { new_buffer, .. }) => Some(new_buffer),
             Self::Finalized(finalized) => finalized.resolved().map(|resolved| &resolved.new_buffer),
-            Self::Historical(snapshot) => snapshot
-                .view
-                .as_ref()
-                .map(|view| &view.resolved.new_buffer),
+            Self::Historical(snapshot) => {
+                snapshot.view.as_ref().map(|view| &view.resolved.new_buffer)
+            }
         }
     }
 
@@ -526,7 +525,9 @@ impl Diff {
     pub fn multibuffer(&self) -> Option<&Entity<MultiBuffer>> {
         match self {
             Self::Pending(PendingDiff { multibuffer, .. }) => Some(multibuffer),
-            Self::Finalized(finalized) => finalized.resolved().map(|resolved| &resolved.multibuffer),
+            Self::Finalized(finalized) => {
+                finalized.resolved().map(|resolved| &resolved.multibuffer)
+            }
             Self::Historical(snapshot) => snapshot
                 .view
                 .as_ref()
@@ -542,11 +543,11 @@ impl Diff {
         }
         match self {
             Self::Pending(PendingDiff { multibuffer, .. }) => Some(multibuffer.clone()),
-            Self::Finalized(finalized) => Some(
-                finalized.with_resolved(cx.weak_entity(), cx, |resolved| {
+            Self::Finalized(finalized) => {
+                Some(finalized.with_resolved(cx.weak_entity(), cx, |resolved| {
                     resolved.multibuffer.clone()
-                }),
-            ),
+                }))
+            }
             Self::Historical(_) => None,
         }
     }
@@ -557,11 +558,11 @@ impl Diff {
         }
         match self {
             Self::Pending(PendingDiff { new_buffer, .. }) => Some(new_buffer.clone()),
-            Self::Finalized(finalized) => Some(
-                finalized.with_resolved(cx.weak_entity(), cx, |resolved| {
-                    resolved.new_buffer.clone()
-                }),
-            ),
+            Self::Finalized(finalized) => Some(finalized.with_resolved(
+                cx.weak_entity(),
+                cx,
+                |resolved| resolved.new_buffer.clone(),
+            )),
             Self::Historical(_) => None,
         }
     }
@@ -825,7 +826,6 @@ impl PendingDiff {
             }),
         }
     }
-
 
     fn update_visible_ranges(&mut self, cx: &mut Context<Diff>) {
         let ranges = self.excerpt_ranges(cx);
@@ -1838,7 +1838,8 @@ mod tests {
                 "unexpected has_changes before resolving {old_text:?} -> {new_text:?}"
             );
 
-            let multibuffer = diff.update(cx, |diff, cx| diff.resolve_multibuffer(cx).expect("diff"));
+            let multibuffer =
+                diff.update(cx, |diff, cx| diff.resolve_multibuffer(cx).expect("diff"));
             assert_eq!(
                 diff.update(cx, |diff, cx| diff.resolve_multibuffer(cx).expect("diff")),
                 multibuffer
@@ -1891,7 +1892,11 @@ mod tests {
         diff.update(cx, |diff, cx| diff.discard_partial_edit(cx));
 
         assert_eq!(
-            diff.read_with(cx, |diff, cx| diff.buffer().expect("resolved").read(cx).text()),
+            diff.read_with(cx, |diff, cx| diff
+                .buffer()
+                .expect("resolved")
+                .read(cx)
+                .text()),
             "before"
         );
         assert!(
