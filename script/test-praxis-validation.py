@@ -1063,7 +1063,8 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("if-no-files-found: error", receipt)
 
     def test_aggregate_rejects_failed_or_skipped_checks_without_verified_reuse(self):
-        block = self.workflow.split("          python - <<'PY'\n", 1)[1].split("          PY\n", 1)[0]
+        aggregate_job = self.workflow.split("  source-validated:\n", 1)[1]
+        block = aggregate_job.split("          python - <<'PY'\n", 1)[1].split("          PY\n", 1)[0]
         code = textwrap.dedent(block)
         results = {"prepare": {"result": "success", "outputs": {"validated": "false"}}}
         for name in (*validation.EXPECTED_JOBS, "full-receipt"):
