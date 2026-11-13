@@ -231,9 +231,12 @@ function BuildRemoteServer {
     Write-Output "Building remote_server for $target"
     cargo --config .cargo/bundle-config.toml build --profile $CargoProfile --package remote_server --target $target
 
-    # SSH clients expect remote_server.exe inside the archive.
-    Copy-Item -Path ".\$CargoOutDir\remote-server.exe" -Destination "$innoDir\remote_server.exe" -Force
-    $remoteServerSrc = (Resolve-Path "$innoDir\remote_server.exe").Path
+    # SSH clients expect remote_server.exe inside the archive. Remote-only
+    # bundles have no installer staging, so rename it in its own folder.
+    $remoteServerStaging = "$env:ZED_WORKSPACE\target\remote-server-staging"
+    New-Item -ItemType Directory -Path $remoteServerStaging -Force | Out-Null
+    Copy-Item -Path ".\$CargoOutDir\remote-server.exe" -Destination "$remoteServerStaging\remote_server.exe" -Force
+    $remoteServerSrc = (Resolve-Path "$remoteServerStaging\remote_server.exe").Path
 
     if ($canCodeSign) {
         Write-Output "Code signing remote_server.exe"
