@@ -1,7 +1,7 @@
 use acp_thread::{
     ParallelStep as StepProgress, ParallelStepStatus, SubagentSessionInfo, parallel_steps_meta,
 };
-use agent_client_protocol::schema::v2 as acp_v2;
+use agent_client_protocol::v2::schema as acp_v2;
 use anyhow::Result;
 use collections::HashMap;
 use futures::StreamExt as _;
@@ -421,7 +421,6 @@ impl AgentTool for RunStepsTool {
                         message_start_index: subagent.num_entries(cx),
                         message_end_index: None,
                     });
-                    event_stream.subagent_spawned(subagent.id());
                     anyhow::Ok(subagent)
                 });
                 let started = created.map(|subagent| {
@@ -708,11 +707,9 @@ mod tests {
 
         let mut plans = Vec::new();
         let mut progress_updates = Vec::new();
-        let mut spawned = 0;
         while let Ok(Ok(event)) = events.try_recv() {
             match event {
                 ThreadEvent::Plan(plan) => plans.push(plan),
-                ThreadEvent::SubagentSpawned(_) => spawned += 1,
                 ThreadEvent::ToolCallUpdate(acp_thread::ToolCallUpdate::V2(update)) => {
                     let meta = update.meta.value().cloned();
                     let progress = acp_thread::parallel_steps_from_meta(&meta);
@@ -723,7 +720,7 @@ mod tests {
                 _ => {}
             }
         }
-        assert_eq!(spawned, 3);
+        assert_eq!(steps.len(), 3);
         // The checklist changes once when the steps start and again as each
         // one finishes, rather than all at once at the end.
         assert_eq!(plans.len(), 4);

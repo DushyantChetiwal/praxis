@@ -78,7 +78,8 @@ elif command == "cargo":
         else:
             assert packages in (["zed", "cli"], ["cli"], ["remote_server"]), arguments
         for package in packages:
-            create(directory / package)
+            # Cargo names the remote server's binary after its [[bin]] target.
+            create(directory / {"remote_server": "remote-server"}.get(package, package))
     elif arguments[0] == "bundle":
         assert "[package.metadata.bundle]" in Path("Cargo.toml").read_text()
         profile = "release" if "--release" in arguments else "debug"
@@ -251,11 +252,11 @@ class BundleSplitModes(unittest.TestCase):
         self.assertTrue(uploads)
         uploaded = " ".join(uploads[-1]["arguments"][8:])
         self.assertEqual("/zed" in uploaded, desktop)
-        self.assertEqual("/remote_server" in uploaded, remote)
+        self.assertEqual("/remote-server" in uploaded, remote)
         self.assertEqual(len(self.calls("gzip")), int(remote))
         if not remote:
             for command in ("dsymutil", "strip", "llvm-objcopy", "codesign", "ldd"):
-                self.assertNotIn("remote_server", json.dumps(self.calls(command)))
+                self.assertNotRegex(json.dumps(self.calls(command)), r"remote[-_]server")
         if not desktop:
             for command in ("hdiutil", "npm", "dmg-license", "curl", "tar", "open"):
                 self.assertEqual(self.calls(command), [])
@@ -405,7 +406,7 @@ class BundleSplitModes(unittest.TestCase):
             with self.subTest(platform=platform):
                 self.run_bundle(platform, "--remote-server-only", environment={"SENTRY_AUTH_TOKEN": ""})
                 self.assertEqual(self.calls("sentry-cli"), [])
-                self.assertTrue((self.root / "target" / target / "release" / ("remote_server" + extension)).is_file())
+                self.assertTrue((self.root / "target" / target / "release" / ("remote-server" + extension)).is_file())
 
     def test_conflicting_modes_fail_before_build(self):
         for platform in ("mac", "linux"):

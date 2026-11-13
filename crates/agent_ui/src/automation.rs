@@ -190,7 +190,7 @@ fn handle(request: Request, cx: &mut App) -> Result<Value> {
             Request::Keys { keys } => {
                 let mut handled = Vec::new();
                 for key in keys.split_whitespace() {
-                    let keystroke = Keystroke::parse(key)?;
+                    let keystroke = Keystroke::parse_with_os(key, cx.platform_info().os)?;
                     handled.push(json!({
                         "key": key,
                         "handled": window.dispatch_keystroke(keystroke, cx),

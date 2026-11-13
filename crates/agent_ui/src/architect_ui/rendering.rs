@@ -1908,7 +1908,7 @@ impl ArchitectPane {
                     )
                 };
 
-                window.paint_layer(bounds, |window| {
+                window.paint_layer(|window| {
                     for (curve, color, selected) in &curves {
                         let width = px(if *selected { 2.4 } else { 1.6 });
                         paint_curve(curve, &to_screen, width, *color, window);
@@ -2836,7 +2836,7 @@ impl ArchitectPane {
                         Interaction::Selecting { .. } => CursorStyle::Crosshair,
                         _ => CursorStyle::ClosedHand,
                     })
-                    .on_scroll_wheel(cx.listener(Self::handle_scroll))
+                    .on_scroll(cx.listener(Self::handle_scroll))
                     .on_pinch(cx.listener(Self::handle_pinch))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))

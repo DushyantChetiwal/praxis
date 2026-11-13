@@ -1,6 +1,6 @@
 use crate::{AgentMessage, AgentMessageContent, UserMessage, UserMessageContent};
 use acp_thread::ClientUserMessageId;
-use agent_client_protocol::schema::v2 as acp_v2;
+use agent_client_protocol::v2::schema as acp_v2;
 use agent_settings::AgentProfileId;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -18,7 +18,7 @@ use sqlez::{
 };
 use std::{io::ErrorKind, path::PathBuf, sync::Arc};
 use ui::{App, SharedString};
-use util::path_list::PathList;
+use util::{ResultExt, path_list::PathList};
 use zed_env_vars::ZED_STATELESS;
 
 pub type DbMessage = crate::Message;
@@ -437,11 +437,11 @@ pub(crate) struct ThreadsDatabase {
     save_count: std::sync::atomic::AtomicUsize,
 }
 
+const LIST_THREADS_QUERY: &str = "SELECT id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at FROM threads ORDER BY updated_at DESC, created_at DESC";
+
 struct GlobalThreadsDatabase(Shared<Task<Result<Arc<ThreadsDatabase>, Arc<anyhow::Error>>>>);
 
 impl Global for GlobalThreadsDatabase {}
-
-const LIST_THREADS_QUERY: &str = "SELECT id, parent_id, folder_paths, folder_paths_order, summary, updated_at, created_at FROM threads ORDER BY updated_at DESC, created_at DESC";
 
 impl ThreadsDatabase {
     pub fn connect(cx: &mut App) -> Shared<Task<Result<Arc<ThreadsDatabase>, Arc<anyhow::Error>>>> {
@@ -523,21 +523,25 @@ impl ThreadsDatabase {
             }
         }
 
-        // `created_at` was added after `data`, so listing threads from the table
-        // reads every history blob to reach it. This index answers the listing
-        // by itself, in order.
-        connection.exec(indoc! {"
-            CREATE INDEX IF NOT EXISTS threads_listing ON threads (
-                updated_at DESC,
-                created_at DESC,
-                id,
-                parent_id,
-                folder_paths,
-                folder_paths_order,
-                summary
-            )
-        "})?()
-        .map_err(|e| e.context("Failed to index the thread list"))?;
+        // Praxis created its own covering index before upstream added this one;
+        // keeping both would store the thread list twice.
+        connection
+            .exec("DROP INDEX IF EXISTS threads_listing")
+            .and_then(|mut drop_index| drop_index())
+            .map_err(|e| e.context("Failed to drop the old thread list index"))
+            .log_err();
+        // The columns added above are stored after the `data` blob, so reading
+        // them from the table walks every thread's overflow pages. This index
+        // covers `LIST_THREADS_QUERY`, so listing threads never touches the blobs.
+        connection
+            .exec(indoc! {"
+                CREATE INDEX IF NOT EXISTS threads_list_metadata ON threads (
+                    updated_at, created_at, id, parent_id, folder_paths, folder_paths_order, summary
+                )
+            "})
+            .and_then(|mut create_index| create_index())
+            .map_err(|e| e.context("Failed to create threads list index"))
+            .log_err();
 
         let db = Self {
             executor,
@@ -880,7 +884,7 @@ impl ThreadsDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1 as acp;
+    use agent_client_protocol::v1::schema as acp;
     use chrono::{DateTime, TimeZone, Utc};
     use collections::HashMap;
     use gpui::TestAppContext;
@@ -1112,6 +1116,26 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].id, newer_id);
         assert_eq!(entries[1].id, older_id);
+    }
+
+    #[gpui::test]
+    async fn test_list_threads_reads_only_the_index(cx: &mut TestAppContext) {
+        let database = ThreadsDatabase::new(cx.executor()).unwrap();
+
+        let plan = database
+            .connection
+            .lock()
+            .select::<(i32, i32, i32, String)>(&format!("EXPLAIN QUERY PLAN {LIST_THREADS_QUERY}"))
+            .unwrap()()
+        .unwrap();
+        let details = plan
+            .into_iter()
+            .map(|(_, _, _, detail)| detail)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            details,
+            ["SCAN threads USING COVERING INDEX threads_list_metadata"]
+        );
     }
 
     #[gpui::test]
@@ -1519,6 +1543,7 @@ mod tests {
             parent_thread_id: parent_id.clone(),
             depth: 1,
             kind: crate::ChildThreadKind::Helper,
+            outcomes: Vec::new(),
         });
 
         let mut grandchild_thread = make_thread(
@@ -1529,6 +1554,7 @@ mod tests {
             parent_thread_id: child_id.clone(),
             depth: 2,
             kind: crate::ChildThreadKind::Helper,
+            outcomes: Vec::new(),
         });
 
         let unrelated_thread = make_thread(
@@ -1570,6 +1596,7 @@ mod tests {
             parent_thread_id: parent_id.clone(),
             depth: 2,
             kind: crate::ChildThreadKind::ArchitectExecution,
+            outcomes: Vec::new(),
         });
 
         database

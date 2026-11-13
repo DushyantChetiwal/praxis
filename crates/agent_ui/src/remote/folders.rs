@@ -106,8 +106,9 @@ pub(super) fn open(
         // A folder on a connected computer opens in this window, so it stays on
         // that computer instead of opening a local path that does not exist.
         if project
-            .read_with(cx, |project, cx| project.remote_connection_options(cx))
-            .is_some()
+            .read_with(cx, |project, cx| {
+                project.remote_connection_options(cx).is_some()
+            })
         {
             project
                 .update(cx, |project, cx| {

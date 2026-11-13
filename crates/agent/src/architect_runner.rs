@@ -6,7 +6,7 @@ use std::rc::Rc;
 use acp_thread::{
     AcpThread, AgentConnection as _, AgentThreadEntry, AssistantMessageChunk, SubmissionResponse,
 };
-use agent_client_protocol::schema::{v1 as acp_v1, v2 as acp};
+use agent_client_protocol::{v1::schema as acp_v1, v2::schema as acp};
 use anyhow::Context as _;
 use architect::{
     ArchitectGraph, Branch, Decision, MAX_NODE_VISITS, MAX_PLAN_DEPTH, MAX_RUN_STEPS, NodePath,
@@ -756,9 +756,14 @@ fn lexical_file_surface_graph(graph: &ArchitectGraph, roots: &FileSurfaceRoots) 
                 };
                 let (absolute, path_style) =
                     if let Some((root_path, path_style)) = roots.get(&root.to_lowercase()) {
-                        let Ok(absolute) = path_style.join_path(root_path, relative) else {
+                        let relative_path = Path::new(relative);
+                        if path_style.has_root(relative_path)
+                            || path_style.is_absolute(relative_path)
+                        {
                             continue;
-                        };
+                        }
+                        let absolute =
+                            path_style.normalize_lexically(path_style.join(root_path, relative));
                         (absolute, *path_style)
                     } else if let Some((_, path_style)) = roots
                         .values()
@@ -775,7 +780,10 @@ fn lexical_file_surface_graph(graph: &ArchitectGraph, roots: &FileSurfaceRoots) 
                 // file even when no filesystem entry exists yet.
                 let identity = format!(
                     "{path_style:?}:{}",
-                    path_style.normalize(absolute).to_lowercase()
+                    path_style
+                        .normalize_lexically(absolute)
+                        .to_string_lossy()
+                        .to_lowercase()
                 );
                 let representative = identities.entry(identity).or_insert_with(|| file.clone());
                 *file = representative.clone();
@@ -2546,9 +2554,8 @@ impl Driver {
         // Tells the plan's conversation about the step's thread, so the UI can
         // show it and surface anything it asks to be allowed to do.
         if step_thread != self.plan_thread {
-            let step_session_id = session_id(&step_thread, cx);
             self.plan_thread.update(cx, |thread, cx| {
-                thread.subagent_spawned(step_session_id, cx);
+                thread.register_subagent(step_thread.clone(), cx);
             });
         }
         let step_session_id = session_id(&step_thread, cx);

@@ -40,7 +40,7 @@ use std::sync::Arc;
 use acp_thread::{
     AgentThreadEntry, PermissionOptions, SelectedPermissionOutcome, ThreadStatus, ToolCallStatus,
 };
-use agent_client_protocol::schema::v2 as acp;
+use agent_client_protocol::v2::schema as acp;
 use anyhow::{Context as _, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
@@ -1174,7 +1174,7 @@ fn plan_summary(thread: &acp_thread::AcpThread) -> Vec<Value> {
     let Some(plan) = thread.plan() else {
         return Vec::new();
     };
-    plan.entries
+    plan.entries()
         .iter()
         .take(MAX_PLAN_STEPS)
         .map(|entry| {
@@ -1234,7 +1234,8 @@ fn terminal_output_page(output: &str, before: Option<usize>, running: bool) -> V
 fn status_name(status: ThreadStatus) -> &'static str {
     match status {
         ThreadStatus::Idle => "idle",
-        ThreadStatus::Generating => "generating",
+        // Unconfirmed activity may still be running, so the phone keeps Stop.
+        ThreadStatus::Generating | ThreadStatus::Unconfirmed => "generating",
     }
 }
 
@@ -2286,6 +2287,7 @@ fn describe_entry(
                 ToolCallStatus::Pending => "pending",
                 ToolCallStatus::WaitingForConfirmation => "waiting",
                 ToolCallStatus::InProgress => "running",
+                ToolCallStatus::Paused => "paused",
                 ToolCallStatus::Completed => "completed",
                 ToolCallStatus::Failed => "failed",
                 ToolCallStatus::Rejected => "rejected",
@@ -2906,7 +2908,7 @@ mod tests {
     #[gpui::test]
     async fn deferred_tool_output_stays_pending_for_the_phone(cx: &mut gpui::TestAppContext) {
         use acp_thread::AgentConnection as _;
-        use agent_client_protocol::schema::v1 as acp_v1;
+        use agent_client_protocol::v1::schema as acp_v1;
         use std::rc::Rc;
         use util::path_list::PathList;
 
@@ -2998,7 +3000,7 @@ mod tests {
         session.update(cx, |thread, cx| {
             thread
                 .upsert_tool_call(
-                    agent_client_protocol::schema::v1::ToolCall::new("remote-tool", "Read a file")
+                    agent_client_protocol::v1::schema::ToolCall::new("remote-tool", "Read a file")
                         .raw_output(json!({ "output": "tool output body" })),
                     cx,
                 )
