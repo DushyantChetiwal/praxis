@@ -595,10 +595,57 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # Tests only build the crates they test, so a change to any other crate
+      # used to reach main without being compiled. Clippy runs beside the
+      # much longer test jobs, so the extra crates do not delay the result.
+      - name: Find the packages this change touches
+        id: changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ env.SOURCE_REF }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          always = {"architect", "agent", "agent_ui", "auto_update", "context_server",
+                    "feedback", "remote", "remote_direct", "gpui", "acp_thread"}
+          # Other platforms' crates do not build here, and the zed binary is
+          # built by the bundle after every merge.
+          skipped = {"zed", "auto_update_helper", "gpui_macos", "gpui_windows",
+                     "gpui_ios", "windows_resources"}
+          compare = subprocess.run(
+              ["gh", "api", f"repos/{os.environ['GITHUB_REPOSITORY']}/compare/main...{os.environ['SOURCE_SHA']}",
+               "--jq", ".files[].filename"],
+              capture_output=True, text=True)
+          if compare.returncode != 0:
+              print(f"::warning::Could not list the changed files: {compare.stderr.strip()}")
+          metadata = json.loads(subprocess.run(
+              ["cargo", "metadata", "--no-deps", "--locked", "--format-version", "1"],
+              check=True, capture_output=True, text=True).stdout)
+          root = metadata["workspace_root"]
+          directories = {
+              os.path.relpath(os.path.dirname(package["manifest_path"]), root) + "/": package["name"]
+              for package in metadata["packages"]
+          }
+          changed = set()
+          for path in compare.stdout.split():
+              owners = [directory for directory in directories
+                        if directory.startswith("crates/") and path.startswith(directory)]
+              if owners:
+                  changed.add(directories[max(owners, key=len)])
+          extra = sorted(changed - always - skipped)
+          print("Changed packages beyond the fixed set:", ", ".join(extra) or "none")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("packages=" + " ".join(f"-p {name}" for name in extra) + "\n")
+          PY
+
       - name: Check the Architect packages with Clippy
         run: >-
           ./script/clippy --locked -p architect -p agent -p agent_ui -p auto_update
           -p context_server -p feedback -p remote -p remote_direct -p gpui -p acp_thread
+          ${{ steps.changed.outputs.packages }}
 
   full-receipt:
     name: Record original full validation
