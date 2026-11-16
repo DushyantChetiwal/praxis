@@ -3860,7 +3860,7 @@ mod tests {
         cx.update(|cx| {
             agent::ThreadStore::init_global(cx);
             language_model::LanguageModelRegistry::test(cx);
-            crate::ThreadMetadataStore::init_global(cx);
+            ThreadMetadataStore::init_global(cx);
         });
 
         let fs = fs::FakeFs::new(cx.executor());

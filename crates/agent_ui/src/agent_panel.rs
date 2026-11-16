@@ -1119,7 +1119,7 @@ pub struct AgentPanel {
     zoomed: bool,
     pending_serialization: Option<Task<Result<()>>>,
     persist_selected_agent_task: Task<()>,
-    selected_agent: Agent,
+    pub(crate) selected_agent: Agent,
     _thread_view_subscription: Option<Subscription>,
     _active_thread_focus_subscription: Option<Subscription>,
     _base_view_observation: Option<Subscription>,

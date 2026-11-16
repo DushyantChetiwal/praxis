@@ -2177,6 +2177,11 @@ impl PlatformWindow for HeadlessWindow {
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         None
     }
+
+    #[cfg(target_os = "windows")]
+    fn get_raw_handle(&self) -> windows::Win32::Foundation::HWND {
+        windows::Win32::Foundation::HWND::default()
+    }
 }
 
 #[doc(hidden)]
