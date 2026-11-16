@@ -8503,11 +8503,12 @@ mod tests {
                 position,
                 ..Default::default()
             }),
-            PlatformInput::ScrollWheel(crate::ScrollWheelEvent {
+            PlatformInput::Scroll(crate::ScrollEvent {
                 position,
                 delta: crate::ScrollDelta::Pixels(point(px(0.), px(10.))),
                 modifiers: Default::default(),
                 touch_phase: TouchPhase::Moved,
+                source: Default::default(),
             }),
             PlatformInput::KeyUp(crate::KeyUpEvent {
                 keystroke: Keystroke::parse("a").expect("valid keystroke"),
