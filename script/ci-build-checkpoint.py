@@ -22,6 +22,12 @@ ARCHIVE = "checkpoint.tar.gz"
 MANIFEST = "checkpoint.json"
 CHECKSUM = "checkpoint.sha256"
 SCHEMA = 1
+# Restoring holds the downloaded archive and its expanded copy at once, and the
+# build then grows the target directory further.
+RESTORE_FREE_SPACE_FACTOR = 5
+# Incremental state accumulates across chained checkpoints; past this size the
+# next build starts cold instead of carrying the growth forward.
+MAX_UNPACKED_BYTES = 45 * 1024**3
 
 
 def output(name, value):
@@ -144,11 +150,43 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def pack(workspace, cargo_home, destination, key):
+def unpacked_size(paths):
+    total = 0
+    for path, _ in paths:
+        if path.is_file():
+            total += path.stat().st_size
+            continue
+        for root, _, files in os.walk(path):
+            for name in files:
+                file = Path(root) / name
+                if not file.is_symlink():
+                    total += file.stat().st_size
+    return total
+
+
+def has_room_to_restore(workspace, archive_bytes):
+    free = shutil.disk_usage(workspace).free
+    if free >= archive_bytes * RESTORE_FREE_SPACE_FACTOR:
+        return True
+    report(
+        f"Skipping the build checkpoint: {free} bytes free, but restoring a {archive_bytes}-byte "
+        f"archive needs {archive_bytes * RESTORE_FREE_SPACE_FACTOR}."
+    )
+    return False
+
+
+def pack(workspace, cargo_home, destination, key, max_unpacked_bytes=MAX_UNPACKED_BYTES):
     validate_key(key)
     paths = state_paths(workspace, cargo_home)
     if not any(name.startswith("target/") for _, name in paths):
         raise ValueError("No compiler state was produced; no checkpoint will be uploaded")
+    size = unpacked_size(paths)
+    if size > max_unpacked_bytes:
+        report(
+            f"Build checkpoint not saved: {size} bytes of compiler state exceeds the "
+            f"{max_unpacked_bytes}-byte limit, so the next build starts cold."
+        )
+        return None
     destination.mkdir(parents=True, exist_ok=True)
     archive_path = destination / ARCHIVE
     manifest = {"schema": SCHEMA, "key": key, "paths": [name for _, name in paths]}
@@ -317,6 +355,8 @@ def main(argv=None):
             return 0
         if arguments.command == "find":
             artifact = find_checkpoint(os.environ["GITHUB_REPOSITORY"], os.environ["CHECKPOINT_PREFIX"])
+            if artifact and not has_room_to_restore(Path.cwd(), artifact.get("size_in_bytes", 0)):
+                artifact = None
             if artifact:
                 output("artifact-id", artifact["id"])
                 output("run-id", artifact["workflow_run"]["id"])

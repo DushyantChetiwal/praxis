@@ -27,7 +27,10 @@ runs:
       env:
         CARGO_INCREMENTAL: "1"
         CACHE_NAME: ${{ inputs.cache-name }}
-        CACHE_RECIPE: ${{ hashFiles('**/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'script/bundle-*', 'script/ci-incremental-cache.py', 'script/ci-build-checkpoint.py', '.github/actions/rust-build-cache/action.yml', '.github/actions/save-rust-build-cache/action.yml') }}
+        # Manifests and the lockfile are left out: Cargo's fingerprints rebuild
+        # whatever they change, and hashing them made every dependency bump or
+        # upstream sync miss the checkpoint.
+        CACHE_RECIPE: ${{ hashFiles('rust-toolchain.toml', '.cargo/**', 'script/bundle-*', 'script/ci-incremental-cache.py', 'script/ci-build-checkpoint.py', '.github/actions/rust-build-cache/action.yml', '.github/actions/save-rust-build-cache/action.yml') }}
       run: python script/ci-incremental-cache.py
 
     - name: Find a compatible retained build checkpoint

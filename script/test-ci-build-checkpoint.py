@@ -280,6 +280,19 @@ class ArchiveTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "No compiler state"):
                 checkpoint.pack(Path(directory), self.cargo, self.archive, KEY)
 
+    def test_oversized_compiler_state_is_not_saved_so_the_next_build_starts_cold(self):
+        output = self.root / "github-output"
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}), contextlib.redirect_stdout(io.StringIO()):
+            manifest = checkpoint.pack(self.workspace, self.cargo, self.archive, KEY, max_unpacked_bytes=16)
+        self.assertIsNone(manifest)
+        self.assertFalse((self.archive / checkpoint.ARCHIVE).exists())
+        self.assertFalse(output.exists() and "archive-path" in output.read_text())
+
+    def test_unpacked_size_counts_every_packed_file(self):
+        paths = checkpoint.state_paths(self.workspace, self.cargo)
+        expected = sum(len(content) for content in self.originals.values()) + len("dependency") * 2
+        self.assertEqual(checkpoint.unpacked_size(paths), expected)
+
 
 class PolicyTests(unittest.TestCase):
     def test_private_or_missing_visibility_disables_all_operations(self):
@@ -293,6 +306,23 @@ class PolicyTests(unittest.TestCase):
                     find.assert_not_called()
                     pack.assert_not_called()
                     restore.assert_not_called()
+
+    def test_a_checkpoint_without_room_to_restore_is_a_miss(self):
+        artifact = {"id": 20, "name": KEY, "size_in_bytes": 100, "workflow_run": {"id": 10}}
+        environment = {
+            "GITHUB_ACTIONS": "true", "REPOSITORY_VISIBILITY": "public",
+            "GITHUB_REPOSITORY": REPOSITORY, "CHECKPOINT_PREFIX": PREFIX,
+        }
+        for free, restored in ((499, False), (500, True)):
+            with self.subTest(free=free), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "github-output"
+                usage = type("Usage", (), {"free": free})()
+                with patch.dict(os.environ, {**environment, "GITHUB_OUTPUT": str(output)}, clear=True), patch.object(
+                    checkpoint, "find_checkpoint", return_value=artifact,
+                ), patch.object(checkpoint.shutil, "disk_usage", return_value=usage):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(checkpoint.main(["find"]), 0)
+                self.assertEqual(output.exists() and "artifact-id=20" in output.read_text(), restored)
 
     def test_only_read_only_github_requests_are_used_for_selection(self):
         result = type("Response", (), {"stdout": "{}"})()
