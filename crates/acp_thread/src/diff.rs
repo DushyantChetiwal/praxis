@@ -1794,7 +1794,9 @@ mod tests {
                     .map(|buffer| buffer.read(cx).text())
                     .collect::<Vec<_>>()
             }),
-            ["HELLO!"]
+            // A finished edit keeps only its hunks, and every hunk line ends
+            // with a line break.
+            ["HELLO!\n"]
         );
     }
 

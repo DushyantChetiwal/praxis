@@ -109,7 +109,7 @@ impl DisconnectedOverlay {
         {
             return;
         }
-        let Some(connection_options) = project.remote_connection_options(cx) else {
+        let Some(connection_options) = project.remote_connection_options(cx).cloned() else {
             return;
         };
         if let Some(overlay) = workspace.active_modal::<Self>(cx) {
