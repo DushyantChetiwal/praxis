@@ -1,0 +1,198 @@
+# Agent and canvas integration tests, run by script/praxis-integration-tests.py.
+# One test per line: `<package> [<name substring> | =<exact test name>]`.
+# A package alone runs all of its library tests.
+# Test lossless history memory behavior
+agent db::tests::
+agent cleared_architect_plan_
+agent terminal_tasks_wait_
+markdown deferred_markdown_
+acp_thread deferred_tool_
+acp_thread test_tool_call_label_
+acp_thread diff::tests::
+agent historical_diff_replay_
+agent tools::edit_file_tool::tests::
+agent tools::write_file_tool::tests::
+agent_ui historical_diff_cards_
+agent_ui entry_view_state::tests::test_diff_sync
+agent_ui test_rewind_views
+agent_ui compact_terminal_wait_
+agent_ui test_deferred_tool_input_
+agent_ui test_thread_search_
+agent_ui test_mixed_assistant_content_
+agent_ui test_subagents_load_on_demand_
+agent history_details_
+agent_ui test_entries_added_in_one_update_
+gpui test_live_entity_counts_
+util test_estimated_json_heap_bytes_
+
+# Test remote transport and image input
+agent_ui remote::
+agent_ui test_remote_images_
+agent test_phone_images_
+language_model test_into_png_
+recent_projects test_reconnect_action_
+remote_direct test_direct_link_
+agent_servers cursor_ext::
+agent_servers auto_approval_
+
+# Test background terminal tab inspection
+terminal_view background_agent_terminals_
+
+# Test the bundled Praxis theme
+theme_settings bundled_praxis_theme_
+
+# Test Plan-mode capability filtering
+agent session_mode_tests::"
+
+# Test capability and structured-read tools
+agent tools::tests::
+agent tools::context_server_registry::tests::
+agent tools::git_tool::tests::
+agent tools::pull_request_tool::tests::
+agent tools::refine_step_tool::tests::
+agent tools::draft_plan_tool::tests::
+agent tools::set_step_locks_tool::tests::
+agent =internal_tests::test_set_step_locks_streaming_and_replay_avoid_thread_self_read
+agent tools::architect_run_tool::tests::
+agent tools::architect_plan_tool::tests::
+agent =internal_tests::test_available_native_agent_exposes_step_configuration
+agent internal_tests::architect_coordinator_tool_tests::
+agent tools::exit_plan_mode_tool::tests::
+agent tools::update_plan_tool::tests::
+agent tools::run_steps_tool::tests::
+agent =internal_tests::test_a_background_task_finishing_after_the_turn_resumes_the_conversation
+agent =thread::tests::test_replay_shows_a_background_wake_as_a_notice
+agent =internal_tests::test_update_plan_shows_the_checklist_in_build_mode
+agent templates::tests::
+
+# Test default permissions and Restricted Mode
+agent_settings
+agent tool_permissions::tests::
+agent tools::delete_path_tool::tests::
+agent tools::copy_path_tool::tests::
+agent tools::move_path_tool::tests::
+agent tools::create_directory_tool::tests::
+agent tools::read_file_tool::test::
+agent tools::list_directory_tool::tests::
+agent tools::skill_tool::tests::
+agent tools::fetch_tool::tests::
+agent =tests::test_tool_authorization
+agent =internal_tests::test_restricted_mode_follows_trust_without_a_new_thread
+agent =internal_tests::test_a_thread_saved_with_the_minimal_profile_reopens_with_the_default
+agent =internal_tests::test_a_terminal_task_exit_is_announced
+
+# Test live parallel step cards
+acp_thread =tests::test_parallel_steps_follow_each_progress_update
+agent_ui parallel_step_cards_follow_their_step_and_the_call
+agent_ui parallel_steps_summary_counts_finished_steps
+
+# Test the checklist as a view of the plan
+agent =thread::tests::test_a_saved_checklist_becomes_the_plan
+agent =thread::tests::test_the_checklist_is_the_plan
+
+# Test Praxis startup defaults
+workspace =tests::test_new_windows_open_maximized_at_the_last_size
+agent_ui =agent_panel::tests::test_agent_panel_starts_open_follows_setting
+terminal_view =terminal_panel::tests::test_terminal_panel_starts_open_follows_setting
+
+# Test native-agent mode and run integration
+agent test_repetition_
+agent =internal_tests::test_a_new_session_offers_plan_and_build
+agent =internal_tests::test_native_mode_changes_notify_the_conversation
+agent =internal_tests::test_plan_mode_keeps_read_tools_and_denies_execution
+agent =internal_tests::test_mode_changes_refresh_the_next_provider_request
+agent =internal_tests::test_plan_mode_and_filtered_tools_survive_reopening
+agent =internal_tests::test_architect_coordinator_owns_mode_and_cancellation
+agent =internal_tests::test_ask_question_is_available_to_root_threads_in_both_modes
+agent =internal_tests::test_a_step_thread_can_refine_its_step
+agent =internal_tests::test_each_architect_step_gets_an_independent_chat
+agent =internal_tests::test_a_reopened_step_thread_gets_its_tool_back
+agent =internal_tests::test_a_run_records_the_steps_it_took
+agent =internal_tests::test_each_run_step_runs_in_a_thread_of_its_own
+agent =internal_tests::test_parallel_branches_run_at_once_and_meet_at_the_join
+agent =internal_tests::test_a_paused_run_lets_its_steps_finish_and_resumes_where_it_was
+agent =internal_tests::test_a_stopped_run_resumes_at_the_step_it_was_on
+agent =internal_tests::test_steps_running_at_once_each_report_on_their_own_visit
+agent =internal_tests::test_step_completion_is_idempotent_and_rejects_stale_visits
+agent =db::tests::test_architect_graph_roundtrips_through_save_load
+
+# Test live Architect recovery and per-step models
+agent =internal_tests::test_failed_architect_branch_resumes_without_replaying_completed_lanes
+agent =internal_tests::test_architect_revises_nested_pending_briefs_and_preserves_recovery
+agent =internal_tests::test_architect_models_update_future_steps_and_reject_active_or_invalid_edits
+agent =internal_tests::test_invalid_architect_model_fails_without_fallback_and_can_be_corrected
+agent =internal_tests::test_architect_branch_failure_retries_the_question_with_the_updated_model
+agent =internal_tests::test_architect_failure_wakes_paused_sibling_lanes
+agent =internal_tests::test_cancelled_architect_turn_does_not_complete_a_reported_step
+agent =internal_tests::test_stopping_architect_execution_keeps_the_coordinator_turn_alive
+settings_ui tool_permissions_setup::tests::
+
+# Test Architect scheduling and durable history
+agent test_subagent_thread_
+agent test_subagent_context_
+agent legacy_node_chat_roles_
+agent architect_runner::checkpoint_tests::
+agent internal_tests::architect_persistence_tests::
+agent =db::tests::test_architect_state_legacy_migration
+acp_thread test_tool_call_liveness
+
+# Test host-specific inventory path rules
+worktree file_inventory::tests::"
+
+# Build remote inventory regressions
+
+# Test remote inventory regressions
+
+# Test context limits and compaction
+agent compact
+agent prompt_too_large
+agent an_oversized_tool_result
+
+# Test turn recovery and shutdown
+agent test_retry_strategy_
+agent test_threads_flushed_to_database_on_app_quit
+agent test_quit_flush_rewrites_only_unsaved_threads
+agent_ui test_send_now_and_stop_agent_only_
+
+# Test loading-thread selection retention
+agent_ui test_add_selection_to_loading_thread
+agent_ui test_loading_selection_
+agent_ui test_pending_selections_survive_connection_retry
+agent_ui test_auth_required_on_initial_connect
+agent_ui test_message_editing_insert_selections
+agent_ui test_insert_selections
+agent_ui test_add_selection_to_terminal_thread_pastes_mention
+
+# Test Architect canvas support
+agent_ui architect_ui::
+agent_ui test_navigating_reports_only_threads_it_can_show
+
+# Test background terminal execution and lifecycle
+agent terminal_tasks_
+agent test_background_terminal_
+agent test_native_terminal_registration_handoff_is_cancellation_safe
+terminal bounded_content
+terminal process_tree
+terminal test_resizing_a_finished_terminal_
+terminal test_released_cells_
+terminal test_link_search_
+acp_thread test_terminal_bounded_capture_reports_live_and_cached_truncation
+agent terminal_tool
+agent built_in_tool_schemas_are_normalized
+settings_ui test_all_tools_are_in_tool_info_or_excluded
+
+# Test GPUI input activity
+gpui input_activity
+gpui test_window_activation_is_app_wide_and_precedes_observers
+gpui direct_text_input_records_activity
+
+# Test question recommendations and countdowns
+agent tools::ask_question_tool::tests::
+agent =internal_tests::test_ask_question_uses_the_owning_session_elicitation
+acp_thread test_question_
+agent_ui conversation_view::elicitation::tests::question_
+agent_ui test_question_timeout_manual_text_and_choices_survive_blur
+
+# Test Praxis Remote
+agent_ui test_remote_send_now_
+agent tools::terminal_task_tool::tests::

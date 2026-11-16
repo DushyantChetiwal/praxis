@@ -26,7 +26,7 @@ EXPECTED_JOBS = {
     "Formatting": "Test validation reuse provenance",
     "Architect graph tests (Linux)": "Test the Architect graph and runner",
     "Architect graph tests (Windows)": "Test the Architect graph and runner",
-    "Agent and canvas integration tests": "Test Praxis Remote",
+    "Agent and canvas integration tests": "Test Praxis Remote and the agent and canvas integrations",
     "Auto-update integrity tests": "Test the updater",
     "Windows update helper tests": "Test the Windows update helper",
     "Clippy package checks": "Check the Architect packages with Clippy",
