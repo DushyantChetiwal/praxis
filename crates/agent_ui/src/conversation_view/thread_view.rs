@@ -876,6 +876,11 @@ pub struct TurnFields {
     pub reported_activity_generation: Option<u64>,
 }
 
+enum QueuedMessageDispatchSource {
+    Automatic,
+    Manual,
+}
+
 enum ThreadControlsPosition {
     /// Below a finalized assistant message.
     TurnEnd {
@@ -1332,7 +1337,7 @@ impl ThreadView {
                 this._draft_resolve_task.take();
                 return;
             }
-            let is_empty = editor.read(cx).text(cx).is_empty();
+            let is_empty = editor.read(cx).editor().read(cx).is_empty(cx);
             let draft_contents_task = if is_empty {
                 None
             } else {
@@ -2382,7 +2387,7 @@ impl ThreadView {
                 return;
             }
             if let Some(entry) = self.message_queue.try_fast_track(is_generating) {
-                self.dispatch_queued_entry(entry, window, cx);
+                self.dispatch_queued_entry(entry, QueuedMessageDispatchSource::Manual, window, cx);
             }
             return;
         }
@@ -3401,7 +3406,7 @@ impl ThreadView {
             .message_queue
             .on_generation_stopped(is_first_editor_focused)
         {
-            self.dispatch_queued_entry(entry, window, cx);
+            self.dispatch_queued_entry(entry, QueuedMessageDispatchSource::Automatic, window, cx);
             true
         } else {
             false
@@ -3419,7 +3424,7 @@ impl ThreadView {
         }
         let is_generating = self.thread.read(cx).status() == acp_thread::ThreadStatus::Generating;
         if let Some(entry) = self.message_queue.send_now(id, is_generating) {
-            self.dispatch_queued_entry(entry, window, cx);
+            self.dispatch_queued_entry(entry, QueuedMessageDispatchSource::Manual, window, cx);
         }
     }
 
@@ -3429,6 +3434,7 @@ impl ThreadView {
     fn dispatch_queued_entry(
         &mut self,
         entry: QueueEntry,
+        source: QueuedMessageDispatchSource,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3436,7 +3442,12 @@ impl ThreadView {
 
         cx.emit(AcpThreadViewEvent::Interacted);
 
-        self.message_editor.focus_handle(cx).focus(window, cx);
+        match source {
+            QueuedMessageDispatchSource::Automatic => {}
+            QueuedMessageDispatchSource::Manual => {
+                self.message_editor.focus_handle(cx).focus(window, cx);
+            }
+        }
 
         // A queued message can itself be a built-in command (e.g. the user typed
         // `/compact` while a turn was generating). Detect that so we run it as a
@@ -4424,7 +4435,7 @@ impl ThreadView {
                     .when_some(plan, |this, plan| {
                         this.child(self.render_plan_summary(plan, window, cx))
                             .when(plan_expanded, |parent| {
-                                parent.children(self.render_plan_body(plan, window, cx))
+                                parent.child(self.render_plan_body(plan, window, cx))
                             })
                     })
                     .when(has_plan && !changed_buffers.is_empty(), |this| {
@@ -5352,14 +5363,14 @@ impl ThreadView {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let plan_expanded = self.plan_expanded;
-        let file_uri = match &plan.content {
-            PlanContent::File { uri } => Some(uri.clone()),
-            PlanContent::Items(_) | PlanContent::Markdown(_) => None,
+        let plan_path = match &plan.content {
+            PlanContent::Markdown { path, .. } => path.clone(),
+            PlanContent::Items(_) => None,
         };
 
         let title = match &plan.content {
             PlanContent::Items(_) => self.render_plan_items_title(plan, window, cx),
-            PlanContent::Markdown(markdown) => {
+            PlanContent::Markdown { markdown, .. } => {
                 let heading = markdown_plan_heading(markdown.read(cx).source());
                 h_flex()
                     .w_full()
@@ -5379,25 +5390,6 @@ impl ThreadView {
                         )
                     })
             }
-            PlanContent::File { uri } => h_flex()
-                .w_full()
-                .min_w_0()
-                .gap_1()
-                .child(
-                    Label::new("Plan")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-                .child(
-                    Label::new(plan_file_label(uri))
-                        .size(LabelSize::Small)
-                        .truncate(),
-                )
-                .child(
-                    Icon::new(IconName::ArrowUpRight)
-                        .size(IconSize::XSmall)
-                        .color(Color::Muted),
-                ),
         };
 
         h_flex()
@@ -5406,12 +5398,10 @@ impl ThreadView {
             .p_1()
             .w_full()
             .gap_1()
-            .when(plan_expanded && file_uri.is_none(), |this| {
+            .when(plan_expanded, |this| {
                 this.border_b_1().border_color(cx.theme().colors().border)
             })
-            .when(file_uri.is_none(), |this| {
-                this.child(Disclosure::new("plan_disclosure", plan_expanded))
-            })
+            .child(Disclosure::new("plan_disclosure", plan_expanded))
             .child(title.flex_1())
             // The Praxis Agent's checklist is its plan, which the canvas shows
             // with room to reshape it.
@@ -5433,6 +5423,18 @@ impl ThreadView {
                         })),
                 )
             })
+            .when_some(plan_path, |this, path| {
+                this.child(
+                    IconButton::new("open-plan-file", IconName::ArrowUpRight)
+                        .icon_size(IconSize::XSmall)
+                        .shape(ui::IconButtonShape::Square)
+                        .tooltip(Tooltip::text("Open Plan File"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_plan_file(path.clone(), window, cx);
+                            cx.stop_propagation();
+                        })),
+                )
+            })
             .child(
                 IconButton::new("dismiss-plan", IconName::Close)
                     .icon_size(IconSize::XSmall)
@@ -5443,15 +5445,40 @@ impl ThreadView {
                         cx.stop_propagation();
                     })),
             )
-            .on_click(cx.listener(move |this, _, window, cx| {
-                if let Some(uri) = &file_uri {
-                    open_link(uri.clone(), &this.workspace, window, cx);
-                } else {
-                    this.plan_expanded = !this.plan_expanded;
-                    cx.notify();
-                }
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.plan_expanded = !this.plan_expanded;
+                cx.notify();
             }))
             .into_any_element()
+    }
+
+    fn open_plan_file(&self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let project_path = self
+            .project
+            .upgrade()
+            .and_then(|project| project.read(cx).find_project_path(&path, cx));
+        let Some(open_task) = self
+            .workspace
+            .update(cx, |workspace, cx| {
+                if let Some(project_path) = project_path {
+                    workspace.open_path(project_path, None, true, window, cx)
+                } else {
+                    workspace.open_abs_path(
+                        path,
+                        OpenOptions {
+                            focus: Some(true),
+                            ..Default::default()
+                        },
+                        window,
+                        cx,
+                    )
+                }
+            })
+            .log_err()
+        else {
+            return;
+        };
+        open_task.detach_and_log_err(cx);
     }
 
     fn render_plan_items_title(&self, plan: &Plan, window: &mut Window, cx: &Context<Self>) -> Div {
@@ -5525,33 +5552,24 @@ impl ThreadView {
         }
     }
 
-    fn render_plan_body(
-        &self,
-        plan: &Plan,
-        window: &mut Window,
-        cx: &Context<Self>,
-    ) -> Option<AnyElement> {
+    fn render_plan_body(&self, plan: &Plan, window: &mut Window, cx: &Context<Self>) -> AnyElement {
         match &plan.content {
-            PlanContent::Items(entries) => Some(
-                self.render_plan_entries(entries, window, cx)
-                    .into_any_element(),
-            ),
-            PlanContent::Markdown(markdown) => Some(
-                v_flex()
-                    .id("plan_markdown")
-                    .max_h_64()
-                    .overflow_y_scroll()
-                    .px_2()
-                    .py_1()
-                    .bg(cx.theme().colors().editor_background)
-                    .text_xs()
-                    .child(MarkdownElement::new(
-                        markdown.clone(),
-                        MarkdownStyle::themed(MarkdownFont::Agent, window, cx),
-                    ))
-                    .into_any_element(),
-            ),
-            PlanContent::File { .. } => None,
+            PlanContent::Items(entries) => self
+                .render_plan_entries(entries, window, cx)
+                .into_any_element(),
+            PlanContent::Markdown { markdown, .. } => v_flex()
+                .id("plan_markdown")
+                .max_h_64()
+                .overflow_y_scroll()
+                .px_2()
+                .py_1()
+                .bg(cx.theme().colors().editor_background)
+                .text_xs()
+                .child(MarkdownElement::new(
+                    markdown.clone(),
+                    MarkdownStyle::themed(MarkdownFont::Agent, window, cx),
+                ))
+                .into_any_element(),
         }
     }
 
@@ -7324,7 +7342,7 @@ impl ThreadView {
                             .toggleable(IconPosition::End, is_selected);
 
                         menu.push_item(entry.handler({
-                            let effort = effort_level.value.clone();
+                            let effort = effort_level.value;
                             let weak_self = weak_self.clone();
                             move |_window, cx| {
                                 let effort = effort.clone();
@@ -15598,14 +15616,6 @@ fn markdown_plan_heading(source: &str) -> Option<&str> {
             && !heading.is_empty())
         .then_some(heading)
     })
-}
-
-fn plan_file_label(uri: &str) -> String {
-    Url::parse(uri)
-        .ok()
-        .and_then(|url| url.to_file_path().ok())
-        .and_then(|path| Some(path.file_name()?.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| uri.to_owned())
 }
 
 fn file_link_parts(input: &str, path_style: PathStyle) -> Option<(&str, Option<&str>)> {

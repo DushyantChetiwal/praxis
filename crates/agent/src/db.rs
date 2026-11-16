@@ -16,7 +16,11 @@ use sqlez::{
     connection::Connection,
     statement::Statement,
 };
-use std::{io::ErrorKind, path::PathBuf, sync::Arc};
+use std::{
+    io::{BufWriter, ErrorKind, Write as _},
+    path::PathBuf,
+    sync::Arc,
+};
 use ui::{App, SharedString};
 use util::{ResultExt, path_list::PathList};
 use zed_env_vars::ZED_STATELESS;
@@ -588,14 +592,18 @@ impl ThreadsDatabase {
             };
         // Serialize into the compressor instead of allocating the entire expanded
         // transcript alongside its live objects and compressed database blob.
-        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), COMPRESSION_LEVEL)?;
-        serde_json::to_writer(
-            &mut encoder,
-            &SerializedThread {
-                thread,
-                version: DbThread::VERSION,
-            },
-        )?;
+        let mut encoder = zstd::stream::Encoder::new(Vec::new(), COMPRESSION_LEVEL)?;
+        {
+            let mut writer = BufWriter::new(&mut encoder);
+            serde_json::to_writer(
+                &mut writer,
+                &SerializedThread {
+                    thread,
+                    version: DbThread::VERSION,
+                },
+            )?;
+            writer.flush()?;
+        }
         let data = encoder.finish()?;
         let data_type = DataType::Zstd;
         let connection = connection.lock();
@@ -1085,6 +1093,43 @@ mod tests {
             checklist: None,
             step_progress: None,
         }
+    }
+
+    #[gpui::test]
+    async fn test_save_thread_stores_versioned_json(cx: &mut TestAppContext) {
+        let database = ThreadsDatabase::new(cx.executor()).unwrap();
+        let thread_id = session_id("versioned-thread");
+        let mut thread = make_thread(
+            "Thread \"雪\"",
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+        );
+        thread.detailed_summary = Some(
+            "A long summary with \"quotes\", \\ and 雪\n"
+                .repeat(8192)
+                .into(),
+        );
+        let expected = serde_json::to_value(&thread).unwrap();
+
+        database
+            .save_thread(thread_id.clone(), thread, PathList::default())
+            .await
+            .unwrap();
+
+        let (data_type, data) = {
+            let connection = database.connection.lock();
+            let mut select = connection
+                .select_bound::<Arc<str>, (DataType, Vec<u8>)>(
+                    "SELECT data_type, data FROM threads WHERE id = ?",
+                )
+                .unwrap();
+            select(thread_id.0).unwrap().into_iter().next().unwrap()
+        };
+        assert_eq!(data_type, DataType::Zstd);
+        let json = zstd::decode_all(data.as_slice()).unwrap();
+        let saved_json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(saved_json["version"], DbThread::VERSION);
+        let restored = DbThread::from_json(&json).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), expected);
     }
 
     #[gpui::test]
