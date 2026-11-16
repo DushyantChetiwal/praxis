@@ -5156,6 +5156,16 @@ impl Panel for AgentPanel {
 }
 
 impl AgentPanel {
+    pub(crate) fn ensure_conversation_for_remote(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_conversation_view().is_none() {
+            self.activate_draft(false, AgentThreadSource::AgentPanel, window, cx);
+        }
+    }
+
     fn ensure_thread_initialized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.base_view, BaseView::Uninitialized) {
             if self.pending_terminal_spawn.is_some() {

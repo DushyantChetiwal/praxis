@@ -18,21 +18,39 @@ There is no repository, configuration file or token to create. You need a GitHub
 
 Praxis must be running on the computer for the phone to pair or to reach it. The phone shows whether each computer is online.
 
-### From a terminal
+### From a terminal or headless server
 
-On a machine you reach over SSH, such as a VM, set up Praxis Remote from a terminal while Praxis runs there:
+On a machine with no display server, desktop session, or browser, such as a Linux VM over SSH, Praxis can run completely headlessly and pair from the terminal:
 
 ```sh
+praxis --remote start ~/my-project
 praxis --remote pair
 ```
 
-If Praxis Remote isn't signed in, this prints a code and a GitHub address. Open the address on any device, your phone included, and enter the code. Then open the app on your phone, choose this computer, and tap **Start pairing**. The terminal shows the six-digit code: answer `y` only if your phone shows the same code.
+`--remote start` launches Praxis in the background with headless workspaces (no X11, Wayland, or GPU needed) and opens any project folders you pass; you can also browse and open folders later from your phone. If Praxis Remote isn't signed in yet, it prints a code and a GitHub address that you can open on any device, your phone included. Then open the app on your phone, choose this computer, and tap **Start pairing**. `--remote pair` shows the six-digit code in the terminal: answer `y` only if your phone shows the same code.
 
+- `praxis --remote serve [PATH...]` runs the headless host in the foreground until Ctrl-C or `SIGTERM` (for `tmux`, containers, or `systemd`), signing in if needed and answering pairing requests right in the terminal.
+- `praxis --remote start [PATH...]` starts the headless host in the background so it stays online after you close SSH.
+- `praxis --remote stop` cleanly shuts down the running Praxis host.
 - `praxis --remote sign-in` signs in without pairing.
-- `praxis --remote status` shows the GitHub account, this computer's name and the paired phones.
+- `praxis --remote status` shows the GitHub account, this computer's name, whether it is running headlessly, the open projects, and the paired phones.
 - `praxis --remote unpair --phone "Pixel 8"` removes a phone.
 
-While `--remote pair` waits, pairing requests are approved in the terminal, not in a Praxis window.
+To keep a VM connected across reboots on Linux, run `--remote serve` as a user service (`~/.config/systemd/user/praxis-remote.service`):
+
+```ini
+[Unit]
+Description=Praxis Remote headless host
+
+[Service]
+ExecStart=%h/.local/bin/praxis --remote serve
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+Enable it with `systemctl --user enable --now praxis-remote` (and `loginctl enable-linger $USER` so it runs when you aren't logged in).
 
 ## What you can do
 

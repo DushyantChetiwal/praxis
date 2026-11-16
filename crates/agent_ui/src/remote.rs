@@ -58,7 +58,7 @@ use util::ResultExt as _;
 use util::rel_path::RelPath;
 use workspace::{MultiWorkspace, Workspace};
 
-use crate::automation::{architect_pane, with_workspace, workspace_windows};
+use crate::automation::{architect_pane, workspace_windows};
 use crate::conversation_view::{ConversationView, ThreadView};
 use crate::thread_metadata_store::ThreadMetadataStore;
 use crate::{AgentPanel, NewThread};
@@ -165,8 +165,11 @@ pub struct CliStatus {
     pub failed: bool,
     /// Turned off, or never set up.
     pub off: bool,
+    /// Running without a display server.
+    pub headless: bool,
     pub login: Option<String>,
     pub device: Option<String>,
+    pub projects: Vec<String>,
     pub phones: Vec<String>,
     /// Where the sign-in is kept when the system keychain is unavailable.
     pub secrets_file: Option<PathBuf>,
@@ -196,14 +199,28 @@ pub fn cli_status(cx: &App) -> Option<CliStatus> {
         ),
         RemoteStatus::Failed { reason, .. } => (reason.clone(), None, false, true),
     };
+    let mut projects = Vec::new();
+    for window in ordered_workspace_windows(cx) {
+        let Some(Ok(multi_workspace)) = window.downcast::<MultiWorkspace>().map(|w| w.read(cx))
+        else {
+            continue;
+        };
+        for (name, _) in project_roots(multi_workspace.workspace(), cx) {
+            if !projects.contains(&name) {
+                projects.push(name);
+            }
+        }
+    }
     Some(CliStatus {
         summary,
         sign_in,
         connected,
         failed,
         off: remote.status == RemoteStatus::Off,
+        headless: cx.compositor_name() == "headless",
         login: remote.login.clone(),
         device: remote.device.clone(),
+        projects,
         phones: remote
             .phones
             .iter()
@@ -415,6 +432,12 @@ pub fn cli_describe(status: &CliStatus) -> String {
     }
     if let Some(device) = &status.device {
         lines.push(format!("This computer: {device}"));
+    }
+    if status.headless {
+        lines.push("Display: headless (no window server needed)".to_string());
+    }
+    if !status.projects.is_empty() {
+        lines.push(format!("Open projects: {}", status.projects.join(", ")));
     }
     if status.phones.is_empty() {
         lines.push("Paired phones: none".to_string());
@@ -1077,12 +1100,67 @@ fn agent_panel(workspace: &Entity<Workspace>, cx: &App) -> Result<Entity<AgentPa
         .context("the Agent panel is not loaded in that window")
 }
 
+fn ordered_workspace_windows(cx: &App) -> Vec<gpui::AnyWindowHandle> {
+    let mut windows = workspace_windows(cx);
+    if cx.window_stack().is_none() {
+        if cx.compositor_name() == "headless" {
+            windows.reverse();
+        }
+        windows.sort_by_key(|window| {
+            window
+                .downcast::<MultiWorkspace>()
+                .and_then(|window| window.read(cx).ok())
+                .is_none_or(|mw| project_roots(mw.workspace(), cx).is_empty())
+        });
+    }
+    windows
+}
+
+fn ensure_workspace_conversation(
+    workspace: &Entity<Workspace>,
+    window: &mut gpui::Window,
+    cx: &mut App,
+) {
+    if let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx)
+        && panel.read(cx).active_conversation_view().is_none()
+    {
+        panel.update(cx, |panel, cx| {
+            panel.ensure_conversation_for_remote(window, cx);
+        });
+    }
+}
+
+fn with_workspace<R>(
+    window_id: Option<u64>,
+    cx: &mut App,
+    f: impl FnOnce(&Entity<Workspace>, &mut gpui::Window, &mut App) -> Result<R>,
+) -> Result<R> {
+    let window = ordered_workspace_windows(cx)
+        .into_iter()
+        .find(|window| window_id.is_none_or(|id| window.window_id().as_u64() == id))
+        .with_context(|| match window_id {
+            Some(id) => format!("no Praxis window has the id {id}"),
+            None => "no Praxis window is open".to_string(),
+        })?;
+    window.update(cx, |root, window, cx| {
+        let multi_workspace = root
+            .downcast::<MultiWorkspace>()
+            .map_err(|_| anyhow!("the window no longer shows a workspace"))?;
+        let workspace = multi_workspace.read(cx).workspace().clone();
+        ensure_workspace_conversation(&workspace, window, cx);
+        f(&workspace, window, cx)
+    })?
+}
+
 fn conversation_view(workspace: &Entity<Workspace>, cx: &App) -> Result<Entity<ConversationView>> {
-    agent_panel(workspace, cx)?
-        .read(cx)
-        .active_conversation_view()
-        .cloned()
-        .context("the Agent panel is not showing a conversation")
+    let panel = agent_panel(workspace, cx)?;
+    if let Some(view) = panel.read(cx).active_conversation_view().cloned() {
+        return Ok(view);
+    }
+    if project_roots(workspace, cx).is_empty() {
+        bail!("Open a project folder first to start a conversation.");
+    }
+    bail!("The Agent panel is not showing a conversation.")
 }
 
 fn root_thread_view(workspace: &Entity<Workspace>, cx: &App) -> Result<Entity<ThreadView>> {
@@ -1177,9 +1255,23 @@ fn model_page(
     }))
 }
 
-fn status(device: &str, cx: &App) -> Value {
-    let active = cx.active_window().map(|window| window.window_id());
-    let windows: Vec<Value> = workspace_windows(cx)
+fn status(device: &str, cx: &mut App) -> Value {
+    let handles = ordered_workspace_windows(cx);
+    for handle in &handles {
+        handle
+            .update(cx, |root, window, cx| {
+                if let Ok(multi_workspace) = root.downcast::<MultiWorkspace>() {
+                    let workspace = multi_workspace.read(cx).workspace().clone();
+                    ensure_workspace_conversation(&workspace, window, cx);
+                }
+            })
+            .ok();
+    }
+    let active = cx
+        .active_window()
+        .or_else(|| handles.first().copied())
+        .map(|window| window.window_id());
+    let windows: Vec<Value> = handles
         .into_iter()
         .filter_map(|window| {
             // A window that closed since it was listed is simply left out.
@@ -3695,8 +3787,10 @@ mod tests {
             connected: true,
             failed: false,
             off: false,
+            headless: false,
             login: Some("octocat".to_string()),
             device: Some("debian-vm".to_string()),
+            projects: Vec::new(),
             phones: vec!["Pixel 8".to_string(), "Tablet".to_string()],
             secrets_file: None,
         }
@@ -3741,5 +3835,114 @@ mod tests {
             question.starts_with("\u{201c}Pixel 8\u{201d} wants to control Praxis on debian-vm.")
         );
         assert!(question.contains("shows the code 807 021"));
+    }
+
+    #[test]
+    fn test_remote_status_describes_headless_mode_and_projects() {
+        let status = CliStatus {
+            headless: true,
+            projects: vec!["praxis".to_string(), "docs".to_string()],
+            ..status()
+        };
+        assert_eq!(
+            cli_describe(&status),
+            "Connected.\nGitHub account: octocat\nThis computer: debian-vm\nDisplay: headless (no window server needed)\nOpen projects: praxis, docs\nPaired phones: Pixel 8, Tablet"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_headless_workspace_initializes_conversation_without_open_dock(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        crate::test_support::init_test(cx);
+        let stub = crate::test_support::set_stub_agent_connection(
+            acp_thread::StubAgentConnection::new(),
+        );
+        cx.update(|cx| {
+            agent::ThreadStore::init_global(cx);
+            language_model::LanguageModelRegistry::test(cx);
+            crate::ThreadMetadataStore::init_global(cx);
+        });
+
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree(util::path!("/repo"), json!({ "README.md": "hi" }))
+            .await;
+
+        // Open an empty placeholder window first, then a project window whose
+        // Agent dock is closed and never drawn, matching a display-less host.
+        let empty_project = Project::test(fs.clone(), [], cx).await;
+        let _empty_window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(empty_project, window, cx));
+
+        let repo_project =
+            Project::test(fs, [Path::new(util::path!("/repo"))], cx).await;
+        let repo_window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(repo_project, window, cx));
+        let repo_workspace = repo_window
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .expect("workspace");
+        let panel = repo_window
+            .update(cx, |_, window, cx| {
+                repo_workspace.update(cx, |workspace, cx| {
+                    let panel = cx.new(|cx| AgentPanel::new(workspace, window, cx));
+                    panel.update(cx, |panel, _| panel.selected_agent = crate::Agent::Stub);
+                    workspace.add_panel(panel.clone(), window, cx);
+                    panel
+                })
+            })
+            .expect("panel");
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                panel.active_conversation_view().is_none(),
+                "dock is closed and unrendered before phone requests arrive"
+            );
+        });
+
+        let status = cx
+            .update(|cx| handle_paired("status", &json!({}), "headless-vm", "phone-1", cx))
+            .await
+            .expect("status");
+        cx.run_until_parked();
+
+        // Now that the conversation spawned its stub session, status reports the
+        // project window first, active, and with a live thread summary.
+        let status = cx
+            .update(|cx| handle_paired("status", &json!({}), "headless-vm", "phone-1", cx))
+            .await
+            .expect("status after session init");
+        assert_eq!(status["windows"][0]["projects"], json!(["repo"]));
+        assert_eq!(status["windows"][0]["active"], json!(true));
+        let session_id = status["windows"][0]["thread"]["session_id"]
+            .as_str()
+            .expect("headless conversation session")
+            .to_string();
+
+        let sent = cx
+            .update(|cx| {
+                handle_paired(
+                    "prompt",
+                    &json!({ "text": "hello from phone", "session_id": session_id }),
+                    "headless-vm",
+                    "phone-1",
+                    cx,
+                )
+            })
+            .await
+            .expect("prompt succeeds without a rendered dock");
+        assert_eq!(sent["session_id"], session_id);
+        cx.run_until_parked();
+
+        let _ = stub;
+        panel.read_with(cx, |panel, cx| {
+            let view = panel
+                .active_conversation_view()
+                .expect("conversation initialized")
+                .read(cx)
+                .root_thread_view()
+                .expect("root thread");
+            assert_eq!(view.read(cx).thread.read(cx).entries().len(), 1);
+        });
     }
 }

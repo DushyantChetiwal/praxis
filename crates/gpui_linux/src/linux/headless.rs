@@ -1,10 +1,6 @@
-mod window;
-
 use std::rc::Rc;
 
-use gpui::{AnyWindowHandle, PlatformDisplay, PlatformWindow, WindowParams};
-
-pub(crate) use window::HeadlessWindow;
+use gpui::{AnyWindowHandle, HeadlessWindow, PlatformDisplay, PlatformWindow, WindowParams};
 
 /// The state of a `LinuxPlatform` with no display server.
 ///
@@ -41,7 +37,7 @@ impl HeadlessConnection {
     ) -> anyhow::Result<Box<dyn PlatformWindow>> {
         Ok(Box::new(HeadlessWindow::new(
             params,
-            self.window_lease.clone(),
+            Some(self.window_lease.clone()),
         )))
     }
 }

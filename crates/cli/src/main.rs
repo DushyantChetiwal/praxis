@@ -37,11 +37,18 @@ struct Detect;
 
 trait InstalledApp {
     fn zed_version_string(&self) -> String;
-    fn launch(&self, ipc_url: String, user_data_dir: Option<&str>) -> anyhow::Result<()>;
+    fn is_running(&self) -> bool;
+    fn launch(
+        &self,
+        ipc_url: String,
+        user_data_dir: Option<&str>,
+        headless: bool,
+    ) -> anyhow::Result<()>;
     fn run_foreground(
         &self,
         ipc_url: String,
         user_data_dir: Option<&str>,
+        headless: bool,
     ) -> io::Result<ExitStatus>;
     fn path(&self) -> PathBuf;
 }
@@ -106,6 +113,9 @@ struct Args {
     /// Run zed in the foreground (useful for debugging)
     #[arg(long)]
     foreground: bool,
+    /// Run Praxis without a display server or desktop windows
+    #[arg(long)]
+    headless: bool,
     /// Custom path to Zed.app or the zed binary
     #[arg(long)]
     zed: Option<PathBuf>,
@@ -132,10 +142,11 @@ struct Args {
     /// (windows, displays, frame scheduling, cursor), for debugging.
     #[arg(long)]
     debug_state: bool,
-    /// Set up Praxis Remote, the connection to your phone, from this terminal.
+    /// Set up or host Praxis Remote, the connection to your phone, from this terminal.
     ///
-    /// `pair` signs in to GitHub first if needed, printing a code you can
-    /// enter on any device, then asks here before allowing a phone.
+    /// `start` launches a display-less host in the background, `serve` runs it in
+    /// the foreground, `stop` shuts it down, and `pair` signs in with a device
+    /// code if needed and approves a phone here.
     #[arg(long, value_name = "ACTION", value_enum)]
     remote: Option<cli::RemoteAction>,
     /// The paired phone that `--remote unpair` removes, by name.
@@ -553,6 +564,33 @@ fn run() -> Result<()> {
         std::process::exit(status.code().unwrap_or(1));
     }
 
+    if args.remote == Some(cli::RemoteAction::Stop) && !app.is_running() {
+        println!("Praxis is not running.");
+        return Ok(());
+    }
+
+    let has_display_env = {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            std::env::var_os("WAYLAND_DISPLAY").is_some()
+                || std::env::var_os("WAYLAND_SOCKET").is_some()
+                || std::env::var_os("DISPLAY").is_some()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        {
+            true
+        }
+    };
+    let launch_headless = args.headless
+        || std::env::var_os("ZED_HEADLESS").is_some()
+        || matches!(
+            args.remote,
+            Some(cli::RemoteAction::Start | cli::RemoteAction::Serve)
+        )
+        || (args.remote.is_some() && !has_display_env);
+    let stop_on_exit = args.remote == Some(cli::RemoteAction::Serve)
+        && (!app.is_running() || args.foreground);
+
     let (server, server_name) =
         IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Zed spawn")?;
     let url = format!("zed-cli://{server_name}");
@@ -689,6 +727,7 @@ fn run() -> Result<()> {
                 #[cfg(not(target_os = "windows"))]
                 let wsl = None;
 
+                let remote_paths = paths.clone();
                 let open_request = CliRequest::Open {
                     paths,
                     urls,
@@ -707,6 +746,8 @@ fn run() -> Result<()> {
                     CliRequest::Remote {
                         action,
                         phone: args.phone.clone(),
+                        paths: remote_paths,
+                        stop_on_exit,
                     }
                 } else if args.debug_state {
                     CliRequest::DebugState
@@ -765,9 +806,9 @@ fn run() -> Result<()> {
         .collect();
 
     if args.foreground {
-        app.run_foreground(url, user_data_dir.as_deref())?;
+        app.run_foreground(url, user_data_dir.as_deref(), launch_headless)?;
     } else {
-        app.launch(url, user_data_dir.as_deref())?;
+        app.launch(url, user_data_dir.as_deref(), launch_headless)?;
         sender.join().unwrap()?;
         if let Some(handle) = stdin_pipe_handle {
             handle.join().unwrap()?;
@@ -934,7 +975,21 @@ mod linux {
             )
         }
 
-        fn launch(&self, ipc_url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
+        fn is_running(&self) -> bool {
+            let sock_path = paths::data_dir().join(format!(
+                "zed-{}.sock",
+                *release_channel::RELEASE_CHANNEL_NAME
+            ));
+            UnixDatagram::unbound()
+                .is_ok_and(|sock| sock.connect(&sock_path).is_ok())
+        }
+
+        fn launch(
+            &self,
+            ipc_url: String,
+            user_data_dir: Option<&str>,
+            headless: bool,
+        ) -> anyhow::Result<()> {
             let data_dir = user_data_dir
                 .map(PathBuf::from)
                 .unwrap_or_else(|| paths::data_dir().clone());
@@ -945,7 +1000,7 @@ mod linux {
             ));
             let sock = UnixDatagram::unbound()?;
             if sock.connect(&sock_path).is_err() {
-                self.boot_background(ipc_url, user_data_dir)?;
+                self.boot_background(ipc_url, user_data_dir, headless)?;
             } else {
                 sock.send(ipc_url.as_bytes())?;
             }
@@ -956,9 +1011,13 @@ mod linux {
             &self,
             ipc_url: String,
             user_data_dir: Option<&str>,
+            headless: bool,
         ) -> io::Result<ExitStatus> {
             let mut cmd = std::process::Command::new(self.0.clone());
             cmd.arg(ipc_url);
+            if headless {
+                cmd.arg("--headless");
+            }
             if let Some(dir) = user_data_dir {
                 cmd.arg("--user-data-dir").arg(dir);
             }
@@ -975,6 +1034,7 @@ mod linux {
             &self,
             ipc_url: String,
             user_data_dir: Option<&str>,
+            headless: bool,
         ) -> anyhow::Result<()> {
             let path = &self.0;
 
@@ -991,6 +1051,9 @@ mod linux {
                     }
                     let mut args: Vec<OsString> =
                         vec![path.as_os_str().to_owned(), OsString::from(ipc_url)];
+                    if headless {
+                        args.push(OsString::from("--headless"));
+                    }
                     if let Some(dir) = user_data_dir {
                         args.push(OsString::from("--user-data-dir"));
                         args.push(OsString::from(dir));
@@ -1207,10 +1270,22 @@ mod windows {
             )
         }
 
-        fn launch(&self, ipc_url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
+        fn is_running(&self) -> bool {
+            !check_single_instance()
+        }
+
+        fn launch(
+            &self,
+            ipc_url: String,
+            user_data_dir: Option<&str>,
+            headless: bool,
+        ) -> anyhow::Result<()> {
             if check_single_instance() {
                 let mut cmd = std::process::Command::new(self.0.clone());
                 cmd.arg(ipc_url);
+                if headless {
+                    cmd.arg("--headless");
+                }
                 if let Some(dir) = user_data_dir {
                     cmd.arg("--user-data-dir").arg(dir);
                 }
@@ -1242,9 +1317,13 @@ mod windows {
             &self,
             ipc_url: String,
             user_data_dir: Option<&str>,
+            headless: bool,
         ) -> io::Result<ExitStatus> {
             let mut cmd = std::process::Command::new(self.0.clone());
             cmd.arg(ipc_url).arg("--foreground");
+            if headless {
+                cmd.arg("--headless");
+            }
             if let Some(dir) = user_data_dir {
                 cmd.arg("--user-data-dir").arg(dir);
             }
@@ -1303,7 +1382,7 @@ mod mac_os {
         ffi::OsStr,
         fs, io,
         path::{Path, PathBuf},
-        process::{Command, ExitStatus},
+        process::{Command, ExitStatus, Stdio},
         ptr,
     };
 
@@ -1378,7 +1457,53 @@ mod mac_os {
             )
         }
 
-        fn launch(&self, url: String, user_data_dir: Option<&str>) -> anyhow::Result<()> {
+        fn is_running(&self) -> bool {
+            let sock_path = paths::data_dir().join(format!(
+                "zed-{}.sock",
+                *release_channel::RELEASE_CHANNEL_NAME
+            ));
+            std::os::unix::net::UnixDatagram::unbound()
+                .is_ok_and(|sock| sock.connect(&sock_path).is_ok())
+        }
+
+        fn launch(
+            &self,
+            url: String,
+            user_data_dir: Option<&str>,
+            headless: bool,
+        ) -> anyhow::Result<()> {
+            let sock_path = user_data_dir
+                .map(PathBuf::from)
+                .unwrap_or_else(|| paths::data_dir().clone())
+                .join(format!(
+                    "zed-{}.sock",
+                    *release_channel::RELEASE_CHANNEL_NAME
+                ));
+            if let Ok(sock) = std::os::unix::net::UnixDatagram::unbound()
+                && sock.connect(&sock_path).is_ok()
+            {
+                sock.send(url.as_bytes())?;
+                return Ok(());
+            }
+
+            if headless {
+                let mut command = std::process::Command::new(self.path());
+                command.env(FORCE_CLI_MODE_ENV_VAR_NAME, "");
+                command.arg("--headless");
+                if let Some(dir) = user_data_dir {
+                    command.arg("--user-data-dir").arg(dir);
+                }
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .arg(url);
+                command
+                    .spawn()
+                    .with_context(|| format!("Spawning {command:?}"))?;
+                return Ok(());
+            }
+
             match self {
                 Self::App { app_bundle, .. } => {
                     let app_path = app_bundle;
@@ -1450,6 +1575,7 @@ mod mac_os {
             &self,
             ipc_url: String,
             user_data_dir: Option<&str>,
+            headless: bool,
         ) -> io::Result<ExitStatus> {
             let path = match self {
                 Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/zed"),
@@ -1458,6 +1584,9 @@ mod mac_os {
 
             let mut cmd = std::process::Command::new(path);
             cmd.arg(ipc_url);
+            if headless {
+                cmd.arg("--headless");
+            }
             if let Some(dir) = user_data_dir {
                 cmd.arg("--user-data-dir").arg(dir);
             }

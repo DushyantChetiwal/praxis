@@ -97,12 +97,18 @@ use crate::zed::{CrashHandler, OpenRequestKind, eager_load_active_theme_and_icon
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn build_application() -> Application {
-    let platform = gpui_platform::current_platform(false);
-    if std::env::var("ZED_EXPERIMENTAL_A11Y").as_deref() == Ok("1") {
+fn build_application(headless: bool) -> Application {
+    let platform = gpui_platform::current_platform(headless);
+    let app = if std::env::var("ZED_EXPERIMENTAL_A11Y").as_deref() == Ok("1") {
         Application::with_platform(platform)
     } else {
         Application::new_inaccessible(platform)
+    };
+    if headless {
+        app.with_windowing(gpui::WindowingRequest::Headless)
+            .with_quit_mode(QuitMode::Explicit)
+    } else {
+        app
     }
 }
 
@@ -134,7 +140,10 @@ fn files_not_created_on_launch(errors: HashMap<io::ErrorKind, Vec<&Path>>) {
         .collect::<Vec<_>>().join("\n\n");
 
     eprintln!("{message}: {error_details}");
-    build_application()
+    if headless_requested(false) {
+        process::exit(1);
+    }
+    build_application(false)
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx| {
             if let Ok(window) = cx.open_window(gpui::WindowOptions::default(), |_, cx| {
@@ -161,6 +170,10 @@ fn files_not_created_on_launch(errors: HashMap<io::ErrorKind, Vec<&Path>>) {
                 fail_to_open_window(anyhow::anyhow!("{message}: {error_details}"), cx)
             }
         })
+}
+
+fn headless_requested(flag: bool) -> bool {
+    flag || std::env::var_os("ZED_HEADLESS").is_some()
 }
 
 fn fail_to_open_window_async(e: anyhow::Error, cx: &mut AsyncApp) {
@@ -232,7 +245,8 @@ fn main() {
     // named after the app rather than the channel, so without this a dev or
     // forked build shares settings, logs and the thread database with an
     // installed stable Zed, and saving a thread here rewrites one there.
-    let restart_arguments = if let Some(directory) = args.user_data_dir.as_deref() {
+    let headless = headless_requested(args.headless);
+    let mut restart_arguments = if let Some(directory) = args.user_data_dir.as_deref() {
         let directory = paths::set_custom_data_dir(directory);
         vec![
             std::ffi::OsString::from("--user-data-dir"),
@@ -244,6 +258,9 @@ fn main() {
         }
         Vec::new()
     };
+    if headless {
+        restart_arguments.push(std::ffi::OsString::from("--headless"));
+    }
 
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
     #[cfg(not(target_os = "windows"))]
@@ -362,7 +379,7 @@ fn main() {
     #[cfg(windows)]
     check_for_conpty_dll();
 
-    let app = build_application()
+    let app = build_application(headless)
         .with_assets(Assets)
         .with_restart_arguments(restart_arguments);
 
@@ -393,7 +410,11 @@ fn main() {
         #[cfg(target_os = "macos")]
         {
             use zed::mac_only_instance::*;
-            ensure_only_instance() != IsOnlyInstance::Yes
+            let already_running = ensure_only_instance() != IsOnlyInstance::Yes;
+            if !already_running {
+                crate::zed::listen_for_cli_connections(open_listener.clone()).log_err();
+            }
+            already_running
         }
     };
     if failed_single_instance_check {
@@ -900,7 +921,9 @@ fn main() {
 
         initialize_workspace(app_state.clone(), cx);
 
-        cx.activate(true);
+        if !headless {
+            cx.activate(true);
+        }
 
         cx.spawn({
             let client = app_state.client.clone();
@@ -2236,6 +2259,10 @@ struct Args {
     /// process communicating over a socket.
     #[arg(long, hide = true)]
     crash_handler: Option<PathBuf>,
+
+    /// Run Praxis without a display server or desktop windows.
+    #[arg(long)]
+    headless: bool,
 
     /// Run zed in the foreground, only used on Windows, to match the behavior on macOS.
     #[arg(long)]
