@@ -648,6 +648,9 @@ impl Platform for MacPlatform {
 
     #[allow(deprecated)]
     fn activate(&self, ignoring_other_apps: bool) {
+        if self.0.lock().headless {
+            return;
+        }
         let app = NSApplication::sharedApplication(self.1);
         app.activateIgnoringOtherApps(ignoring_other_apps);
     }
@@ -667,6 +670,14 @@ impl Platform for MacPlatform {
 
     fn set_initial_windowing(&self, request: WindowingRequest) {
         self.set_activation_policy(activation_policy_for(&request));
+    }
+
+    fn compositor_name(&self) -> &'static str {
+        if self.0.lock().headless {
+            "headless"
+        } else {
+            ""
+        }
     }
 
     fn request_windowing(&self, request: WindowingRequest) -> Task<Result<()>> {
@@ -744,6 +755,9 @@ impl Platform for MacPlatform {
     // Returns the windows ordered front-to-back, meaning that the active
     // window is the first one in the returned vec.
     fn window_stack(&self) -> Option<Vec<AnyWindowHandle>> {
+        if self.0.lock().headless {
+            return None;
+        }
         Some(MacWindow::ordered_windows())
     }
 
@@ -758,15 +772,19 @@ impl Platform for MacPlatform {
             return Err(PopupNotSupportedError.into());
         }
 
-        let (cursor_visible, foreground_executor, background_executor, renderer_context) = {
+        let (headless, cursor_visible, foreground_executor, background_executor, renderer_context) = {
             let guard = self.0.lock();
             (
+                guard.headless,
                 guard.cursor_visible.clone(),
                 guard.foreground_executor.clone(),
                 guard.background_executor.clone(),
                 guard.renderer_context.clone(),
             )
         };
+        if headless {
+            return Ok(Box::new(gpui::HeadlessWindow::new(options, None)));
+        }
 
         Ok(Box::new(MacWindow::open(
             handle,

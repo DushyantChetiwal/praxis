@@ -1119,7 +1119,7 @@ pub struct AgentPanel {
     zoomed: bool,
     pending_serialization: Option<Task<Result<()>>>,
     persist_selected_agent_task: Task<()>,
-    selected_agent: Agent,
+    pub(crate) selected_agent: Agent,
     _thread_view_subscription: Option<Subscription>,
     _active_thread_focus_subscription: Option<Subscription>,
     _base_view_observation: Option<Subscription>,
@@ -5156,6 +5156,16 @@ impl Panel for AgentPanel {
 }
 
 impl AgentPanel {
+    pub(crate) fn ensure_conversation_for_remote(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_conversation_view().is_none() {
+            self.activate_draft(false, AgentThreadSource::AgentPanel, window, cx);
+        }
+    }
+
     fn ensure_thread_initialized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.base_view, BaseView::Uninitialized) {
             if self.pending_terminal_spawn.is_some() {

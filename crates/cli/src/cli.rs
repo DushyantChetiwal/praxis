@@ -63,6 +63,12 @@ pub enum RemoteAction {
     SignIn,
     /// Sign in if needed, then wait for a phone and approve it here.
     Pair,
+    /// Start a headless Praxis Remote host in the background.
+    Start,
+    /// Run a headless Praxis Remote host in the foreground until stopped.
+    Serve,
+    /// Stop the running Praxis host.
+    Stop,
     /// Remove the paired phone named by `--phone`.
     Unpair,
 }
@@ -92,6 +98,10 @@ pub enum CliRequest {
     Remote {
         action: RemoteAction,
         phone: Option<String>,
+        #[serde(default)]
+        paths: Vec<String>,
+        #[serde(default)]
+        stop_on_exit: bool,
     },
     /// The answer to a [`CliResponse::PromptConfirm`].
     Confirm {

@@ -375,12 +375,13 @@ impl LinuxPlatform {
             }
         };
         match backend {
-            Some((backend, environment)) => {
-                let connection = self
-                    .connect(backend, environment, startup)
-                    .unwrap_or_else(|error| panic!("{error:#}"));
-                self.replace_connection(connection);
-            }
+            Some((backend, environment)) => match self.connect(backend, environment, startup) {
+                Ok(connection) => self.replace_connection(connection),
+                Err(error) if self.allowed_modes.contains(WindowingModes::HEADLESS) => {
+                    log::warn!("failed to connect to display server, starting headless: {error:#}");
+                }
+                Err(error) => panic!("{error:#}"),
+            },
             None => assert!(
                 self.allowed_modes.contains(WindowingModes::HEADLESS),
                 "{:?} does not allow starting headless, and no allowed display server was given",

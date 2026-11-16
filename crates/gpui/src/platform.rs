@@ -69,6 +69,7 @@ use std::io::Cursor;
 use std::ops;
 use std::time::Duration;
 use std::{
+    cell::RefCell,
     ffi::OsString,
     fmt::{self, Debug},
     ops::Range,
@@ -1982,6 +1983,207 @@ impl PlatformAtlas for HeadlessAtlas {
     }
 }
 
+struct HeadlessWindowState {
+    bounds: Bounds<Pixels>,
+    /// Held while this window exists so platforms can tell whether headless windows are open.
+    _lease: Option<Rc<()>>,
+    input_handler: Option<PlatformInputHandler>,
+    title: Option<String>,
+    is_fullscreen: bool,
+}
+
+/// A platform window with no display surface and no GPU.
+///
+/// Layout, text shaping, and entity state run normally while `draw` discards
+/// every scene and [`HeadlessAtlas`] satisfies sprite requests without
+/// uploading pixels. This lets headless hosts run [`Window`]-backed workspaces
+/// without a display server.
+pub struct HeadlessWindow(Rc<RefCell<HeadlessWindowState>>);
+
+impl HasWindowHandle for HeadlessWindow {
+    fn window_handle(
+        &self,
+    ) -> std::result::Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
+    {
+        Err(raw_window_handle::HandleError::NotSupported)
+    }
+}
+
+impl HasDisplayHandle for HeadlessWindow {
+    fn display_handle(
+        &self,
+    ) -> std::result::Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+    {
+        Err(raw_window_handle::HandleError::NotSupported)
+    }
+}
+
+impl HeadlessWindow {
+    /// Creates a headless window with `params` and an optional `lease` token
+    /// retained until the window is dropped.
+    pub fn new(params: WindowParams, lease: Option<Rc<()>>) -> Self {
+        Self(Rc::new(RefCell::new(HeadlessWindowState {
+            bounds: params.bounds,
+            _lease: lease,
+            input_handler: None,
+            title: None,
+            is_fullscreen: false,
+        })))
+    }
+}
+
+impl PlatformWindow for HeadlessWindow {
+    fn bounds(&self) -> Bounds<Pixels> {
+        self.0.borrow().bounds
+    }
+
+    fn is_maximized(&self) -> bool {
+        false
+    }
+
+    fn window_bounds(&self) -> WindowBounds {
+        WindowBounds::Windowed(self.bounds())
+    }
+
+    fn content_size(&self) -> Size<Pixels> {
+        self.bounds().size
+    }
+
+    fn resize(&mut self, size: Size<Pixels>) {
+        self.0.borrow_mut().bounds.size = size;
+    }
+
+    fn scale_factor(&self) -> f32 {
+        1.0
+    }
+
+    fn appearance(&self) -> WindowAppearance {
+        WindowAppearance::Dark
+    }
+
+    fn display(&self) -> Option<Rc<dyn PlatformDisplay>> {
+        None
+    }
+
+    fn mouse_position(&self) -> Point<Pixels> {
+        Point::default()
+    }
+
+    fn modifiers(&self) -> crate::Modifiers {
+        crate::Modifiers::default()
+    }
+
+    fn capslock(&self) -> crate::Capslock {
+        crate::Capslock::default()
+    }
+
+    fn set_input_handler(&mut self, input_handler: PlatformInputHandler) {
+        self.0.borrow_mut().input_handler = Some(input_handler);
+    }
+
+    fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
+        self.0.borrow_mut().input_handler.take()
+    }
+
+    fn prompt(
+        &self,
+        _level: PromptLevel,
+        _msg: &str,
+        _detail: Option<&str>,
+        _answers: &[PromptButton],
+    ) -> Option<oneshot::Receiver<usize>> {
+        None
+    }
+
+    fn activate(&self) {}
+
+    fn is_active(&self) -> bool {
+        false
+    }
+
+    fn visibility(&self) -> WindowVisibility {
+        WindowVisibility::Hidden
+    }
+
+    fn is_hovered(&self) -> bool {
+        false
+    }
+
+    fn background_appearance(&self) -> WindowBackgroundAppearance {
+        WindowBackgroundAppearance::Opaque
+    }
+
+    fn set_title(&mut self, title: &str) {
+        self.0.borrow_mut().title = Some(title.to_owned());
+    }
+
+    fn get_title(&self) -> String {
+        self.0.borrow().title.clone().unwrap_or_default()
+    }
+
+    fn set_background_appearance(&self, _background: WindowBackgroundAppearance) {}
+
+    fn minimize(&self) {}
+
+    fn zoom(&self) {}
+
+    fn toggle_fullscreen(&self) {
+        let mut state = self.0.borrow_mut();
+        state.is_fullscreen = !state.is_fullscreen;
+    }
+
+    fn is_fullscreen(&self) -> bool {
+        self.0.borrow().is_fullscreen
+    }
+
+    // No compositor drives a frame loop, so frame and status callbacks are dropped.
+    fn on_request_frame(&self, _callback: Box<dyn FnMut(RequestFrameOptions)>) {}
+
+    fn on_input(&self, _callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>) {}
+
+    fn on_active_status_change(&self, _callback: Box<dyn FnMut(bool)>) {}
+
+    fn on_visibility_change(&self, _callback: Box<dyn FnMut(WindowVisibility)>) {}
+
+    fn on_hover_status_change(&self, _callback: Box<dyn FnMut(bool)>) {}
+
+    fn on_resize(&self, _callback: Box<dyn FnMut(Size<Pixels>, f32)>) {}
+
+    fn on_moved(&self, _callback: Box<dyn FnMut()>) {}
+
+    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {}
+
+    fn on_should_close(&self, _callback: Box<dyn FnMut() -> bool>) {}
+
+    fn on_close(&self, _callback: Box<dyn FnOnce()>) {}
+
+    fn on_hit_test_window_control(&self, _callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
+    }
+
+    fn on_appearance_changed(&self, _callback: Box<dyn FnMut()>) {}
+
+    fn draw(&self, _scene: &Scene) {}
+
+    fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
+        Arc::new(HeadlessAtlas::default())
+    }
+
+    fn is_subpixel_rendering_supported(&self) -> bool {
+        false
+    }
+
+    fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
+
+    fn gpu_specs(&self) -> Option<GpuSpecs> {
+        None
+    }
+
+    #[cfg(target_os = "windows")]
+    fn get_raw_handle(&self) -> windows::Win32::Foundation::HWND {
+        windows::Win32::Foundation::HWND::default()
+    }
+}
+
 #[doc(hidden)]
 pub struct AtlasTextureList<T> {
     pub textures: Vec<Option<T>>,
@@ -3862,6 +4064,53 @@ mod frame_signal_tests {
         let signal = PlatformFrameSignal::new();
         signal.record(Instant::now(), FrameRequestSource::LocalSchedule);
         assert_eq!(signal.take(), None);
+    }
+}
+
+#[cfg(test)]
+mod headless_window_tests {
+    use super::*;
+
+    #[test]
+    fn test_headless_window_lease_and_visibility() {
+        let lease = Rc::new(());
+        let params = WindowParams {
+            bounds: Bounds {
+                origin: point(px(0.), px(0.)),
+                size: size(px(800.), px(600.)),
+            },
+            titlebar: None,
+            kind: WindowKind::Normal,
+            is_movable: true,
+            app_owns_titlebar_drag: false,
+            is_resizable: true,
+            is_minimizable: true,
+            focus: false,
+            show: false,
+            icon: None,
+            display_id: None,
+            app_id: None,
+            window_min_size: None,
+            #[cfg(target_os = "macos")]
+            tabbing_identifier: None,
+            #[cfg(target_os = "macos")]
+            use_display_p3: false,
+        };
+        let mut window = HeadlessWindow::new(params, Some(lease.clone()));
+        assert_eq!(Rc::strong_count(&lease), 2);
+        assert_eq!(window.visibility(), WindowVisibility::Hidden);
+        assert!(!window.is_active());
+        assert_eq!(window.content_size(), size(px(800.), px(600.)));
+
+        window.resize(size(px(1024.), px(768.)));
+        window.set_title("Praxis Headless");
+        assert_eq!(window.content_size(), size(px(1024.), px(768.)));
+        assert_eq!(window.get_title(), "Praxis Headless");
+        assert!(window.window_handle().is_err());
+        assert!(window.display_handle().is_err());
+
+        drop(window);
+        assert_eq!(Rc::strong_count(&lease), 1);
     }
 }
 

@@ -458,7 +458,10 @@ async fn serve(
                 {
                     continue;
                 }
-                let value = cx.update(|cx| snapshot(&status(&device, cx), Some(watch), cx));
+                let value = cx.update(|cx| {
+                    let current = status(&device, cx);
+                    snapshot(&current, Some(watch), cx)
+                });
                 let fingerprint = value.to_string();
                 let unchanged = published.get(phone).is_some_and(|(previous, at)| {
                     previous == &fingerprint && at.elapsed() < Duration::from_secs(15)

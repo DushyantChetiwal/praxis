@@ -57,6 +57,8 @@ pub struct WindowsPlatform {
     initial_windowing: RefCell<Option<WindowingRequest>>,
     /// Set to stop the current `VSyncProvider` thread, which runs while windowed.
     vsync_stop: RefCell<Option<Arc<AtomicBool>>>,
+    /// Cloned into every open [`gpui::HeadlessWindow`], so its count tells whether headless windows exist.
+    headless_window_lease: Rc<()>,
     // The below members will never change throughout the entire lifecycle of the app.
     /// Created with `headless()`: never windowed, and without a real text system.
     headless: bool,
@@ -273,6 +275,7 @@ impl WindowsPlatform {
             raw_window_handles,
             initial_windowing: RefCell::new(None),
             vsync_stop: RefCell::new(None),
+            headless_window_lease: Rc::new(()),
             headless,
             icon,
             background_executor,
@@ -620,6 +623,11 @@ impl Platform for WindowsPlatform {
                 Ok(())
             }
             WindowingRequest::Windowed(_) if windowed => Err(anyhow!("already windowed")),
+            WindowingRequest::Windowed(_) if Rc::strong_count(&self.headless_window_lease) > 1 => {
+                Err(anyhow!(
+                    "close headless windows before switching to windowed mode"
+                ))
+            }
             WindowingRequest::Windowed(environment) => {
                 check_can_show_windows(&environment).and_then(|()| self.attach_gpu())
             }
@@ -628,6 +636,10 @@ impl Platform for WindowsPlatform {
 
     fn graphical_environment(&self) -> Option<GraphicalEnvironment> {
         self.is_windowed().then(GraphicalEnvironment::detect)
+    }
+
+    fn compositor_name(&self) -> &'static str {
+        if self.is_windowed() { "" } else { "headless" }
     }
 
     fn restart(&self, binary_path: Option<PathBuf>, arguments: Vec<OsString>) {
@@ -745,7 +757,10 @@ impl Platform for WindowsPlatform {
         options: WindowParams,
     ) -> Result<Box<dyn PlatformWindow>> {
         if !self.is_windowed() {
-            return Err(anyhow!("cannot open windows while headless"));
+            return Ok(Box::new(gpui::HeadlessWindow::new(
+                options,
+                Some(self.headless_window_lease.clone()),
+            )));
         }
         let window = WindowsWindow::new(handle, options, self.generate_creation_info())?;
         let handle = window.get_raw_handle();

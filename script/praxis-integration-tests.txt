@@ -27,6 +27,7 @@ util test_estimated_json_heap_bytes_
 
 # Test remote transport and image input
 agent_ui remote::
+gpui headless_window_tests::
 agent_ui test_remote_images_
 agent test_phone_images_
 language_model test_into_png_

@@ -413,7 +413,7 @@ impl OpenListener {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(unix)]
 pub fn listen_for_cli_connections(opener: OpenListener) -> Result<()> {
     use release_channel::RELEASE_CHANNEL_NAME;
     use std::os::unix::net::UnixDatagram;
@@ -698,9 +698,23 @@ pub async fn handle_cli_request(
             // Only expected as the answer to a prompt sent by a handler.
             debug_panic!("unexpected Confirm message");
         }
-        CliRequest::Remote { action, phone } => {
-            let status =
-                super::remote_cli::run(action, phone, responses.as_ref(), &mut requests, cx).await;
+        CliRequest::Remote {
+            action,
+            phone,
+            paths,
+            stop_on_exit,
+        } => {
+            let status = super::remote_cli::run(
+                action,
+                phone,
+                paths,
+                stop_on_exit,
+                app_state,
+                responses.as_ref(),
+                &mut requests,
+                cx,
+            )
+            .await;
             responses.send(CliResponse::Exit { status }).log_err();
         }
         CliRequest::DebugState => {
