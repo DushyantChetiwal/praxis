@@ -2,6 +2,7 @@
 """Retain public-repository Rust build state without using the Actions cache pool."""
 
 import argparse
+import contextlib
 import hashlib
 import io
 import json
@@ -19,12 +20,17 @@ import time
 BUNDLE_WORKFLOW = ".github/workflows/bundle_fork.yml"
 ROOT_NAMES = {".fingerprint", "build", "deps", "incremental"}
 ARCHIVE = "checkpoint.tar.gz"
+# Python's gzip packed 30 GB in 6 minutes on Linux and 12 on Windows; zstd uses
+# every core. gzip remains the fallback where the zstd command is missing.
+ZSTD_ARCHIVE = "checkpoint.tar.zst"
 MANIFEST = "checkpoint.json"
 CHECKSUM = "checkpoint.sha256"
 SCHEMA = 1
-# Restoring holds the downloaded archive and its expanded copy at once, and the
-# build then grows the target directory further.
-RESTORE_FREE_SPACE_FACTOR = 5
+# Downloading needs room for the archive; the expanded size is checked against
+# the manifest once the archive is here.
+DOWNLOAD_FREE_SPACE_FACTOR = 1.5
+# The expanded state plus room for the build to grow.
+RESTORE_FREE_SPACE_FACTOR = 1.25
 # Incremental state accumulates across chained checkpoints; past this size the
 # next build starts cold instead of carrying the growth forward.
 MAX_UNPACKED_BYTES = 45 * 1024**3
@@ -164,18 +170,63 @@ def unpacked_size(paths):
     return total
 
 
-def has_room_to_restore(workspace, archive_bytes):
+class NotEnoughSpace(Exception):
+    pass
+
+
+def has_room_to_download(workspace, archive_bytes):
     free = shutil.disk_usage(workspace).free
-    if free >= archive_bytes * RESTORE_FREE_SPACE_FACTOR:
+    needed = int(archive_bytes * DOWNLOAD_FREE_SPACE_FACTOR)
+    if free >= needed:
+        report(f"Disk space before downloading the checkpoint: {free} bytes free.")
         return True
     report(
-        f"Skipping the build checkpoint: {free} bytes free, but restoring a {archive_bytes}-byte "
-        f"archive needs {archive_bytes * RESTORE_FREE_SPACE_FACTOR}."
+        f"Skipping the build checkpoint: {free} bytes free, but downloading a {archive_bytes}-byte "
+        f"archive needs {needed}."
     )
     return False
 
 
-def pack(workspace, cargo_home, destination, key, max_unpacked_bytes=MAX_UNPACKED_BYTES):
+def write_archive(archive_path, zstd, add_members):
+    if zstd is None:
+        with tarfile.open(archive_path, "w:gz", compresslevel=1) as archive:
+            add_members(archive)
+        return
+    with open(archive_path, "wb") as compressed:
+        process = subprocess.Popen([zstd, "-q", "-3", "-T0", "-c"], stdin=subprocess.PIPE, stdout=compressed)
+        try:
+            with tarfile.open(fileobj=process.stdin, mode="w|") as archive:
+                add_members(archive)
+        finally:
+            process.stdin.close()
+            status = process.wait()
+    if status != 0:
+        raise ValueError(f"zstd failed with exit status {status}")
+
+
+@contextlib.contextmanager
+def read_archive(archive_path, zstd):
+    if archive_path.name != ZSTD_ARCHIVE:
+        with tarfile.open(archive_path, "r:gz") as archive:
+            yield archive
+        return
+    if zstd is None:
+        raise ValueError("Restoring a zstd checkpoint needs the zstd command")
+    process = subprocess.Popen([zstd, "-q", "-d", "-c", str(archive_path)], stdout=subprocess.PIPE)
+    try:
+        with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
+            yield archive
+        # Read the end-of-archive padding so zstd is not cut off mid-write.
+        while process.stdout.read(1 << 20):
+            pass
+    finally:
+        process.stdout.close()
+        status = process.wait()
+    if status != 0:
+        raise ValueError(f"zstd failed with exit status {status}")
+
+
+def pack(workspace, cargo_home, destination, key, max_unpacked_bytes=MAX_UNPACKED_BYTES, zstd=None):
     validate_key(key)
     paths = state_paths(workspace, cargo_home)
     if not any(name.startswith("target/") for _, name in paths):
@@ -188,8 +239,8 @@ def pack(workspace, cargo_home, destination, key, max_unpacked_bytes=MAX_UNPACKE
         )
         return None
     destination.mkdir(parents=True, exist_ok=True)
-    archive_path = destination / ARCHIVE
-    manifest = {"schema": SCHEMA, "key": key, "paths": [name for _, name in paths]}
+    archive_path = destination / (ARCHIVE if zstd is None else ZSTD_ARCHIVE)
+    manifest = {"schema": SCHEMA, "key": key, "paths": [name for _, name in paths], "bytes": size}
     metadata = json.dumps(manifest, sort_keys=True).encode("utf-8")
     counts = {"files": 0, "bytes": 0, "incremental_files": 0}
 
@@ -219,16 +270,18 @@ def pack(workspace, cargo_home, destination, key, max_unpacked_bytes=MAX_UNPACKE
                 counts["incremental_files"] += 1
         return member
 
-    started = time.monotonic()
-    with tarfile.open(archive_path, "w:gz", compresslevel=1) as archive:
+    def add_members(archive):
         entry = tarfile.TarInfo(MANIFEST)
         entry.size = len(metadata)
         archive.addfile(entry, io.BytesIO(metadata))
         for path, name in paths:
             archive.add(path, arcname=name, filter=count)
+
+    started = time.monotonic()
+    write_archive(archive_path, zstd, add_members)
     (destination / CHECKSUM).write_text(digest(archive_path) + "\n", encoding="ascii")
     report(
-        f"Build checkpoint saved locally: {key}\n\n"
+        f"Build checkpoint saved locally with {'gzip' if zstd is None else 'zstd'}: {key}\n\n"
         f"Files: {counts['files']}; incremental files: {counts['incremental_files']}; "
         f"unpacked bytes: {counts['bytes']}; archive bytes: {archive_path.stat().st_size}; "
         f"packing seconds: {time.monotonic() - started:.1f}."
@@ -238,9 +291,11 @@ def pack(workspace, cargo_home, destination, key, max_unpacked_bytes=MAX_UNPACKE
     return manifest
 
 
-def restore(workspace, cargo_home, directory, key):
+def restore(workspace, cargo_home, directory, key, zstd=None):
     validate_key(key)
-    archive_path = directory / ARCHIVE
+    archive_path = next((directory / name for name in (ZSTD_ARCHIVE, ARCHIVE) if (directory / name).is_file()), None)
+    if archive_path is None:
+        raise ValueError("Missing build-checkpoint archive")
     checksum_path = directory / CHECKSUM
     if checksum_path.stat().st_size > 128:
         raise ValueError("Oversized build-checkpoint checksum")
@@ -250,7 +305,7 @@ def restore(workspace, cargo_home, directory, key):
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="expanded-", dir=directory) as temporary:
         staging = Path(temporary)
-        with tarfile.open(archive_path, "r:gz") as archive:
+        with read_archive(archive_path, zstd) as archive:
             first = archive.next()
             if first is None or first.name != MANIFEST or not first.isfile() or not 0 < first.size <= 65536:
                 raise ValueError("Missing or oversized build-checkpoint manifest")
@@ -261,6 +316,15 @@ def restore(workspace, cargo_home, directory, key):
                 manifest = json.load(stream)
             if manifest.get("schema") != SCHEMA or manifest.get("key") != key:
                 raise ValueError("Build-checkpoint identity mismatch")
+            expanded = manifest.get("bytes")
+            if isinstance(expanded, int) and expanded > 0:
+                free = shutil.disk_usage(directory).free
+                needed = int(expanded * RESTORE_FREE_SPACE_FACTOR)
+                if free < needed:
+                    raise NotEnoughSpace(
+                        f"Skipping the build checkpoint: {free} bytes free, but expanding "
+                        f"{expanded} bytes of compiler state needs {needed}."
+                    )
             paths = manifest.get("paths")
             if not isinstance(paths, list) or not paths or not all(isinstance(name, str) and safe_root(name) for name in paths):
                 raise ValueError("Unexpected build-checkpoint paths")
@@ -355,7 +419,7 @@ def main(argv=None):
             return 0
         if arguments.command == "find":
             artifact = find_checkpoint(os.environ["GITHUB_REPOSITORY"], os.environ["CHECKPOINT_PREFIX"])
-            if artifact and not has_room_to_restore(Path.cwd(), artifact.get("size_in_bytes", 0)):
+            if artifact and not has_room_to_download(Path.cwd(), artifact.get("size_in_bytes", 0)):
                 artifact = None
             if artifact:
                 output("artifact-id", artifact["id"])
@@ -369,8 +433,14 @@ def main(argv=None):
                 raise ValueError("Checkpoint directory is required")
             workspace = Path.cwd()
             cargo_home = Path(os.environ.get("CARGO_HOME") or Path.home() / ".cargo")
-            operation = pack if arguments.command == "pack" else restore
-            operation(workspace, cargo_home, arguments.directory, os.environ["CHECKPOINT_KEY"])
+            key = os.environ["CHECKPOINT_KEY"]
+            if arguments.command == "pack":
+                pack(workspace, cargo_home, arguments.directory, key, zstd=shutil.which("zstd"))
+            else:
+                restore(workspace, cargo_home, arguments.directory, key, zstd=shutil.which("zstd"))
+    except NotEnoughSpace as reason:
+        report(str(reason))
+        return 0
     except Exception as error:
         print(f"::warning::Build checkpoint {arguments.command} unavailable: {error}")
         return 1

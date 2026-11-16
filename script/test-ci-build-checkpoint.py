@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import tarfile
 import tempfile
 import unittest
@@ -21,6 +22,8 @@ SPEC.loader.exec_module(checkpoint)
 PREFIX = "rust-build-state-v2-bundle-linux-x86_64-" + "a" * 64 + "-"
 KEY = PREFIX + "b" * 40 + "-10-1"
 REPOSITORY = "owner/praxis"
+# Resolved before tests clear the environment, PATH included.
+ZSTD = shutil.which("zstd")
 ROOT = "repos/" + REPOSITORY
 
 
@@ -288,6 +291,41 @@ class ArchiveTests(unittest.TestCase):
         self.assertFalse((self.archive / checkpoint.ARCHIVE).exists())
         self.assertFalse(output.exists() and "archive-path" in output.read_text())
 
+    @unittest.skipUnless(ZSTD, "zstd is not installed")
+    def test_zstd_checkpoints_restore_the_same_state(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            manifest = checkpoint.pack(self.workspace, self.cargo, self.archive, KEY, zstd=ZSTD)
+        self.assertTrue((self.archive / checkpoint.ZSTD_ARCHIVE).is_file())
+        self.assertFalse((self.archive / checkpoint.ARCHIVE).exists())
+        fresh = self.root / "fresh-workspace"
+        cargo = self.root / "fresh-cargo"
+        fresh.mkdir()
+        cargo.mkdir()
+        with contextlib.redirect_stdout(io.StringIO()):
+            checkpoint.restore(fresh, cargo, self.archive, KEY, zstd=ZSTD)
+        for name, content in self.originals.items():
+            with self.subTest(name=name):
+                self.assertEqual((fresh / name).read_bytes(), content)
+                self.assertEqual(int((fresh / name).stat().st_mtime), 1700000000)
+        self.assertEqual(manifest["bytes"], checkpoint.unpacked_size(checkpoint.state_paths(self.workspace, self.cargo)))
+
+    def test_a_restore_without_room_for_the_expanded_state_changes_nothing(self):
+        manifest = self.pack()
+        fresh = self.root / "fresh-workspace"
+        fresh.mkdir()
+        needed = int(manifest["bytes"] * checkpoint.RESTORE_FREE_SPACE_FACTOR)
+        for free, room in ((needed - 1, False), (needed, True)):
+            with self.subTest(free=free):
+                usage = type("Usage", (), {"free": free})()
+                with patch.object(checkpoint.shutil, "disk_usage", return_value=usage):
+                    if room:
+                        self.restore(fresh, self.root / "fresh-cargo")
+                        self.assertTrue((fresh / "target/.rustc_info.json").is_file())
+                    else:
+                        with self.assertRaises(checkpoint.NotEnoughSpace):
+                            self.restore(fresh, self.root / "fresh-cargo")
+                        self.assertFalse((fresh / "target").exists())
+
     def test_unpacked_size_counts_every_packed_file(self):
         paths = checkpoint.state_paths(self.workspace, self.cargo)
         expected = sum(len(content) for content in self.originals.values()) + len("dependency") * 2
@@ -313,7 +351,7 @@ class PolicyTests(unittest.TestCase):
             "GITHUB_ACTIONS": "true", "REPOSITORY_VISIBILITY": "public",
             "GITHUB_REPOSITORY": REPOSITORY, "CHECKPOINT_PREFIX": PREFIX,
         }
-        for free, restored in ((499, False), (500, True)):
+        for free, restored in ((149, False), (150, True)):
             with self.subTest(free=free), tempfile.TemporaryDirectory() as directory:
                 output = Path(directory) / "github-output"
                 usage = type("Usage", (), {"free": free})()

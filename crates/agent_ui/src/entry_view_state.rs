@@ -391,6 +391,12 @@ impl EntryViewState {
                     materialize_tool_calls || self.is_tool_call_content_visible(tool_call);
                 let terminals = tool_call.terminals().cloned().collect::<Vec<_>>();
                 let diff_entities = tool_call.diffs().cloned().collect::<Vec<_>>();
+                // Unresolved diffs have no multibuffer yet, so they are missing
+                // from `diffs` below but still need to count as restored.
+                let diff_ids = diff_entities
+                    .iter()
+                    .map(Entity::entity_id)
+                    .collect::<Vec<_>>();
                 let is_tool_call_completed =
                     matches!(tool_call.status(), acp_thread::ToolCallStatus::Completed);
                 let patch_hunk_buffers = tool_call
@@ -581,7 +587,7 @@ impl EntryViewState {
                     }
                 } else {
                     restored_view_ids.extend(terminals.iter().map(|terminal| terminal.entity_id()));
-                    restored_view_ids.extend(diffs.iter().map(|(diff, _)| diff.entity_id()));
+                    restored_view_ids.extend(diff_ids);
                     restored_view_ids.extend(patch_hunk_ids.iter().copied());
                 }
                 if let Some(Entry::ToolCall(entry)) = self.entries.get_mut(index) {
