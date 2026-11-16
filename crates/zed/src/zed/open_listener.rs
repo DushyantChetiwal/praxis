@@ -699,14 +699,8 @@ pub async fn handle_cli_request(
             debug_panic!("unexpected Confirm message");
         }
         CliRequest::Remote { action, phone } => {
-            let status = super::remote_cli::run(
-                action,
-                phone,
-                responses.as_ref(),
-                &mut requests,
-                cx,
-            )
-            .await;
+            let status =
+                super::remote_cli::run(action, phone, responses.as_ref(), &mut requests, cx).await;
             responses.send(CliResponse::Exit { status }).log_err();
         }
         CliRequest::DebugState => {

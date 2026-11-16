@@ -204,7 +204,11 @@ pub fn cli_status(cx: &App) -> Option<CliStatus> {
         off: remote.status == RemoteStatus::Off,
         login: remote.login.clone(),
         device: remote.device.clone(),
-        phones: remote.phones.iter().map(|phone| phone.name.clone()).collect(),
+        phones: remote
+            .phones
+            .iter()
+            .map(|phone| phone.name.clone())
+            .collect(),
         secrets_file: store::secrets_file_in_use(),
     })
 }
@@ -3718,7 +3722,9 @@ mod tests {
             login: None,
             device: None,
             phones: Vec::new(),
-            secrets_file: Some(PathBuf::from("/home/me/.local/share/praxis/remote/secrets.json")),
+            secrets_file: Some(PathBuf::from(
+                "/home/me/.local/share/praxis/remote/secrets.json",
+            )),
             ..status()
         };
         let text = cli_describe(&status);
@@ -3731,7 +3737,9 @@ mod tests {
     #[test]
     fn test_remote_pairing_question_names_phone_computer_and_code() {
         let question = cli_pairing_prompt("Pixel 8", "debian-vm", "807 021");
-        assert!(question.starts_with("\u{201c}Pixel 8\u{201d} wants to control Praxis on debian-vm."));
+        assert!(
+            question.starts_with("\u{201c}Pixel 8\u{201d} wants to control Praxis on debian-vm.")
+        );
         assert!(question.contains("shows the code 807 021"));
     }
 }

@@ -102,12 +102,20 @@ pub enum CliRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CliResponse {
     Ping,
-    Stdout { message: String },
-    Stderr { message: String },
-    Exit { status: i32 },
+    Stdout {
+        message: String,
+    },
+    Stderr {
+        message: String,
+    },
+    Exit {
+        status: i32,
+    },
     PromptOpenBehavior,
     /// Ask a yes-or-no question; the CLI answers with [`CliRequest::Confirm`].
-    PromptConfirm { message: String },
+    PromptConfirm {
+        message: String,
+    },
 }
 
 /// When Zed started not as an *.app but as a binary (e.g. local development),

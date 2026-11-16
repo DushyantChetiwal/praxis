@@ -72,9 +72,7 @@ async fn sign_in(responses: &dyn CliResponseSink, cx: &mut AsyncApp) -> Result<(
     let login = status.login.as_deref().unwrap_or("your account");
     say(
         responses,
-        format!(
-            "Signed in to GitHub as {login}. Run `praxis --remote pair` to pair a phone."
-        ),
+        format!("Signed in to GitHub as {login}. Run `praxis --remote pair` to pair a phone."),
     );
     Ok(())
 }
@@ -124,9 +122,7 @@ async fn pair(
     cx: &mut AsyncApp,
 ) -> Result<()> {
     let status = connect(responses, cx).await?;
-    let device = status
-        .device
-        .unwrap_or_else(|| "this computer".to_string());
+    let device = status.device.unwrap_or_else(|| "this computer".to_string());
     // Held until this returns; dropping it sends approval back to windows.
     let mut questions = cx
         .update(remote::cli_pairing_questions)
@@ -152,19 +148,25 @@ async fn pair(
     let allowed = loop {
         match requests.next().await {
             Some(CliRequest::Confirm { allowed }) => break allowed,
-            Some(other) => log::warn!("Ignoring an unexpected CLI request while pairing: {other:?}"),
+            Some(other) => {
+                log::warn!("Ignoring an unexpected CLI request while pairing: {other:?}")
+            }
             // The terminal went away without answering.
             None => break false,
         }
     };
     let phone = question.phone;
     if question.answer.send(allowed).is_err() {
-        bail!("The pairing with \u{201c}{phone}\u{201d} expired before it was answered. Try again.");
+        bail!(
+            "The pairing with \u{201c}{phone}\u{201d} expired before it was answered. Try again."
+        );
     }
     if allowed {
         say(
             responses,
-            format!("Paired \u{201c}{phone}\u{201d}. It can now see and control Praxis on {device}."),
+            format!(
+                "Paired \u{201c}{phone}\u{201d}. It can now see and control Praxis on {device}."
+            ),
         );
     } else {
         say(responses, format!("Denied \u{201c}{phone}\u{201d}."));
@@ -172,11 +174,7 @@ async fn pair(
     Ok(())
 }
 
-fn unpair(
-    phone: Option<String>,
-    responses: &dyn CliResponseSink,
-    cx: &mut AsyncApp,
-) -> Result<()> {
+fn unpair(phone: Option<String>, responses: &dyn CliResponseSink, cx: &mut AsyncApp) -> Result<()> {
     let phone = phone.context(
         "Name the phone to unpair with `--phone NAME`. `praxis --remote status` lists the paired phones.",
     )?;
