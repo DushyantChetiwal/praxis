@@ -132,6 +132,15 @@ struct Args {
     /// (windows, displays, frame scheduling, cursor), for debugging.
     #[arg(long)]
     debug_state: bool,
+    /// Set up Praxis Remote, the connection to your phone, from this terminal.
+    ///
+    /// `pair` signs in to GitHub first if needed, printing a code you can
+    /// enter on any device, then asks here before allowing a phone.
+    #[arg(long, value_name = "ACTION", value_enum)]
+    remote: Option<cli::RemoteAction>,
+    /// The paired phone that `--remote unpair` removes, by name.
+    #[arg(long, value_name = "NAME", requires = "remote")]
+    phone: Option<String>,
     /// Open the project in a dev container.
     ///
     /// Automatically triggers "Reopen in Dev Container" if a `.devcontainer/`
@@ -694,7 +703,12 @@ fn run() -> Result<()> {
                     cwd: env::current_dir().ok(),
                 };
 
-                tx.send(if args.debug_state {
+                tx.send(if let Some(action) = args.remote {
+                    CliRequest::Remote {
+                        action,
+                        phone: args.phone.clone(),
+                    }
+                } else if args.debug_state {
                     CliRequest::DebugState
                 } else {
                     open_request
@@ -713,6 +727,10 @@ fn run() -> Result<()> {
                             let behavior = prompt_open_behavior()
                                 .unwrap_or(cli::CliBehaviorSetting::ExistingWindow);
                             tx.send(CliRequest::SetOpenBehavior { behavior })?;
+                        }
+                        CliResponse::PromptConfirm { message } => {
+                            let allowed = prompt_confirm(&message);
+                            tx.send(CliRequest::Confirm { allowed })?;
                         }
                     }
                 }
@@ -810,6 +828,19 @@ fn anonymous_fd(path: &str) -> Option<fs::File> {
 /// Shows an interactive prompt asking the user to choose the default open
 /// behavior for `zed <path>`. Returns `None` if the prompt cannot be shown
 /// (e.g. stdin is not a terminal) or the user cancels.
+/// Asks a yes-or-no question, answering no when nobody can be asked.
+fn prompt_confirm(message: &str) -> bool {
+    if !std::io::stdin().is_terminal() {
+        eprintln!("{message}\nNo terminal to answer in, so the answer is no.");
+        return false;
+    }
+    dialoguer::Confirm::new()
+        .with_prompt(message)
+        .default(false)
+        .interact()
+        .unwrap_or(false)
+}
+
 fn prompt_open_behavior() -> Option<cli::CliBehaviorSetting> {
     if !std::io::stdin().is_terminal() {
         return None;

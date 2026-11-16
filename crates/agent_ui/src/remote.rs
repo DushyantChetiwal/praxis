@@ -140,7 +140,137 @@ pub(crate) struct PraxisRemote {
     device: Option<String>,
     phones: Vec<PhoneInfo>,
     commands: Option<mpsc::UnboundedSender<channel::Command>>,
+    /// Set while `praxis --remote pair` waits, so pairing is approved in that
+    /// terminal instead of a window, which a headless machine may not show.
+    terminal_approver: Option<mpsc::UnboundedSender<PairingQuestion>>,
     _task: Option<Task<()>>,
+}
+
+/// A phone asking to pair, put to the terminal running `praxis --remote pair`.
+pub struct PairingQuestion {
+    pub phone: String,
+    pub device: String,
+    /// The six-digit code both screens show, formatted for reading.
+    pub code: String,
+    pub answer: futures::channel::oneshot::Sender<bool>,
+}
+
+/// Praxis Remote as `praxis --remote status` reports it.
+pub struct CliStatus {
+    pub summary: String,
+    /// The code to enter and where, while waiting for GitHub sign-in.
+    pub sign_in: Option<(String, String)>,
+    pub connected: bool,
+    /// Stopped for good: retrying will not help until something changes.
+    pub failed: bool,
+    /// Turned off, or never set up.
+    pub off: bool,
+    pub login: Option<String>,
+    pub device: Option<String>,
+    pub phones: Vec<String>,
+    /// Where the sign-in is kept when the system keychain is unavailable.
+    pub secrets_file: Option<PathBuf>,
+}
+
+pub fn cli_status(cx: &App) -> Option<CliStatus> {
+    let remote = PraxisRemote::global(cx)?;
+    let remote = remote.read(cx);
+    let (summary, sign_in, connected, failed) = match &remote.status {
+        RemoteStatus::Off => ("Praxis Remote is off.".to_string(), None, false, false),
+        RemoteStatus::SigningIn {
+            user_code,
+            verification_uri,
+        } => (
+            "Waiting for you to sign in to GitHub.".to_string(),
+            Some((user_code.clone(), verification_uri.clone())),
+            false,
+            false,
+        ),
+        RemoteStatus::Connecting => ("Connecting to GitHub.".to_string(), None, false, false),
+        RemoteStatus::Connected => ("Connected.".to_string(), None, true, false),
+        RemoteStatus::Offline(reason) => (
+            format!("GitHub can't be reached, and Praxis keeps trying: {reason}"),
+            None,
+            false,
+            false,
+        ),
+        RemoteStatus::Failed { reason, .. } => (reason.clone(), None, false, true),
+    };
+    Some(CliStatus {
+        summary,
+        sign_in,
+        connected,
+        failed,
+        off: remote.status == RemoteStatus::Off,
+        login: remote.login.clone(),
+        device: remote.device.clone(),
+        phones: remote
+            .phones
+            .iter()
+            .map(|phone| phone.name.clone())
+            .collect(),
+        secrets_file: store::secrets_file_in_use(),
+    })
+}
+
+/// Starts signing in, or retries a stopped connection. Returns false when
+/// Praxis Remote is already connected or on its way.
+pub fn cli_sign_in(cx: &mut App) -> bool {
+    let Some(remote) = PraxisRemote::global(cx) else {
+        return false;
+    };
+    remote.update(cx, |remote, cx| match remote.status {
+        RemoteStatus::Off | RemoteStatus::Failed { sign_in: true, .. } => {
+            remote.sign_in(cx);
+            true
+        }
+        RemoteStatus::Failed { sign_in: false, .. } => {
+            // Cleared first so a caller waiting on the status does not read
+            // the old failure as the outcome of this attempt.
+            remote.status = RemoteStatus::Connecting;
+            remote.retry(cx);
+            true
+        }
+        RemoteStatus::SigningIn { .. }
+        | RemoteStatus::Connecting
+        | RemoteStatus::Connected
+        | RemoteStatus::Offline(_) => false,
+    })
+}
+
+/// Routes pairing approval to the caller for as long as it keeps the
+/// receiver, instead of prompting in a window.
+pub fn cli_pairing_questions(cx: &mut App) -> Option<mpsc::UnboundedReceiver<PairingQuestion>> {
+    let remote = PraxisRemote::global(cx)?;
+    let (sender, receiver) = mpsc::unbounded();
+    remote.update(cx, |remote, _| remote.terminal_approver = Some(sender));
+    Some(receiver)
+}
+
+/// Unpairs the phone with this name. Names are not unique, so an ambiguous
+/// name is refused rather than guessed at.
+pub fn cli_unpair(name: &str, cx: &mut App) -> Result<String> {
+    let remote = PraxisRemote::global(cx).context("Praxis Remote is not running.")?;
+    remote.update(cx, |remote, cx| {
+        let matching = remote
+            .phones
+            .iter()
+            .filter(|phone| phone.name == name || phone.id == name)
+            .map(|phone| phone.id.clone())
+            .collect::<Vec<_>>();
+        match matching.as_slice() {
+            [id] => {
+                remote.unpair(id.clone(), cx);
+                Ok(format!("Unpaired “{name}”."))
+            }
+            [] => bail!(
+                "No paired phone is called “{name}”. Run `praxis --remote status` to see the paired phones."
+            ),
+            _ => bail!(
+                "More than one paired phone is called “{name}”. Unpair it from Praxis Remote in a Praxis window instead."
+            ),
+        }
+    })
 }
 
 struct GlobalPraxisRemote(Entity<PraxisRemote>);
@@ -155,6 +285,7 @@ impl PraxisRemote {
             device: None,
             phones: Vec::new(),
             commands: None,
+            terminal_approver: None,
             _task: None,
         }
     }
@@ -272,6 +403,42 @@ impl PraxisRemote {
                 .detach_and_log_err(cx);
         }
     }
+}
+
+pub fn cli_describe(status: &CliStatus) -> String {
+    let mut lines = vec![status.summary.clone()];
+    if let Some((code, uri)) = &status.sign_in {
+        lines.push(cli_sign_in_instructions(code, uri));
+    }
+    if let Some(login) = &status.login {
+        lines.push(format!("GitHub account: {login}"));
+    }
+    if let Some(device) = &status.device {
+        lines.push(format!("This computer: {device}"));
+    }
+    if status.phones.is_empty() {
+        lines.push("Paired phones: none".to_string());
+    } else {
+        lines.push(format!("Paired phones: {}", status.phones.join(", ")));
+    }
+    if let Some(path) = &status.secrets_file {
+        lines.push(format!(
+            "No system keychain is available, so the sign-in is kept in {}, which only you can read.",
+            path.display()
+        ));
+    }
+    lines.join("\n")
+}
+
+pub fn cli_sign_in_instructions(code: &str, uri: &str) -> String {
+    format!("To sign in to GitHub, open {uri} on any device, your phone included, and enter {code}")
+}
+
+pub fn cli_pairing_prompt(phone: &str, device: &str, code: &str) -> String {
+    format!(
+        "\u{201c}{phone}\u{201d} wants to control Praxis on {device}. \
+         Allow it only if the phone shows the code {code}. Allow?"
+    )
 }
 
 async fn sign_in_with_github(
@@ -3519,5 +3686,60 @@ mod tests {
         assert!(listing["entries"].to_string().len() <= DIR_JSON_BUDGET + 2);
         let first = format!("000-{}", "n".repeat(100));
         assert_eq!(listing["entries"][0]["name"], first);
+    }
+
+    fn status() -> CliStatus {
+        CliStatus {
+            summary: "Connected.".to_string(),
+            sign_in: None,
+            connected: true,
+            failed: false,
+            off: false,
+            login: Some("octocat".to_string()),
+            device: Some("debian-vm".to_string()),
+            phones: vec!["Pixel 8".to_string(), "Tablet".to_string()],
+            secrets_file: None,
+        }
+    }
+
+    #[test]
+    fn test_remote_status_lists_account_computer_and_phones() {
+        assert_eq!(
+            cli_describe(&status()),
+            "Connected.\nGitHub account: octocat\nThis computer: debian-vm\nPaired phones: Pixel 8, Tablet"
+        );
+    }
+
+    #[test]
+    fn test_remote_status_explains_sign_in_and_keychain_fallback() {
+        let status = CliStatus {
+            summary: "Waiting for you to sign in to GitHub.".to_string(),
+            sign_in: Some((
+                "ABCD-1234".to_string(),
+                "https://github.com/login/device".to_string(),
+            )),
+            connected: false,
+            login: None,
+            device: None,
+            phones: Vec::new(),
+            secrets_file: Some(PathBuf::from(
+                "/home/me/.local/share/praxis/remote/secrets.json",
+            )),
+            ..status()
+        };
+        let text = cli_describe(&status);
+        assert!(text.contains("open https://github.com/login/device on any device"));
+        assert!(text.contains("enter ABCD-1234"));
+        assert!(text.contains("Paired phones: none"));
+        assert!(text.contains("remote/secrets.json, which only you can read"));
+    }
+
+    #[test]
+    fn test_remote_pairing_question_names_phone_computer_and_code() {
+        let question = cli_pairing_prompt("Pixel 8", "debian-vm", "807 021");
+        assert!(
+            question.starts_with("\u{201c}Pixel 8\u{201d} wants to control Praxis on debian-vm.")
+        );
+        assert!(question.contains("shows the code 807 021"));
     }
 }

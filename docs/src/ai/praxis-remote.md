@@ -18,6 +18,22 @@ There is no repository, configuration file or token to create. You need a GitHub
 
 Praxis must be running on the computer for the phone to pair or to reach it. The phone shows whether each computer is online.
 
+### From a terminal
+
+On a machine you reach over SSH, such as a VM, set up Praxis Remote from a terminal while Praxis runs there:
+
+```sh
+praxis --remote pair
+```
+
+If Praxis Remote isn't signed in, this prints a code and a GitHub address. Open the address on any device, your phone included, and enter the code. Then open the app on your phone, choose this computer, and tap **Start pairing**. The terminal shows the six-digit code: answer `y` only if your phone shows the same code.
+
+- `praxis --remote sign-in` signs in without pairing.
+- `praxis --remote status` shows the GitHub account, this computer's name and the paired phones.
+- `praxis --remote unpair --phone "Pixel 8"` removes a phone.
+
+While `--remote pair` waits, pairing requests are approved in the terminal, not in a Praxis window.
+
 ## What you can do
 
 - **Chat:** read the active conversation as it happens, send messages (queued if the agent is busy), stop a turn, and start a new thread. Tap **Thinking** to expand thinking supplied by the model provider. It only appears when the provider sends it; Praxis does not generate a substitute.
@@ -45,9 +61,9 @@ Expect a delay of a few seconds between tapping and seeing the result. The exact
 
 - **End-to-end encryption.** Each phone agrees its own key with the computer when it pairs (P-256 key agreement, then AES-256-GCM). Snapshots, requests and answers are encrypted with that key and bound to the computer and the phone they belong to, so they cannot be read, changed or replayed elsewhere.
 - **What GitHub can see.** The gist is secret, so it is not listed publicly, but GitHub and anyone who learns its link can read it. All they can learn is encrypted data, the computer's name, the phones' random ids, and when Praxis and the phone were active. Your prompts, conversations, file names and code never leave your devices unencrypted.
-- **Approval on the computer.** A phone can only be added by someone at the computer, who clicks **Allow** after checking the code. The phone commits to its key before it learns the computer's, so even someone who can write comments as you cannot make the codes match except by a one-in-a-million chance.
+- **Approval on the computer.** A phone can only be added by someone at the computer, who clicks **Allow**, or answers `y` to `praxis --remote pair`, after checking the code. The phone commits to its key before it learns the computer's, so even someone who can write comments as you cannot make the codes match except by a one-in-a-million chance.
 - **Your account only.** Praxis only acts on comments written by the account it is signed in to, and deletes anyone else's. Requests more than five minutes old are refused rather than replayed, so nothing queued while your computer was off runs later by surprise.
-- **Secrets stay in the keychain.** Praxis keeps its GitHub sign-in and every phone's key in the system keychain (Keychain on macOS, Credential Manager on Windows, the Secret Service on Linux), never in a file. The phone keeps its sign-in and keys in Android's encrypted storage.
+- **Secrets stay in the keychain.** Praxis keeps its GitHub sign-in and every phone's key in the system keychain (Keychain on macOS, Credential Manager on Windows, the Secret Service on Linux). Where no keychain can be used, as on a Linux server or VM without a Secret Service, they go in `remote/secrets.json` in Praxis's data folder instead, readable only by your user, like GitHub's own CLI does. `praxis --remote status` says when that file is in use, and Praxis deletes it once the keychain works again. The phone keeps its sign-in and keys in Android's encrypted storage.
 - **Unpairing.** Open **Praxis Remote…** and click **Unpair** next to a phone to remove it at once; it can no longer read anything or send requests. A phone can also unpair itself from its settings.
 - **Turning it off.** **Turn Off** stops Praxis Remote, deletes the gist and forgets the sign-in and every phone. To revoke Praxis Remote's access to your gists completely, remove it under **Settings → Applications → Authorized GitHub Apps** on GitHub.
 

@@ -52,6 +52,21 @@ pub enum CliBehaviorSetting {
     NewWindow,
 }
 
+/// What `--remote` does with Praxis Remote, the connection to the user's phones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteAction {
+    /// Show whether Praxis Remote is signed in and which phones are paired.
+    Status,
+    /// Sign in to GitHub with a code you can enter on any device.
+    SignIn,
+    /// Sign in if needed, then wait for a phone and approve it here.
+    Pair,
+    /// Remove the paired phone named by `--phone`.
+    Unpair,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CliRequest {
     Open {
@@ -74,15 +89,33 @@ pub enum CliRequest {
     },
     /// Print a diagnostic snapshot of the app's GPUI and platform state.
     DebugState,
+    Remote {
+        action: RemoteAction,
+        phone: Option<String>,
+    },
+    /// The answer to a [`CliResponse::PromptConfirm`].
+    Confirm {
+        allowed: bool,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CliResponse {
     Ping,
-    Stdout { message: String },
-    Stderr { message: String },
-    Exit { status: i32 },
+    Stdout {
+        message: String,
+    },
+    Stderr {
+        message: String,
+    },
+    Exit {
+        status: i32,
+    },
     PromptOpenBehavior,
+    /// Ask a yes-or-no question; the CLI answers with [`CliRequest::Confirm`].
+    PromptConfirm {
+        message: String,
+    },
 }
 
 /// When Zed started not as an *.app but as a binary (e.g. local development),

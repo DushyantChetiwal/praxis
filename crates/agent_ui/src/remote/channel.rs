@@ -22,7 +22,8 @@ use super::crypto::{self, Key, PROTOCOL, PairingKey, PairingSecrets};
 use super::github::{self, Api, SignedOut, Tokens};
 use super::store::{self, LocalState, PhoneInfo, Secrets};
 use super::{
-    PraxisRemote, RemoteStatus, Watch, handle_paired, resolve_device_name, snapshot, status,
+    PairingQuestion, PraxisRemote, RemoteStatus, Watch, handle_paired, resolve_device_name,
+    snapshot, status,
 };
 use crate::automation::workspace_windows;
 
@@ -942,7 +943,8 @@ impl Channel {
         Ok(())
     }
 
-    /// Asks the user at the computer whether to allow a phone, with a native
+    /// Asks the user at the computer whether to allow a phone: in the terminal
+    /// running `praxis --remote pair` if there is one, else with a native
     /// prompt on a Praxis window.
     fn ask(&mut self, comment_id: u64, cx: &mut AsyncApp) {
         let Some(sender) = self.sender.clone() else {
@@ -956,16 +958,36 @@ impl Channel {
         };
         let name = &pairing.name;
         let device = &self.device;
-        let message = format!("Allow “{name}” to control Praxis on {device}?");
-        let detail = pairing_detail(&secrets.code);
-        let Some(answer) = cx.update(|cx| show_prompt(&message, &detail, cx)) else {
-            // There is no window to ask in yet; this is tried again.
-            return;
+        let terminal = cx.update(terminal_approver).and_then(|approver| {
+            let (sender, receiver) = oneshot::channel();
+            let question = PairingQuestion {
+                phone: name.clone(),
+                device: device.clone(),
+                code: crypto::display_code(&secrets.code),
+                answer: sender,
+            };
+            approver.unbounded_send(question).ok().map(|()| receiver)
+        });
+        let answer = match terminal {
+            Some(receiver) => Answer::Terminal(receiver),
+            None => {
+                let message = format!("Allow “{name}” to control Praxis on {device}?");
+                let detail = pairing_detail(&secrets.code);
+                let Some(answer) = cx.update(|cx| show_prompt(&message, &detail, cx)) else {
+                    // There is no window to ask in yet; this is tried again.
+                    return;
+                };
+                Answer::Window(answer)
+            }
         };
         *asked = true;
         self.prompt = Some(comment_id);
         self._prompt_task = Some(cx.spawn(async move |_| {
-            let allowed = answer.await.is_ok_and(|index| index == 0);
+            // A terminal that goes away without answering denies the phone.
+            let allowed = match answer {
+                Answer::Terminal(answer) => answer.await.unwrap_or(false),
+                Answer::Window(answer) => answer.await.is_ok_and(|index| index == 0),
+            };
             let command = Command::PromptAnswered {
                 comment_id,
                 allowed,
@@ -1158,6 +1180,18 @@ async fn find_or_create_gist(
     id.filter(|id| is_gist_id(id))
         .map(str::to_string)
         .context("GitHub did not say which gist it created")
+}
+
+enum Answer {
+    Terminal(oneshot::Receiver<bool>),
+    /// The index of the chosen button: 0 allows.
+    Window(oneshot::Receiver<usize>),
+}
+
+fn terminal_approver(cx: &mut App) -> Option<mpsc::UnboundedSender<PairingQuestion>> {
+    let remote = PraxisRemote::global(cx)?;
+    let approver = remote.read(cx).terminal_approver.clone()?;
+    (!approver.is_closed()).then_some(approver)
 }
 
 fn show_prompt(message: &str, detail: &str, cx: &mut App) -> Option<oneshot::Receiver<usize>> {

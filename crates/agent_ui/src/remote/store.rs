@@ -1,10 +1,11 @@
 //! What Praxis Remote remembers between launches.
 //!
-//! Nothing secret goes on disk in plain text: the GitHub tokens and every
-//! phone's key live in the system keychain, always, even though this build's
-//! release channel keeps other credentials in a development file. The data
-//! directory only holds which account, channel and gist are in use, and the
-//! names of the paired phones.
+//! The GitHub tokens and every phone's key live in the system keychain, even
+//! though this build's release channel keeps other credentials in a
+//! development file. Where no keychain can be used, as on a Linux server or
+//! VM without a Secret Service, they go in a file only this user can read,
+//! as GitHub's own CLI does. The data directory otherwise only holds which
+//! account, channel and gist are in use, and the names of the paired phones.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -48,6 +49,16 @@ pub(super) struct Secrets {
 
 pub(super) fn state_path() -> PathBuf {
     paths::data_dir().join("remote").join("state.json")
+}
+
+fn secrets_path() -> PathBuf {
+    paths::data_dir().join("remote").join("secrets.json")
+}
+
+/// Where the sign-in is kept, when the keychain could not be used.
+pub(super) fn secrets_file_in_use() -> Option<PathBuf> {
+    let path = secrets_path();
+    path.is_file().then_some(path)
 }
 
 pub(super) fn acquire_channel_lock() -> Result<std::fs::File> {
@@ -119,11 +130,19 @@ pub(super) fn delete_state() -> Result<()> {
 
 pub(super) async fn load_secrets(cx: &AsyncApp) -> Result<Option<Secrets>> {
     let task = cx.update(|cx| cx.read_credentials(KEYCHAIN_URL));
-    let Some((_, bytes)) = task
-        .await
-        .context("reading Praxis Remote's sign-in from the system keychain")?
-    else {
-        return Ok(None);
+    let bytes = match task.await {
+        Ok(Some((_, bytes))) => bytes,
+        Ok(None) => match read_secrets_file(&secrets_path())? {
+            Some(bytes) => bytes,
+            None => return Ok(None),
+        },
+        Err(error) => match read_secrets_file(&secrets_path())? {
+            Some(bytes) => bytes,
+            None => {
+                return Err(error)
+                    .context("reading Praxis Remote's sign-in from the system keychain");
+            }
+        },
     };
     let secrets = serde_json::from_slice(&bytes).context("reading Praxis Remote's sign-in")?;
     Ok(Some(secrets))
@@ -132,14 +151,83 @@ pub(super) async fn load_secrets(cx: &AsyncApp) -> Result<Option<Secrets>> {
 pub(super) async fn save_secrets(login: &str, secrets: &Secrets, cx: &AsyncApp) -> Result<()> {
     let bytes = serde_json::to_vec(secrets)?;
     let task = cx.update(|cx| cx.write_credentials(KEYCHAIN_URL, login, &bytes));
-    task.await
-        .context("saving Praxis Remote's sign-in in the system keychain")
+    match task.await {
+        // A copy left from a time without a keychain must not outlive it.
+        Ok(()) => remove_secrets_file(&secrets_path()),
+        Err(error) => {
+            let path = secrets_path();
+            log::warn!(
+                "Praxis Remote could not use the system keychain ({error:#}), so it keeps its sign-in in {}",
+                path.display()
+            );
+            write_secrets_file(&path, &bytes)
+        }
+    }
 }
 
 pub(super) async fn delete_secrets(cx: &AsyncApp) -> Result<()> {
     let task = cx.update(|cx| cx.delete_credentials(KEYCHAIN_URL));
-    task.await
-        .context("removing Praxis Remote's sign-in from the system keychain")
+    let keychain = task.await;
+    let path = secrets_path();
+    let had_file = path.is_file();
+    remove_secrets_file(&path)?;
+    match keychain {
+        // Without a keychain, the file was the only copy.
+        Err(error) if had_file => {
+            log::info!("Praxis Remote's keychain entry could not be removed: {error:#}");
+            Ok(())
+        }
+        result => result.context("removing Praxis Remote's sign-in from the system keychain"),
+    }
+}
+
+fn read_secrets_file(path: &std::path::Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+fn write_secrets_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let directory = path
+        .parent()
+        .context("Praxis Remote's sign-in has no folder")?;
+    std::fs::create_dir_all(directory)
+        .with_context(|| format!("creating {}", directory.display()))?;
+    let temporary = path.with_extension("json.tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // Created unreadable to others from the start, rather than narrowed
+    // after the secret is already written.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options
+        .open(&temporary)
+        .with_context(|| format!("writing {}", temporary.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // A leftover temporary file keeps its old mode when reopened.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("protecting {}", temporary.display()))?;
+    }
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("writing {}", temporary.display()))?;
+    drop(file);
+    std::fs::rename(&temporary, path).with_context(|| format!("writing {}", path.display()))
+}
+
+fn remove_secrets_file(path: &std::path::Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Err(error).with_context(|| format!("removing {}", path.display()))
+        }
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -160,5 +248,33 @@ mod tests {
             path.exists(),
             "never unlink a lock file while another process may open it"
         );
+    }
+
+    #[test]
+    fn test_remote_secrets_file_round_trips_and_is_private() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("remote").join("secrets.json");
+        assert_eq!(read_secrets_file(&path).expect("missing file reads"), None);
+
+        write_secrets_file(&path, b"first").expect("written");
+        write_secrets_file(&path, b"second").expect("replaced");
+        assert_eq!(
+            read_secrets_file(&path).expect("read").as_deref(),
+            Some(&b"second"[..])
+        );
+        assert!(!path.with_extension("json.tmp").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "only the owner may read the sign-in");
+        }
+
+        remove_secrets_file(&path).expect("removed");
+        remove_secrets_file(&path).expect("removing twice is fine");
+        assert_eq!(read_secrets_file(&path).expect("read"), None);
     }
 }
