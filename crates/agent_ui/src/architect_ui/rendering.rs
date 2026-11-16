@@ -3395,14 +3395,26 @@ mod tests {
                     "the icon must agree with the banner for {outcome:?}"
                 );
                 let quads = window.painted_quads();
-                // GPUI paints backgrounds and borders separately; border strips
-                // retain the element bounds but have a narrower content mask.
+                // GPUI paints each border side as a fill of the border color
+                // that keeps the element bounds but is masked to that side.
+                let is_border_strip = |quad: &gpui::Quad, at_bottom: bool| {
+                    let mask = quad.content_mask.bounds;
+                    let edge_matches = if at_bottom {
+                        mask.bottom() == quad.bounds.bottom() && mask.top() > quad.bounds.top()
+                    } else {
+                        mask.top() == quad.bounds.top() && mask.bottom() < quad.bounds.bottom()
+                    };
+                    quad.background == border.into()
+                        && mask.size.width == quad.bounds.size.width
+                        && edge_matches
+                };
                 let banner = quads
                     .iter()
                     .find(|quad| {
-                        quad.border_color == border
-                            && quad.border_widths.bottom > px(0.0).scale(window.scale_factor())
-                            && quad.border_widths.top == px(0.0).scale(window.scale_factor())
+                        is_border_strip(quad, true)
+                            && !quads.iter().any(|other| {
+                                other.bounds == quad.bounds && is_border_strip(other, false)
+                            })
                     })
                     .unwrap_or_else(|| {
                         panic!("the mounted run banner should paint its status border for {outcome:?}: {quads:?}")
