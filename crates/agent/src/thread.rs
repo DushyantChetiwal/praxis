@@ -12395,6 +12395,7 @@ mod tests {
             request_texts_after_system(&final_request.messages),
             vec![
                 "old user".to_string(),
+                "old assistant".to_string(),
                 summary_request_text("summary"),
                 "new prompt".to_string(),
             ]

@@ -497,7 +497,7 @@ impl EntryViewState {
                         }
                     }
 
-                    for (diff, multibuffer) in diffs.iter().cloned() {
+                    for (diff, multibuffer) in diffs.iter() {
                         let diff_id = diff.entity_id();
                         // Close/reopen can precede the queued entry updates, leaving
                         // an editor attached to the previous materialization.
@@ -517,6 +517,7 @@ impl EntryViewState {
                             let is_historical = diff.read(cx).is_historical();
                             cx.subscribe(&editor, {
                                 let diff = diff.clone();
+                                let multibuffer = multibuffer.clone();
                                 let entry_index = index;
                                 move |_this, _editor, event: &EditorEvent, cx| {
                                     if let EditorEvent::OpenExcerptsRequested {
