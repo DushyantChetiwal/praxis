@@ -37,11 +37,14 @@ def filtersets(lines):
 
 def main():
     packages, expressions = filtersets(LIST.read_text(encoding="utf-8").splitlines())
-    command = ["cargo", "nextest", "run", "--locked", "--no-fail-fast", "--lib"]
+    build_only = "--no-run" in sys.argv[1:]
+    command = ["cargo", "nextest", "run", "--locked", "--lib"]
     for package in packages:
         command += ["-p", package]
-    for expression in expressions:
-        command += ["-E", expression]
+    if not build_only:
+        command.append("--no-fail-fast")
+        for expression in expressions:
+            command += ["-E", expression]
     command += sys.argv[1:]
     print(f"{len(expressions)} filters across {len(packages)} packages", flush=True)
     return subprocess.call(command)
