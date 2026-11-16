@@ -3939,7 +3939,16 @@ mod tests {
                 .read(cx)
                 .root_thread_view()
                 .expect("root thread");
-            assert_eq!(view.read(cx).thread.read(cx).entries().len(), 1);
+            let entries = view.read(cx).thread.read(cx).entries();
+            assert!(
+                entries.iter().any(|entry| matches!(
+                    entry,
+                    AgentThreadEntry::UserMessage(message)
+                        if snapshot_message_text(&message.content, cx) == "hello from phone"
+                )),
+                "expected prompt in headless thread, got {} entries",
+                entries.len()
+            );
         });
     }
 }
