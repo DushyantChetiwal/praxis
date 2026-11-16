@@ -193,6 +193,10 @@ fn send_args_to_instance(args: &Args) -> anyhow::Result<()> {
                                 behavior: cli::CliBehaviorSetting::ExistingWindow,
                             })?;
                         }
+                        // This path only opens files and never asks to confirm.
+                        CliResponse::PromptConfirm { .. } => {
+                            tx.send(CliRequest::Confirm { allowed: false })?;
+                        }
                     }
                 }
                 Ok(())

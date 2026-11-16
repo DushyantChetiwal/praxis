@@ -694,6 +694,21 @@ pub async fn handle_cli_request(
             // resolve_open_behavior
             debug_panic!("unexpected SetOpenBehavior message");
         }
+        CliRequest::Confirm { .. } => {
+            // Only expected as the answer to a prompt sent by a handler.
+            debug_panic!("unexpected Confirm message");
+        }
+        CliRequest::Remote { action, phone } => {
+            let status = super::remote_cli::run(
+                action,
+                phone,
+                responses.as_ref(),
+                &mut requests,
+                cx,
+            )
+            .await;
+            responses.send(CliResponse::Exit { status }).log_err();
+        }
         CliRequest::DebugState => {
             // Deliberately does not activate the app: activation redraws
             // windows and would disturb the state being inspected.
@@ -2782,6 +2797,11 @@ mod tests {
                             prompt_response.unwrap_or(cli::CliBehaviorSetting::ExistingWindow);
                         request_tx
                             .unbounded_send(CliRequest::SetOpenBehavior { behavior })
+                            .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    }
+                    CliResponse::PromptConfirm { .. } => {
+                        request_tx
+                            .unbounded_send(CliRequest::Confirm { allowed: false })
                             .map_err(|error| anyhow::anyhow!("{error}"))?;
                     }
                 }
