@@ -78,7 +78,7 @@ jobs:
           # Staging another merge underneath it would only duplicate that work.
           pending="$(gh pr list --repo "${GITHUB_REPOSITORY}" --base main --state open \
             --json number,headRefName \
-            --jq '[.[] | select(.headRefName | startswith("praxis-sync/"))][0].number // empty')"
+            --jq '[.[] | select(.headRefName | startswith("praxis-sync/") or startswith("upstream-sync"))][0].number // empty')"
           if [ -n "${pending}" ]; then
             echo "state=pending" >> "${GITHUB_OUTPUT}"
             echo "pending_pr=${pending}" >> "${GITHUB_OUTPUT}"
@@ -237,7 +237,7 @@ jobs:
         run: |
           set -euo pipefail
           # Upstream's own automation targets zed-industries. Only these run here.
-          keep=" architect_quality.yml bundle_fork.yml bundle_after_merge.yml sync_upstream.yml recover_windows_symbols.yml android_remote.yml remote_relay_probe.yml incremental_ci.yml "
+          keep=" architect_quality.yml bundle_fork.yml bundle_after_merge.yml sync_upstream.yml recover_windows_symbols.yml android_remote.yml remote_relay_probe.yml incremental_ci.yml warm_ci_caches.yml macos_path_checks.yml "
           gh workflow list --repo "${GITHUB_REPOSITORY}" --limit 500 --json id,path,state \
             --jq '.[] | select(.state == "active") | "\(.id) \(.path)"' |
             while read -r id path; do
@@ -311,7 +311,17 @@ jobs:
               resolution="Praxis main already contains upstream Zed ${UPSTREAM_SHA}."
               ;;
             pending)
-              note="Waiting for upstream sync pull request #${PENDING_PR} to merge with a merge commit."
+              quality="$(gh pr view "${PENDING_PR}" --repo "${GITHUB_REPOSITORY}" --json statusCheckRollup \
+                --jq '[.statusCheckRollup[] | select(.name == "Quality source validated")][0].conclusion // empty' || true)"
+              if [ "${quality}" = FAILURE ]; then
+                {
+                  echo "Upstream sync pull request #${PENDING_PR} is failing CI, so no newer upstream changes can merge."
+                  echo
+                  echo "Push fixes to ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${PENDING_PR}, then merge it with a merge commit."
+                } > "${body}"
+              else
+                note="Waiting for upstream sync pull request #${PENDING_PR} to merge with a merge commit."
+              fi
               ;;
             conflict)
               {
@@ -355,11 +365,21 @@ jobs:
               echo
               echo "Latest attempt: ${run_url}"
             } >> "${body}"
+            # Editing an issue sends no notification, so a changed blocker also
+            # gets a comment that mentions the owner.
+            current="$(grep -v '^Latest attempt: ' "${body}" || true)"
             if [ -n "${issue}" ]; then
+              previous="$(gh issue view "${issue}" --repo "${GITHUB_REPOSITORY}" --json body --jq .body |
+                tr -d '\r' | grep -v '^Latest attempt: ' || true)"
               gh issue edit "${issue}" --repo "${GITHUB_REPOSITORY}" --body-file "${body}"
             else
-              gh issue create --repo "${GITHUB_REPOSITORY}" --title "${TRACKING_ISSUE_TITLE}" \
-                --body-file "${body}"
+              previous=""
+              issue="$(gh issue create --repo "${GITHUB_REPOSITORY}" --title "${TRACKING_ISSUE_TITLE}" \
+                --body-file "${body}")"
+            fi
+            if [ "${previous}" != "${current}" ]; then
+              gh issue comment "${issue}" --repo "${GITHUB_REPOSITORY}" \
+                --body "@${GITHUB_REPOSITORY_OWNER} the upstream sync is blocked; see the issue description. ${run_url}"
             fi
             cat "${body}" >> "${GITHUB_STEP_SUMMARY}"
           elif [ -n "${resolution}" ]; then

@@ -50,6 +50,7 @@ jobs:
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
       validated: ${{ steps.reuse.outputs.validated }}
+      rust: ${{ steps.scope.outputs.rust || 'true' }}
     steps:
       - name: Check out the selected source
         uses: actions/checkout@v7
@@ -61,8 +62,18 @@ jobs:
         id: source
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Decide whether the change touches Rust
+        id: scope
+        if: hashFiles('script/ci-rust-changes.py') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: python script/ci-rust-changes.py
+
       - name: Look for an original full validation
         id: reuse
+        if: steps.scope.outputs.rust != 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
@@ -111,6 +122,12 @@ jobs:
 
       - name: Test retained build checkpoints
         run: python script/test-ci-build-checkpoint.py
+
+      - name: Test Rust change detection
+        run: python script/test-ci-rust-changes.py
+
+      - name: Test the integration test list
+        run: python script/test-praxis-integration-tests.py
 
       - name: Test Unix split release packaging
         if: hashFiles('script/test-bundle-split-modes.py') != ''
@@ -205,12 +222,10 @@ jobs:
     name: ${{ matrix.name }}
     env:
       SOURCE_REF: ${{ needs.prepare.outputs.source_sha }}
-    # Unformatted commits are corrected and pushed again, so expensive jobs
-    # wait for formatting instead of running on a superseded commit.
-    needs:
-      - prepare
-      - formatting
-    if: needs.prepare.outputs.validated != 'true'
+    # Build jobs start beside formatting. When formatting pushes a correction,
+    # the new commit's run cancels this one.
+    needs: prepare
+    if: needs.prepare.outputs.validated != 'true' && needs.prepare.outputs.rust != 'false'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -250,10 +265,8 @@ jobs:
       SOURCE_REF: ${{ needs.prepare.outputs.source_sha }}
       # Line tables keep backtraces readable at a fraction of the link time.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
-    needs:
-      - prepare
-      - formatting
-    if: needs.prepare.outputs.validated != 'true'
+    needs: prepare
+    if: needs.prepare.outputs.validated != 'true' && needs.prepare.outputs.rust != 'false'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -287,22 +300,12 @@ jobs:
       - name: Test Praxis Remote and the agent and canvas integrations
         run: python script/praxis-integration-tests.py
 
-      - name: Build remote inventory regressions
-        if: ${{ !cancelled() }}
-        run: cargo test --locked -p project --features test-support --test file_inventory --no-run
-
-      - name: Test remote inventory regressions
-        if: ${{ !cancelled() }}
-        run: timeout --kill-after=10s 120s cargo test --locked -p project --features test-support --test file_inventory
-
   updater-tests:
     name: Auto-update integrity tests
     env:
       SOURCE_REF: ${{ needs.prepare.outputs.source_sha }}
-    needs:
-      - prepare
-      - formatting
-    if: needs.prepare.outputs.validated != 'true'
+    needs: prepare
+    if: needs.prepare.outputs.validated != 'true' && needs.prepare.outputs.rust != 'false'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -335,10 +338,8 @@ jobs:
     name: Windows update helper tests
     env:
       SOURCE_REF: ${{ needs.prepare.outputs.source_sha }}
-    needs:
-      - prepare
-      - formatting
-    if: needs.prepare.outputs.validated != 'true'
+    needs: prepare
+    if: needs.prepare.outputs.validated != 'true' && needs.prepare.outputs.rust != 'false'
     runs-on: windows-2022
     timeout-minutes: 90
     steps:
@@ -377,10 +378,8 @@ jobs:
     name: Clippy package checks
     env:
       SOURCE_REF: ${{ needs.prepare.outputs.source_sha }}
-    needs:
-      - prepare
-      - formatting
-    if: needs.prepare.outputs.validated != 'true'
+    needs: prepare
+    if: needs.prepare.outputs.validated != 'true' && needs.prepare.outputs.rust != 'false'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -541,6 +540,11 @@ jobs:
           if prepare["outputs"].get("validated") == "true":
               assert all(job["result"] == "skipped" for job in results.values()), results
               print("Source has a verified original full validation; no new receipt issued")
+          elif prepare["outputs"].get("rust") == "false":
+              formatting = results.pop("formatting")
+              assert formatting["result"] == "success", formatting
+              assert all(job["result"] == "skipped" for job in results.values()), results
+              print("No Rust-affecting files changed; formatting passed and the Rust jobs were skipped")
           else:
               assert all(job["result"] == "success" for job in results.values()), results
               print("All required quality jobs executed successfully")

@@ -1042,12 +1042,17 @@ class WorkflowContractTests(unittest.TestCase):
                 condition = header.strip()
             with self.subTest(step=name):
                 self.assertTrue(condition.startswith("failure()"), condition)
-        # Expensive jobs wait for formatting, which pushes corrections itself.
+        # Expensive jobs start beside formatting. A correction is pushed with a
+        # token that starts a new run, and a new pull request run cancels this
+        # one, so no build result outlives the commit it built.
         for job in ("architect-tests", "agent-tests", "updater-tests", "windows-updater-tests", "clippy"):
             body = self.workflow.split(f"  {job}:\n", 1)[1]
             body = body[:body.index("    steps:\n")]
             with self.subTest(job=job):
-                self.assertIn("      - prepare\n      - formatting\n", body)
+                self.assertIn("    needs: prepare\n", body)
+                self.assertIn("needs.prepare.outputs.rust != 'false'", body)
+        self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", self.workflow)
+        self.assertIn("PUSH_TOKEN: ${{ secrets.PRAXIS_SYNC_TOKEN }}", formatting)
         self.assertEqual(self.workflow.count("save-if: ${{ github.ref == 'refs/heads/main' }}"), 5)
         correction = formatting.split("- name: Commit formatting corrections to this pull request\n", 1)[1]
         self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", correction)
@@ -1087,6 +1092,28 @@ class WorkflowContractTests(unittest.TestCase):
         results["Formatting"]["result"] = "failure"
         with self.assertRaises(AssertionError):
             aggregate()
+
+    def test_aggregate_accepts_skipped_rust_jobs_only_without_rust_changes(self):
+        aggregate_job = self.workflow.split("  source-validated:\n", 1)[1]
+        block = aggregate_job.split("          python - <<'PY'\n", 1)[1].split("          PY\n", 1)[0]
+        code = textwrap.dedent(block)
+        jobs = ("architect-tests", "agent-tests", "updater-tests", "windows-updater-tests", "clippy", "full-receipt")
+
+        def aggregate(rust, formatting, others):
+            results = {
+                "prepare": {"result": "success", "outputs": {"validated": "false", "rust": rust}},
+                "formatting": {"result": formatting},
+                **{job: {"result": others} for job in jobs},
+            }
+            with patch.dict(os.environ, {"RESULTS": json.dumps(results)}), contextlib.redirect_stdout(io.StringIO()):
+                exec(code, {})
+
+        aggregate("false", "success", "skipped")
+        for formatting, others in (("failure", "skipped"), ("success", "failure"), ("success", "success")):
+            with self.subTest(formatting=formatting, others=others), self.assertRaises(AssertionError):
+                aggregate("false", formatting, others)
+        with self.assertRaises(AssertionError):
+            aggregate("true", "success", "skipped")
 
 
 class BundleAfterMergeTests(unittest.TestCase):

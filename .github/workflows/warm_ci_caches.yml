@@ -13,6 +13,12 @@ on:
   push:
     branches:
       - main
+    # Mirrors script/ci-rust-changes.py: these never reach a Rust build.
+    paths-ignore:
+      - remote-android/**
+      - docs/**
+      - "*.md"
+      - .github/workflows/android_remote.yml
   workflow_dispatch:
 
 permissions:
@@ -55,9 +61,6 @@ jobs:
 
       - name: Build the agent and canvas tests
         run: python script/praxis-integration-tests.py --no-run
-
-      - name: Build remote inventory regressions
-        run: cargo test --locked -p project --features test-support --test file_inventory --no-run
 
   clippy:
     name: Warm the Clippy cache
