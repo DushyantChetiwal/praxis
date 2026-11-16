@@ -167,7 +167,7 @@ if ! "$remote_server_only"; then
     debug_binaries+=("${target_dir}/${target_triple}/release/zed")
 fi
 if ! "$desktop_only"; then
-    debug_binaries+=("${target_dir}/${remote_server_triple}/release/remote_server")
+    debug_binaries+=("${target_dir}/${remote_server_triple}/release/remote-server")
 fi
 
 if ! "$skip_sentry"; then
@@ -206,10 +206,10 @@ trap 'rm -rf "$temp_dir"' EXIT
 # Cargo may reuse its outputs on the next invocation. Strip packaging copies
 # so reruns still upload full ELFs and extract complete debug companions.
 if ! "$desktop_only"; then
-    llvm-objcopy --strip-debug --discard-all "${target_dir}/${remote_server_triple}/release/remote_server" "${temp_dir}/remote_server"
+    llvm-objcopy --strip-debug --discard-all "${target_dir}/${remote_server_triple}/release/remote-server" "${temp_dir}/remote_server"
 
     # Ensure that remote_server does not depend on libssl nor libcrypto, as we got rid of these deps.
-    if ldd "${target_dir}/${remote_server_triple}/release/remote_server" | grep -q 'libcrypto\|libssl'; then
+    if ldd "${target_dir}/${remote_server_triple}/release/remote-server" | grep -q 'libcrypto\|libssl'; then
         if [[ "$remote_server_triple" == *-musl ]]; then
             echo "Error: remote_server still depends on libssl or libcrypto" && exit 1
         else

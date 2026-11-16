@@ -52,7 +52,7 @@ pub(super) fn list(
                 let full = if path_style.is_absolute(&entry.path) {
                     entry.path
                 } else {
-                    path_style.join_path(&path, &entry.path).ok()?
+                    path_style.join(&path, &entry.path)
                 };
                 let name = path_style.file_name(&full)?.to_str()?.to_owned();
                 let full = full.to_str()?.to_owned();
@@ -98,10 +98,12 @@ pub(super) fn open(
         Err(error) => return Task::ready(Err(error)),
     };
     cx.spawn(async move |cx| {
-        let remote = project.read_with(cx, |project, cx| project.remote_connection_options(cx));
+        let is_remote = project.read_with(cx, |project, cx| {
+            project.remote_connection_options(cx).is_some()
+        });
         // A folder on a connected computer opens in this window, so it stays on
         // that computer instead of opening a local path that does not exist.
-        if remote.is_some() {
+        if is_remote {
             project
                 .update(cx, |project, cx| {
                     project.find_or_create_worktree(&path, true, cx)
@@ -200,7 +202,7 @@ mod tests {
             home
         );
         assert!(host_path("home/me", None, PathStyle::Unix).is_err());
-        let child = PathStyle::Unix.join_path(home, "project").expect("joined");
+        let child = PathStyle::Unix.join(home, "project");
         assert_eq!(child.to_str(), Some("/home/me/project"));
         assert_eq!(
             PathStyle::Unix.parent(&child).and_then(Path::to_str),

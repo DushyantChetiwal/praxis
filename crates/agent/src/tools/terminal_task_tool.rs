@@ -3,7 +3,7 @@ use super::terminal_tool::{
 };
 use crate::{AgentTool, TerminalHandle, ToolCallEventStream, ToolCapability, ToolInput};
 use acp_thread::ProcessOutput;
-use agent_client_protocol::schema::v2 as acp;
+use agent_client_protocol::v2::schema as acp;
 use anyhow::{Result, anyhow};
 use futures::{FutureExt as _, channel::mpsc, future::Shared};
 use gpui::{App, AsyncApp, SharedString, Task};

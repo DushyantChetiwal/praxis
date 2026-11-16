@@ -1,7 +1,7 @@
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
 
 use acp_thread::AcpThread;
-use agent_client_protocol::schema::v2 as acp;
+use agent_client_protocol::v2::schema as acp;
 use anyhow::{Context as _, Result, ensure};
 use architect::{NodePath, StepModel};
 use futures::{FutureExt as _, channel::oneshot};

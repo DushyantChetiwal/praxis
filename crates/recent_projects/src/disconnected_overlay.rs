@@ -66,7 +66,8 @@ impl DisconnectedOverlay {
                 }
                 let handle = cx.entity().downgrade();
 
-                let remote_connection_options = project.read(cx).remote_connection_options(cx);
+                let remote_connection_options =
+                    project.read(cx).remote_connection_options(cx).cloned();
                 let host = if let Some(remote_connection_options) = remote_connection_options {
                     Host::RemoteServerProject(
                         remote_connection_options,
@@ -108,7 +109,7 @@ impl DisconnectedOverlay {
         {
             return;
         }
-        let Some(connection_options) = project.remote_connection_options(cx) else {
+        let Some(connection_options) = project.remote_connection_options(cx).cloned() else {
             return;
         };
         if let Some(overlay) = workspace.active_modal::<Self>(cx) {

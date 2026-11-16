@@ -78,7 +78,8 @@ elif command == "cargo":
         else:
             assert packages in (["zed", "cli"], ["cli"], ["remote_server"]), arguments
         for package in packages:
-            create(directory / package)
+            # Cargo names the remote server's binary after its [[bin]] target.
+            create(directory / {"remote_server": "remote-server"}.get(package, package))
     elif arguments[0] == "bundle":
         assert "[package.metadata.bundle]" in Path("Cargo.toml").read_text()
         profile = "release" if "--release" in arguments else "debug"
@@ -179,6 +180,8 @@ class BundleSplitModes(unittest.TestCase):
         (self.root / "crates/zed/contents/stable/embedded.provisionprofile").write_text("profile")
         (self.root / "docs/brand/praxis-app-icon.svg").write_text("icon")
         (self.root / "libstdc++.so.6").write_text("library")
+        (self.root / "sdk").mkdir()
+        (self.root / "sdk/SDKSettings.plist").write_text("plist")
         driver = self.root / "bin/mock-command"
         driver.write_text("#!" + sys.executable + "\n" + MOCK_COMMAND)
         driver.chmod(0o755)
@@ -193,10 +196,13 @@ class BundleSplitModes(unittest.TestCase):
             (self.root / "script" / command).symlink_to(driver)
         for command in ("notarytool", "stapler"):
             (self.root / "xcode/usr/bin" / command).symlink_to(driver)
-        # The production script deliberately uses an absolute codesign path.
+        # The production script deliberately uses absolute codesign and
+        # PlistBuddy paths.
         (self.root / "bash-env").write_text(
             "function /usr/bin/codesign { "
             + shlex.quote(str(self.root / "bin/codesign")) + ' "$@"; }\n'
+            + 'function /usr/libexec/PlistBuddy { case "$2" in '
+            + '*CanonicalName) echo macosx26.0 ;; *Version) echo 26.0 ;; esac; }\n'
         )
 
     def run_bundle(self, platform, *arguments, environment=None, succeeds=True):
@@ -216,6 +222,7 @@ class BundleSplitModes(unittest.TestCase):
             "TMPDIR": str(self.root / "tmp"),
             "MOCK_HOST": "aarch64-apple-darwin" if platform == "mac" else "x86_64-unknown-linux-gnu",
             "SENTRY_AUTH_TOKEN": "mock-token",
+            "SDKROOT": str(self.root / "sdk"),
             "CC": "clang",
             "LLD": str(self.root / "bin" / "ld.lld"),
         })
@@ -251,11 +258,11 @@ class BundleSplitModes(unittest.TestCase):
         self.assertTrue(uploads)
         uploaded = " ".join(uploads[-1]["arguments"][8:])
         self.assertEqual("/zed" in uploaded, desktop)
-        self.assertEqual("/remote_server" in uploaded, remote)
+        self.assertEqual("/remote-server" in uploaded, remote)
         self.assertEqual(len(self.calls("gzip")), int(remote))
         if not remote:
             for command in ("dsymutil", "strip", "llvm-objcopy", "codesign", "ldd"):
-                self.assertNotIn("remote_server", json.dumps(self.calls(command)))
+                self.assertNotRegex(json.dumps(self.calls(command)), r"remote[-_]server")
         if not desktop:
             for command in ("hdiutil", "npm", "dmg-license", "curl", "tar", "open"):
                 self.assertEqual(self.calls(command), [])
@@ -405,7 +412,7 @@ class BundleSplitModes(unittest.TestCase):
             with self.subTest(platform=platform):
                 self.run_bundle(platform, "--remote-server-only", environment={"SENTRY_AUTH_TOKEN": ""})
                 self.assertEqual(self.calls("sentry-cli"), [])
-                self.assertTrue((self.root / "target" / target / "release" / ("remote_server" + extension)).is_file())
+                self.assertTrue((self.root / "target" / target / "release" / ("remote-server" + extension)).is_file())
 
     def test_conflicting_modes_fail_before_build(self):
         for platform in ("mac", "linux"):

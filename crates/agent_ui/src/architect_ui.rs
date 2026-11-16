@@ -28,8 +28,8 @@ use git_ui::git_panel::GitPanel;
 use gpui::{
     AnyWindowHandle, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels,
-    Point, ScrollDelta, ScrollWheelEvent, Subscription, Task, TaskExt as _, WeakEntity, Window,
-    point, px,
+    Point, ScrollDelta, ScrollEvent, Subscription, Task, TaskExt as _, WeakEntity, Window, point,
+    px,
 };
 use project_panel::ProjectPanel;
 use settings::Settings as _;
@@ -310,7 +310,7 @@ pub struct ArchitectPane {
     plan_drawer_shows_plan: bool,
     /// A past step visit whose thread the conversation drawer is showing, as
     /// opened from a step's run activity. `None` follows the running step.
-    inspected_step_session: Option<agent_client_protocol::schema::v2::SessionId>,
+    inspected_step_session: Option<agent_client_protocol::v2::schema::SessionId>,
     outline_width: Pixels,
     inspector_width: Pixels,
     search_editor: Entity<Editor>,
@@ -1866,7 +1866,7 @@ impl ArchitectPane {
         // The step's thread is normally loaded as it starts; this covers a
         // plan conversation that missed it.
         if let Some(session_id) = self.run_step_session(cx) {
-            self.load_step_thread(session_id, window, cx);
+            self.load_step_thread(session_id, cx);
         }
         self.remember_transient_focus(window, cx);
         self.plan_drawer_shows_plan = false;
@@ -1880,15 +1880,14 @@ impl ArchitectPane {
     /// already, and redraws once it is so the drawer can show it.
     fn load_step_thread(
         &mut self,
-        session_id: agent_client_protocol::schema::v2::SessionId,
-        window: &mut Window,
+        session_id: agent_client_protocol::v2::schema::SessionId,
         cx: &mut Context<Self>,
     ) {
         let Some(view) = self.plan_conversation_view(cx) else {
             return;
         };
         let load = view.update(cx, |view, cx| {
-            view.ensure_subagent_thread_loaded(session_id, window, cx)
+            view.ensure_subagent_thread_loaded(session_id, cx)
         });
         cx.spawn(async move |this, cx| {
             load.await?;
@@ -1901,11 +1900,11 @@ impl ArchitectPane {
     /// did can be read after the run.
     fn open_step_visit(
         &mut self,
-        session_id: agent_client_protocol::schema::v2::SessionId,
+        session_id: agent_client_protocol::v2::schema::SessionId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.load_step_thread(session_id.clone(), window, cx);
+        self.load_step_thread(session_id.clone(), cx);
         self.remember_transient_focus(window, cx);
         self.plan_drawer_shows_plan = false;
         self.inspected_step_session = Some(session_id);
@@ -2079,7 +2078,7 @@ impl ArchitectPane {
 
     // -- Input ----------------------------------------------------------------
 
-    fn handle_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn handle_scroll(&mut self, event: &ScrollEvent, _: &mut Window, cx: &mut Context<Self>) {
         if event.modifiers.control || event.modifiers.platform {
             let delta = match event.delta {
                 ScrollDelta::Pixels(pixels) => f32::from(pixels.y),
@@ -2270,9 +2269,9 @@ impl ArchitectPane {
         let modifiers = event.keystroke.modifiers;
         // Zoom keys go without Ctrl or Cmd, which with these keys already
         // resize the fonts everywhere in the workspace.
-        let zoom_key = canvas_focused && !modifiers.secondary() && !modifiers.alt;
+        let zoom_key = canvas_focused && !modifiers.secondary(cx) && !modifiers.alt;
         match event.keystroke.key.as_str() {
-            "z" | "Z" if canvas_focused && modifiers.secondary() => {
+            "z" | "Z" if canvas_focused && modifiers.secondary(cx) => {
                 let direction = if modifiers.shift {
                     HistoryDirection::Redo
                 } else {
@@ -2283,10 +2282,10 @@ impl ArchitectPane {
             "y" if canvas_focused && modifiers.control && !cfg!(target_os = "macos") => {
                 self.step_history(HistoryDirection::Redo, window, cx);
             }
-            "d" if canvas_focused && modifiers.secondary() && !modifiers.shift => {
+            "d" if canvas_focused && modifiers.secondary(cx) && !modifiers.shift => {
                 self.duplicate_selection(window, cx);
             }
-            "a" if canvas_focused && modifiers.secondary() && !modifiers.shift => {
+            "a" if canvas_focused && modifiers.secondary(cx) && !modifiers.shift => {
                 self.select_all_steps(window, cx);
             }
             "delete" | "backspace" if canvas_focused && self.has_bulk_selection() => {
@@ -4146,11 +4145,11 @@ mod tests {
         });
         assert_eq!(listed.len(), 4);
         let [a, b, c, d] = [0, 1, 2, 3].map(|index| listed[index].clone());
-        let ctrl = Modifiers::secondary_key();
+        let ctrl = cx.update(|_, cx| Modifiers::secondary_key(cx));
         let shift = Modifiers::shift();
         let ctrl_shift = Modifiers {
             shift: true,
-            ..Modifiers::secondary_key()
+            ..ctrl
         };
         pane.update_in(cx, |pane, window, cx| {
             pane.click_outline_step(b.clone(), &listed, Modifiers::none(), window, cx);

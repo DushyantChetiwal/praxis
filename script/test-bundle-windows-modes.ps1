@@ -192,9 +192,22 @@ try {
                 AssertEqual $args @('--config', '.cargo/bundle-config.toml', 'build', '--profile', 'release', '--package', 'remote_server', '--target', $target) 'Remote uses the existing release build configuration'
                 $operations.Add('build')
             }
+            $staging = "$env:ZED_WORKSPACE\target\remote-server-staging"
+            function New-Item($ItemType, $Path, [switch]$Force) {
+                AssertEqual $Path $staging 'Remote staging stays outside the installer'
+            }
+            function Copy-Item($Path, $Destination, [switch]$Force) {
+                AssertEqual $Path ".\$CargoOutDir\remote-server.exe" 'Remote executable source'
+                AssertEqual $Destination "$staging\remote_server.exe" 'SSH clients get the executable name they expect'
+                $operations.Add('stage')
+            }
             function Resolve-Path($Path) {
-                AssertEqual $Path ".\$CargoOutDir\remote_server.exe" 'Remote executable source'
+                AssertEqual $Path "$staging\remote_server.exe" 'Remote executable is packaged from staging'
                 [pscustomobject]@{ Path = 'remote_server.exe' }
+            }
+            function Remove-Item($Path, [switch]$Force) {
+                AssertEqual $Path 'remote_server.exe' 'Staged executable is removed after packaging'
+                $operations.Add('clean')
             }
             function Invoke-TrustedSigning {
                 param($Files, $Endpoint, $CodeSigningAccountName, $CertificateProfileName, $FileDigest, $TimestampDigest, $TimestampRfc3161)
@@ -207,9 +220,9 @@ try {
                 $operations.Add('zip')
             }
             BuildRemoteServer
-            $expected = @('build')
+            $expected = @('build', 'stage')
             if ($signed) { $expected += 'sign' }
-            $expected += 'zip'
+            $expected += @('zip', 'clean')
             AssertEqual $operations $expected 'Remote signing occurs before packaging without Inno staging'
         }
     }
