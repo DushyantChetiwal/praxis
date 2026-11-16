@@ -91,6 +91,7 @@ jobs:
         .github/workflows/android_remote.yml
         .github/workflows/remote_relay_probe.yml
         .github/workflows/incremental_ci.yml
+        .github/workflows/warm_ci_caches.yml
         .github/actions/rust-build-cache/action.yml
         .github/actions/save-rust-build-cache/action.yml
     needs: prepare
