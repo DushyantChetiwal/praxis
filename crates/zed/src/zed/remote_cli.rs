@@ -383,7 +383,9 @@ async fn answer_pairing_question(
     };
     let phone = question.phone;
     if question.answer.send(allowed).is_err() {
-        bail!("The pairing with \u{201c}{phone}\u{201d} expired before it was answered. Try again.");
+        bail!(
+            "The pairing with \u{201c}{phone}\u{201d} expired before it was answered. Try again."
+        );
     }
     if allowed {
         say(
@@ -398,11 +400,7 @@ async fn answer_pairing_question(
     Ok(true)
 }
 
-fn unpair(
-    phone: Option<String>,
-    responses: &dyn CliResponseSink,
-    cx: &mut AsyncApp,
-) -> Result<()> {
+fn unpair(phone: Option<String>, responses: &dyn CliResponseSink, cx: &mut AsyncApp) -> Result<()> {
     let phone = phone.context(
         "Name the phone to unpair with `--phone NAME`. `praxis --remote status` lists the paired phones.",
     )?;

@@ -3855,9 +3855,8 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         crate::test_support::init_test(cx);
-        let stub = crate::test_support::set_stub_agent_connection(
-            acp_thread::StubAgentConnection::new(),
-        );
+        let stub =
+            crate::test_support::set_stub_agent_connection(acp_thread::StubAgentConnection::new());
         cx.update(|cx| {
             agent::ThreadStore::init_global(cx);
             language_model::LanguageModelRegistry::test(cx);
@@ -3874,8 +3873,7 @@ mod tests {
         let _empty_window =
             cx.add_window(|window, cx| MultiWorkspace::test_new(empty_project, window, cx));
 
-        let repo_project =
-            Project::test(fs, [Path::new(util::path!("/repo"))], cx).await;
+        let repo_project = Project::test(fs, [Path::new(util::path!("/repo"))], cx).await;
         let repo_window =
             cx.add_window(|window, cx| MultiWorkspace::test_new(repo_project, window, cx));
         let repo_workspace = repo_window

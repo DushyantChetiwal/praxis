@@ -772,17 +772,16 @@ impl Platform for MacPlatform {
             return Err(PopupNotSupportedError.into());
         }
 
-        let (headless, cursor_visible, foreground_executor, background_executor, renderer_context) =
-            {
-                let guard = self.0.lock();
-                (
-                    guard.headless,
-                    guard.cursor_visible.clone(),
-                    guard.foreground_executor.clone(),
-                    guard.background_executor.clone(),
-                    guard.renderer_context.clone(),
-                )
-            };
+        let (headless, cursor_visible, foreground_executor, background_executor, renderer_context) = {
+            let guard = self.0.lock();
+            (
+                guard.headless,
+                guard.cursor_visible.clone(),
+                guard.foreground_executor.clone(),
+                guard.background_executor.clone(),
+                guard.renderer_context.clone(),
+            )
+        };
         if headless {
             return Ok(Box::new(gpui::HeadlessWindow::new(options, None)));
         }

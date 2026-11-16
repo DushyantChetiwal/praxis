@@ -588,8 +588,8 @@ fn run() -> Result<()> {
             Some(cli::RemoteAction::Start | cli::RemoteAction::Serve)
         )
         || (args.remote.is_some() && !has_display_env);
-    let stop_on_exit = args.remote == Some(cli::RemoteAction::Serve)
-        && (!app.is_running() || args.foreground);
+    let stop_on_exit =
+        args.remote == Some(cli::RemoteAction::Serve) && (!app.is_running() || args.foreground);
 
     let (server, server_name) =
         IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Zed spawn")?;
@@ -980,8 +980,7 @@ mod linux {
                 "zed-{}.sock",
                 *release_channel::RELEASE_CHANNEL_NAME
             ));
-            UnixDatagram::unbound()
-                .is_ok_and(|sock| sock.connect(&sock_path).is_ok())
+            UnixDatagram::unbound().is_ok_and(|sock| sock.connect(&sock_path).is_ok())
         }
 
         fn launch(
