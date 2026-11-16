@@ -1270,9 +1270,7 @@
       // Global default permission when no tool-specific rules match.
       // "allow" - Auto-approve without prompting (default)
       // "deny" - Auto-reject
-      // "confirm" - Prompt for approval. The edit_file and write_file tools
-      //   don't prompt for files inside the project unless an
-      //   "always_confirm" pattern matches.
+      // "confirm" - Always prompt
       "default": "allow",
       // Per-tool permission rules. Regex patterns match against tool input text.
       // The per-tool "default" also applies to MCP tools.

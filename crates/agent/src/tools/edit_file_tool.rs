@@ -1854,13 +1854,22 @@ mod tests {
             }
 
             let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
-            cx.update(|cx| edit_tool.authorize(&PathBuf::from("root/src/main.rs"), &stream_tx, cx))
-                .await
-                .unwrap();
-            assert!(
-                stream_rx.try_recv().is_err(),
-                "a path that matches no pattern should not prompt (default: {default:?})"
-            );
+            let authorize =
+                cx.update(|cx| edit_tool.authorize(&PathBuf::from("root/src/main.rs"), &stream_tx, cx));
+            if default == settings::ToolPermissionMode::Confirm {
+                // Praxis's confirm prompts for every edit, inside the project too.
+                let event = stream_rx.expect_authorization().await;
+                assert_eq!(
+                    event.tool_call.title,
+                    MaybeUndefined::Value("Edit `root/src/main.rs`".into())
+                );
+            } else {
+                authorize.await.unwrap();
+                assert!(
+                    stream_rx.try_recv().is_err(),
+                    "a path that matches no pattern should not prompt when edits are allowed"
+                );
+            }
         }
     }
 

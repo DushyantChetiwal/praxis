@@ -1177,9 +1177,7 @@ pub enum ToolPermissionMode {
     Allow,
     /// Auto-reject with an error.
     Deny,
-    /// Prompt for confirmation.
-    /// The `edit_file` and `write_file` tools don't prompt for files inside
-    /// the project unless an `always_confirm` pattern matches.
+    /// Always prompt for confirmation.
     Confirm,
 }
 

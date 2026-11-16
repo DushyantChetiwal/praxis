@@ -775,19 +775,16 @@ pub fn authorize_file_edit(
             return authorize.await;
         }
 
-        match resolved {
-            Ok(_) => Ok(()),
-            Err(_) => {
-                let authorize = cx.update(|cx| {
-                    let context = ToolPermissionContext::new(
-                        &tool_name,
-                        vec![path_owned.to_string_lossy().to_string()],
-                    );
-                    event_stream.authorize(&title, context, cx)
-                });
-                authorize.await
-            }
-        }
+        // Praxis defaults to allow, so a user who chose confirm asked for a
+        // prompt on every edit, including ordinary files inside the project.
+        let authorize = cx.update(|cx| {
+            let context = ToolPermissionContext::new(
+                &tool_name,
+                vec![path_owned.to_string_lossy().to_string()],
+            );
+            event_stream.authorize(&title, context, cx)
+        });
+        authorize.await
     })
 }
 
