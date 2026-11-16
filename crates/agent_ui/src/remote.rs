@@ -3898,8 +3898,7 @@ mod tests {
             );
         });
 
-        let status = cx
-            .update(|cx| handle_paired("status", &json!({}), "headless-vm", "phone-1", cx))
+        cx.update(|cx| handle_paired("status", &json!({}), "headless-vm", "phone-1", cx))
             .await
             .expect("status");
         cx.run_until_parked();
