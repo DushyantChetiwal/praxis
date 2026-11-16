@@ -13,7 +13,7 @@ agent historical_diff_replay_
 agent tools::edit_file_tool::tests::
 agent tools::write_file_tool::tests::
 agent_ui historical_diff_cards_
-agent_ui entry_view_state::tests::test_diff_sync
+agent_ui entry_view_state::tests::test_legacy_diff_sync
 agent_ui test_rewind_views
 agent_ui compact_terminal_wait_
 agent_ui test_deferred_tool_input_
