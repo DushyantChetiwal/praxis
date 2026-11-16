@@ -1,0 +1,129 @@
+# Pushes to main reuse the pull request's validation receipt and skip the
+# build jobs in architect_quality.yml, so those jobs never saved their
+# dependency caches and every pull request compiled all third-party crates.
+# This builds the same targets after every merge and saves them under the same
+# keys for pull requests to restore.
+#
+# Keep the environment, shared keys, and build commands identical to
+# architect_quality.yml: rust-cache keys include the CARGO_* and RUST*
+# environment.
+name: Warm CI caches
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: warm-ci-caches
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  agent-tests:
+    name: Warm the agent and canvas test cache
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Linux build dependencies
+        run: ./script/linux
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: architect-agent-tests
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9
+        with:
+          tool: nextest
+
+      - name: Build the agent and canvas tests
+        run: python script/praxis-integration-tests.py --no-run
+
+      - name: Build remote inventory regressions
+        run: cargo test --locked -p project --features test-support --test file_inventory --no-run
+
+  clippy:
+    name: Warm the Clippy cache
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Linux build dependencies
+        run: ./script/linux
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: architect-clippy
+
+      - name: Check the Architect packages with Clippy
+        run: >-
+          ./script/clippy --locked -p architect -p agent -p agent_ui -p auto_update
+          -p context_server -p feedback -p remote -p remote_direct -p gpui -p acp_thread
+
+  updater-tests:
+    name: Warm the auto-update test cache
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: architect-updater-tests
+
+      - name: Build the updater, remote, and MCP tests
+        run: |
+          cargo test --locked -p auto_update --lib --no-run
+          cargo test --locked -p remote --lib --no-run
+          cargo test --locked -p context_server --lib --no-run
+
+  windows-updater-tests:
+    name: Warm the Windows update helper cache
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Cache Rust dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: architect-windows-updater-tests
+
+      - name: Build the Windows update helper and terminal tests
+        run: |
+          cargo test --locked -p auto_update_helper --no-run
+          cargo test --locked -p terminal --lib --no-run
+          cargo check --locked -p gpui_windows
+
+      - name: Check the Windows update helper with Clippy
+        shell: bash
+        run: ./script/clippy --locked -p auto_update_helper
