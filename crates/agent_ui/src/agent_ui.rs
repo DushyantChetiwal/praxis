@@ -1509,7 +1509,7 @@ mod tests {
                 registry.register_provider(provider, cx);
             });
 
-            SettingsStore::update_global(cx, |store, cx| {
+            cx.update_global::<SettingsStore, _>(|store, cx| {
                 store
                     .set_user_settings(
                         r#"{
