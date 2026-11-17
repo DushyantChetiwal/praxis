@@ -3603,11 +3603,16 @@ fn subagent_model_id_to_selection(model_id: &AgentModelId, cx: &App) -> Language
     let Some((provider, model)) = model_id.as_ref().split_once('/') else {
         return model_id_to_selection(model_id, cx);
     };
-    if let Some(selection) = settings.subagent_model.as_ref()
-        && selection.provider.0 == provider
-        && selection.model == model
+    for configured in [
+        settings.subagent_model.as_ref(),
+        settings.workhorse_model.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
     {
-        return selection.clone();
+        if configured.provider.0 == provider && configured.model == model {
+            return configured.clone();
+        }
     }
     model_id_to_selection(model_id, cx)
 }

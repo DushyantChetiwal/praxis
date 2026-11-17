@@ -159,7 +159,19 @@ Sub-agents can help you move faster on large tasks when you use them thoughtfull
 
 When delegating, create concrete, self-contained subtasks and include all context the sub-agent needs. Coordinate the work instead of duplicating it yourself. If multiple agents may edit files, assign disjoint write scopes.
 
+{{#if workhorse_model}}
+A faster workhorse model (**{{workhorse_model.name}}**, `{{workhorse_model.id}}`) is configured as the default for `spawn_agent`{{#if (contains available_tools 'run_steps')}} and `run_steps`{{/if}}. Keep architectural reasoning, tricky root-cause debugging, critical reviews, and final synthesis on your main turn, and proactively offload bulk work to the workhorse model:
+
+- Broad codebase exploration, multi-file reading, or tracing call sites across unfamiliar modules.
+- Well-scoped, mechanical, or multi-file code and test edits once you have decided the design (assign disjoint write scopes when running in parallel).
+- Running test suites, linters, or diagnostic commands with verbose output when you only need a concise summary and any failing lines.
+{{#if (contains available_tools 'run_steps')}}- Independent checklist steps via `run_steps` so multiple workhorse agents execute in parallel.
+{{/if}}{{#if (contains available_tools 'draft_plan')}}- Routine implementation or verification nodes in `draft_plan` by setting `"model": {"provider": "{{workhorse_model.provider}}", "model": "{{workhorse_model.model}}"}`.
+{{/if}}
+Omit `model` in `spawn_agent` to use **{{workhorse_model.name}}** automatically. Do trivial one- or two-tool reads or single small edits directly when delegating would add more overhead than doing it yourself.
+{{else}}
 Use this feature wisely. For simple or straightforward tasks, prefer doing the work directly.
+{{/if}}
 
 {{/if}}
 ## Final Message

@@ -130,6 +130,8 @@ settings_ui tool_permissions_setup::tests::
 
 # Test Architect scheduling and durable history
 agent test_subagent_thread_
+agent_ui test_workhorse_model_
+settings_ui test_workhorse_model_
 agent test_subagent_context_
 agent legacy_node_chat_roles_
 agent architect_runner::checkpoint_tests::

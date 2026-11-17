@@ -224,6 +224,7 @@ pub struct AgentSettings {
     pub default_height: Pixels,
     pub max_content_width: Option<Pixels>,
     pub default_model: Option<LanguageModelSelection>,
+    pub workhorse_model: Option<LanguageModelSelection>,
     pub subagent_model: Option<LanguageModelSelection>,
     pub inline_assistant_model: Option<LanguageModelSelection>,
     pub inline_assistant_use_streaming_tools: bool,
@@ -270,6 +271,36 @@ pub struct ThreadsSidebarSettings {
 impl AgentSettings {
     pub fn enabled(&self, cx: &App) -> bool {
         self.enabled && !DisableAiSettings::get_global(cx).disable_ai
+    }
+
+    pub fn effective_subagent_model(&self) -> Option<&LanguageModelSelection> {
+        self.subagent_model
+            .as_ref()
+            .or(self.workhorse_model.as_ref())
+    }
+
+    pub fn effective_inline_assistant_model(&self) -> Option<&LanguageModelSelection> {
+        self.inline_assistant_model
+            .as_ref()
+            .or(self.workhorse_model.as_ref())
+    }
+
+    pub fn effective_commit_message_model(&self) -> Option<&LanguageModelSelection> {
+        self.commit_message_model
+            .as_ref()
+            .or(self.workhorse_model.as_ref())
+    }
+
+    pub fn effective_thread_summary_model(&self) -> Option<&LanguageModelSelection> {
+        self.thread_summary_model
+            .as_ref()
+            .or(self.workhorse_model.as_ref())
+    }
+
+    pub fn effective_compaction_model(&self) -> Option<&LanguageModelSelection> {
+        self.compaction_model
+            .as_ref()
+            .or(self.workhorse_model.as_ref())
     }
 
     pub fn temperature_for_model(model: &LanguageModel, cx: &App) -> Option<f32> {
@@ -606,6 +637,7 @@ impl Settings for AgentSettings {
             flexible: agent.flexible.unwrap(),
             starts_open: agent.starts_open.unwrap(),
             default_model: Some(agent.default_model.unwrap()),
+            workhorse_model: agent.workhorse_model,
             subagent_model: agent.subagent_model,
             inline_assistant_model: agent.inline_assistant_model,
             inline_assistant_use_streaming_tools: agent
@@ -1212,6 +1244,74 @@ mod tests {
             AgentSettings::get_global(cx)
                 .terminal_init_command
                 .is_none()
+        );
+    }
+
+    #[gpui::test]
+    fn test_workhorse_model_fallback_and_role_overrides(cx: &mut gpui::App) {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        AgentSettings::register(cx);
+
+        assert!(
+            AgentSettings::get_global(cx)
+                .effective_subagent_model()
+                .is_none()
+        );
+
+        SettingsStore::update_global(cx, |store, cx| {
+            store
+                .set_user_settings(
+                    r#"{
+                        "agent": {
+                            "workhorse_model": {
+                                "provider": "google",
+                                "model": "gemini-4-hydrogen",
+                                "enable_thinking": true,
+                                "effort": "medium"
+                            },
+                            "compaction_model": {
+                                "provider": "google",
+                                "model": "gemini-3.5-flash-lite",
+                                "enable_thinking": false
+                            }
+                        }
+                    }"#,
+                    cx,
+                )
+                .unwrap();
+        });
+
+        let settings = AgentSettings::get_global(cx);
+        assert_eq!(
+            settings
+                .effective_subagent_model()
+                .map(|selection| selection.model.as_str()),
+            Some("gemini-4-hydrogen")
+        );
+        assert_eq!(
+            settings
+                .effective_inline_assistant_model()
+                .map(|selection| selection.model.as_str()),
+            Some("gemini-4-hydrogen")
+        );
+        assert_eq!(
+            settings
+                .effective_commit_message_model()
+                .map(|selection| selection.model.as_str()),
+            Some("gemini-4-hydrogen")
+        );
+        assert_eq!(
+            settings
+                .effective_thread_summary_model()
+                .map(|selection| selection.model.as_str()),
+            Some("gemini-4-hydrogen")
+        );
+        assert_eq!(
+            settings
+                .effective_compaction_model()
+                .map(|selection| selection.model.as_str()),
+            Some("gemini-3.5-flash-lite")
         );
     }
 

@@ -446,6 +446,7 @@ struct SettingsFieldMetadata {
     display_clear_button: bool,
     confirm_on_focus_out: bool,
     treat_missing_text_as_empty: bool,
+    allow_missing_default: bool,
 }
 
 pub fn init(cx: &mut App) {
@@ -681,6 +682,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::AudioInputDeviceName>(render_input_audio_device_dropdown)
         .add_basic_renderer::<settings::AudioOutputDeviceName>(render_output_audio_device_dropdown)
         .add_basic_renderer::<settings::TerminalBell>(render_dropdown)
+        .add_basic_renderer::<settings::LanguageModelSelection>(render_language_model_picker)
         // please semicolon stay on next line
         ;
 }
@@ -1158,7 +1160,13 @@ impl SettingsPageItem {
                     renderers.get(&AnySettingField::type_id(setting_item.field.as_ref()));
                 let field_renderer_or_warning =
                     field_renderer.ok_or("NO RENDERER").and_then(|renderer| {
-                        if cfg!(debug_assertions) && !found {
+                        if cfg!(debug_assertions)
+                            && !found
+                            && !setting_item
+                                .metadata
+                                .as_ref()
+                                .is_some_and(|metadata| metadata.allow_missing_default)
+                        {
                             Err("NO DEFAULT")
                         } else {
                             Ok(renderer)
@@ -5440,6 +5448,274 @@ fn render_icon_theme_picker(
         .into_any_element()
 }
 
+type LanguageModelSettingPicker = picker::Picker<LanguageModelSettingPickerDelegate>;
+
+#[derive(Clone)]
+struct LanguageModelSettingCandidate {
+    label: SharedString,
+    search_text: String,
+    selection: Option<settings::LanguageModelSelection>,
+}
+
+struct LanguageModelSettingPickerDelegate {
+    candidates: Vec<LanguageModelSettingCandidate>,
+    filtered_indices: Vec<usize>,
+    selected_index: usize,
+    current_selection: Option<settings::LanguageModelSelection>,
+    on_changed:
+        Arc<dyn Fn(Option<settings::LanguageModelSelection>, &mut Window, &mut App) + 'static>,
+}
+
+impl LanguageModelSettingPickerDelegate {
+    fn new(
+        empty_label: SharedString,
+        current_selection: Option<settings::LanguageModelSelection>,
+        on_changed: impl Fn(Option<settings::LanguageModelSelection>, &mut Window, &mut App) + 'static,
+        cx: &App,
+    ) -> Self {
+        let mut candidates = vec![LanguageModelSettingCandidate {
+            search_text: format!("{empty_label} none default").to_lowercase(),
+            label: empty_label,
+            selection: None,
+        }];
+        for model in language_model::LanguageModelRegistry::read_global(cx).available_models(cx) {
+            let provider_name = model.provider_name().0;
+            let model_name = model.name().0;
+            let provider_id = model.provider_id().0;
+            let model_id = model.id().0;
+            let selection = if let Some(existing) = current_selection.as_ref()
+                && existing.provider.0 == provider_id.as_ref()
+                && existing.model == model_id.as_ref()
+            {
+                existing.clone()
+            } else {
+                settings::LanguageModelSelection {
+                    provider: provider_id.to_string().into(),
+                    model: model_id.to_string(),
+                    enable_thinking: model.supports_thinking(),
+                    effort: model
+                        .default_effort_level()
+                        .map(|level| level.value.to_string()),
+                    speed: None,
+                }
+            };
+            candidates.push(LanguageModelSettingCandidate {
+                label: format!("{provider_name} · {model_name}").into(),
+                search_text: format!("{provider_name} {model_name} {provider_id} {model_id}")
+                    .to_lowercase(),
+                selection: Some(selection),
+            });
+        }
+        let filtered_indices: Vec<usize> = (0..candidates.len()).collect();
+        let selected_index =
+            Self::selected_position(&candidates, &filtered_indices, &current_selection);
+        Self {
+            candidates,
+            filtered_indices,
+            selected_index,
+            current_selection,
+            on_changed: Arc::new(on_changed),
+        }
+    }
+
+    fn selected_position(
+        candidates: &[LanguageModelSettingCandidate],
+        filtered_indices: &[usize],
+        current_selection: &Option<settings::LanguageModelSelection>,
+    ) -> usize {
+        filtered_indices
+            .iter()
+            .position(
+                |&candidate_ix| match (&candidates[candidate_ix].selection, current_selection) {
+                    (None, None) => true,
+                    (Some(left), Some(right)) => {
+                        left.provider.0 == right.provider.0 && left.model == right.model
+                    }
+                    _ => false,
+                },
+            )
+            .unwrap_or(0)
+    }
+}
+
+impl picker::PickerDelegate for LanguageModelSettingPickerDelegate {
+    type ListItem = AnyElement;
+
+    fn name() -> &'static str {
+        "language model picker"
+    }
+
+    fn match_count(&self) -> usize {
+        self.filtered_indices.len()
+    }
+
+    fn selected_index(&self) -> usize {
+        self.selected_index
+    }
+
+    fn set_selected_index(
+        &mut self,
+        ix: usize,
+        _: &mut Window,
+        cx: &mut Context<LanguageModelSettingPicker>,
+    ) {
+        self.selected_index = ix.min(self.filtered_indices.len().saturating_sub(1));
+        cx.notify();
+    }
+
+    fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
+        "Search models…".into()
+    }
+
+    fn update_matches(
+        &mut self,
+        query: String,
+        _window: &mut Window,
+        cx: &mut Context<LanguageModelSettingPicker>,
+    ) -> Task<()> {
+        let query_lower = query.trim().to_lowercase();
+        self.filtered_indices = self
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| {
+                query_lower.is_empty() || candidate.search_text.contains(&query_lower)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        self.selected_index = Self::selected_position(
+            &self.candidates,
+            &self.filtered_indices,
+            &self.current_selection,
+        );
+        cx.notify();
+        Task::ready(())
+    }
+
+    fn confirm(
+        &mut self,
+        _secondary: bool,
+        window: &mut Window,
+        cx: &mut Context<LanguageModelSettingPicker>,
+    ) {
+        if let Some(&candidate_ix) = self.filtered_indices.get(self.selected_index)
+            && let Some(candidate) = self.candidates.get(candidate_ix)
+        {
+            let selection = candidate.selection.clone();
+            (self.on_changed)(selection, window, cx);
+            cx.emit(gpui::DismissEvent);
+        }
+    }
+
+    fn dismissed(&mut self, window: &mut Window, cx: &mut Context<LanguageModelSettingPicker>) {
+        cx.defer_in(window, |picker, window, cx| {
+            picker.set_query("", window, cx);
+        });
+        cx.emit(gpui::DismissEvent);
+    }
+
+    fn render_match(
+        &self,
+        ix: usize,
+        selected: bool,
+        _window: &mut Window,
+        _cx: &mut Context<LanguageModelSettingPicker>,
+    ) -> Option<Self::ListItem> {
+        let candidate_ix = *self.filtered_indices.get(ix)?;
+        let candidate = self.candidates.get(candidate_ix)?;
+        Some(
+            ui::ListItem::new(ix)
+                .inset(true)
+                .spacing(ui::ListItemSpacing::Sparse)
+                .toggle_state(selected)
+                .child(Label::new(candidate.label.clone()))
+                .into_any_element(),
+        )
+    }
+}
+
+fn render_language_model_picker(
+    field: SettingField<settings::LanguageModelSelection>,
+    file: SettingsUiFile,
+    metadata: Option<&SettingsFieldMetadata>,
+    title: &'static str,
+    description: &'static str,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let empty_label: SharedString = metadata
+        .and_then(|metadata| metadata.placeholder)
+        .unwrap_or("Use Default Model")
+        .into();
+    let current_selection = SettingsStore::global(cx)
+        .get_value_from_file(file.to_settings(), field.pick)
+        .1
+        .cloned();
+    let current_label = match &current_selection {
+        Some(selection) => language_model::LanguageModelRegistry::read_global(cx)
+            .available_models(cx)
+            .find(|model| {
+                model.provider_id().0.as_ref() == selection.provider.0
+                    && model.id().0.as_ref() == selection.model
+            })
+            .map(|model| format!("{} · {}", model.provider_name().0, model.name().0).into())
+            .unwrap_or_else(|| format!("{} / {}", selection.provider.0, selection.model).into()),
+        None => empty_label.clone(),
+    };
+
+    let trigger_id: SharedString = format!(
+        "language_model_picker_trigger_{}",
+        field.json_path.unwrap_or(title)
+    )
+    .into();
+    let handle = ui::PopoverMenuHandle::default();
+    PopoverMenu::new(("language-model-picker", field.json_path.unwrap_or(title)))
+        .trigger(wire_picker_trigger_a11y(
+            render_picker_trigger_button(trigger_id, current_label)
+                .aria_label(title)
+                .when(!description.is_empty(), |this| {
+                    this.aria_description(description)
+                }),
+            handle.clone(),
+        ))
+        .menu(move |window, cx| {
+            let file = file.clone();
+            let empty_label = empty_label.clone();
+            let current_selection = current_selection.clone();
+            Some(cx.new(|cx| {
+                let delegate = LanguageModelSettingPickerDelegate::new(
+                    empty_label,
+                    current_selection,
+                    move |selection, window, cx| {
+                        update_settings_file(
+                            file.clone(),
+                            field.json_path,
+                            window,
+                            cx,
+                            move |settings, app| {
+                                (field.write)(settings, selection.clone(), app);
+                            },
+                        )
+                        .log_err();
+                    },
+                    cx,
+                );
+                picker::Picker::uniform_list(delegate, window, cx)
+                    .show_scrollbar(true)
+                    .initial_width(rems_from_px(260_f32))
+                    .max_height(rems(18.))
+                    .popover()
+            }))
+        })
+        .anchor(gpui::Anchor::TopLeft)
+        .offset(gpui::Point {
+            x: px(0.0),
+            y: px(2.0),
+        })
+        .with_handle(handle)
+        .into_any_element()
+}
+
 #[cfg(test)]
 pub mod test {
 
@@ -7578,6 +7854,79 @@ pub mod test {
         );
         cx.run_until_parked();
         credentials.assert_reads(&[url; 2]);
+    }
+
+    #[gpui::test]
+    fn test_workhorse_model_setting_renders_without_default_warning(cx: &mut gpui::TestAppContext) {
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            register_settings(cx);
+            let app_state = AppState::test(cx);
+            AppState::set_global(app_state, cx);
+            language_model::init(cx);
+        });
+        let (settings_window, cx) =
+            cx.add_window_view(|window, cx| SettingsWindow::new(None, window, cx));
+        cx.run_until_parked();
+
+        settings_window.update_in(cx, |settings_window, window, cx| {
+            let ai_page = settings_window
+                .pages
+                .iter()
+                .find(|page| page.title == "AI")
+                .expect("AI settings page");
+            let workhorse_item = ai_page
+                .items
+                .iter()
+                .find(|item| {
+                    matches!(
+                        item,
+                        SettingsPageItem::SettingItem(setting)
+                            if setting.field.json_path() == Some("agent.workhorse_model")
+                    )
+                })
+                .expect("agent.workhorse_model setting item");
+            let SettingsPageItem::SettingItem(setting) = workhorse_item else {
+                unreachable!();
+            };
+            assert!(
+                cx.default_global::<SettingFieldRenderer>()
+                    .renderers
+                    .borrow()
+                    .contains_key(&AnySettingField::type_id(setting.field.as_ref())),
+                "LanguageModelSelection must have a registered settings renderer"
+            );
+            assert!(
+                setting
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.allow_missing_default),
+                "agent.workhorse_model should allow an unset default without debug warning"
+            );
+
+            let selected_for_delegate = selected.clone();
+            let delegate = LanguageModelSettingPickerDelegate::new(
+                "Use Main Model".into(),
+                None,
+                move |choice, _, _| {
+                    selected_for_delegate.borrow_mut().push(choice);
+                },
+                cx,
+            );
+            assert_eq!(delegate.candidates[0].label.as_ref(), "Use Main Model");
+            assert!(delegate.candidates[0].selection.is_none());
+
+            let _ = workhorse_item.render(settings_window, 0, false, false, window, cx);
+        });
+        cx.cx
+            .update(|cx| open_settings_editor(Some("agent.workhorse_model"), None, None, cx));
+        cx.run_until_parked();
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(1000.), px(700.)),
+            |_, _| settings_window.clone().into_any_element(),
+        );
+        assert!(selected.borrow().is_empty());
     }
 
     fn settings_window_with_items(
