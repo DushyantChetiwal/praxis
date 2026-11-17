@@ -148,6 +148,8 @@ project+test-support @file_inventory
 # Test remote inventory regressions
 
 # Test context limits and compaction
+google_ai
+language_model_core
 agent compact
 agent prompt_too_large
 agent an_oversized_tool_result
