@@ -1490,17 +1490,19 @@ mod tests {
             language_model::init(cx);
 
             let provider = Arc::new(language_model::fake_provider::FakeLanguageModelProvider::new(
-                LanguageModelProviderId::from("google"),
-                language_model::LanguageModelProviderName::from("Google"),
+                LanguageModelProviderId::from("google".to_string()),
+                language_model::LanguageModelProviderName::from("Google".to_string()),
             ));
             let carbon = provider.update_model("gemini-4-carbon", |model| {
-                model.name = language_model::LanguageModelName::from("Gemini 4 Carbon");
+                model.name = language_model::LanguageModelName::from("Gemini 4 Carbon".to_string());
             });
             let hydrogen = provider.update_model("gemini-4-hydrogen", |model| {
-                model.name = language_model::LanguageModelName::from("Gemini 4 Hydrogen");
+                model.name =
+                    language_model::LanguageModelName::from("Gemini 4 Hydrogen".to_string());
             });
             let lite = provider.update_model("gemini-3.5-flash-lite", |model| {
-                model.name = language_model::LanguageModelName::from("Gemini 3.5 Flash Lite");
+                model.name =
+                    language_model::LanguageModelName::from("Gemini 3.5 Flash Lite".to_string());
             });
 
             LanguageModelRegistry::global(cx).update(cx, |registry, cx| {

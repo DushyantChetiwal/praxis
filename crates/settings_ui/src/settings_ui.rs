@@ -5668,8 +5668,13 @@ fn render_language_model_picker(
         field.json_path.unwrap_or(title)
     )
     .into();
+    let menu_id: SharedString = format!(
+        "language-model-picker-{}",
+        field.json_path.unwrap_or(title)
+    )
+    .into();
     let handle = ui::PopoverMenuHandle::default();
-    PopoverMenu::new(("language-model-picker", field.json_path.unwrap_or(title)))
+    PopoverMenu::new(menu_id)
         .trigger(wire_picker_trigger_a11y(
             render_picker_trigger_button(trigger_id, current_label)
                 .aria_label(title)
