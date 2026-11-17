@@ -5525,15 +5525,15 @@ impl LanguageModelSettingPickerDelegate {
     ) -> usize {
         filtered_indices
             .iter()
-            .position(
-                |&candidate_ix| match (&candidates[candidate_ix].selection, current_selection) {
+            .position(|&candidate_ix| {
+                match (&candidates[candidate_ix].selection, current_selection) {
                     (None, None) => true,
                     (Some(left), Some(right)) => {
                         left.provider.0 == right.provider.0 && left.model == right.model
                     }
                     _ => false,
-                },
-            )
+                }
+            })
             .unwrap_or(0)
     }
 }

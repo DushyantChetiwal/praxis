@@ -751,7 +751,11 @@ mod tests {
         assert!(!without_workhorse.contains("faster workhorse model"));
 
         let with_workhorse = render(
-            vec!["spawn_agent".into(), "run_steps".into(), "draft_plan".into()],
+            vec![
+                "spawn_agent".into(),
+                "run_steps".into(),
+                "draft_plan".into(),
+            ],
             Some(WorkhorseModelPrompt {
                 name: "Gemini 4 Hydrogen".into(),
                 id: "google/gemini-4-hydrogen".into(),
@@ -764,9 +768,8 @@ mod tests {
         assert!(with_workhorse.contains("proactively offload bulk work to the workhorse model"));
         assert!(with_workhorse.contains("`run_steps`"));
         assert!(
-            with_workhorse.contains(
-                r#""model": {"provider": "google", "model": "gemini-4-hydrogen"}"#
-            )
+            with_workhorse
+                .contains(r#""model": {"provider": "google", "model": "gemini-4-hydrogen"}"#)
         );
         assert!(!with_workhorse.contains("prefer doing the work directly"));
     }

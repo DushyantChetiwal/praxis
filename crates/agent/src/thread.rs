@@ -2379,9 +2379,11 @@ impl Thread {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut thread = Self::new_child(parent_thread, ChildThreadKind::Helper, cx);
-        let model_selection = model_selection
-            .cloned()
-            .or_else(|| AgentSettings::get_global(cx).effective_subagent_model().cloned());
+        let model_selection = model_selection.cloned().or_else(|| {
+            AgentSettings::get_global(cx)
+                .effective_subagent_model()
+                .cloned()
+        });
         if let Some(model_selection) = model_selection {
             thread.inherits_parent_model_settings = false;
             thread.apply_model_selection(&model_selection, cx);

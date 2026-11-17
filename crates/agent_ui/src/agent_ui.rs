@@ -1114,9 +1114,7 @@ fn update_active_language_model_from_settings(cx: &mut App) {
     let thread_summary = settings
         .effective_thread_summary_model()
         .map(to_selected_model);
-    let compaction = settings
-        .effective_compaction_model()
-        .map(to_selected_model);
+    let compaction = settings.effective_compaction_model().map(to_selected_model);
     let inline_alternatives = settings
         .inline_alternatives
         .iter()
