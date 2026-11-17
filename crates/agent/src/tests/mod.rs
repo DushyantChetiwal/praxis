@@ -7842,9 +7842,10 @@ async fn test_subagent_thread_uses_workhorse_model_and_prompts_parent_only(
         FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
     }));
 
+    always_allow_tools(cx);
     cx.update(|cx| {
         LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
-            registry.register_provider(provider, cx);
+            registry.register_provider(provider.clone(), cx);
         });
 
         let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
@@ -7865,7 +7866,7 @@ async fn test_subagent_thread_uses_workhorse_model_and_prompts_parent_only(
             project_context.clone(),
             context_server_registry.clone(),
             Templates::new(),
-            Some(carbon_model),
+            Some(carbon_model.clone()),
             cx,
         );
         thread.add_default_tools(environment.clone(), cx);
@@ -7890,34 +7891,55 @@ async fn test_subagent_thread_uses_workhorse_model_and_prompts_parent_only(
         );
     });
 
-    let parent_system_prompt = parent_thread.update(cx, |thread, cx| {
-        let request = thread
-            .build_completion_request(CompletionIntent::UserPrompt, cx)
-            .unwrap();
-        request.messages[0].string_contents()
+    let _parent_events = parent_thread.update(cx, |thread, cx| {
+        thread
+            .send(ClientUserMessageId::new(), ["Plan and implement"], cx)
+            .unwrap()
     });
+    cx.run_until_parked();
+    let parent_request = fake.pending_completions_for(&carbon_model).pop().unwrap();
+    let parent_system_prompt = parent_request.messages[0].string_contents();
     assert!(parent_system_prompt.contains("Gemini 4 Hydrogen"));
     assert!(parent_system_prompt.contains("`google/gemini-4-hydrogen`"));
     assert!(parent_system_prompt.contains("proactively offload bulk work to the workhorse model"));
+    fake.send_text(&carbon_model, &parent_request, "done");
+    fake.end_stream(&carbon_model, &parent_request);
+    cx.run_until_parked();
 
-    let subagent_system_prompt = subagent_thread.update(cx, |thread, cx| {
-        let request = thread
-            .build_completion_request(CompletionIntent::UserPrompt, cx)
-            .unwrap();
-        request.messages[0].string_contents()
+    let _subagent_events = subagent_thread.update(cx, |thread, cx| {
+        thread
+            .send(ClientUserMessageId::new(), ["Subtask"], cx)
+            .unwrap()
     });
+    cx.run_until_parked();
+    let subagent_request = provider
+        .pending_completions_for(&hydrogen_model)
+        .pop()
+        .unwrap();
+    let subagent_system_prompt = subagent_request.messages[0].string_contents();
     assert!(!subagent_system_prompt.contains("faster workhorse model"));
+    provider.send_text(&hydrogen_model, &subagent_request, "done");
+    provider.end_stream(&hydrogen_model, &subagent_request);
+    cx.run_until_parked();
 
     parent_thread.update(cx, |thread, cx| {
-        thread.set_model(hydrogen_model, cx);
+        thread.set_model(hydrogen_model.clone(), cx);
     });
-    let same_model_prompt = parent_thread.update(cx, |thread, cx| {
-        let request = thread
-            .build_completion_request(CompletionIntent::UserPrompt, cx)
-            .unwrap();
-        request.messages[0].string_contents()
+    let _same_model_events = parent_thread.update(cx, |thread, cx| {
+        thread
+            .send(ClientUserMessageId::new(), ["Follow-up"], cx)
+            .unwrap()
     });
+    cx.run_until_parked();
+    let same_model_request = provider
+        .pending_completions_for(&hydrogen_model)
+        .pop()
+        .unwrap();
+    let same_model_prompt = same_model_request.messages[0].string_contents();
     assert!(!same_model_prompt.contains("faster workhorse model"));
+    provider.send_text(&hydrogen_model, &same_model_request, "done");
+    provider.end_stream(&hydrogen_model, &same_model_request);
+    cx.run_until_parked();
 }
 
 #[gpui::test]

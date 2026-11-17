@@ -7863,6 +7863,7 @@ pub mod test {
         let selected = Rc::new(RefCell::new(Vec::new()));
         cx.update(|cx| {
             register_settings(cx);
+            super::init(cx);
             let app_state = AppState::test(cx);
             AppState::set_global(app_state, cx);
             language_model::init(cx);
