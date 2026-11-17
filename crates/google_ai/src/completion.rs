@@ -254,6 +254,7 @@ impl ThinkingConfig {
 
 pub struct GoogleEventMapper {
     usage: UsageMetadata,
+    emitted_tool_use: bool,
     stop_emitted: bool,
 }
 
@@ -261,6 +262,7 @@ impl GoogleEventMapper {
     pub fn new() -> Self {
         Self {
             usage: UsageMetadata::default(),
+            emitted_tool_use: false,
             stop_emitted: false,
         }
     }
@@ -295,7 +297,6 @@ impl GoogleEventMapper {
         static TOOL_CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
         let mut events: Vec<_> = Vec::new();
-        let mut wants_to_use_tool = false;
         let mut stop_reason = None;
         if let Some(usage_metadata) = event.usage_metadata {
             update_usage(&mut self.usage, &usage_metadata);
@@ -395,7 +396,7 @@ impl GoogleEventMapper {
                         }
                         Part::InlineDataPart(_) => {}
                         Part::FunctionCallPart(function_call_part) => {
-                            wants_to_use_tool = true;
+                            self.emitted_tool_use = true;
                             let name: Arc<str> = function_call_part.function_call.name.into();
                             let id: LanguageModelToolUseId =
                                 if let Some(ref call_id) = function_call_part.function_call.id {
@@ -431,7 +432,7 @@ impl GoogleEventMapper {
 
         // Even when Gemini wants to use a Tool, the API
         // responds with `finish_reason: STOP`
-        if wants_to_use_tool {
+        if matches!(stop_reason, Some(StopReason::EndTurn)) && self.emitted_tool_use {
             stop_reason = Some(StopReason::ToolUse);
         }
         if let Some(stop_reason) = stop_reason
@@ -483,9 +484,11 @@ fn update_usage(usage: &mut UsageMetadata, new: &UsageMetadata) {
 }
 
 fn convert_usage(usage: &UsageMetadata) -> TokenUsage {
+    // Gemini's intermediate thinking chunks can report `cachedContentTokenCount`
+    // before `promptTokenCount` is reconciled on the final chunk.
     let prompt_tokens = usage.prompt_token_count.unwrap_or(0);
     let cached_tokens = usage.cached_content_token_count.unwrap_or(0);
-    let input_tokens = prompt_tokens - cached_tokens;
+    let input_tokens = prompt_tokens.saturating_sub(cached_tokens);
     let output_tokens = usage.candidates_token_count.unwrap_or(0);
 
     TokenUsage {
@@ -989,7 +992,7 @@ mod tests {
         };
 
         let events = mapper.map_event(response);
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 1);
 
         if let Ok(LanguageModelCompletionEvent::ToolUse(tool_use)) = &events[0] {
             assert_eq!(tool_use.name.as_ref(), "test_function");
@@ -1030,7 +1033,7 @@ mod tests {
         };
 
         let events = mapper.map_event(response);
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 1);
 
         if let Ok(LanguageModelCompletionEvent::ToolUse(tool_use)) = &events[0] {
             assert!(tool_use.thought_signature.is_none());
@@ -1072,5 +1075,192 @@ mod tests {
         } else {
             panic!("Expected ToolUse event");
         }
+    }
+
+    #[test]
+    fn intermediate_cached_usage_does_not_underflow() {
+        let mut mapper = GoogleEventMapper::new();
+        let chunks = [
+            json!({
+                "candidates": [{
+                    "content": {
+                        "parts": [{"text": "Thinking...", "thought": true}],
+                        "role": "model"
+                    }
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 408_077,
+                    "cachedContentTokenCount": 410_271,
+                    "candidatesTokenCount": 0,
+                    "totalTokenCount": 408_077
+                }
+            }),
+            json!({
+                "candidates": [{
+                    "content": {"parts": [{"text": "Done"}], "role": "model"},
+                    "finishReason": "STOP"
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 412_540,
+                    "cachedContentTokenCount": 410_271,
+                    "candidatesTokenCount": 42,
+                    "totalTokenCount": 412_582
+                }
+            }),
+        ];
+
+        let usage_updates: Vec<TokenUsage> = chunks
+            .into_iter()
+            .flat_map(|chunk| mapper.map_event(serde_json::from_value(chunk).unwrap()))
+            .filter_map(|event| match event {
+                Ok(LanguageModelCompletionEvent::UsageUpdate(usage)) => Some(usage),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            usage_updates,
+            vec![
+                TokenUsage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_input_tokens: 410_271,
+                    cache_creation_input_tokens: 0,
+                },
+                TokenUsage {
+                    input_tokens: 2_269,
+                    output_tokens: 42,
+                    cache_read_input_tokens: 410_271,
+                    cache_creation_input_tokens: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn incomplete_tool_call_stream_reports_unexpected_end() {
+        let responses = vec![Ok(serde_json::from_value(json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {"name": "read_file", "args": {"path": "README.md"}}
+                    }]
+                }
+            }]
+        }))
+        .unwrap())];
+
+        futures::executor::block_on(async {
+            let mut stream = GoogleEventMapper::new()
+                .map_stream(Box::pin(futures::stream::iter(responses)))
+                .boxed();
+            assert!(matches!(
+                stream.next().await,
+                Some(Ok(LanguageModelCompletionEvent::ToolUse(tool_use)))
+                    if tool_use.name.as_ref() == "read_file"
+            ));
+            assert!(matches!(
+                stream.next().await,
+                Some(Err(LanguageModelCompletionError::StreamEndedUnexpectedly { provider }))
+                    if provider == language_model_core::GOOGLE_PROVIDER_NAME
+            ));
+            assert!(stream.next().await.is_none());
+        });
+    }
+
+    #[test]
+    fn multi_chunk_tool_calls_wait_for_finish_reason() {
+        let responses = vec![
+            Ok(serde_json::from_value(json!({
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [{
+                            "functionCall": {"name": "read_file", "args": {"path": "a.rs"}}
+                        }]
+                    }
+                }]
+            }))
+            .unwrap()),
+            Ok(serde_json::from_value(json!({
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [{
+                            "functionCall": {"name": "read_file", "args": {"path": "b.rs"}}
+                        }]
+                    }
+                }]
+            }))
+            .unwrap()),
+            Ok(serde_json::from_value(json!({
+                "candidates": [{
+                    "content": {"role": "model", "parts": []},
+                    "finishReason": "STOP"
+                }]
+            }))
+            .unwrap()),
+        ];
+
+        let events = futures::executor::block_on(
+            GoogleEventMapper::new()
+                .map_stream(Box::pin(futures::stream::iter(responses)))
+                .collect::<Vec<_>>(),
+        );
+        let mapped: Vec<_> = events.into_iter().map(|event| event.unwrap()).collect();
+        assert_eq!(mapped.len(), 3);
+        assert!(matches!(
+            &mapped[0],
+            LanguageModelCompletionEvent::ToolUse(tool_use) if tool_use.name.as_ref() == "read_file"
+        ));
+        assert!(matches!(
+            &mapped[1],
+            LanguageModelCompletionEvent::ToolUse(tool_use) if tool_use.name.as_ref() == "read_file"
+        ));
+        assert_eq!(
+            mapped[2],
+            LanguageModelCompletionEvent::Stop(StopReason::ToolUse)
+        );
+    }
+
+    #[test]
+    fn non_stop_finish_reason_after_tool_call_is_preserved() {
+        let responses = vec![
+            Ok(serde_json::from_value(json!({
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [{
+                            "functionCall": {"name": "write_file", "args": {"path": "a.rs"}}
+                        }]
+                    }
+                }]
+            }))
+            .unwrap()),
+            Ok(serde_json::from_value(json!({
+                "candidates": [{
+                    "content": {"role": "model", "parts": []},
+                    "finishReason": "MAX_TOKENS"
+                }]
+            }))
+            .unwrap()),
+        ];
+
+        let events = futures::executor::block_on(
+            GoogleEventMapper::new()
+                .map_stream(Box::pin(futures::stream::iter(responses)))
+                .collect::<Vec<_>>(),
+        );
+        let mapped: Vec<_> = events.into_iter().map(|event| event.unwrap()).collect();
+        assert_eq!(mapped.len(), 2);
+        assert!(matches!(
+            &mapped[0],
+            LanguageModelCompletionEvent::ToolUse(tool_use) if tool_use.name.as_ref() == "write_file"
+        ));
+        assert_eq!(
+            mapped[1],
+            LanguageModelCompletionEvent::Stop(StopReason::MaxTokens)
+        );
     }
 }

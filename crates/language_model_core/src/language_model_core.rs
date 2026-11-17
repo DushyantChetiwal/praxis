@@ -575,9 +575,9 @@ pub struct TokenUsage {
 impl TokenUsage {
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens
-            + self.output_tokens
-            + self.cache_read_input_tokens
-            + self.cache_creation_input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_read_input_tokens)
+            .saturating_add(self.cache_creation_input_tokens)
     }
 }
 
@@ -586,11 +586,14 @@ impl Add<TokenUsage> for TokenUsage {
 
     fn add(self, other: Self) -> Self {
         Self {
-            input_tokens: self.input_tokens + other.input_tokens,
-            output_tokens: self.output_tokens + other.output_tokens,
-            cache_creation_input_tokens: self.cache_creation_input_tokens
-                + other.cache_creation_input_tokens,
-            cache_read_input_tokens: self.cache_read_input_tokens + other.cache_read_input_tokens,
+            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
+            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
+            cache_creation_input_tokens: self
+                .cache_creation_input_tokens
+                .saturating_add(other.cache_creation_input_tokens),
+            cache_read_input_tokens: self
+                .cache_read_input_tokens
+                .saturating_add(other.cache_read_input_tokens),
         }
     }
 }
@@ -600,11 +603,14 @@ impl Sub<TokenUsage> for TokenUsage {
 
     fn sub(self, other: Self) -> Self {
         Self {
-            input_tokens: self.input_tokens - other.input_tokens,
-            output_tokens: self.output_tokens - other.output_tokens,
-            cache_creation_input_tokens: self.cache_creation_input_tokens
-                - other.cache_creation_input_tokens,
-            cache_read_input_tokens: self.cache_read_input_tokens - other.cache_read_input_tokens,
+            input_tokens: self.input_tokens.saturating_sub(other.input_tokens),
+            output_tokens: self.output_tokens.saturating_sub(other.output_tokens),
+            cache_creation_input_tokens: self
+                .cache_creation_input_tokens
+                .saturating_sub(other.cache_creation_input_tokens),
+            cache_read_input_tokens: self
+                .cache_read_input_tokens
+                .saturating_sub(other.cache_read_input_tokens),
         }
     }
 }
@@ -1381,5 +1387,41 @@ mod tests {
         assert_eq!(deserialized.id, original.id);
         assert_eq!(deserialized.name, original.name);
         assert_eq!(deserialized.thought_signature, None);
+    }
+
+    #[test]
+    fn test_token_usage_arithmetic_saturates() {
+        let large = TokenUsage {
+            input_tokens: u64::MAX - 5,
+            output_tokens: 10,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 20,
+        };
+        let delta = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: 5,
+            cache_read_input_tokens: 30,
+        };
+
+        assert_eq!(large.total_tokens(), u64::MAX);
+        assert_eq!(
+            large + delta,
+            TokenUsage {
+                input_tokens: u64::MAX,
+                output_tokens: 60,
+                cache_creation_input_tokens: 5,
+                cache_read_input_tokens: 50,
+            }
+        );
+        assert_eq!(
+            large - delta,
+            TokenUsage {
+                input_tokens: u64::MAX - 105,
+                output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            }
+        );
     }
 }
