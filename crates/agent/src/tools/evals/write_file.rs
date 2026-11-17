@@ -198,6 +198,7 @@ impl WriteToolTest {
                 project: &project_context,
                 available_tools: tool_names,
                 model_name: None,
+                workhorse_model: None,
                 date: chrono::Local::now().format("%Y-%m-%d").to_string(),
                 user_agents_md: None,
                 sandboxing: false,

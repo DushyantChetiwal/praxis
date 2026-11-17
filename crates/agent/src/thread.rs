@@ -2379,9 +2379,11 @@ impl Thread {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut thread = Self::new_child(parent_thread, ChildThreadKind::Helper, cx);
-        let model_selection = model_selection
-            .cloned()
-            .or_else(|| AgentSettings::get_global(cx).subagent_model.clone());
+        let model_selection = model_selection.cloned().or_else(|| {
+            AgentSettings::get_global(cx)
+                .effective_subagent_model()
+                .cloned()
+        });
         if let Some(model_selection) = model_selection {
             thread.inherits_parent_model_settings = false;
             thread.apply_model_selection(&model_selection, cx);
@@ -6942,6 +6944,7 @@ impl Thread {
             project: self.project_context.read(cx),
             available_tools,
             model_name: self.model().map(|m| m.name().0.to_string()),
+            workhorse_model: self.workhorse_model_prompt(cx),
             date: Local::now().format("%Y-%m-%d").to_string(),
             user_agents_md,
             sandboxing: crate::sandboxing::sandboxing_enabled_for_project(
@@ -7091,6 +7094,36 @@ impl Thread {
         LanguageModelRegistry::read_global(cx)
             .compaction_model()
             .or_else(|| self.model().cloned())
+    }
+
+    fn workhorse_model_prompt(&self, cx: &App) -> Option<crate::WorkhorseModelPrompt> {
+        if self.parent_thread_id().is_some() {
+            return None;
+        }
+        let selection = AgentSettings::get_global(cx).effective_subagent_model()?;
+        let provider_id = LanguageModelProviderId::from(selection.provider.0.clone());
+        let model_id = LanguageModelId::from(selection.model.clone());
+        let registry = LanguageModelRegistry::read_global(cx);
+        let provider = registry.provider(&provider_id)?;
+        if !provider.is_authenticated(cx) {
+            return None;
+        }
+        let resolved = provider
+            .provided_models(cx)
+            .into_iter()
+            .find(|model| model.id() == model_id)?;
+        if self
+            .model()
+            .is_some_and(|current| current.provider_id() == provider_id && current.id() == model_id)
+        {
+            return None;
+        }
+        Some(crate::WorkhorseModelPrompt {
+            name: resolved.name().0.to_string(),
+            id: format!("{}/{}", resolved.provider_id().0, resolved.id().0),
+            provider: resolved.provider_id().0.to_string(),
+            model: resolved.id().0.to_string(),
+        })
     }
 
     fn build_compaction_request(

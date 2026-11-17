@@ -9353,7 +9353,29 @@ fn ai_page(cx: &App) -> SettingsPage {
         ]);
 
         items.extend([
-
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Workhorse Model",
+                description: "Fast worker model used across subagents, parallel checklist steps, context compaction, thread summaries, inline assists, and commit messages when a role-specific model is not set. When distinct from your main model, Praxis also prompts the main agent to offload bulk work to it.",
+                field: Box::new(SettingField {
+                    organization_override: None,
+                    json_path: Some("agent.workhorse_model"),
+                    pick: |settings_content| {
+                        settings_content.agent.as_ref()?.workhorse_model.as_ref()
+                    },
+                    write: |settings_content, value, _| {
+                        settings_content
+                            .agent
+                            .get_or_insert_default()
+                            .workhorse_model = value;
+                    },
+                }),
+                metadata: Some(Box::new(SettingsFieldMetadata {
+                    placeholder: Some("Use Main Model"),
+                    allow_missing_default: true,
+                    ..Default::default()
+                })),
+                files: USER,
+            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Single File Review",
                 description: "When enabled, agent edits will also be displayed in single-file buffers for review.",

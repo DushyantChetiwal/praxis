@@ -7813,6 +7813,136 @@ async fn test_subagent_thread_model_selection(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_subagent_thread_uses_workhorse_model_and_prompts_parent_only(
+    cx: &mut TestAppContext,
+) {
+    let fake = init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/test"), json!({})).await;
+    let project = Project::test(fs, [path!("/test").as_ref()], cx).await;
+    let project_context = cx.new(|_cx| ProjectContext::default());
+    let context_server_store = project.read_with(cx, |project, _| project.context_server_store());
+    let context_server_registry =
+        cx.new(|cx| ContextServerRegistry::new(context_server_store.clone(), cx));
+    let carbon_model = fake.update_model("gemini-4-carbon", |model| {
+        model.name = LanguageModelName::from("Gemini 4 Carbon".to_string());
+        model.supports_thinking = true;
+    });
+    let provider = Arc::new(FakeLanguageModelProvider::new(
+        LanguageModelProviderId::from("google".to_string()),
+        LanguageModelProviderName::from("Google".to_string()),
+    ));
+    let hydrogen_model = provider.update_model("gemini-4-hydrogen", |model| {
+        model.name = LanguageModelName::from("Gemini 4 Hydrogen".to_string());
+        model.supports_thinking = true;
+    });
+    let environment = Rc::new(cx.update(|cx| {
+        cx.update_flags(true, vec!["subagents".to_string()]);
+        FakeThreadEnvironment::default().with_terminal(FakeTerminalHandle::new_never_exits(cx))
+    }));
+
+    always_allow_tools(cx);
+    cx.update(|cx| {
+        LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+            registry.register_provider(provider.clone(), cx);
+        });
+
+        let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+        settings.workhorse_model = Some(LanguageModelSelection {
+            provider: LanguageModelProviderSetting("google".to_string()),
+            model: "gemini-4-hydrogen".to_string(),
+            enable_thinking: true,
+            effort: Some("medium".to_string()),
+            speed: None,
+        });
+        settings.subagent_model = None;
+        agent_settings::AgentSettings::override_global(settings, cx);
+    });
+
+    let parent_thread = cx.new(|cx| {
+        let mut thread = Thread::new(
+            project.clone(),
+            project_context.clone(),
+            context_server_registry.clone(),
+            Templates::new(),
+            Some(carbon_model.clone()),
+            cx,
+        );
+        thread.add_default_tools(environment.clone(), cx);
+        thread
+    });
+
+    let subagent_thread = cx.new(|cx| {
+        let mut thread = Thread::new_subagent(&parent_thread, None, cx);
+        thread.add_default_tools(environment.clone(), cx);
+        thread
+    });
+
+    subagent_thread.read_with(cx, |subagent_thread, _cx| {
+        assert_eq!(
+            subagent_thread.model().map(|model| model.id()),
+            Some(hydrogen_model.id())
+        );
+        assert!(subagent_thread.thinking_enabled());
+        assert_eq!(
+            subagent_thread.thinking_effort(),
+            Some(&"medium".to_string())
+        );
+    });
+
+    let _parent_events = parent_thread.update(cx, |thread, cx| {
+        thread
+            .send(ClientUserMessageId::new(), ["Plan and implement"], cx)
+            .unwrap()
+    });
+    cx.run_until_parked();
+    let parent_request = fake.pending_completions_for(&carbon_model).pop().unwrap();
+    let parent_system_prompt = parent_request.messages[0].string_contents();
+    assert!(parent_system_prompt.contains("Gemini 4 Hydrogen"));
+    assert!(parent_system_prompt.contains("`google/gemini-4-hydrogen`"));
+    assert!(parent_system_prompt.contains("proactively offload bulk work to the workhorse model"));
+    fake.send_text(&carbon_model, &parent_request, "done");
+    fake.end_stream(&carbon_model, &parent_request);
+    cx.run_until_parked();
+
+    let _subagent_events = subagent_thread.update(cx, |thread, cx| {
+        thread
+            .send(ClientUserMessageId::new(), ["Subtask"], cx)
+            .unwrap()
+    });
+    cx.run_until_parked();
+    let subagent_request = provider
+        .pending_completions_for(&hydrogen_model)
+        .pop()
+        .unwrap();
+    let subagent_system_prompt = subagent_request.messages[0].string_contents();
+    assert!(!subagent_system_prompt.contains("faster workhorse model"));
+    provider.send_text(&hydrogen_model, &subagent_request, "done");
+    provider.end_stream(&hydrogen_model, &subagent_request);
+    cx.run_until_parked();
+
+    parent_thread.update(cx, |thread, cx| {
+        thread.set_model(hydrogen_model.clone(), cx);
+    });
+    let _same_model_events = parent_thread.update(cx, |thread, cx| {
+        thread
+            .send(ClientUserMessageId::new(), ["Follow-up"], cx)
+            .unwrap()
+    });
+    cx.run_until_parked();
+    let same_model_request = provider
+        .pending_completions_for(&hydrogen_model)
+        .pop()
+        .unwrap();
+    let same_model_prompt = same_model_request.messages[0].string_contents();
+    assert!(!same_model_prompt.contains("faster workhorse model"));
+    provider.send_text(&hydrogen_model, &same_model_request, "done");
+    provider.end_stream(&hydrogen_model, &same_model_request);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
 async fn test_max_subagent_depth_prevents_tool_registration(cx: &mut TestAppContext) {
     let fake = init_test(cx);
 

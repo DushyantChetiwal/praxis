@@ -1106,18 +1106,15 @@ fn update_active_language_model_from_settings(cx: &mut App) {
 
     let default = settings.default_model.as_ref().map(to_selected_model);
     let inline_assistant = settings
-        .inline_assistant_model
-        .as_ref()
+        .effective_inline_assistant_model()
         .map(to_selected_model);
     let commit_message = settings
-        .commit_message_model
-        .as_ref()
+        .effective_commit_message_model()
         .map(to_selected_model);
     let thread_summary = settings
-        .thread_summary_model
-        .as_ref()
+        .effective_thread_summary_model()
         .map(to_selected_model);
-    let compaction = settings.compaction_model.as_ref().map(to_selected_model);
+    let compaction = settings.effective_compaction_model().map(to_selected_model);
     let inline_alternatives = settings
         .inline_alternatives
         .iter()
@@ -1170,6 +1167,7 @@ mod tests {
             default_height: px(600.),
             max_content_width: Some(px(850.)),
             default_model: None,
+            workhorse_model: None,
             subagent_model: None,
             inline_assistant_model: None,
             inline_assistant_use_streaming_tools: false,
@@ -1481,5 +1479,67 @@ mod tests {
         assert_eq!(action.agent, Agent::NativeAgent.id());
 
         assert!(serde_json::from_str::<NewExternalAgentThread>(r#"{}"#).is_err());
+    }
+
+    #[gpui::test]
+    fn test_workhorse_model_populates_registry_roles_until_overridden(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            AgentSettings::register(cx);
+            language_model::init(cx);
+
+            let provider = Arc::new(language_model::fake_provider::FakeLanguageModelProvider::new(
+                LanguageModelProviderId::from("google".to_string()),
+                language_model::LanguageModelProviderName::from("Google".to_string()),
+            ));
+            let carbon = provider.update_model("gemini-4-carbon", |model| {
+                model.name = language_model::LanguageModelName::from("Gemini 4 Carbon".to_string());
+            });
+            let hydrogen = provider.update_model("gemini-4-hydrogen", |model| {
+                model.name =
+                    language_model::LanguageModelName::from("Gemini 4 Hydrogen".to_string());
+            });
+            let lite = provider.update_model("gemini-3.5-flash-lite", |model| {
+                model.name =
+                    language_model::LanguageModelName::from("Gemini 3.5 Flash Lite".to_string());
+            });
+
+            LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                registry.register_provider(provider, cx);
+            });
+
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store
+                    .set_user_settings(
+                        r#"{
+                            "agent": {
+                                "default_model": { "provider": "google", "model": "gemini-4-carbon" },
+                                "workhorse_model": { "provider": "google", "model": "gemini-4-hydrogen" },
+                                "compaction_model": { "provider": "google", "model": "gemini-3.5-flash-lite" }
+                            }
+                        }"#,
+                        cx,
+                    )
+                    .unwrap();
+            });
+            update_active_language_model_from_settings(cx);
+
+            let registry = LanguageModelRegistry::read_global(cx);
+            assert_eq!(registry.default_model().map(|m| m.id()), Some(carbon.id()));
+            assert_eq!(
+                registry.inline_assistant_model().map(|m| m.id()),
+                Some(hydrogen.id())
+            );
+            assert_eq!(
+                registry.commit_message_model(cx).map(|m| m.id()),
+                Some(hydrogen.id())
+            );
+            assert_eq!(
+                registry.thread_summary_model(cx).map(|m| m.id()),
+                Some(hydrogen.id())
+            );
+            assert_eq!(registry.compaction_model().map(|m| m.id()), Some(lite.id()));
+        });
     }
 }

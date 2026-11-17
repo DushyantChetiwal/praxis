@@ -294,20 +294,26 @@ pub struct AgentSettingsContent {
     pub max_content_width: Option<crate::PixelSetting>,
     /// The default model to use when creating new chats and for other features when a specific model is not specified.
     pub default_model: Option<LanguageModelSelection>,
-    /// Model to use for subagents. Defaults to the parent thread's model and its
-    /// thinking, effort, and speed settings when not specified. If the configured
-    /// model is unavailable, the parent thread's model is used instead.
+    /// Fast workhorse model used across worker and auxiliary roles (`subagent_model`,
+    /// `compaction_model`, `thread_summary_model`, `inline_assistant_model`, and
+    /// `commit_message_model`) whenever a role-specific model is not explicitly set.
+    /// When configured and distinct from a thread's main model, Praxis also informs
+    /// the main coordinator so it proactively offloads bulk work to this model.
+    pub workhorse_model: Option<LanguageModelSelection>,
+    /// Model to use for subagents. Defaults to `workhorse_model` when set, otherwise
+    /// the parent thread's model and its thinking, effort, and speed settings. If the
+    /// configured model is unavailable, the parent thread's model is used instead.
     pub subagent_model: Option<LanguageModelSelection>,
     /// Favorite models to show at the top of the model selector.
     #[serde(default)]
     pub favorite_models: Vec<LanguageModelSelection>,
-    /// Model to use for the inline assistant. Defaults to default_model when not specified.
+    /// Model to use for the inline assistant. Defaults to `workhorse_model` (or `default_model`) when not specified.
     pub inline_assistant_model: Option<LanguageModelSelection>,
     /// Model to use for the inline assistant when streaming tools are enabled.
     ///
     /// Default: true
     pub inline_assistant_use_streaming_tools: Option<bool>,
-    /// Model to use for generating git commit messages. Defaults to default_model when not specified.
+    /// Model to use for generating git commit messages. Defaults to `workhorse_model` (or `default_model`) when not specified.
     pub commit_message_model: Option<LanguageModelSelection>,
     /// Whether to include project rules files (AGENTS.md, CLAUDE.md, .rules, etc.)
     /// in the prompt when generating git commit messages.
@@ -317,12 +323,12 @@ pub struct AgentSettingsContent {
     /// Custom instructions to include in the prompt when generating git commit messages.
     /// Applied in addition to any project rules files (such as `.rules` or `AGENTS.md`).
     pub commit_message_instructions: Option<String>,
-    /// Model to use for generating thread summaries. Defaults to default_model when not specified.
+    /// Model to use for generating thread summaries. Defaults to `workhorse_model` (or `default_model`) when not specified.
     pub thread_summary_model: Option<LanguageModelSelection>,
     /// Model to use for context compaction (`/compact` and auto-compaction).
-    /// Falls back to the thread's currently selected model when not specified.
-    /// If the configured model is unavailable (provider not registered, model
-    /// not found), the thread's current model is used instead.
+    /// Defaults to `workhorse_model` when set, otherwise falls back to the thread's
+    /// currently selected model. If the configured model is unavailable (provider not
+    /// registered, model not found), the thread's current model is used instead.
     pub compaction_model: Option<LanguageModelSelection>,
     /// Additional models with which to generate alternatives when performing inline assists.
     pub inline_alternatives: Option<Vec<LanguageModelSelection>>,

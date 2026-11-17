@@ -36,12 +36,21 @@ pub trait Template: Sized {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkhorseModelPrompt {
+    pub name: String,
+    pub id: String,
+    pub provider: String,
+    pub model: String,
+}
+
 #[derive(Serialize)]
 pub struct SystemPromptTemplate<'a> {
     #[serde(flatten)]
     pub project: &'a prompt_store::ProjectContext,
     pub available_tools: Vec<SharedString>,
     pub model_name: Option<String>,
+    pub workhorse_model: Option<WorkhorseModelPrompt>,
     pub date: String,
     /// Contents of the user-global `~/.config/zed/AGENTS.md` file (or the
     /// platform equivalent), if present and non-empty.
@@ -124,6 +133,7 @@ mod tests {
                 project: &project,
                 available_tools: vec![visible.into()],
                 model_name: None,
+                workhorse_model: None,
                 date: "2026-10-01".into(),
                 user_agents_md: None,
                 sandboxing: false,
@@ -173,6 +183,7 @@ mod tests {
                 project: &project,
                 available_tools: tools,
                 model_name: None,
+                workhorse_model: None,
                 date: "2026-10-01".into(),
                 user_agents_md: None,
                 sandboxing: false,
@@ -207,6 +218,7 @@ mod tests {
             project: &project,
             available_tools: vec!["echo".into()],
             model_name: Some("test-model".to_string()),
+            workhorse_model: None,
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: false,
@@ -241,6 +253,7 @@ mod tests {
             project: &project,
             available_tools: vec!["draft_plan".into()],
             model_name: Some("test-model".to_string()),
+            workhorse_model: None,
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: false,
@@ -272,6 +285,7 @@ mod tests {
             project: &project,
             available_tools: vec!["draft_plan".into(), "set_step_locks".into()],
             model_name: Some("test-model".to_string()),
+            workhorse_model: None,
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: false,
@@ -298,6 +312,7 @@ mod tests {
                 project: &project,
                 available_tools,
                 model_name: Some("test-model".to_string()),
+                workhorse_model: None,
                 date: "2026-01-01".to_string(),
                 user_agents_md: None,
                 sandboxing: false,
@@ -328,6 +343,7 @@ mod tests {
                 project: &project,
                 available_tools: vec!["read_file".into(), "exit_plan_mode".into()],
                 model_name: Some("test-model".to_string()),
+                workhorse_model: None,
                 date: "2026-01-01".to_string(),
                 user_agents_md: None,
                 sandboxing: false,
@@ -355,6 +371,7 @@ mod tests {
                 project: &project,
                 available_tools,
                 model_name: Some("test-model".to_string()),
+                workhorse_model: None,
                 date: "2026-01-01".to_string(),
                 user_agents_md: None,
                 sandboxing: false,
@@ -389,6 +406,7 @@ mod tests {
                 project: &project,
                 available_tools,
                 model_name: None,
+                workhorse_model: None,
                 date: "2026-01-01".into(),
                 user_agents_md: None,
                 sandboxing: false,
@@ -428,6 +446,7 @@ mod tests {
             project: &project,
             available_tools: vec!["echo".into()],
             model_name: Some("test-model".to_string()),
+            workhorse_model: None,
             date: "2026-01-01".to_string(),
             user_agents_md: Some("always be concise".into()),
             sandboxing: false,
@@ -460,6 +479,7 @@ mod tests {
             project: &project,
             available_tools: vec!["echo".into()],
             model_name: Some("test-model".to_string()),
+            workhorse_model: None,
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: false,
@@ -496,6 +516,7 @@ mod tests {
             project: &project,
             available_tools: vec!["echo".into(), "terminal".into()],
             model_name: Some("test-model".to_string()),
+            workhorse_model: None,
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: true,
@@ -542,6 +563,7 @@ mod tests {
             project: &project,
             available_tools: vec!["echo".into(), "terminal".into()],
             model_name: Some("test-model".to_string()),
+            workhorse_model: None,
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: true,
@@ -578,6 +600,7 @@ mod tests {
             project: &project,
             available_tools: vec!["echo".into(), "terminal".into()],
             model_name: Some("test-model".to_string()),
+            workhorse_model: None,
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: true,
@@ -611,6 +634,7 @@ mod tests {
             project: &project,
             available_tools: vec!["echo".into(), "terminal".into()],
             model_name: Some("test-model".to_string()),
+            workhorse_model: None,
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: true,
@@ -636,6 +660,7 @@ mod tests {
             project: &project,
             available_tools: vec!["echo".into()],
             model_name: Some("test-model".to_string()),
+            workhorse_model: None,
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: true,
@@ -659,6 +684,7 @@ mod tests {
             project: &project,
             available_tools: vec!["echo".into()],
             model_name: Some("test-model".to_string()),
+            workhorse_model: None,
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: false,
@@ -680,6 +706,7 @@ mod tests {
             project: &project,
             available_tools: vec!["echo".into()],
             model_name: Some("test-model".to_string()),
+            workhorse_model: None,
             date: "2026-01-01".to_string(),
             user_agents_md: None,
             sandboxing: false,
@@ -694,5 +721,56 @@ mod tests {
 
         assert!(!rendered.contains("The user has specified the following rules"));
         assert!(!rendered.contains("Rules title:"));
+    }
+
+    #[test]
+    fn test_system_prompt_describes_workhorse_delegation_when_configured() {
+        let project = prompt_store::ProjectContext::default();
+        let templates = Templates::new();
+        let render = |tools: Vec<SharedString>, workhorse_model: Option<WorkhorseModelPrompt>| {
+            SystemPromptTemplate {
+                project: &project,
+                available_tools: tools,
+                model_name: Some("Gemini 4 Carbon".into()),
+                workhorse_model,
+                date: "2026-11-18".into(),
+                user_agents_md: None,
+                sandboxing: false,
+                is_linux: false,
+                is_windows: false,
+                restricted: false,
+                plan_mode: false,
+                plan: None,
+            }
+            .render(&templates)
+            .unwrap()
+        };
+
+        let without_workhorse = render(vec!["spawn_agent".into()], None);
+        assert!(without_workhorse.contains("prefer doing the work directly"));
+        assert!(!without_workhorse.contains("faster workhorse model"));
+
+        let with_workhorse = render(
+            vec![
+                "spawn_agent".into(),
+                "run_steps".into(),
+                "draft_plan".into(),
+            ],
+            Some(WorkhorseModelPrompt {
+                name: "Gemini 4 Hydrogen".into(),
+                id: "google/gemini-4-hydrogen".into(),
+                provider: "google".into(),
+                model: "gemini-4-hydrogen".into(),
+            }),
+        );
+        assert!(with_workhorse.contains("Gemini 4 Hydrogen"));
+        assert!(with_workhorse.contains("`google/gemini-4-hydrogen`"));
+        assert!(with_workhorse.contains("proactively offload bulk work to the workhorse model"));
+        assert!(with_workhorse.contains("`run_steps`"));
+        assert!(
+            with_workhorse
+                .contains(r#""model": {"provider": "google", "model": "gemini-4-hydrogen"}"#)
+        );
+        assert!(!with_workhorse.contains("prefer doing the work directly"));
     }
 }
