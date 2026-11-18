@@ -57,6 +57,8 @@ internal fun sameRelayPeer(first: Link, second: Link): Boolean =
     first.channel == second.channel && first.phoneId == second.phoneId && first.key.contentEquals(second.key)
 
 internal class RelayCursor {
+    enum class DeltaDecision { Accept, Ignore, Gap }
+
     var epoch: String? = null
         private set
     private var sequence = 0L
@@ -73,9 +75,20 @@ internal class RelayCursor {
         sequence = incoming
         return true
     }
+
+    @Synchronized fun acceptDelta(packet: JSONObject): DeltaDecision {
+        val incoming = packet.long("sequence") ?: return DeltaDecision.Ignore
+        val base = packet.long("base_sequence") ?: return DeltaDecision.Ignore
+        if (packet.str("epoch") != epoch || incoming <= sequence) return DeltaDecision.Ignore
+        if (base != sequence) return DeltaDecision.Gap
+        sequence = incoming
+        return DeltaDecision.Accept
+    }
 }
 
 data class LiveSnapshot(val channel: String, val phoneId: String, val snapshot: Snapshot)
+data class LiveDelta(val channel: String, val phoneId: String, val delta: ThreadDelta)
+data class LiveGap(val channel: String, val phoneId: String)
 data class LiveConnection(val channel: String, val connected: Boolean, val epoch: String? = null)
 
 /**
@@ -88,6 +101,10 @@ class NostrChannel(private val directLinks: DirectLinks? = null) {
     @Volatile private var session: Session? = null
     private val _snapshots = MutableSharedFlow<LiveSnapshot>(extraBufferCapacity = 1)
     val snapshots = _snapshots.asSharedFlow()
+    private val _deltas = MutableSharedFlow<LiveDelta>(extraBufferCapacity = 16)
+    val deltas = _deltas.asSharedFlow()
+    private val _gaps = MutableSharedFlow<LiveGap>(extraBufferCapacity = 1)
+    val gaps = _gaps.asSharedFlow()
     private val _connection = MutableStateFlow<LiveConnection?>(null)
     val connection = _connection.asStateFlow()
 
@@ -241,6 +258,19 @@ class NostrChannel(private val directLinks: DirectLinks? = null) {
                     parseSnapshot(packet.obj("snapshot")?.toString())?.takeIf { session === this@Session }?.let {
                         _snapshots.emit(LiveSnapshot(link.channel, link.phoneId, it))
                     }
+                }
+                "delta" -> when (cursor.acceptDelta(packet)) {
+                    RelayCursor.DeltaDecision.Accept -> {
+                        parseThreadDelta(packet.obj("delta")?.toString())?.takeIf { session === this@Session }?.let {
+                            _deltas.emit(LiveDelta(link.channel, link.phoneId, it))
+                        }
+                    }
+                    RelayCursor.DeltaDecision.Gap -> {
+                        if (session === this@Session) {
+                            _gaps.tryEmit(LiveGap(link.channel, link.phoneId))
+                        }
+                    }
+                    RelayCursor.DeltaDecision.Ignore -> Unit
                 }
             }
         }

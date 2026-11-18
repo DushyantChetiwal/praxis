@@ -354,4 +354,91 @@ class TranscriptHistoryTest {
         assertEquals(after.size, after.toSet().size)
         assertNull(rootAnchor.indexIn(transcriptItemKeys(view("other"))))
     }
+
+    @Test
+    fun applyDeltaUpdatesAndAppendsAndRejectsMissingBaseline() {
+        val base = TranscriptHistory().live(view(start = 10, total = 12))
+        val delta = parseThreadDelta(
+            """
+            {
+              "session_id": "root",
+              "title": "Updated title",
+              "thread_status": "idle",
+              "total": 13,
+              "next_before": 10,
+              "has_more": true,
+              "upserts": [
+                {"index": 11, "role": "assistant", "text": "message 11 updated"},
+                {"index": 12, "role": "assistant", "text": "message 12"}
+              ]
+            }
+            """.trimIndent(),
+        )
+        assertNotNull(delta)
+        val updated = base.applyDelta(delta!!)
+        assertNotNull(updated)
+        val thread = updated!!.thread!!
+        assertEquals("Updated title", thread.title)
+        assertEquals("idle", thread.status)
+        assertEquals(13, thread.total)
+        assertEquals(10, updated.records.getValue("root").nextBefore)
+        assertEquals("message 11 updated", thread.entries.first { it.index == 11 }.text)
+        assertEquals("message 12", thread.entries.last().text)
+
+        assertNull(TranscriptHistory().applyDelta(delta))
+        assertNull(base.applyDelta(delta.copy(sessionId = "other")))
+    }
+
+    @Test
+    fun applyDeltaDisjointJumpSnapsToTail() {
+        val base = TranscriptHistory().live(view(start = 0, total = 5))
+        val disjoint = ThreadDelta(
+            updatedAtRaw = null,
+            updatedAt = null,
+            watch = null,
+            status = null,
+            sessionId = "root",
+            title = null,
+            threadStatus = "generating",
+            total = 20,
+            nextBefore = 15,
+            hasMore = true,
+            upserts = (15 until 20).map { Entry(it, "assistant", "tail $it", null) },
+            stepThreads = null,
+        )
+        val snapped = base.applyDelta(disjoint)!!
+        assertEquals((15 until 20).toList(), snapped.thread!!.entries.map { it.index })
+        assertEquals(15, snapped.records.getValue("root").nextBefore)
+        assertEquals(listOf(HistoryRange(15, 20)), snapped.records.getValue("root").ranges)
+    }
+
+    @Test
+    fun relayCursorAcceptsSequentialDeltasDetectsGapsAndRecoversViaSnapshot() {
+        val cursor = RelayCursor()
+        val epoch = "0123456789abcdef0123456789abcdef"
+        assertTrue(cursor.handshake(epoch))
+
+        assertTrue(cursor.accept(JSONObject("""{"type":"snapshot","epoch":"$epoch","sequence":1}""")))
+        assertEquals(
+            RelayCursor.DeltaDecision.Accept,
+            cursor.acceptDelta(JSONObject("""{"type":"delta","epoch":"$epoch","sequence":2,"base_sequence":1}""")),
+        )
+        assertEquals(
+            RelayCursor.DeltaDecision.Ignore,
+            cursor.acceptDelta(JSONObject("""{"type":"delta","epoch":"$epoch","sequence":2,"base_sequence":1}""")),
+        )
+        assertEquals(
+            RelayCursor.DeltaDecision.Ignore,
+            cursor.acceptDelta(JSONObject("""{"type":"delta","epoch":"deadbeef","sequence":3,"base_sequence":2}""")),
+        )
+        assertEquals(
+            RelayCursor.DeltaDecision.Gap,
+            cursor.acceptDelta(JSONObject("""{"type":"delta","epoch":"$epoch","sequence":4,"base_sequence":3}""")),
+        )
+        assertTrue(cursor.accept(JSONObject("""{"type":"snapshot","epoch":"$epoch","sequence":5}""")))
+        assertEquals(
+            RelayCursor.DeltaDecision.Accept,
+            cursor.acceptDelta(JSONObject("""{"type":"delta","epoch":"$epoch","sequence":6,"base_sequence":5}""")),
+        )
+    }
 }

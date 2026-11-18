@@ -13,7 +13,27 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.dushyantchetiwal.praxis.remote.data.ApiException
+import io.github.dushyantchetiwal.praxis.remote.data.ComposerSuggestion
+import io.github.dushyantchetiwal.praxis.remote.data.ComposerSuggestionsState
 import io.github.dushyantchetiwal.praxis.remote.data.CryptoException
+import io.github.dushyantchetiwal.praxis.remote.data.LocalStateCache
+import io.github.dushyantchetiwal.praxis.remote.data.ThreadDelta
+import io.github.dushyantchetiwal.praxis.remote.data.TriggerKind
+import io.github.dushyantchetiwal.praxis.remote.data.applyComposerSuggestion
+import io.github.dushyantchetiwal.praxis.remote.data.buildCancelSubagentJson
+import io.github.dushyantchetiwal.praxis.remote.data.buildEditStepJson
+import io.github.dushyantchetiwal.praxis.remote.data.buildPlanRunActionJson
+import io.github.dushyantchetiwal.praxis.remote.data.buildRetryStepJson
+import io.github.dushyantchetiwal.praxis.remote.data.buildSkipStepJson
+import io.github.dushyantchetiwal.praxis.remote.data.buildWorktreeCreateJson
+import io.github.dushyantchetiwal.praxis.remote.data.buildWorktreeMergeJson
+import io.github.dushyantchetiwal.praxis.remote.data.detectComposerTrigger
+import io.github.dushyantchetiwal.praxis.remote.data.parseMentionSuggestions
+import io.github.dushyantchetiwal.praxis.remote.data.parsePlanInspection
+import io.github.dushyantchetiwal.praxis.remote.data.parseSkillSuggestions
+import io.github.dushyantchetiwal.praxis.remote.data.parseWatchdogInfo
+import io.github.dushyantchetiwal.praxis.remote.data.parseWorktrees
+import io.github.dushyantchetiwal.praxis.remote.ui.PlanCallbacks
 import io.github.dushyantchetiwal.praxis.remote.data.Device
 import io.github.dushyantchetiwal.praxis.remote.data.DetailRequest
 import io.github.dushyantchetiwal.praxis.remote.data.DetailBody
@@ -83,6 +103,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -234,6 +255,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** The composer's text, kept here so a failed send can put it back. */
     var composer by mutableStateOf("")
+    var composerCursor by mutableStateOf(0)
+        private set
+    private val localStateCache = LocalStateCache(application)
+    private var suggestionsJob: Job? = null
+    private var planJob: Job? = null
     private val imageDrafts = mutableStateMapOf<String, List<PromptImage>>()
     private fun imageDraftKey() = "${viewKey()}:${d.currentWindow()?.thread?.sessionId}"
     val composerImages: List<PromptImage> get() = imageDrafts[imageDraftKey()].orEmpty()
@@ -435,6 +461,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         viewModelScope.launch {
+            channel.live.deltas.collect { update ->
+                if (foreground && d.device?.channel == update.channel && phoneId == update.phoneId) {
+                    edit { copy(lastContact = now(), stateApplied = true) }
+                    applyDelta(update.delta)
+                    setBanner("poll", null)
+                    setBanner("state", null)
+                    ensureWatch()
+                }
+            }
+        }
+        viewModelScope.launch {
+            channel.live.gaps.collect { gap ->
+                if (foreground && d.device?.channel == gap.channel && phoneId == gap.phoneId && !watcher.inFlight) {
+                    watcher.renewAt = 0L
+                    ensureWatch()
+                }
+            }
+        }
+        viewModelScope.launch {
+            ActiveRunService.actions.collect { event ->
+                when (event.action) {
+                    ActiveRunService.ACTION_APPROVE -> {
+                        val permission = d.visiblePermissions().firstOrNull {
+                            it.toolCallId == event.toolCallId &&
+                                (event.sessionId == null || it.sessionId == event.sessionId)
+                        } ?: return@collect
+                        val option = permission.options.firstOrNull { it.id == event.optionId }
+                            ?: permission.options.firstOrNull { it.isAllow }
+                            ?: return@collect
+                        answerPermission(permission, option)
+                    }
+                    ActiveRunService.ACTION_RETRY -> retryTurn()
+                    ActiveRunService.ACTION_STOP_RUN -> stopGenerating(keepCommands = false)
+                }
+            }
+        }
+        viewModelScope.launch {
             var previousEpoch: String? = null
             var wasLive = false
             channel.live.connection.collect { connection ->
@@ -527,6 +590,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onForeground() {
         foreground = true
+        syncRunNotification()
         if (store.token == null) return
         if (d.device != null) edit { copy(resumeRevision = resumeRevision + 1) }
         startPolling()
@@ -546,6 +610,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pollJob = null
         devicesJob?.cancel()
         devicesJob = null
+        syncRunNotification()
     }
 
     private fun startDeviceRefresh() {
@@ -651,6 +716,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         stopDevice()
         gh.clearCache()
         if (explicit) {
+            val pairedChannels = _app.value.devices.paired
+            viewModelScope.launch {
+                pairedChannels.forEach { localStateCache.forgetChannel(it) }
+            }
             store.clearAccount()
             imageDrafts.clear()
             fileDrafts.clear()
@@ -658,6 +727,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             detailCache = newDetailCache()
         } else store.clearToken()
         composer = ""
+        composerCursor = 0
         _app.update {
             AppState(
                 screen = Screen.SignIn,
@@ -789,8 +859,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         stopDevice()
         store.savedChannel = null
         composer = ""
+        composerCursor = 0
         go(Screen.Devices)
         loadDevices()
+    }
+
+    fun openFromNotification(channel: String?, windowId: Long?) {
+        if (channel.isNullOrBlank()) return
+        val targetDevice = _app.value.devices.devices.find { it.channel == channel } ?: return
+        selectDevice(targetDevice)
+        if (windowId != null && d.status?.windows?.any { it.id == windowId } == true) {
+            selectWindow(windowId)
+        }
+        go(Screen.Device)
     }
 
     private fun selectDevice(device: Device) {
@@ -802,7 +883,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         stopDevice()
-        edit { copy(device = device, windowId = store.windowFor(device.channel)) }
+        val initialWindow = store.windowFor(device.channel)
+        edit { copy(device = device, windowId = initialWindow) }
+        restoreCachedWindow(device, initialWindow)
         startPolling() // The watch is sent once the first poll has resolved the window.
     }
 
@@ -873,6 +956,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val device = d.device ?: return
         val link = linkFor(device)
         store.forgetPairing(device.channel)
+        viewModelScope.launch { localStateCache.forgetChannel(device.channel) }
         setDevices { copy(paired = paired - device.channel) }
         leaveDevice()
         message(str(R.string.unpair_done, device.name))
@@ -900,6 +984,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         uploadJob = null
         attachJob?.cancel()
         attachJob = null
+        suggestionsJob?.cancel()
+        suggestionsJob = null
+        planJob?.cancel()
+        planJob = null
         attaching = null
         generation++
         resetWatcher()
@@ -957,6 +1045,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val device = d.device
         if (device != null && id != null) store.setWindowFor(device.channel, id)
         resetWindowView()
+        if (device != null) restoreCachedWindow(device, id)
     }
 
     fun selectWindow(id: Long) {
@@ -987,6 +1076,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         closeDetailCache()
+        localStateCache.close()
         channel.live.close()
         super.onCleared()
     }
@@ -1127,6 +1217,147 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             edit { copy(modeOverride = null) }
         }
         if (previousUpdatedAt != snapshot.updatedAtRaw) recheckStaleWatch()
+        persistCachedWindow()
+        syncRunNotification()
+    }
+
+    private fun applyDelta(delta: ThreadDelta) {
+        delta.status?.let { applyStatus(it, delta.watch?.window) }
+        if (d.watchMatchesView(delta.watch)) {
+            val next = d.history.applyDelta(delta)
+            if (next != null) {
+                if (d.history.request != null && next.request == null) cancelHistoryRequest()
+                edit {
+                    copy(
+                        history = next,
+                        threadError = null,
+                        threadKnown = true,
+                    )
+                }
+                pruneOutbox()
+                persistCachedWindow()
+                syncRunNotification()
+            } else if (!watcher.inFlight) {
+                watcher.renewAt = 0L
+                ensureWatch()
+            }
+        } else {
+            pruneOutbox()
+            persistCachedWindow()
+            syncRunNotification()
+        }
+    }
+
+    private fun restoreCachedWindow(device: Device, windowId: Long?) {
+        val peeked = localStateCache.peek(device.channel, windowId)
+        if (peeked != null && d.device?.channel == device.channel && d.status == null) {
+            val cachedHistory = peeked.thread?.let { TranscriptHistory().live(it) } ?: d.history
+            edit {
+                copy(
+                    status = peeked.status ?: status,
+                    history = cachedHistory,
+                    threadKnown = peeked.thread != null || threadKnown,
+                )
+            }
+            return
+        }
+        val key = store.keyFor(device.channel) ?: return
+        val targetChannel = device.channel
+        val gen = generation
+        viewModelScope.launch {
+            val cached = localStateCache.restore(targetChannel, key, windowId) ?: return@launch
+            if (gen != generation || d.device?.channel != targetChannel || d.windowId != windowId) return@launch
+            if (d.stateApplied || d.status != null) return@launch
+            val cachedHistory = cached.thread?.let { TranscriptHistory().live(it) } ?: d.history
+            edit {
+                copy(
+                    status = cached.status ?: status,
+                    history = cachedHistory,
+                    threadKnown = cached.thread != null || threadKnown,
+                )
+            }
+        }
+    }
+
+    private fun persistCachedWindow() {
+        val device = d.device ?: return
+        val key = store.keyFor(device.channel) ?: return
+        val windowId = d.windowId
+        val status = d.status
+        val thread = d.thread
+        if (status == null && thread == null) return
+        viewModelScope.launch {
+            localStateCache.save(device.channel, key, windowId, status, thread)
+        }
+    }
+
+    private fun syncRunNotification() {
+        val device = d.device
+        if (device == null) {
+            ActiveRunService.stop(getApplication())
+            return
+        }
+        val window = d.currentWindow()
+        val title = d.conversationTitle() ?: window?.projectsLabel ?: device.name
+        val permission = d.visiblePermissions().firstOrNull()
+        val question = window?.thread?.questions?.firstOrNull()
+        val error = window?.thread?.error
+        val running = d.isGenerating() || window?.architect?.running == true
+
+        if (foreground) {
+            if (!running && permission == null && question == null && error == null) {
+                ActiveRunService.stop(getApplication())
+            }
+            return
+        }
+
+        val state = when {
+            permission != null -> RunNotificationState(
+                channel = device.channel,
+                deviceName = device.name,
+                windowId = d.windowId,
+                sessionId = permission.sessionId,
+                title = title,
+                detail = permission.title ?: permission.toolCallId,
+                kind = RunAlertKind.NeedsPermission,
+                permissionToolCallId = permission.toolCallId,
+                approveOptionId = permission.options.firstOrNull { it.isAllow }?.id,
+            )
+            question != null -> RunNotificationState(
+                channel = device.channel,
+                deviceName = device.name,
+                windowId = d.windowId,
+                sessionId = question.sessionId,
+                title = title,
+                detail = question.title.ifBlank { str(R.string.question_needed) },
+                kind = RunAlertKind.NeedsQuestion,
+                questionId = question.id,
+            )
+            error != null -> RunNotificationState(
+                channel = device.channel,
+                deviceName = device.name,
+                windowId = d.windowId,
+                sessionId = window?.thread?.sessionId,
+                title = title,
+                detail = error.message,
+                kind = RunAlertKind.Failed,
+            )
+            running -> RunNotificationState(
+                channel = device.channel,
+                deviceName = device.name,
+                windowId = d.windowId,
+                sessionId = window?.thread?.sessionId,
+                title = title,
+                detail = window?.architect?.currentStep ?: str(R.string.status_working),
+                kind = RunAlertKind.Running,
+            )
+            else -> null
+        }
+        if (state != null) {
+            ActiveRunService.startOrUpdate(getApplication(), state)
+        } else {
+            ActiveRunService.stop(getApplication())
+        }
     }
 
     private fun applyStatus(status: Status, preferredWindow: Long?) {
@@ -1181,7 +1412,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         watcher.inFlight = true
         viewModelScope.launch {
             try {
-                val args = JSONObject().put("seconds", WATCH_SECONDS).put("include_details", false)
+                val args = JSONObject()
+                    .put("seconds", WATCH_SECONDS)
+                    .put("include_details", false)
+                    .put("deltas", true)
                 if (targetWindow != null) args.put("window", targetWindow)
                 if (targetSession != null) args.put("session_id", targetSession)
                 praxis("watch", args)
@@ -1302,8 +1536,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             files = files,
             fingerprint = io.github.dushyantchetiwal.praxis.remote.data.promptFingerprint(text, images),
         )
-        edit { copy(outbox = outbox + item) }
+        edit { copy(outbox = outbox + item, composerSuggestions = ComposerSuggestionsState()) }
+        suggestionsJob?.cancel()
         composer = ""
+        composerCursor = 0
         imageDrafts.remove(draft)
         fileDrafts.remove(draft)
         viewModelScope.launch {
@@ -1360,6 +1596,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (composerImages.isNotEmpty() || composerFiles.isNotEmpty() ||
             !retained.canRestoreDraft(d.currentWindow()?.thread?.sessionId, composer)) return
         composer = retained.text
+        composerCursor = retained.text.length
         imageDrafts[imageDraftKey()] = retained.images
         fileDrafts[imageDraftKey()] = retained.files
         edit { copy(outbox = outbox.filterNot { it.id == retained.id }) }
@@ -1895,11 +2132,188 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (d.device == null) return
         val threads = d.threads
         val files = d.files
+        val plan = d.plan
+        if (d.tab == Tab.Plan && !plan.loading && (force || (plan.inspection == null && plan.error == null))) {
+            loadPlan()
+        }
         if (d.tab == Tab.Threads && !threads.loading && (force || (threads.items == null && threads.error == null))) {
             loadThreads()
         }
         if (d.tab == Tab.Files && !files.loading && files.file == null) {
             if (force) listDir(files.path) else if (files.entries == null && files.error == null) listDir("")
+        }
+    }
+
+    fun updateComposer(text: String, cursor: Int) {
+        composer = text
+        composerCursor = cursor.coerceIn(0, text.length)
+        suggestionsJob?.cancel()
+        val trigger = detectComposerTrigger(text, composerCursor)
+        if (trigger == null || d.device == null) {
+            if (d.composerSuggestions.trigger != null || d.composerSuggestions.loading) {
+                edit { copy(composerSuggestions = ComposerSuggestionsState()) }
+            }
+            return
+        }
+        edit { copy(composerSuggestions = composerSuggestions.copy(trigger = trigger, loading = true)) }
+        val gen = generation
+        val key = viewKey()
+        suggestionsJob = viewModelScope.launch {
+            delay(140L)
+            val op = if (trigger.kind == TriggerKind.Mention) "mentions" else "skills"
+            val result = try {
+                praxis(op, windowArgs { put("query", trigger.query); put("limit", 20) })
+            } catch (_: ApiException) {
+                null
+            }
+            if (gen != generation || key != viewKey()) return@launch
+            if (d.composerSuggestions.trigger != trigger) return@launch
+            val items = if (trigger.kind == TriggerKind.Mention) {
+                parseMentionSuggestions(result)
+            } else {
+                parseSkillSuggestions(result)
+            }
+            edit {
+                copy(
+                    composerSuggestions = ComposerSuggestionsState(
+                        trigger = trigger,
+                        loading = false,
+                        items = items,
+                    ),
+                )
+            }
+        }
+    }
+
+    fun selectComposerSuggestion(suggestion: ComposerSuggestion) {
+        val trigger = d.composerSuggestions.trigger ?: return
+        val replaced = applyComposerSuggestion(composer, trigger, suggestion)
+        suggestionsJob?.cancel()
+        composer = replaced.text
+        composerCursor = replaced.newCursorIndex
+        edit { copy(composerSuggestions = ComposerSuggestionsState()) }
+    }
+
+    fun dismissComposerSuggestions() {
+        suggestionsJob?.cancel()
+        edit { copy(composerSuggestions = ComposerSuggestionsState()) }
+    }
+
+    fun onVoiceTranscript(text: String, steer: Boolean) {
+        val dictated = text.trim()
+        if (dictated.isEmpty()) return
+        if (steer && d.isGenerating() && d.currentWindow()?.thread?.steering == true) {
+            composer = dictated
+            composerCursor = dictated.length
+            sendPrompt(steer = true)
+        } else {
+            val next = if (composer.isBlank()) {
+                dictated
+            } else {
+                val sep = if (composer.last().isWhitespace()) "" else " "
+                "$composer$sep$dictated"
+            }
+            updateComposer(next, next.length)
+        }
+    }
+
+    fun onVoiceError(errorMessage: String) {
+        message(errorMessage)
+    }
+
+    fun loadPlan() {
+        if (d.device == null) return
+        val gen = generation
+        val key = viewKey()
+        planJob?.cancel()
+        edit { copy(plan = plan.copy(loading = true, error = null)) }
+        planJob = viewModelScope.launch {
+            try {
+                val inspectDeferred = async { praxis("plan_inspect", windowArgs()) }
+                val worktreesDeferred = async {
+                    runCatching { praxis("worktree_list", windowArgs()) }.getOrNull()
+                }
+                val watchdogDeferred = async {
+                    runCatching { praxis("watchdog_status", JSONObject()) }.getOrNull()
+                }
+                val inspectJson = inspectDeferred.await()
+                val worktreesJson = worktreesDeferred.await()
+                val watchdogJson = watchdogDeferred.await()
+                if (gen != generation || key != viewKey()) return@launch
+                edit {
+                    copy(
+                        plan = plan.copy(
+                            loading = false,
+                            error = null,
+                            inspection = parsePlanInspection(inspectJson),
+                            worktrees = worktreesJson?.let(::parseWorktrees) ?: plan.worktrees,
+                            watchdog = watchdogJson?.let(::parseWatchdogInfo) ?: plan.watchdog,
+                        ),
+                    )
+                }
+            } catch (e: ApiException) {
+                if (gen != generation || key != viewKey()) return@launch
+                edit { copy(plan = plan.copy(loading = false, error = e.message)) }
+            }
+        }
+    }
+
+    fun planCallbacks(): PlanCallbacks = PlanCallbacks(
+        onRefresh = { loadPlan() },
+        onPlanControl = { action -> runPlanControl("plan_control", buildPlanRunActionJson(action)) },
+        onRetryStep = { path -> runPlanControl("plan_control", buildRetryStepJson(path)) },
+        onSkipStep = { path -> runPlanControl("plan_control", buildSkipStepJson(path)) },
+        onEditStep = { path, intent, rules, capture ->
+            runPlanControl("plan_control", buildEditStepJson(path, intent, rules, capture))
+        },
+        onOpenSession = { sessionId ->
+            if (sessionId.isNotBlank()) {
+                edit {
+                    copy(
+                        watchSession = sessionId,
+                        history = TranscriptHistory(),
+                        threadKnown = false,
+                        threadError = null,
+                        tab = Tab.Chat,
+                    )
+                }
+                ensureWatch()
+            }
+        },
+        onCancelSubagent = { sessionId ->
+            runPlanControl("plan_control", buildCancelSubagentJson(sessionId))
+        },
+        onCreateWorktree = { branch ->
+            runPlanControl("worktree_create", buildWorktreeCreateJson(branch))
+        },
+        onMergeWorktree = { worktree ->
+            val branch = worktree.branch ?: return@PlanCallbacks
+            runPlanControl("worktree_merge", buildWorktreeMergeJson(branch, worktree.path))
+        },
+        onRestartWatchdog = {
+            runPlanControl("watchdog_restart", JSONObject().put("reason", "remote_restart_requested"))
+        },
+    )
+
+    private fun runPlanControl(op: String, args: JSONObject) {
+        if (d.device == null || d.plan.busy) return
+        val gen = generation
+        val key = viewKey()
+        val scopedArgs = windowArgs().apply {
+            args.keys().forEach { k -> put(k, args.get(k)) }
+        }
+        viewModelScope.launch {
+            edit { copy(plan = plan.copy(busy = true, error = null)) }
+            try {
+                praxis(op, scopedArgs)
+                if (gen != generation || key != viewKey()) return@launch
+                edit { copy(plan = plan.copy(busy = false)) }
+                loadPlan()
+            } catch (e: ApiException) {
+                if (gen != generation || key != viewKey()) return@launch
+                edit { copy(plan = plan.copy(busy = false)) }
+                message(e.message ?: str(R.string.error_op_failed, op))
+            }
         }
     }
 

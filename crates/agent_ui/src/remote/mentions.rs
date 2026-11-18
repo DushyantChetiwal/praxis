@@ -271,14 +271,22 @@ pub(super) fn filter_skills_and_commands(
     if payload.to_string().len() <= budget {
         return payload;
     }
-    if let Some(skills_arr) = payload.get_mut("skills").and_then(Value::as_array_mut) {
-        while payload.to_string().len() > budget && !skills_arr.is_empty() {
-            skills_arr.pop();
+    while payload.to_string().len() > budget {
+        let popped = payload
+            .get_mut("skills")
+            .and_then(Value::as_array_mut)
+            .and_then(Vec::pop);
+        if popped.is_none() {
+            break;
         }
     }
-    if let Some(commands_arr) = payload.get_mut("commands").and_then(Value::as_array_mut) {
-        while payload.to_string().len() > budget && !commands_arr.is_empty() {
-            commands_arr.pop();
+    while payload.to_string().len() > budget {
+        let popped = payload
+            .get_mut("commands")
+            .and_then(Value::as_array_mut)
+            .and_then(Vec::pop);
+        if popped.is_none() {
+            break;
         }
     }
     payload

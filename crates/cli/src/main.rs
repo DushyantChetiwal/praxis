@@ -516,7 +516,7 @@ fn run() -> Result<()> {
     }
 
     if args.watchdog_status {
-        let watchdog_dir = paths::support_dir().join("watchdog");
+        let watchdog_dir = paths::data_dir().join("watchdog");
         let status_path = watchdog_dir.join("status.json");
         let heartbeat_path = watchdog_dir.join("heartbeat.json");
         match fs::read_to_string(&status_path) {

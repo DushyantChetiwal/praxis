@@ -83,7 +83,7 @@ static HEARTBEAT_STARTED: AtomicBool = AtomicBool::new(false);
 static HEARTBEAT_STATE: OnceLock<Mutex<HeartbeatRuntimeState>> = OnceLock::new();
 
 pub fn watchdog_dir() -> PathBuf {
-    paths::support_dir().join("watchdog")
+    paths::data_dir().join("watchdog")
 }
 
 pub fn set_open_workspaces(workspaces: Vec<String>) {

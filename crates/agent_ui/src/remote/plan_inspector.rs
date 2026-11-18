@@ -8,7 +8,7 @@ use agent::{
 use agent_client_protocol::v2::schema as acp;
 use anyhow::{Context as _, Result, anyhow};
 use architect::{ArchitectGraph, GraphEdit, NodeId, NodePath, preview_graph_edits};
-use gpui::App;
+use gpui::{App, TaskExt as _};
 use serde_json::{Value, json};
 use workspace::Workspace;
 
@@ -37,18 +37,20 @@ pub(super) fn inspect(workspace: &gpui::Entity<Workspace>, cx: &App) -> Result<V
                 .enumerate()
                 .rev()
                 .find_map(|(index, entry)| transcript_entry(index, entry, false, cx))
-                .unwrap_or(Value::Null);
+                .and_then(|value| value.get("text").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or_default();
             let title = sub
                 .title()
                 .map(|title| truncate(&title, 120))
                 .unwrap_or_else(|| "Sub-agent".to_string());
             let status = sub.status();
+            let can_cancel = status != ThreadStatus::Idle;
             json!({
                 "session_id": sub.session_id().0.as_ref(),
                 "title": title,
                 "status": status_name(status),
                 "total_entries": entries.len(),
-                "can_cancel": status != ThreadStatus::Idle,
+                "can_cancel": can_cancel,
                 "preview": preview,
             })
         })
@@ -355,11 +357,17 @@ pub(super) fn fit_plan_payload(mut payload: Value, budget: usize) -> Value {
     if let Some(subagents) = payload.get_mut("subagents").and_then(Value::as_array_mut) {
         for subagent in subagents.iter_mut() {
             if let Some(object) = subagent.as_object_mut() {
-                object.insert("preview".into(), Value::Null);
+                object.insert("preview".into(), json!(""));
             }
         }
-        while payload.to_string().len() > budget && !subagents.is_empty() {
-            subagents.pop();
+    }
+    while payload.to_string().len() > budget {
+        let popped = payload
+            .get_mut("subagents")
+            .and_then(Value::as_array_mut)
+            .and_then(Vec::pop);
+        if popped.is_none() {
+            break;
         }
     }
     if payload.to_string().len() <= budget {
@@ -373,8 +381,14 @@ pub(super) fn fit_plan_payload(mut payload: Value, budget: usize) -> Value {
                 object.insert("responsibility".into(), json!(""));
             }
         }
-        while payload.to_string().len() > budget && !nodes.is_empty() {
-            nodes.pop();
+    }
+    while payload.to_string().len() > budget {
+        let popped = payload
+            .get_mut("nodes")
+            .and_then(Value::as_array_mut)
+            .and_then(Vec::pop);
+        if popped.is_none() {
+            break;
         }
     }
     payload

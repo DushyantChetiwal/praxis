@@ -1,6 +1,7 @@
 package io.github.dushyantchetiwal.praxis.remote
 
 import androidx.compose.ui.graphics.ImageBitmap
+import io.github.dushyantchetiwal.praxis.remote.data.ComposerSuggestionsState
 import io.github.dushyantchetiwal.praxis.remote.data.Device
 import io.github.dushyantchetiwal.praxis.remote.data.DirEntry
 import io.github.dushyantchetiwal.praxis.remote.data.FileContent
@@ -11,6 +12,7 @@ import io.github.dushyantchetiwal.praxis.remote.data.QuestionHeader
 import io.github.dushyantchetiwal.praxis.remote.data.QuestionForm
 import io.github.dushyantchetiwal.praxis.remote.data.ONLINE_THRESHOLD_MS
 import io.github.dushyantchetiwal.praxis.remote.data.Permission
+import io.github.dushyantchetiwal.praxis.remote.data.PlanUiState
 import io.github.dushyantchetiwal.praxis.remote.data.Snapshot
 import io.github.dushyantchetiwal.praxis.remote.data.Status
 import io.github.dushyantchetiwal.praxis.remote.data.TerminalOutput
@@ -25,7 +27,7 @@ import io.github.dushyantchetiwal.praxis.remote.data.WindowInfo
 
 enum class Screen { Loading, SignIn, Devices, Pair, Device, Settings }
 
-enum class Tab { Chat, Threads, Files }
+enum class Tab { Chat, Plan, Threads, Files }
 
 enum class StopTarget { Agent, Plan }
 
@@ -262,6 +264,8 @@ data class DeviceUi(
     val questionList: QuestionListState = QuestionListState(),
     val answeredQuestions: Set<String> = emptySet(),
     val tab: Tab = Tab.Chat,
+    val plan: PlanUiState = PlanUiState(),
+    val composerSuggestions: ComposerSuggestionsState = ComposerSuggestionsState(),
     val threads: ThreadsState = ThreadsState(),
     val files: FilesState = FilesState(),
     val download: DownloadState? = null,

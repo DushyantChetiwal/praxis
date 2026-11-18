@@ -218,9 +218,17 @@ impl Render for ArchitectStatusItem {
         let title = thread
             .title()
             .unwrap_or_else(|| SharedString::from("Untitled plan"));
+        let is_running = pane.is_running(cx);
+        let parallel_count = if is_running {
+            pane.running_nodes(cx).len()
+        } else {
+            0
+        };
+        let has_watcher = is_running && pane.run_step_session(cx).is_some();
+
         // The same words as the plan header, so the two never disagree.
         let graph = thread.architect_graph();
-        let status = if pane.is_running(cx) {
+        let status = if is_running {
             "running"
         } else if graph.is_none_or(ArchitectGraph::is_empty) {
             "not started"
@@ -228,6 +236,20 @@ impl Render for ArchitectStatusItem {
             "ready to run"
         } else {
             "needs fixes"
+        };
+
+        let activity_badge = if parallel_count > 1 {
+            Some((
+                format!("{parallel_count} parallel"),
+                format!("{parallel_count} Architect steps running in parallel"),
+            ))
+        } else if has_watcher {
+            Some((
+                "watching".to_string(),
+                "Active Architect step watcher connected".to_string(),
+            ))
+        } else {
+            None
         };
 
         h_flex()
@@ -244,6 +266,24 @@ impl Render for ArchitectStatusItem {
                     .color(Color::Muted)
                     .truncate(),
             )
+            .when_some(activity_badge, |this, (label, tooltip)| {
+                this.child(
+                    h_flex()
+                        .id("architect-status-activity-badge")
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(cx.theme().status().info_border)
+                        .bg(cx.theme().status().info_background)
+                        .tooltip(Tooltip::text(tooltip))
+                        .child(
+                            Label::new(label)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Info),
+                        ),
+                )
+            })
             .into_any()
     }
 }

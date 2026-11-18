@@ -1053,7 +1053,12 @@ fn handle_paired(
                 .spawn(async move { watchdog_restart(&reason) });
         }
         "worktree_list" => {
-            with_workspace(window, cx, |workspace, _, cx| worktree_list(workspace, cx))
+            return match with_workspace(window, cx, |workspace, _, cx| {
+                worktree_list(workspace, cx)
+            }) {
+                Ok(task) => task,
+                Err(error) => Task::ready(Err(error)),
+            };
         }
         "worktree_create" => {
             return match with_workspace(window, cx, |workspace, _, cx| {
@@ -3055,7 +3060,7 @@ fn download_chunk(roots: &[(String, PathBuf)], path: &str, offset: u64) -> Resul
 }
 
 fn watchdog_dir() -> PathBuf {
-    paths::support_dir().join("watchdog")
+    paths::data_dir().join("watchdog")
 }
 
 fn current_unix_ms() -> u64 {
@@ -3151,35 +3156,33 @@ fn latest_session_for_worktree(
         .map(|session_id| session_id.0.as_ref().to_string())
 }
 
-fn worktree_list(workspace: &Entity<Workspace>, cx: &App) -> Result<Value> {
-    let project = workspace.read(cx).project().read(cx);
-    let git_store = project.git_store().read(cx);
+fn worktree_list(
+    workspace: &Entity<Workspace>,
+    cx: &App,
+) -> Result<Task<Result<Value>>> {
+    let summaries =
+        crate::thread_worktree_archive::list_workspace_worktrees(workspace.read(cx), cx);
+    let git_store = workspace.read(cx).project().read(cx).git_store().read(cx);
     let metadata_store = ThreadMetadataStore::try_global(cx);
     let mut seen_paths = HashSet::new();
-    let mut worktrees = Vec::new();
+    let mut entries = Vec::new();
+
+    for summary in summaries {
+        if !seen_paths.insert(summary.path.clone()) {
+            continue;
+        }
+        let session_id = latest_session_for_worktree(metadata_store.as_ref(), &summary.path, cx);
+        entries.push((
+            summary.path,
+            summary.name,
+            summary.branch,
+            summary.is_main,
+            session_id,
+        ));
+    }
 
     for repository in git_store.repositories().values() {
         let snapshot = repository.read(cx).snapshot();
-        let main_path = snapshot.work_directory_abs_path.to_path_buf();
-        if seen_paths.insert(main_path.clone()) {
-            let name = main_path
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| main_path.display().to_string());
-            let branch = snapshot
-                .branch
-                .as_ref()
-                .map(|branch| branch.name().to_string());
-            let session_id = latest_session_for_worktree(metadata_store.as_ref(), &main_path, cx);
-            worktrees.push(json!({
-                "path": main_path.display().to_string(),
-                "name": name,
-                "branch": branch,
-                "is_main": snapshot.is_main_worktree(),
-                "session_id": session_id,
-            }));
-        }
-
         for linked in snapshot.linked_worktrees() {
             if !seen_paths.insert(linked.path.clone()) {
                 continue;
@@ -3197,17 +3200,36 @@ fn worktree_list(workspace: &Entity<Workspace>, cx: &App) -> Result<Value> {
                     .to_string()
             });
             let session_id = latest_session_for_worktree(metadata_store.as_ref(), &linked.path, cx);
-            worktrees.push(json!({
-                "path": linked.path.display().to_string(),
-                "name": name,
-                "branch": branch,
-                "is_main": linked.is_main,
-                "session_id": session_id,
-            }));
+            entries.push((linked.path, name, branch, linked.is_main, session_id));
         }
     }
 
-    Ok(json!({ "worktrees": worktrees }))
+    Ok(cx.background_executor().spawn(async move {
+        let mut worktrees = Vec::with_capacity(entries.len());
+        for (path, name, branch, is_main, session_id) in entries {
+            let changed_files = if !is_main {
+                if let Some(branch_name) = branch.as_deref() {
+                    agent::worktree_isolation::summarize_local_worktree_diff(&path, branch_name)
+                        .await
+                        .map(|diff| diff.changed_files)
+                        .unwrap_or(0)
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            worktrees.push(json!({
+                "path": path.display().to_string(),
+                "name": name,
+                "branch": branch,
+                "is_main": is_main,
+                "session_id": session_id,
+                "changed_files": changed_files,
+            }));
+        }
+        Ok(json!({ "worktrees": worktrees }))
+    }))
 }
 
 fn validate_git_branch_name(branch: &str) -> Result<String> {
@@ -3222,19 +3244,6 @@ fn validate_git_branch_name(branch: &str) -> Result<String> {
         "invalid branch name {branch:?}"
     );
     Ok(branch.to_string())
-}
-
-fn sanitize_worktree_dir_name(branch: &str) -> String {
-    branch
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect()
 }
 
 fn worktree_create(
@@ -3272,45 +3281,32 @@ fn worktree_create(
             .context("No git repository is open in this window.")?
     };
 
-    let target_path = match explicit_path {
-        Some(path) => path,
+    let spec = match explicit_path {
+        Some(path) => agent::worktree_isolation::IsolatedWorktreeSpec {
+            repo_root: repo_path,
+            worktree_path: path,
+            branch_name: branch,
+        },
         None => {
             let setting = &project::project_settings::ProjectSettings::get_global(cx)
                 .git
                 .worktree_directory;
-            let base_dir = project::git_store::worktrees_directory_for_repo(
+            agent::worktree_isolation::plan_isolated_worktree(
                 &repo_path,
+                &branch,
+                "",
                 setting,
                 util::paths::PathStyle::local(),
-            )?;
-            base_dir.join(sanitize_worktree_dir_name(&branch))
+            )?
         }
     };
 
     Ok(cx.background_executor().spawn(async move {
-        if let Some(parent) = target_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-        let output = util::command::new_smol_command("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .arg("worktree")
-            .arg("add")
-            .arg("-b")
-            .arg(&branch)
-            .arg(&target_path)
-            .output()
-            .await
-            .context("running `git worktree add`")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git worktree add failed: {}", stderr.trim());
-        }
+        agent::worktree_isolation::create_local_git_worktree(&spec).await?;
         Ok(json!({
             "created": true,
-            "path": target_path.display().to_string(),
-            "branch": branch,
+            "path": spec.worktree_path.to_string_lossy(),
+            "branch": spec.branch_name,
         }))
     }))
 }
@@ -3324,60 +3320,33 @@ fn worktree_merge(
         bail!("Merging a git worktree on a remote WSL or SSH project is not supported yet.");
     }
     let branch = validate_git_branch_name(required(args, "branch")?)?;
-    let requested_path = args
-        .get("path")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from);
 
-    let repo_path = {
+    let main_repo_path = {
         let project = workspace.read(cx).project().read(cx);
         let git_store = project.git_store().read(cx);
-        if let Some(requested) = requested_path {
-            git_store
-                .repositories()
-                .values()
-                .map(|repo| repo.read(cx).snapshot())
-                .find(|snapshot| snapshot.work_directory_abs_path.as_ref() == requested)
-                .map(|snapshot| snapshot.work_directory_abs_path.to_path_buf())
-                .context("The requested worktree path is not an open repository in this window.")?
-        } else {
-            git_store
-                .repositories()
-                .values()
-                .map(|repo| repo.read(cx).snapshot())
-                .find(|snapshot| snapshot.is_main_worktree())
-                .or_else(|| {
-                    git_store
-                        .repositories()
-                        .values()
-                        .map(|repo| repo.read(cx).snapshot())
-                        .next()
-                })
-                .map(|snapshot| snapshot.work_directory_abs_path.to_path_buf())
-                .context("No git repository is open in this window.")?
-        }
+        git_store
+            .repositories()
+            .values()
+            .map(|repo| repo.read(cx).snapshot())
+            .find(|snapshot| snapshot.is_main_worktree())
+            .or_else(|| {
+                git_store
+                    .repositories()
+                    .values()
+                    .map(|repo| repo.read(cx).snapshot())
+                    .next()
+            })
+            .map(|snapshot| snapshot.work_directory_abs_path.to_path_buf())
+            .context("No git repository is open in this window.")?
     };
 
     Ok(cx.background_executor().spawn(async move {
-        let output = util::command::new_smol_command("git")
-            .arg("-C")
-            .arg(&repo_path)
-            .arg("merge")
-            .arg("--no-edit")
-            .arg(&branch)
-            .output()
-            .await
-            .context("running `git merge`")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("git merge failed: {}", stderr.trim());
-        }
+        let outcome =
+            agent::worktree_isolation::merge_local_git_worktree(&main_repo_path, &branch).await?;
         Ok(json!({
-            "merged": true,
-            "branch": branch,
-            "path": repo_path.display().to_string(),
+            "merged": outcome.merged,
+            "branch": outcome.branch,
+            "summary": outcome.summary,
         }))
     }))
 }

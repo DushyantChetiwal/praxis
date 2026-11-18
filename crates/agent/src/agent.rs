@@ -12,6 +12,7 @@ mod thread;
 mod thread_store;
 mod tool_permissions;
 mod tools;
+pub mod worktree_isolation;
 
 pub use architect_runner::*;
 use context_server::ContextServerId;
@@ -30,6 +31,7 @@ pub use thread::*;
 pub use thread_store::*;
 pub use tool_permissions::*;
 pub use tools::*;
+pub use worktree_isolation::*;
 
 use acp_thread::{
     AcpThread, AgentModelId, AgentModelSelector, AgentSessionInfo, AgentSessionList,
