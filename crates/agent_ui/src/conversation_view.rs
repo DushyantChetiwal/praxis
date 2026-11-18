@@ -22507,13 +22507,30 @@ pub(crate) mod tests {
             let summary = super::SubagentTelemetrySummary::from_thread(root.read(cx), cx)
                 .expect("summary should exist when subagents are registered");
             assert_eq!(summary.total_count, 2);
-            assert_eq!(summary.running_count, 0);
-            assert_eq!(summary.completed_count, 2);
+            assert_eq!(summary.running_count, 2);
+            assert_eq!(summary.completed_count, 0);
             assert_eq!(summary.total_tokens, 750);
             assert_eq!(
                 summary.workhorse_label,
                 Some(SharedString::from("gemini-4-hydrogen"))
             );
+        });
+
+        child_idle.update(cx, |thread, cx| {
+            thread
+                .update_session_state(
+                    acp_v2::StateUpdate::Idle(acp_v2::IdleStateUpdate::new()),
+                    cx,
+                )
+                .expect("idle state should apply");
+        });
+
+        cx.read(|cx| {
+            let summary = super::SubagentTelemetrySummary::from_thread(root.read(cx), cx)
+                .expect("summary should exist after idle transition");
+            assert_eq!(summary.total_count, 2);
+            assert_eq!(summary.running_count, 1);
+            assert_eq!(summary.completed_count, 1);
         });
     }
 }

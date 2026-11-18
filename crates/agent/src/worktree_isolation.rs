@@ -295,7 +295,8 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_local_git_worktree_create_diff_and_merge(_cx: &mut gpui::TestAppContext) {
+    async fn test_local_git_worktree_create_diff_and_merge(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
         let temp = tempfile::tempdir().unwrap();
         let repo_path = temp.path().join("repo");
         std::fs::create_dir_all(&repo_path).unwrap();
