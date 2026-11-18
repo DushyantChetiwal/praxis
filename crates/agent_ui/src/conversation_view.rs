@@ -22438,15 +22438,15 @@ pub(crate) mod tests {
         let connection: Rc<dyn AgentConnection> = Rc::new(StubAgentConnection::new());
 
         cx.update(|cx| {
-            SettingsStore::global(cx)
-                .update(cx, |store, cx| {
-                    store
-                        .set_user_settings(
-                            r#"{ "agent": { "workhorse_model": { "provider": "google", "model": "gemini-4-hydrogen" } } }"#,
-                            cx,
-                        )
-                        .expect("valid user settings");
-                });
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.workhorse_model = Some(
+                serde_json::from_value(serde_json::json!({
+                    "provider": "google",
+                    "model": "gemini-4-hydrogen",
+                }))
+                .expect("valid workhorse selection"),
+            );
+            AgentSettings::override_global(settings, cx);
         });
 
         let (root, child_idle, child_tokens) = cx.update(|cx| {

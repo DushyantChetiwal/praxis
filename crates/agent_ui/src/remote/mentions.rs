@@ -83,8 +83,7 @@ pub(super) fn search(
     };
 
     let symbol_task = if want_symbols {
-        let query_clone = query.clone();
-        Some(project.update(cx, |project, cx| project.symbols(&query_clone, cx)))
+        Some(project.update(cx, |project, cx| project.symbols(&query, cx)))
     } else {
         None
     };
