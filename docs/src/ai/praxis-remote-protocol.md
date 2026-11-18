@@ -107,6 +107,24 @@ while desktop Remote remains enabled, its relay sockets may stay connected. Publ
 after its last handshake ages out (45 seconds). An unexpectedly stopped desktop relay service retries after 30 seconds
 with a new incarnation, rather than reusing uncertain command receipts.
 
+### Protocol v3 sub-100ms delta stream
+
+A phone may pass `"deltas": true` in a live `watch` request to opt into Protocol v3 delta streaming. When any active
+watch enables deltas, the desktop checks watched state on an **80 ms** cadence instead of 1 second:
+
+- The first packet for a phone (or after a `watch` change, `session_id` switch, `thread_error` change, `total` shrink,
+  or when a delta packet exceeds 16,000 bytes) is a full `{type: "snapshot", epoch, sequence, snapshot}`.
+- Subsequent updates emit `{type: "delta", epoch, sequence, base_sequence, delta}` where `base_sequence` equals the
+  immediately preceding packet's `sequence` sent to that phone. If a phone observes a gap (`base_sequence != last_sequence`),
+  it re-issues `watch` or `thread` to resynchronize.
+- `delta` contains:
+  - `updated_at`, `watch`, `session_id`, `title`, `thread_status`, `total`, `next_before`, `has_more`
+  - `status`: changed `status` object, or `null` when unchanged
+  - `upserts`: array of new or modified entry headers (matched by `index`)
+  - `step_threads`: changed `step_threads` array, or `null` when unchanged
+- When nothing changed within 15 seconds, no packet is emitted; after 15 seconds, a lightweight heartbeat delta with
+  `"upserts": []` is emitted.
+
 Relays observe connection metadata and can reject or throttle traffic. Ephemeral delivery is not durable storage,
 a deletion guarantee, forward secrecy, or a permanent free-capacity promise. No paid relay, central service, or
 public image-hosting account is configured.
@@ -379,6 +397,41 @@ The phone permits one history request at a time. Request identities reject stale
 - Files larger than 5 MB are refused with an error. Each piece is a comment the phone writes and the computer rewrites, and GitHub limits how many comments an account may write in an hour.
 
 A phone runs one download at a time, one piece in flight, so its other requests still get through.
+
+## Praxis 2.0 operations
+
+### `plan_inspect` (read-only)
+
+Inspects the active Architect plan DAG and live sub-agents in the target window (`window` optional). Returns `{has_plan, revision, running, paused, can_resume, outcome, nodes, edges, subagents}` bounded to 40,000 bytes. Each node includes `{path, id, title, responsibility, intent, rules, capture, locked, status, reason, model, session_id, summary, attempt}`; each edge includes `{from, to, condition}`; each sub-agent includes `{session_id, title, status, total_entries, can_cancel, preview}`. Sub-agent transcripts can also be fetched with the existing `thread` op by passing their `session_id`.
+
+### `plan_action` (mutating)
+
+Controls the Architect plan or active sub-agents (`action` required):
+
+- `"run"` | `"pause"` | `"resume"` | `"stop"`: delegates to Architect run control.
+- `"retry_step"` (`path: string[]`): resumes from checkpoint at `path` or starts a run from `path`, returning `{ok_action: "retry_step"}`.
+- `"edit_step"` (`path: string[]`, optional `intent`, `rules`, `capture`): updates the step specification, returning `{ok_action: "edit_step"}`.
+- `"skip_step"` (`path: string[]`): removes the node via `GraphEdit::RemoveNode` and applies the graph update, returning `{ok_action: "skip_step"}`.
+- `"cancel_subagent"` (`session_id`): cancels a running sub-agent on the root thread, returning `{ok_action: "cancel_subagent"}`.
+
+### `mentions` (read-only)
+
+Searches workspace files (excluding `private_files`) and project symbols for `@` autocomplete. Args: `query` (default `""`), `kind` (`"all"` | `"file"` | `"symbol"`, default `"all"`), `limit` (`1..=30`, default `20`). Returns `{items: [{kind, label, path, insert_text}]}`.
+
+### `skills` (read-only)
+
+Lists available agent skills and slash commands (including `/compact` on native threads) filtered case-insensitively by `query` (default `""`, `limit` `1..=30` default `20`). Returns `{skills: [{name, description, insert_text}], commands: [{name, description, insert_text}]}`.
+
+### `watchdog_status` (read-only) & `watchdog_restart` (mutating)
+
+- `watchdog_status`: reads `status.json` and `heartbeat.json` in `support_dir()/watchdog` and returns `{supervised, supervisor_pid, child_pid, restarts, heartbeat_age_ms, last_exit_reason}`.
+- `watchdog_restart` (optional `reason`): reads `watchdog.token` and atomically writes `restart_request.json` (via `restart_request.json.tmp` rename), returning `{requested: true}` or an error if not running under the watchdog.
+
+### `worktree_list` (read-only), `worktree_create` & `worktree_merge` (mutating)
+
+- `worktree_list`: returns `{worktrees: [{path, name, branch, is_main, session_id}]}` from open git repositories and thread metadata.
+- `worktree_create` (`branch`, optional `path`): runs `git worktree add -b <branch> <path>` for local repositories and returns `{created: true, path, branch}`.
+- `worktree_merge` (`branch`, optional `path`): runs `git merge --no-edit <branch>` in the target local repository and returns `{merged: true, branch, path}`.
 
 ## Housekeeping
 

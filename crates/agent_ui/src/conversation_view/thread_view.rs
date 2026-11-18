@@ -15752,12 +15752,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn compact_terminal_wait_selects_one_active_timer(_cx: &mut gpui::TestAppContext) {
-        let first: acp_v2::ToolCallId = "first".into();
-        let second: acp_v2::ToolCallId = "second".into();
-        let unrelated: acp_v2::ToolCallId = "read".into();
-        #[test]
+    #[test]
     fn test_reported_activity_completion_status() {
         use acp_v2::StopReason::*;
         for (reason, expected) in [

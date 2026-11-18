@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::crypto::{self, Key};
+use super::delta::PeerDeltaTracker;
 use super::direct::{DirectConnection, DirectTransport, OnDirectMessage};
 use super::{Watch, channel, handle_paired, snapshot, status};
 
@@ -435,19 +436,35 @@ async fn serve(
     let result = until_stopped(&stopped, async {
     let mut receipts = Receipts::default();
     let mut watches: HashMap<String, Watch> = HashMap::new();
-    let mut published: HashMap<String, (String, Instant)> = HashMap::new();
+    let mut delta_tracker = PeerDeltaTracker::new();
+    let mut non_delta_checked_at: HashMap<String, Instant> = HashMap::new();
     let mut sequence = 0u64;
     let mut next_snapshot = Instant::now();
     loop {
         if stopped.is_closed() {
             break;
         }
-        if Instant::now() >= next_snapshot {
-            next_snapshot = Instant::now() + Duration::from_secs(1);
+        let now_instant = Instant::now();
+        if now_instant >= next_snapshot {
             let now = Utc::now();
             watches.retain(|phone, watch| watch.until > now && peers.read().contains_key(phone));
-            published.retain(|phone, _| watches.contains_key(phone));
+            delta_tracker.retain_phones(&watches);
+            non_delta_checked_at.retain(|phone, _| watches.contains_key(phone));
+            let has_delta_watch = watches.values().any(|watch| watch.deltas && watch.until > now);
+            let tick_interval = if has_delta_watch {
+                Duration::from_millis(80)
+            } else {
+                Duration::from_secs(1)
+            };
+            next_snapshot = now_instant + tick_interval;
             for (phone, watch) in &watches {
+                if !watch.deltas
+                    && non_delta_checked_at
+                        .get(phone)
+                        .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+                {
+                    continue;
+                }
                 let Some(peer) = peers.read().get(phone).cloned() else {
                     continue;
                 };
@@ -458,30 +475,37 @@ async fn serve(
                 {
                     continue;
                 }
+                non_delta_checked_at.insert(phone.clone(), now_instant);
                 let value = cx.update(|cx| {
                     let current = status(&device, cx);
                     snapshot(&current, Some(watch), cx)
                 });
-                let fingerprint = value.to_string();
-                let unchanged = published.get(phone).is_some_and(|(previous, at)| {
-                    previous == &fingerprint && at.elapsed() < Duration::from_secs(15)
-                });
-                if unchanged {
+                let Some(packet) = delta_tracker.next_packet(
+                    phone,
+                    &epoch,
+                    value,
+                    watch.deltas,
+                    now,
+                    now_instant,
+                    &mut sequence,
+                )?
+                else {
                     continue;
-                }
-                let snapshot: Value = serde_json::from_str(&channel::fit_snapshot(value, now))?;
-                sequence = sequence.saturating_add(1);
-                let packet = json!({"type": "snapshot", "epoch": epoch, "sequence": sequence, "snapshot": snapshot}).to_string();
+                };
                 match outgoing.try_send((peer, packet)) {
-                    Ok(()) => {
-                        published.insert(phone.clone(), (fingerprint, Instant::now()));
-                    }
+                    Ok(()) => {}
                     Err(async_channel::TrySendError::Full(_)) => {}
                     Err(error) => return Err(anyhow!("live connection stopped: {error}")),
                 }
             }
         }
-        let timer = cx.background_executor().timer(Duration::from_millis(250));
+        let now = Utc::now();
+        let timer_duration = if watches.values().any(|watch| watch.deltas && watch.until > now) {
+            Duration::from_millis(80)
+        } else {
+            Duration::from_millis(250)
+        };
+        let timer = cx.background_executor().timer(timer_duration);
         let packet = futures::select_biased! {
             _ = stopped.recv().fuse() => break,
             packet = requests.recv().fuse() => packet.ok(),
@@ -532,11 +556,17 @@ async fn serve(
                                 .get("include_details")
                                 .and_then(Value::as_bool)
                                 != Some(false),
+                            deltas: request
+                                .args
+                                .get("deltas")
+                                .and_then(Value::as_bool)
+                                == Some(true),
                             until: Utc::now() + chrono::Duration::seconds(seconds),
                         };
                         let until = watch.until.to_rfc3339();
                         watches.insert(peer.id.clone(), watch);
-                        published.remove(&peer.id);
+                        delta_tracker.remove_phone(&peer.id);
+                        non_delta_checked_at.remove(&peer.id);
                         next_snapshot = Instant::now();
                         Ok(json!({"until": until}))
                     } else if request.op == "direct_offer" {
@@ -603,6 +633,11 @@ fn is_read_only_op(op: &str) -> bool {
             | "list_dir"
             | "read_file"
             | "download"
+            | "plan_inspect"
+            | "mentions"
+            | "skills"
+            | "watchdog_status"
+            | "worktree_list"
     )
 }
 

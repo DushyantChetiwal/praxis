@@ -22,11 +22,14 @@
 
 mod channel;
 mod crypto;
+mod delta;
 pub(crate) mod direct;
 mod folders;
 mod github;
 mod images;
+mod mentions;
 mod modal;
+mod plan_inspector;
 mod questions;
 mod relay;
 mod store;
@@ -77,7 +80,7 @@ const PERMISSION_DETAIL_LIMIT: usize = 4_000;
 const FILE_LIMIT: usize = 20_000;
 /// What a file's content may take once escaped as JSON, which leaves room
 /// for the rest of the answer in the 46,000 bytes an answer may have.
-const FILE_JSON_BUDGET: usize = 40_000;
+pub(super) const FILE_JSON_BUDGET: usize = 40_000;
 const MAX_FILE_BYTES: u64 = 2_000_000;
 /// A download travels in pieces that each fit in one answer once base64
 /// encoded.
@@ -520,6 +523,7 @@ struct Watch {
     window: Option<u64>,
     session_id: Option<String>,
     include_details: bool,
+    deltas: bool,
     until: DateTime<Utc>,
 }
 
@@ -1016,6 +1020,57 @@ fn handle_paired(
         "architect" => with_workspace(window, cx, |workspace, window, cx| {
             architect(workspace, required(args, "op")?, window, cx)
         }),
+        "plan_inspect" => with_workspace(window, cx, |workspace, _, cx| {
+            plan_inspector::inspect(workspace, cx)
+        }),
+        "plan_action" => with_workspace(window, cx, |workspace, window, cx| {
+            plan_inspector::action(workspace, args, window, cx)
+        }),
+        "mentions" => {
+            return match with_workspace(window, cx, |workspace, _, cx| {
+                Ok(mentions::search(workspace, args, cx))
+            }) {
+                Ok(task) => task,
+                Err(error) => Task::ready(Err(error)),
+            };
+        }
+        "skills" => with_workspace(window, cx, |workspace, _, cx| {
+            mentions::skills(workspace, args, cx)
+        }),
+        "watchdog_status" => {
+            return cx
+                .background_executor()
+                .spawn(async move { watchdog_status() });
+        }
+        "watchdog_restart" => {
+            let reason = args
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("remote_restart_requested")
+                .to_string();
+            return cx
+                .background_executor()
+                .spawn(async move { watchdog_restart(&reason) });
+        }
+        "worktree_list" => {
+            with_workspace(window, cx, |workspace, _, cx| worktree_list(workspace, cx))
+        }
+        "worktree_create" => {
+            return match with_workspace(window, cx, |workspace, _, cx| {
+                worktree_create(workspace, args, cx)
+            }) {
+                Ok(task) => task,
+                Err(error) => Task::ready(Err(error)),
+            };
+        }
+        "worktree_merge" => {
+            return match with_workspace(window, cx, |workspace, _, cx| {
+                worktree_merge(workspace, args, cx)
+            }) {
+                Ok(task) => task,
+                Err(error) => Task::ready(Err(error)),
+            };
+        }
         "list_dir" => {
             let path = args
                 .get("path")
@@ -1091,13 +1146,13 @@ fn remote_project(workspace: &Entity<Workspace>, cx: &App) -> Option<Entity<Proj
     remote.then_some(project)
 }
 
-fn required<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
+pub(super) fn required<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
         .with_context(|| format!("expected \"{key}\""))
 }
 
-fn agent_panel(workspace: &Entity<Workspace>, cx: &App) -> Result<Entity<AgentPanel>> {
+pub(super) fn agent_panel(workspace: &Entity<Workspace>, cx: &App) -> Result<Entity<AgentPanel>> {
     workspace
         .read(cx)
         .panel::<AgentPanel>(cx)
@@ -1156,7 +1211,10 @@ fn with_workspace<R>(
     })?
 }
 
-fn conversation_view(workspace: &Entity<Workspace>, cx: &App) -> Result<Entity<ConversationView>> {
+pub(super) fn conversation_view(
+    workspace: &Entity<Workspace>,
+    cx: &App,
+) -> Result<Entity<ConversationView>> {
     let panel = agent_panel(workspace, cx)?;
     if let Some(view) = panel.read(cx).active_conversation_view().cloned() {
         return Ok(view);
@@ -1167,7 +1225,10 @@ fn conversation_view(workspace: &Entity<Workspace>, cx: &App) -> Result<Entity<C
     bail!("The Agent panel is not showing a conversation.")
 }
 
-fn root_thread_view(workspace: &Entity<Workspace>, cx: &App) -> Result<Entity<ThreadView>> {
+pub(super) fn root_thread_view(
+    workspace: &Entity<Workspace>,
+    cx: &App,
+) -> Result<Entity<ThreadView>> {
     conversation_view(workspace, cx)?
         .read(cx)
         .root_thread_view()
@@ -1513,7 +1574,7 @@ fn terminal_output_page(output: &str, before: Option<usize>, running: bool) -> V
     })
 }
 
-fn status_name(status: ThreadStatus) -> &'static str {
+pub(super) fn status_name(status: ThreadStatus) -> &'static str {
     match status {
         ThreadStatus::Idle => "idle",
         // Unconfirmed activity may still be running, so the phone keeps Stop.
@@ -1727,7 +1788,7 @@ fn set_mode(workspace: &Entity<Workspace>, mode: &str, cx: &mut App) -> Result<V
     Ok(json!({ "mode": mode }))
 }
 
-fn architect(
+pub(super) fn architect(
     workspace: &Entity<Workspace>,
     op: &str,
     window: &mut gpui::Window,
@@ -1893,6 +1954,13 @@ fn requested_acp_thread(
                 .thread_view(&session_id)
                 .map(|view| view.read(cx).thread.clone())
                 .or_else(|| live_step_thread(owner.as_ref()?, &session_id, cx))
+                .or_else(|| {
+                    conversation.conversation().and_then(|conv| {
+                        conv.read(cx)
+                            .threads()
+                            .find_map(|thread| thread.read(cx).subagent(&session_id).cloned())
+                    })
+                })
                 .context("that conversation is not open or running in this window")?
         }
         None => conversation
@@ -2389,7 +2457,7 @@ fn user_message_fingerprint(content: &acp_thread::MessageContent, cx: &App) -> S
     transcript::fingerprint(snapshot_message_text(content, cx).trim())
 }
 
-fn transcript_entry(
+pub(super) fn transcript_entry(
     index: usize,
     entry: &AgentThreadEntry,
     include_details: bool,
@@ -2618,7 +2686,7 @@ fn describe_entry(
     }
 }
 
-fn truncate(text: &str, limit: usize) -> String {
+pub(super) fn truncate(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_string();
     }
@@ -2681,7 +2749,12 @@ fn resolve_project_path(roots: &[(String, PathBuf)], path: &str) -> Result<(Stri
 
 /// Whether the project's `private_files` setting covers a path, in which
 /// case the agent would not read it either.
-fn is_private(workspace: &Entity<Workspace>, root_name: &str, relative: &str, cx: &App) -> bool {
+pub(super) fn is_private(
+    workspace: &Entity<Workspace>,
+    root_name: &str,
+    relative: &str,
+    cx: &App,
+) -> bool {
     // A path Praxis cannot represent is refused rather than guessed about.
     let Ok(relative) = RelPath::from_unix_str(relative) else {
         return true;
@@ -2978,6 +3051,326 @@ fn download_chunk(roots: &[(String, PathBuf)], path: &str, offset: u64) -> Resul
         "offset": offset,
         "version": format!("{size}:{modified}"),
         "data": BASE64.encode(&data),
+    }))
+}
+
+fn watchdog_dir() -> PathBuf {
+    paths::support_dir().join("watchdog")
+}
+
+fn current_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn watchdog_status() -> Result<Value> {
+    let directory = watchdog_dir();
+    let now_ms = current_unix_ms();
+    let status: Option<Value> = std::fs::read(directory.join("status.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let heartbeat: Option<Value> = std::fs::read(directory.join("heartbeat.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let heartbeat_age_ms = heartbeat
+        .as_ref()
+        .and_then(|entry| entry.get("updated_at_unix_ms").and_then(Value::as_u64))
+        .map(|updated_at| now_ms.saturating_sub(updated_at));
+
+    match status {
+        Some(status) => {
+            let child_pid = status.get("child_pid").and_then(Value::as_u64);
+            Ok(json!({
+                "supervised": child_pid.is_some(),
+                "supervisor_pid": status.get("supervisor_pid").and_then(Value::as_u64),
+                "child_pid": child_pid,
+                "restarts": status.get("restarts").and_then(Value::as_u64).unwrap_or(0),
+                "heartbeat_age_ms": heartbeat_age_ms,
+                "last_exit_reason": status
+                    .get("last_exit_reason")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            }))
+        }
+        None => Ok(json!({
+            "supervised": false,
+            "supervisor_pid": Value::Null,
+            "child_pid": Value::Null,
+            "restarts": 0,
+            "heartbeat_age_ms": heartbeat_age_ms,
+            "last_exit_reason": Value::Null,
+        })),
+    }
+}
+
+fn watchdog_restart(reason: &str) -> Result<Value> {
+    let directory = watchdog_dir();
+    let token_path = directory.join("watchdog.token");
+    let token = std::fs::read_to_string(&token_path)
+        .map(|contents| contents.trim().to_string())
+        .map_err(|_| {
+            anyhow!(
+                "Praxis is not running under the watchdog supervisor, so it cannot restart remotely."
+            )
+        })?;
+    if token.is_empty() {
+        bail!(
+            "Praxis is not running under the watchdog supervisor, so it cannot restart remotely."
+        );
+    }
+
+    let request = json!({
+        "token": token,
+        "requested_at_unix_ms": current_unix_ms(),
+        "reason": reason,
+    });
+    let payload = serde_json::to_vec_pretty(&request)?;
+    let target_path = directory.join("restart_request.json");
+    let temp_path = directory.join("restart_request.json.tmp");
+    std::fs::write(&temp_path, &payload)
+        .with_context(|| format!("writing {}", temp_path.display()))?;
+    std::fs::rename(&temp_path, &target_path)
+        .with_context(|| format!("renaming {}", target_path.display()))?;
+    Ok(json!({ "requested": true }))
+}
+
+fn latest_session_for_worktree(store: Option<&Entity<ThreadMetadataStore>>, path: &Path, cx: &App) -> Option<String> {
+    let store = store?;
+    store
+        .read(cx)
+        .entries()
+        .filter(|metadata| !metadata.archived && metadata.references_folder_path(path))
+        .max_by_key(|metadata| metadata.updated_at)
+        .and_then(|metadata| metadata.session_id.as_ref())
+        .map(|session_id| session_id.0.as_ref().to_string())
+}
+
+fn worktree_list(workspace: &Entity<Workspace>, cx: &App) -> Result<Value> {
+    let project = workspace.read(cx).project().read(cx);
+    let git_store = project.git_store().read(cx);
+    let metadata_store = ThreadMetadataStore::try_global(cx);
+    let mut seen_paths = HashSet::new();
+    let mut worktrees = Vec::new();
+
+    for repository in git_store.repositories().values() {
+        let snapshot = repository.read(cx).snapshot();
+        let main_path = snapshot.work_directory_abs_path.to_path_buf();
+        if seen_paths.insert(main_path.clone()) {
+            let name = main_path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| main_path.display().to_string());
+            let branch = snapshot.branch.as_ref().map(|branch| branch.name().to_string());
+            let session_id = latest_session_for_worktree(metadata_store.as_ref(), &main_path, cx);
+            worktrees.push(json!({
+                "path": main_path.display().to_string(),
+                "name": name,
+                "branch": branch,
+                "is_main": snapshot.is_main_worktree(),
+                "session_id": session_id,
+            }));
+        }
+
+        for linked in snapshot.linked_worktrees() {
+            if !seen_paths.insert(linked.path.clone()) {
+                continue;
+            }
+            let name = linked
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| linked.path.display().to_string());
+            let branch = linked.ref_name.as_ref().map(|ref_name| {
+                ref_name
+                    .as_ref()
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(ref_name.as_ref())
+                    .to_string()
+            });
+            let session_id =
+                latest_session_for_worktree(metadata_store.as_ref(), &linked.path, cx);
+            worktrees.push(json!({
+                "path": linked.path.display().to_string(),
+                "name": name,
+                "branch": branch,
+                "is_main": linked.is_main,
+                "session_id": session_id,
+            }));
+        }
+    }
+
+    Ok(json!({ "worktrees": worktrees }))
+}
+
+fn validate_git_branch_name(branch: &str) -> Result<String> {
+    let branch = branch.trim();
+    anyhow::ensure!(!branch.is_empty(), "expected a non-empty \"branch\"");
+    anyhow::ensure!(
+        !branch.starts_with('-')
+            && !branch.contains("..")
+            && !branch.bytes().any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()),
+        "invalid branch name {branch:?}"
+    );
+    Ok(branch.to_string())
+}
+
+fn sanitize_worktree_dir_name(branch: &str) -> String {
+    branch
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn worktree_create(
+    workspace: &Entity<Workspace>,
+    args: &Value,
+    cx: &mut App,
+) -> Result<Task<Result<Value>>> {
+    if remote_project(workspace, cx).is_some() {
+        bail!("Creating a git worktree on a remote WSL or SSH project is not supported yet.");
+    }
+    let branch = validate_git_branch_name(required(args, "branch")?)?;
+    let explicit_path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+
+    let repo_path = {
+        let project = workspace.read(cx).project().read(cx);
+        let git_store = project.git_store().read(cx);
+        git_store
+            .repositories()
+            .values()
+            .map(|repo| repo.read(cx).snapshot())
+            .find(|snapshot| snapshot.is_main_worktree())
+            .or_else(|| {
+                git_store
+                    .repositories()
+                    .values()
+                    .map(|repo| repo.read(cx).snapshot())
+                    .next()
+            })
+            .map(|snapshot| snapshot.work_directory_abs_path.to_path_buf())
+            .context("No git repository is open in this window.")?
+    };
+
+    let target_path = match explicit_path {
+        Some(path) => path,
+        None => {
+            let setting = &project::project_settings::ProjectSettings::get_global(cx)
+                .git
+                .worktree_directory;
+            let base_dir = project::git_store::worktrees_directory_for_repo(
+                &repo_path,
+                setting,
+                util::paths::PathStyle::local(),
+            )?;
+            base_dir.join(sanitize_worktree_dir_name(&branch))
+        }
+    };
+
+    Ok(cx.background_executor().spawn(async move {
+        if let Some(parent) = target_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        let output = util::command::new_smol_command("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("worktree")
+            .arg("add")
+            .arg("-b")
+            .arg(&branch)
+            .arg(&target_path)
+            .output()
+            .await
+            .context("running `git worktree add`")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git worktree add failed: {}", stderr.trim());
+        }
+        Ok(json!({
+            "created": true,
+            "path": target_path.display().to_string(),
+            "branch": branch,
+        }))
+    }))
+}
+
+fn worktree_merge(
+    workspace: &Entity<Workspace>,
+    args: &Value,
+    cx: &mut App,
+) -> Result<Task<Result<Value>>> {
+    if remote_project(workspace, cx).is_some() {
+        bail!("Merging a git worktree on a remote WSL or SSH project is not supported yet.");
+    }
+    let branch = validate_git_branch_name(required(args, "branch")?)?;
+    let requested_path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+
+    let repo_path = {
+        let project = workspace.read(cx).project().read(cx);
+        let git_store = project.git_store().read(cx);
+        if let Some(requested) = requested_path {
+            git_store
+                .repositories()
+                .values()
+                .map(|repo| repo.read(cx).snapshot())
+                .find(|snapshot| snapshot.work_directory_abs_path.as_ref() == requested)
+                .map(|snapshot| snapshot.work_directory_abs_path.to_path_buf())
+                .context("The requested worktree path is not an open repository in this window.")?
+        } else {
+            git_store
+                .repositories()
+                .values()
+                .map(|repo| repo.read(cx).snapshot())
+                .find(|snapshot| snapshot.is_main_worktree())
+                .or_else(|| {
+                    git_store
+                        .repositories()
+                        .values()
+                        .map(|repo| repo.read(cx).snapshot())
+                        .next()
+                })
+                .map(|snapshot| snapshot.work_directory_abs_path.to_path_buf())
+                .context("No git repository is open in this window.")?
+        }
+    };
+
+    Ok(cx.background_executor().spawn(async move {
+        let output = util::command::new_smol_command("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("merge")
+            .arg("--no-edit")
+            .arg(&branch)
+            .output()
+            .await
+            .context("running `git merge`")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("git merge failed: {}", stderr.trim());
+        }
+        Ok(json!({
+            "merged": true,
+            "branch": branch,
+            "path": repo_path.display().to_string(),
+        }))
     }))
 }
 

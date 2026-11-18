@@ -832,6 +832,7 @@ impl Channel {
                         .map(str::to_string),
                     include_details: args.get("include_details").and_then(Value::as_bool)
                         != Some(false),
+                    deltas: false,
                     until: Utc::now() + chrono::Duration::seconds(seconds),
                 };
                 let until = watch.until.to_rfc3339();
