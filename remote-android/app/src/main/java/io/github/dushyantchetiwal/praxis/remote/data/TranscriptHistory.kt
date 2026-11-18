@@ -1,5 +1,7 @@
 package io.github.dushyantchetiwal.praxis.remote.data
 
+const val LIVE_TAIL_ENTRIES = 24
+
 /** Source-index coverage includes blank entries which have no rendered row. */
 data class HistoryRange(val start: Int, val end: Int)
 data class HistoryFailure(val message: String? = null)
@@ -42,6 +44,36 @@ data class TranscriptHistory(
             (retry || record.failure == null)
     }
 
+    fun replacesDisjointRoot(incoming: ThreadView): Boolean {
+        if (!incoming.pagingValid) return false
+        val session = incoming.sessionId ?: return false
+        if (rootSession != session) return false
+        val old = records[session]?.takeIf { it.view.total <= incoming.total } ?: return false
+        val start = incoming.nextBefore?.takeIf { it in 0..incoming.total } ?: return false
+        return incoming.entries.isNotEmpty() && start > (old.ranges.lastOrNull()?.end ?: 0)
+    }
+
+    fun trimToLatest(maxEntries: Int = LIVE_TAIL_ENTRIES): TranscriptHistory {
+        if (maxEntries <= 0 || records.isEmpty()) return copy(request = null)
+        val trimmed = records.mapValues { (_, record) ->
+            if (!record.live || record.view.nextBefore == null || record.view.entries.size <= maxEntries) {
+                record
+            } else {
+                val kept = record.view.entries.takeLast(maxEntries)
+                val tailStart = kept.first().index
+                val ranges = record.ranges.mapNotNull { range ->
+                    if (range.end <= tailStart) null else HistoryRange(maxOf(range.start, tailStart), range.end)
+                }
+                record.copy(
+                    view = record.view.copy(entries = kept, nextBefore = tailStart, hasMore = tailStart > 0),
+                    ranges = ranges,
+                    failure = null,
+                )
+            }
+        }
+        return copy(records = trimmed, request = null)
+    }
+
     fun live(incoming: ThreadView): TranscriptHistory {
         if (!incoming.pagingValid) return this
         val session = incoming.sessionId ?: return TranscriptHistory()
@@ -56,18 +88,24 @@ data class TranscriptHistory(
         for (view in listOf(incoming) + liveSteps) {
             val id = view.sessionId ?: continue
             val old = records[id]?.takeIf { it.view.total <= view.total }
-            if (old == null && request?.session == id) request = null
             val range = view.nextBefore?.takeIf { it in 0..view.total }?.let { HistoryRange(it, view.total) }
+            // When new activity outpaces the live tail while the phone was away,
+            // drop the stale prefix rather than leaving an unmarked hole above the
+            // current state; earlier entries load backward from the new tail on scroll.
+            val disjointJump = old != null && range != null && view.entries.isNotEmpty() &&
+                range.start > (old.ranges.lastOrNull()?.end ?: 0)
+            val retained = old?.takeUnless { disjointJump }
+            if (retained == null && request?.session == id) request = null
             val updated = HistoryRecord(
                 view = view.copy(
-                    entries = mergeEntries(old?.view?.entries.orEmpty(), view.entries, view.total),
+                    entries = mergeEntries(retained?.view?.entries.orEmpty(), view.entries, view.total),
                     stepThreads = emptyList(),
                 ),
-                ranges = mergeRanges(old?.ranges.orEmpty() + listOfNotNull(range)),
-                failure = old?.failure,
+                ranges = mergeRanges(retained?.ranges.orEmpty() + listOfNotNull(range)),
+                failure = retained?.failure,
             )
             val next = updated.nextBefore
-            val progressed = next != null && old?.nextBefore?.let { next < it } == true
+            val progressed = next != null && retained?.nextBefore?.let { next < it } == true
             records[id] = if (next == null || next == 0 || progressed) updated.copy(failure = null) else updated
         }
         val shownSteps = (previous.shownSteps + liveSteps.mapNotNull { it.sessionId }).filter { it != session }.distinct()

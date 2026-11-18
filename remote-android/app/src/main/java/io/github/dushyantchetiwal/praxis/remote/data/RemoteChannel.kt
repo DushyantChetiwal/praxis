@@ -735,9 +735,11 @@ class Gists(private val gh: GitHubClient) {
      */
     suspend fun snapshot(gist: JSONObject, link: Link): Snapshot? {
         val text = file(gist, STATE_FILE) ?: return null
-        val blob = runCatching { JSONObject(text) }.getOrNull()?.str(link.phoneId) ?: return null
-        val plain = RemoteCrypto.open(link.key, blob, RemoteCrypto.stateAad(link.channel, link.phoneId))
-        return parseSnapshot(String(plain, Charsets.UTF_8))
+        return withContext(Dispatchers.Default) {
+            val blob = runCatching { JSONObject(text) }.getOrNull()?.str(link.phoneId) ?: return@withContext null
+            val plain = RemoteCrypto.open(link.key, blob, RemoteCrypto.stateAad(link.channel, link.phoneId))
+            parseSnapshot(String(plain, Charsets.UTF_8))
+        }
     }
 }
 

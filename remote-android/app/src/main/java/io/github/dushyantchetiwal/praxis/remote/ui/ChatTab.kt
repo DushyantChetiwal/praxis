@@ -864,6 +864,13 @@ private fun TranscriptContent(ui: DeviceUi, vm: MainViewModel) {
     LaunchedEffect(session, entries, stepThreads, ui.outbox.size, ui.threadKnown) {
         if (stick) scrollToEnd(listState)
     }
+    LaunchedEffect(ui.resumeRevision) {
+        if (ui.resumeRevision > 0L) {
+            anchor = null
+            stick = true
+            scrollToEnd(listState)
+        }
+    }
     LaunchedEffect(ui.outbox.size) {
         // Sending always brings the new message into view.
         if (ui.outbox.isNotEmpty()) {

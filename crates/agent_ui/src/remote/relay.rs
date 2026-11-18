@@ -537,6 +537,7 @@ async fn serve(
                         let until = watch.until.to_rfc3339();
                         watches.insert(peer.id.clone(), watch);
                         published.remove(&peer.id);
+                        next_snapshot = Instant::now();
                         Ok(json!({"until": until}))
                     } else if request.op == "direct_offer" {
                         accept_direct(
@@ -551,10 +552,14 @@ async fn serve(
                     } else if matches!(request.op.as_str(), "unpair" | "batch") {
                         Err(anyhow!("Use the GitHub channel for this operation"))
                     } else {
-                        cx.update(|cx| {
+                        let task = cx.update(|cx| {
                             handle_paired(&request.op, &request.args, &device, &peer.id, cx)
-                        })
-                        .await
+                        });
+                        let response = task.await;
+                        if response.is_ok() && !is_read_only_op(&request.op) {
+                            next_snapshot = Instant::now();
+                        }
+                        response
                     };
                     let answer = channel::envelope(&request.id, result);
                     receipts.finish(&peer.id, &request.id, answer.clone());
@@ -581,6 +586,26 @@ async fn serve(
     result.unwrap_or(Ok(()))
 }
 
+fn is_read_only_op(op: &str) -> bool {
+    matches!(
+        op,
+        "status"
+            | "host_folders"
+            | "threads"
+            | "thread"
+            | "queue"
+            | "queue_content"
+            | "models"
+            | "terminals"
+            | "terminal_output"
+            | "questions"
+            | "question_content"
+            | "list_dir"
+            | "read_file"
+            | "download"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,6 +628,16 @@ mod tests {
         assert_eq!(until_stopped(&stopped, async { 42 }).await, None);
         let (_stop, stopped) = async_channel::bounded::<()>(1);
         assert_eq!(until_stopped(&stopped, async { 42 }).await, Some(42));
+    }
+
+    #[test]
+    fn read_only_ops_do_not_force_immediate_snapshots() {
+        for op in ["status", "thread", "models", "list_dir", "read_file"] {
+            assert!(is_read_only_op(op));
+        }
+        for op in ["prompt", "send_now", "steer", "stop", "open_thread"] {
+            assert!(!is_read_only_op(op));
+        }
     }
 
     #[derive(Default)]

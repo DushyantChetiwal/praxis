@@ -67,7 +67,11 @@ pub(crate) use modal::PraxisRemoteModal;
 use store::PhoneInfo;
 
 const TRANSCRIPT_BUDGET: usize = 36_000;
+const LIVE_HEADER_BUDGET: usize = 8_000;
+const HEADER_PAGE_BUDGET: usize = 12_000;
 const ENTRY_LIMIT: usize = 6_000;
+const LIVE_HEADER_ENTRIES: usize = 24;
+const HEADER_PAGE_ENTRIES: usize = 30;
 const HISTORY_PAGE_ENTRIES: usize = 100;
 const PERMISSION_DETAIL_LIMIT: usize = 4_000;
 const FILE_LIMIT: usize = 20_000;
@@ -1929,10 +1933,15 @@ fn requested_thread_snapshot(
     }
     let include_details = args.get("include_details").and_then(Value::as_bool) != Some(false);
     if let Some(before) = history_before_index(args)? {
+        let budget = if include_details {
+            TRANSCRIPT_BUDGET
+        } else {
+            HEADER_PAGE_BUDGET
+        };
         Ok(thread_page_snapshot(
             thread.read(cx),
             None,
-            TRANSCRIPT_BUDGET,
+            budget,
             Some(before),
             include_details,
             cx,
@@ -2194,6 +2203,11 @@ fn watched_thread_snapshot(
     }
     // Reserve the step_threads field and array separators, then share one budget.
     let budget = TRANSCRIPT_BUDGET.saturating_sub(32 + steps.len()) / (steps.len() + 1);
+    let budget = if include_details {
+        budget
+    } else {
+        budget.min(LIVE_HEADER_BUDGET)
+    };
     let mut snapshot = thread_snapshot(thread, None, budget, include_details, cx);
     let step_threads: Vec<Value> = steps
         .into_iter()
@@ -2280,6 +2294,11 @@ fn collect_transcript_page(
     let end = before.min(source.len());
     let mut next_before = end;
     let mut entries = Vec::new();
+    let max_entries = match (include_details, preview) {
+        (true, _) => HISTORY_PAGE_ENTRIES,
+        (false, true) => LIVE_HEADER_ENTRIES,
+        (false, false) => HEADER_PAGE_ENTRIES,
+    };
     for (index, entry) in source
         .iter()
         .take(end)
@@ -2291,6 +2310,9 @@ fn collect_transcript_page(
             next_before = index;
             continue;
         };
+        if entries.len() >= max_entries {
+            break;
+        }
         let value = if include_details {
             fit_transcript_entry(value, ENTRY_LIMIT, "entry_limit")
         } else {
@@ -3062,6 +3084,67 @@ mod tests {
         assert!(header.get("parts").is_none());
         assert_eq!(header["details_pending"], true);
         assert_eq!(header["truncated"], false);
+    }
+
+    #[gpui::test]
+    fn live_header_snapshots_send_only_visible_tail_and_page_backward(cx: &mut App) {
+        let source: Vec<_> = (0..90)
+            .map(|index| assistant_entry(&[(false, &format!("Message {index}"))], cx))
+            .collect();
+        let (tail, mut before) =
+            collect_transcript_page(&source, source.len(), LIVE_HEADER_BUDGET, true, false, cx);
+        assert_eq!(tail.len(), LIVE_HEADER_ENTRIES);
+        assert_eq!(before, 90 - LIVE_HEADER_ENTRIES);
+        let tail_indices: Vec<usize> = tail
+            .iter()
+            .map(|entry| entry["index"].as_u64().expect("entry index") as usize)
+            .collect();
+        assert_eq!(tail_indices, (66..90).collect::<Vec<_>>());
+
+        let mut paged_indices = tail_indices;
+        let mut expected_stops = Vec::new();
+        while before > 0 {
+            let (page, next) =
+                collect_transcript_page(&source, before, HEADER_PAGE_BUDGET, false, false, cx);
+            assert!(page.len() <= HEADER_PAGE_ENTRIES);
+            assert!(next < before);
+            let mut indices: Vec<usize> = page
+                .iter()
+                .map(|entry| entry["index"].as_u64().expect("entry index") as usize)
+                .collect();
+            indices.extend(paged_indices);
+            paged_indices = indices;
+            expected_stops.push(next);
+            before = next;
+        }
+        assert_eq!(expected_stops, vec![36, 6, 0]);
+        assert_eq!(paged_indices, (0..90).collect::<Vec<_>>());
+
+        let mut blank_prefixed: Vec<_> = (0..10)
+            .map(|_| {
+                AgentThreadEntry::UserMessage(acp_thread::UserMessage {
+                    identity: acp_thread::MessageIdentity::Legacy(None),
+                    meta: None,
+                    client_id: None,
+                    is_optimistic: false,
+                    content: acp_thread::MessageContent::default(),
+                    indented: false,
+                })
+            })
+            .collect();
+        for index in 0..LIVE_HEADER_ENTRIES {
+            blank_prefixed.push(assistant_entry(&[(false, &format!("Tail {index}"))], cx));
+        }
+        let (tail, next) = collect_transcript_page(
+            &blank_prefixed,
+            blank_prefixed.len(),
+            LIVE_HEADER_BUDGET,
+            true,
+            false,
+            cx,
+        );
+        assert_eq!(tail.len(), LIVE_HEADER_ENTRIES);
+        assert_eq!(next, 0);
     }
 
     #[gpui::test]

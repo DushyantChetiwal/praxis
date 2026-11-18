@@ -91,6 +91,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -99,6 +100,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 private const val STATE_POLL_MS = 3_000L
+private const val LIVE_CONNECT_GRACE_MS = 2_500L
 private const val MAX_POLL_BACKOFF_MS = 30_000L
 private const val WATCH_SECONDS = 300
 private const val WATCH_RENEW_MS = 4 * 60_000L
@@ -477,8 +479,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (store.token == null) {
             go(Screen.SignIn)
         } else {
-            go(Screen.Devices)
-            loadDevices(initial = true)
+            val cached = store.cachedComputers()
+            val pairedCached = cached.filter(::isPaired).map { it.channel }.toSet()
+            if (cached.isNotEmpty()) {
+                setDevices {
+                    copy(
+                        devices = (devices + cached).distinctBy { it.channel },
+                        paired = paired + pairedCached,
+                    )
+                }
+            }
+            val saved = store.savedChannel?.let { channel ->
+                cached.find { it.channel == channel && it.channel in pairedCached }
+            }
+            if (saved != null) {
+                openDevice(saved)
+                loadDevices(initial = false)
+            } else {
+                go(Screen.Devices)
+                loadDevices(initial = true)
+            }
         }
     }
 
@@ -508,6 +528,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun onForeground() {
         foreground = true
         if (store.token == null) return
+        if (d.device != null) edit { copy(resumeRevision = resumeRevision + 1) }
         startPolling()
         startDeviceRefresh()
         if (_app.value.screen in LISTING_SCREENS) loadDevices()
@@ -519,6 +540,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // stops publishing snapshots once the watch runs out.
         foreground = false
         channel.live.stop()
+        cancelHistoryRequest()
+        if (d.device != null) edit { copy(history = history.trimToLatest()) }
         pollJob?.cancel()
         pollJob = null
         devicesJob?.cancel()
@@ -996,6 +1019,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 pruneOutbox()
                 return 5_000L
             }
+            // Let the initial live handshake finish before falling back to a
+            // potentially stale gist snapshot and a slow comment-based watch.
+            if (channel.live.connecting(link)) {
+                withTimeoutOrNull(LIVE_CONNECT_GRACE_MS) {
+                    channel.live.connection.first { it?.channel == link.channel }
+                }
+                if (channel.live.ready(link)) {
+                    ensureWatch()
+                    pruneOutbox()
+                    return 5_000L
+                }
+            }
         }
         var wait: Long? = STATE_POLL_MS
         try {
@@ -1070,13 +1105,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         snapshot.status?.let { applyStatus(it, snapshot.watch?.window) }
         if (d.watchMatchesView(snapshot.watch)) {
             val incoming = snapshot.thread
+            val jumped = incoming != null && d.history.replacesDisjointRoot(incoming)
             val history = when {
                 incoming != null -> d.history.live(incoming)
                 snapshot.threadError != null -> d.history
                 else -> TranscriptHistory()
             }
             if (d.history.request != null && history.request == null) cancelHistoryRequest()
-            edit { copy(history = history, threadError = snapshot.threadError, threadKnown = true) }
+            edit {
+                copy(
+                    history = history,
+                    resumeRevision = if (jumped) resumeRevision + 1 else resumeRevision,
+                    threadError = snapshot.threadError,
+                    threadKnown = true,
+                )
+            }
         }
         pruneOutbox()
         val override = d.modeOverride
