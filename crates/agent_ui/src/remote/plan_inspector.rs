@@ -124,10 +124,7 @@ pub(super) fn inspect(workspace: &gpui::Entity<Workspace>, cx: &App) -> Result<V
     if let Some(run) = run {
         for step in run.history() {
             let path: Vec<String> = step.path.0.iter().map(|id| id.0.clone()).collect();
-            let session_id = step
-                .session_id
-                .as_ref()
-                .map(|id| id.0.as_ref().to_string());
+            let session_id = step.session_id.as_ref().map(|id| id.0.as_ref().to_string());
             let summary = step
                 .summary
                 .as_ref()
@@ -277,8 +274,8 @@ fn collect_graph(
         let (hist_session, hist_summary, hist_attempt) =
             history.get(&path).cloned().unwrap_or((None, None, 0));
 
-        let session_id = hist_session
-            .or_else(|| node.chat.as_ref().map(|chat| chat.0.as_ref().to_string()));
+        let session_id =
+            hist_session.or_else(|| node.chat.as_ref().map(|chat| chat.0.as_ref().to_string()));
         let summary = hist_summary.or_else(|| {
             node.result
                 .as_ref()
@@ -346,21 +343,16 @@ fn parse_json_path(value: Option<&Value>) -> Option<Vec<String>> {
 }
 
 pub(super) fn parse_node_path(value: Option<&Value>) -> Result<NodePath> {
-    let segments = parse_json_path(value)
-        .context("expected \"path\" as a non-empty array of step ids")?;
-    Ok(NodePath(
-        segments.into_iter().map(NodeId::from).collect(),
-    ))
+    let segments =
+        parse_json_path(value).context("expected \"path\" as a non-empty array of step ids")?;
+    Ok(NodePath(segments.into_iter().map(NodeId::from).collect()))
 }
 
 pub(super) fn fit_plan_payload(mut payload: Value, budget: usize) -> Value {
     if payload.to_string().len() <= budget {
         return payload;
     }
-    if let Some(subagents) = payload
-        .get_mut("subagents")
-        .and_then(Value::as_array_mut)
-    {
+    if let Some(subagents) = payload.get_mut("subagents").and_then(Value::as_array_mut) {
         for subagent in subagents.iter_mut() {
             if let Some(object) = subagent.as_object_mut() {
                 object.insert("preview".into(), Value::Null);

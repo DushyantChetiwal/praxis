@@ -3498,11 +3498,7 @@ impl Thread {
         self.parent_thread_id().is_none()
     }
 
-    pub(crate) fn record_background_wake_notice(
-        &mut self,
-        notice: String,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn record_background_wake_notice(&mut self, notice: String, cx: &mut Context<Self>) {
         if !self.can_wake_for_background_work() {
             return;
         }

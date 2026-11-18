@@ -57,8 +57,7 @@ impl PeerDeltaTracker {
             return Ok(None);
         }
 
-        let fitted: Value =
-            serde_json::from_str(&channel::fit_snapshot(raw_snapshot, now))?;
+        let fitted: Value = serde_json::from_str(&channel::fit_snapshot(raw_snapshot, now))?;
 
         if !deltas {
             return self.record_and_emit_snapshot(
@@ -107,14 +106,7 @@ impl PeerDeltaTracker {
             }
         }
 
-        self.record_and_emit_snapshot(
-            phone,
-            epoch,
-            fingerprint,
-            fitted,
-            now_instant,
-            sequence,
-        )
+        self.record_and_emit_snapshot(phone, epoch, fingerprint, fitted, now_instant, sequence)
     }
 
     fn record_and_emit_snapshot(
@@ -361,15 +353,7 @@ mod tests {
 
         assert!(
             tracker
-                .next_packet(
-                    "phone1",
-                    "e1",
-                    snap.clone(),
-                    true,
-                    now,
-                    t0,
-                    &mut sequence,
-                )
+                .next_packet("phone1", "e1", snap.clone(), true, now, t0, &mut sequence,)
                 .expect("ok")
                 .is_some()
         );

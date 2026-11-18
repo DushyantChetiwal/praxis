@@ -158,8 +158,7 @@ pub fn read_watchdog_health_in(directory: &Path, now_ms: u64) -> WatchdogHealth 
     let status = read_json::<WatchdogStatus>(&directory.join(STATUS_FILE));
     let heartbeat = read_json::<Heartbeat>(&directory.join(HEARTBEAT_FILE));
 
-    let heartbeat_age_ms =
-        heartbeat.map(|entry| now_ms.saturating_sub(entry.updated_at_unix_ms));
+    let heartbeat_age_ms = heartbeat.map(|entry| now_ms.saturating_sub(entry.updated_at_unix_ms));
 
     match status {
         Some(status) => WatchdogHealth {
@@ -481,9 +480,12 @@ fn consume_valid_restart_request(
 }
 
 fn validate_restart_request(request: &RestartRequest, expected_token: &str, now_ms: u64) -> bool {
-    let token_matches =
-        constant_time_eq(request.token.trim().as_bytes(), expected_token.trim().as_bytes());
-    let not_expired = now_ms.saturating_sub(request.requested_at_unix_ms) <= RESTART_REQUEST_MAX_AGE_MS;
+    let token_matches = constant_time_eq(
+        request.token.trim().as_bytes(),
+        expected_token.trim().as_bytes(),
+    );
+    let not_expired =
+        now_ms.saturating_sub(request.requested_at_unix_ms) <= RESTART_REQUEST_MAX_AGE_MS;
     let not_far_future =
         request.requested_at_unix_ms.saturating_sub(now_ms) <= RESTART_REQUEST_MAX_AGE_MS;
 
@@ -636,12 +638,8 @@ fn sha256_hex(input: &[u8]) -> String {
     for chunk in padded.chunks_exact(64) {
         let mut schedule = [0u32; 64];
         for (index, word_bytes) in chunk.chunks_exact(4).enumerate() {
-            schedule[index] = u32::from_be_bytes([
-                word_bytes[0],
-                word_bytes[1],
-                word_bytes[2],
-                word_bytes[3],
-            ]);
+            schedule[index] =
+                u32::from_be_bytes([word_bytes[0], word_bytes[1], word_bytes[2], word_bytes[3]]);
         }
         for index in 16..64 {
             let s0 = schedule[index - 15].rotate_right(7)
@@ -740,7 +738,13 @@ mod tests {
         let token = load_or_create_token(&dir).unwrap();
         assert_eq!(token.len(), 64);
 
-        write_status(&dir, 1001, Some(2002), 2, Some("exit_status: 1".to_string()));
+        write_status(
+            &dir,
+            1001,
+            Some(2002),
+            2,
+            Some("exit_status: 1".to_string()),
+        );
         let heartbeat = Heartbeat {
             pid: 2002,
             started_at_unix_ms: 10_000,

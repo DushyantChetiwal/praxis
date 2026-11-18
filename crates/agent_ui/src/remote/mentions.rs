@@ -33,8 +33,7 @@ pub(super) fn search(
     let limit = parse_limit(args);
 
     let want_files = matches!(kind.as_str(), "all" | "file");
-    let want_symbols =
-        kind == "symbol" || (kind == "all" && !query.is_empty());
+    let want_symbols = kind == "symbol" || (kind == "all" && !query.is_empty());
 
     let project = workspace.read(cx).project().clone();
     let workspace_handle = workspace.clone();
@@ -47,12 +46,13 @@ pub(super) fn search(
             .into_iter()
             .map(|worktree| {
                 let worktree = worktree.read(cx);
-                root_names.insert(worktree.id().to_usize(), worktree.root_name_str().to_string());
+                root_names.insert(
+                    worktree.id().to_usize(),
+                    worktree.root_name_str().to_string(),
+                );
                 PathMatchCandidateSet {
                     snapshot: worktree.snapshot(),
-                    include_ignored: worktree
-                        .root_entry()
-                        .is_some_and(|entry| entry.is_ignored),
+                    include_ignored: worktree.root_entry().is_some_and(|entry| entry.is_ignored),
                     include_root_name,
                     candidates: Candidates::Entries,
                 }
@@ -131,11 +131,7 @@ pub(super) fn search(
         {
             cx.update(|cx| {
                 let project_read = project.read(cx);
-                let include_root_name = workspace_handle
-                    .read(cx)
-                    .visible_worktrees(cx)
-                    .count()
-                    > 1;
+                let include_root_name = workspace_handle.read(cx).visible_worktrees(cx).count() > 1;
                 for symbol in symbols {
                     if items.len() >= limit {
                         break;
@@ -143,8 +139,7 @@ pub(super) fn search(
                     let SymbolLocation::InProject(project_path) = &symbol.path else {
                         continue;
                     };
-                    let Some(worktree) =
-                        project_read.worktree_for_id(project_path.worktree_id, cx)
+                    let Some(worktree) = project_read.worktree_for_id(project_path.worktree_id, cx)
                     else {
                         continue;
                     };
@@ -173,11 +168,7 @@ pub(super) fn search(
     })
 }
 
-pub(super) fn skills(
-    workspace: &Entity<Workspace>,
-    args: &Value,
-    cx: &App,
-) -> Result<Value> {
+pub(super) fn skills(workspace: &Entity<Workspace>, args: &Value, cx: &App) -> Result<Value> {
     let query = args
         .get("query")
         .and_then(Value::as_str)
@@ -236,8 +227,7 @@ fn matches_query(name: &str, description: &str, query_lower: &str) -> bool {
     if query_lower.is_empty() {
         return true;
     }
-    name.to_lowercase().contains(query_lower)
-        || description.to_lowercase().contains(query_lower)
+    name.to_lowercase().contains(query_lower) || description.to_lowercase().contains(query_lower)
 }
 
 pub(super) fn filter_skills_and_commands(

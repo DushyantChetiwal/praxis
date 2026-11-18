@@ -7262,8 +7262,14 @@ async fn test_subagent_tool_output_does_not_include_thinking(cx: &mut TestAppCon
             _ => None,
         })
         .collect();
-    assert!(wake_text.contains("subagent task response 1"), "{wake_text}");
-    assert!(wake_text.contains("subagent task response 2"), "{wake_text}");
+    assert!(
+        wake_text.contains("subagent task response 1"),
+        "{wake_text}"
+    );
+    assert!(
+        wake_text.contains("subagent task response 2"),
+        "{wake_text}"
+    );
     assert!(
         !wake_text.contains("thinking more about the subagent task"),
         "{wake_text}"

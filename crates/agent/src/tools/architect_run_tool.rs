@@ -1350,7 +1350,9 @@ mod tests {
             thread.finish_architect_run(architect::RunOutcome::Completed, cx);
             let notes = thread.tool_result_notes("grep");
             assert!(
-                notes.iter().any(|note| note.contains("Architect run completed")),
+                notes
+                    .iter()
+                    .any(|note| note.contains("Architect run completed")),
                 "{notes:?}"
             );
         });
@@ -1365,7 +1367,9 @@ mod tests {
             thread.stop_architect_run(cx);
             let notes = thread.tool_result_notes("grep");
             assert!(
-                notes.iter().any(|note| note.contains("Architect run stopped")),
+                notes
+                    .iter()
+                    .any(|note| note.contains("Architect run stopped")),
                 "{notes:?}"
             );
         });

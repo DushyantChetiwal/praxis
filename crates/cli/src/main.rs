@@ -831,9 +831,19 @@ fn run() -> Result<()> {
         .collect();
 
     if args.foreground {
-        app.run_foreground(url, user_data_dir.as_deref(), launch_headless, args.watchdog)?;
+        app.run_foreground(
+            url,
+            user_data_dir.as_deref(),
+            launch_headless,
+            args.watchdog,
+        )?;
     } else {
-        app.launch(url, user_data_dir.as_deref(), launch_headless, args.watchdog)?;
+        app.launch(
+            url,
+            user_data_dir.as_deref(),
+            launch_headless,
+            args.watchdog,
+        )?;
         sender.join().unwrap()?;
         if let Some(handle) = stdin_pipe_handle {
             handle.join().unwrap()?;

@@ -551,9 +551,7 @@ impl AgentTool for RunStepsTool {
                         .collect();
                     let summary = serde_json::to_string(&serde_json::json!({ "steps": outcomes }))
                         .unwrap_or_else(|error| format!("Failed to serialize run_steps: {error}"));
-                    let notice = format!(
-                        "Parallel steps finished. Outcomes:\n\n{summary}"
-                    );
+                    let notice = format!("Parallel steps finished. Outcomes:\n\n{summary}");
                     owner
                         .update(cx, |owner, cx| {
                             owner.finish_background_subagent_batch(
@@ -968,7 +966,10 @@ mod tests {
             panic!("expected text");
         };
         assert!(text.contains("\"status\":\"running\""), "{text}");
-        assert!(text.contains("Parallel steps started in the background"), "{text}");
+        assert!(
+            text.contains("Parallel steps started in the background"),
+            "{text}"
+        );
         Ok(())
     }
 }

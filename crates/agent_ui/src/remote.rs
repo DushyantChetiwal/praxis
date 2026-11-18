@@ -3136,7 +3136,11 @@ fn watchdog_restart(reason: &str) -> Result<Value> {
     Ok(json!({ "requested": true }))
 }
 
-fn latest_session_for_worktree(store: Option<&Entity<ThreadMetadataStore>>, path: &Path, cx: &App) -> Option<String> {
+fn latest_session_for_worktree(
+    store: Option<&Entity<ThreadMetadataStore>>,
+    path: &Path,
+    cx: &App,
+) -> Option<String> {
     let store = store?;
     store
         .read(cx)
@@ -3162,7 +3166,10 @@ fn worktree_list(workspace: &Entity<Workspace>, cx: &App) -> Result<Value> {
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| main_path.display().to_string());
-            let branch = snapshot.branch.as_ref().map(|branch| branch.name().to_string());
+            let branch = snapshot
+                .branch
+                .as_ref()
+                .map(|branch| branch.name().to_string());
             let session_id = latest_session_for_worktree(metadata_store.as_ref(), &main_path, cx);
             worktrees.push(json!({
                 "path": main_path.display().to_string(),
@@ -3189,8 +3196,7 @@ fn worktree_list(workspace: &Entity<Workspace>, cx: &App) -> Result<Value> {
                     .unwrap_or(ref_name.as_ref())
                     .to_string()
             });
-            let session_id =
-                latest_session_for_worktree(metadata_store.as_ref(), &linked.path, cx);
+            let session_id = latest_session_for_worktree(metadata_store.as_ref(), &linked.path, cx);
             worktrees.push(json!({
                 "path": linked.path.display().to_string(),
                 "name": name,
@@ -3210,7 +3216,9 @@ fn validate_git_branch_name(branch: &str) -> Result<String> {
     anyhow::ensure!(
         !branch.starts_with('-')
             && !branch.contains("..")
-            && !branch.bytes().any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()),
+            && !branch
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()),
         "invalid branch name {branch:?}"
     );
     Ok(branch.to_string())
