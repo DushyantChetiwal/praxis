@@ -3196,7 +3196,7 @@ fn worktree_list(workspace: &Entity<Workspace>, cx: &App) -> Result<Task<Result<
                     .to_string()
             });
             let session_id = latest_session_for_worktree(metadata_store.as_ref(), &linked.path, cx);
-            entries.push((linked.path, name, branch, linked.is_main, session_id));
+            entries.push((linked.path.clone(), name, branch, linked.is_main, session_id));
         }
     }
 

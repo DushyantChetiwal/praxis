@@ -4149,7 +4149,9 @@ impl ConversationView {
             conversation.updated_at = Some(updated_at);
         });
     }
+}
 
+impl ConversationView {
     fn render_subagent_telemetry_hud(&self, cx: &App) -> Option<AnyElement> {
         let root_thread = self.root_thread(cx)?;
         let summary = SubagentTelemetrySummary::from_thread(root_thread.read(cx), cx)?;

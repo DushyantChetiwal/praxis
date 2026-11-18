@@ -278,12 +278,13 @@ mod tests {
         assert!(plan_isolated_worktree(repo, "Test", "1", "..", PathStyle::Unix).is_err());
     }
 
-    fn run_git(repo: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
+    async fn run_git(repo: &Path, args: &[&str]) {
+        let output = new_command("git")
             .arg("-C")
             .arg(repo)
             .args(args)
             .output()
+            .await
             .expect("git command should spawn");
         assert!(
             output.status.success(),
@@ -299,13 +300,13 @@ mod tests {
         let repo_path = temp.path().join("repo");
         std::fs::create_dir_all(&repo_path).unwrap();
 
-        run_git(&repo_path, &["init"]);
-        run_git(&repo_path, &["config", "user.email", "test@praxis.dev"]);
-        run_git(&repo_path, &["config", "user.name", "Praxis Test"]);
+        run_git(&repo_path, &["init"]).await;
+        run_git(&repo_path, &["config", "user.email", "test@praxis.dev"]).await;
+        run_git(&repo_path, &["config", "user.name", "Praxis Test"]).await;
 
         std::fs::write(repo_path.join("README.md"), "initial\n").unwrap();
-        run_git(&repo_path, &["add", "README.md"]);
-        run_git(&repo_path, &["commit", "-m", "Initial commit"]);
+        run_git(&repo_path, &["add", "README.md"]).await;
+        run_git(&repo_path, &["commit", "-m", "Initial commit"]).await;
 
         let spec = plan_isolated_worktree(
             &repo_path,
@@ -332,8 +333,8 @@ mod tests {
         assert_eq!(diff.changed_files, 1);
         assert!(diff.summary.contains("README.md"));
 
-        run_git(&spec.worktree_path, &["add", "README.md"]);
-        run_git(&spec.worktree_path, &["commit", "-m", "Worktree change"]);
+        run_git(&spec.worktree_path, &["add", "README.md"]).await;
+        run_git(&spec.worktree_path, &["commit", "-m", "Worktree change"]).await;
 
         // Dirty main repo must refuse merge
         std::fs::write(repo_path.join("dirty.txt"), "uncommitted\n").unwrap();

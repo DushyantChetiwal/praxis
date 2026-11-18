@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "Watchdog supervisor runs synchronously before GPUI initializes"
+)]
+
 use anyhow::{Context as _, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
