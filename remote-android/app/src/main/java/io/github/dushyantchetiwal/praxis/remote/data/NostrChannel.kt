@@ -110,6 +110,8 @@ class NostrChannel(private val directLinks: DirectLinks? = null) {
 
     fun ready(link: Link): Boolean = session?.let { sameRelayPeer(it.link, link) && it.ready() } == true
 
+    fun connecting(link: Link): Boolean = session?.let { sameRelayPeer(it.link, link) && it.connecting() } == true
+
     // Null means no command was submitted. Once submitted, every failure is surfaced,
     // never converted into a second dispatch over GitHub.
     suspend fun exchange(link: Link, id: String, op: String, args: JSONObject): JSONObject? {
@@ -129,6 +131,7 @@ class NostrChannel(private val directLinks: DirectLinks? = null) {
         private val cursor = RelayCursor()
         @Volatile private var epoch: String? = null
         @Volatile private var lastHello = 0L
+        @Volatile private var initialHandshake = true
         @Volatile private var direct: DirectLink? = null
         @Volatile private var directJob: Job? = null
         @Volatile private var directFailures = 0
@@ -139,6 +142,8 @@ class NostrChannel(private val directLinks: DirectLinks? = null) {
             val last = lastHello
             return epoch != null && last != 0L && System.nanoTime() - last in 0 until 30_000_000_000L && job?.isActive == true
         }
+
+        fun connecting(): Boolean = initialHandshake && !ready() && job?.isActive == true
 
         suspend fun run() {
             var receiver: Job? = null
@@ -176,7 +181,9 @@ class NostrChannel(private val directLinks: DirectLinks? = null) {
                         catch (error: Exception) { Log.w("PraxisRemote", "Ignored an invalid direct packet", error) }
                     }
                 }
-                transport.connect(Duration.ofSeconds(8))
+                // Do not let one slow or unreachable relay stall the initial
+                // handshake while another relay is already connected.
+                transport.connect(Duration.ofMillis(1_500))
                 transport.subscribe(ReqTarget.auto(listOf(Filter().author(peer.publicKey()).pubkey(own.publicKey()).kind(Kind(RELAY_KIND)).limit(0uL))), id = "praxis-live")
                 var failures = 0
                 while (kotlinx.coroutines.currentCoroutineContext().isActive) {
@@ -184,6 +191,7 @@ class NostrChannel(private val directLinks: DirectLinks? = null) {
                         withTimeoutOrNull(6_000) { exchange(UUID.randomUUID().toString(), "hello", JSONObject(), attempts = 1) }
                     } catch (error: CancellationException) { throw error }
                     catch (error: Exception) { Log.d("PraxisRemote", "Live handshake will retry", error); null }
+                    initialHandshake = false
                     val newEpoch = answer?.takeIf { it.bool("ok") }?.obj("result")?.str("epoch")
                     if (newEpoch != null && cursor.handshake(newEpoch)) {
                         epoch = newEpoch
@@ -203,6 +211,7 @@ class NostrChannel(private val directLinks: DirectLinks? = null) {
             catch (error: LinkageError) { Log.w("PraxisRemote", "Live transport is unavailable on this device; keeping GitHub fallback", error) }
             catch (error: Exception) { Log.w("PraxisRemote", "Live transport failed; keeping GitHub fallback", error) }
             finally {
+                initialHandshake = false
                 lastHello = 0
                 receiver?.cancel()
                 directJob?.cancel()

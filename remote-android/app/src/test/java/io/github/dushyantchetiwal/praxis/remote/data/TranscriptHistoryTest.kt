@@ -66,15 +66,56 @@ class TranscriptHistoryTest {
     }
 
     @Test
-    fun snapshotGapsArePagedBeforeContinuingOlderHistory() {
+    fun snapshotGapsSnapToCurrentVisibleTailAndPageBackwardFromCurrentState() {
         var history = TranscriptHistory().live(view()).begin("root", 1)
         history = history.complete(history.request!!, page(history.request!!))
-        history = history.live(view(start = 30, total = 40))
+        assertFalse(history.replacesDisjointRoot(view(start = 20, total = 25)))
+        val touching = history.live(view(start = 20, total = 25))
+        assertEquals((0 until 25).toList(), touching.thread!!.entries.map { it.index })
+
+        val inFlight = TranscriptHistory().live(view()).begin("root", 99)
+        val jumped = view(start = 30, total = 40)
+        assertTrue(history.replacesDisjointRoot(jumped))
+        assertTrue(inFlight.replacesDisjointRoot(jumped))
+        assertNull(inFlight.live(jumped).request)
+
+        history = history.live(jumped)
+        assertEquals((30 until 40).toList(), history.thread!!.entries.map { it.index })
         assertEquals(30, history.records.getValue("root").nextBefore)
+
         history = history.begin("root", 2)
         history = history.complete(history.request!!, page(history.request!!, start = 15, total = 40))
+        assertEquals((15 until 40).toList(), history.thread!!.entries.map { it.index })
+        assertEquals(15, history.records.getValue("root").nextBefore)
+
+        history = history.begin("root", 3)
+        history = history.complete(history.request!!, page(history.request!!, start = 0, total = 40))
         assertEquals((0 until 40).toList(), history.thread!!.entries.map { it.index })
         assertEquals(0, history.records.getValue("root").nextBefore)
+    }
+
+    @Test
+    fun trimToLatestKeepsOnlyVisibleTailAndPagesBackwardCleanly() {
+        val full = view(start = 0, total = 60).copy(
+            stepThreads = listOf(view("done-step", start = 0, total = 40)),
+        )
+        var history = TranscriptHistory().live(full)
+        // Mark done-step idle/non-live by omitting it from a subsequent live update.
+        history = history.live(view(start = 45, total = 60))
+        assertEquals((0 until 60).toList(), history.thread!!.entries.map { it.index })
+
+        val trimmed = history.trimToLatest(maxEntries = 24)
+        assertEquals((36 until 60).toList(), trimmed.thread!!.entries.map { it.index })
+        assertEquals(36, trimmed.records.getValue("root").nextBefore)
+        assertTrue(trimmed.canLoad("root"))
+        // Non-live completed step history keeps its entries since no live snapshot will resend its tail.
+        assertEquals(40, trimmed.thread!!.stepThreads.single().entries.size)
+
+        val loading = trimmed.begin("root", 1)
+        assertEquals(36, loading.request!!.before)
+        val paged = loading.complete(loading.request!!, page(loading.request!!, start = 12, total = 60))
+        assertEquals((12 until 60).toList(), paged.thread!!.entries.map { it.index })
+        assertEquals(12, paged.records.getValue("root").nextBefore)
     }
 
     @Test

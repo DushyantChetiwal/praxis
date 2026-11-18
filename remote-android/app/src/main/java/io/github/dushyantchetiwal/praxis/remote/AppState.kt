@@ -249,6 +249,7 @@ data class DeviceUi(
     /** A thread pinned with open_thread; null follows the window's active thread. */
     val watchSession: String? = null,
     val history: TranscriptHistory = TranscriptHistory(),
+    val resumeRevision: Long = 0L,
     /** Whether [thread] reflects a snapshot for the current view. */
     val threadKnown: Boolean = false,
     val threadError: String? = null,
