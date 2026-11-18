@@ -26,7 +26,7 @@ const MIN_PARALLEL_STEPS: usize = 2;
 const MAX_PARALLEL_STEPS: usize = 6;
 
 /// Carry out several independent steps of your checklist at the same time, one
-/// agent per step, and wait until all of them finish.
+/// agent per step.
 ///
 /// Use it when two or more pending steps do not depend on each other, such as
 /// changes to separate parts of the codebase or independent investigations.
@@ -42,8 +42,10 @@ const MAX_PARALLEL_STEPS: usize = 6;
 ///   first step to change a file keeps it; another step that tries to change
 ///   the same file is refused and reports what it could not do, so you can
 ///   finish that part yourself afterwards.
-/// - You receive each agent's final summary, the files it changed, and its
-///   session_id, which `spawn_agent` can use to follow up with that agent.
+/// - In a main conversation, the steps run in the background and this tool
+///   returns at once with each step's `session_id`. Praxis wakes the
+///   conversation with all step outcomes, changed files, and `session_id`s
+///   when the batch finishes.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct RunStepsToolInput {
@@ -73,9 +75,22 @@ pub struct StepOutcome {
     pub changed_files: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RunningParallelStep {
+    pub step: String,
+    pub session_id: acp_v2::SessionId,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RunStepsToolOutput {
+    Running {
+        steps: Vec<RunningParallelStep>,
+        checklist: Vec<PlanStep>,
+        /// Always true. Tells this variant apart when a saved result is read.
+        background: bool,
+    },
     Finished {
         steps: Vec<StepOutcome>,
         checklist: Vec<PlanStep>,
@@ -85,9 +100,23 @@ pub enum RunStepsToolOutput {
     },
 }
 
+const RUNNING_NOTE: &str = "Parallel steps started in the background. Keep working on something \
+    that does not depend on them, or end your turn if nothing remains: Praxis resumes this \
+    conversation with all step outcomes when the batch finishes.";
+
 impl From<RunStepsToolOutput> for LanguageModelToolResultContent {
     fn from(output: RunStepsToolOutput) -> Self {
         match output {
+            RunStepsToolOutput::Running { steps, .. } => {
+                let summary = serde_json::json!({
+                    "status": "running",
+                    "steps": steps,
+                    "note": RUNNING_NOTE,
+                });
+                serde_json::to_string(&summary)
+                    .unwrap_or_else(|error| format!("Failed to serialize run_steps: {error}"))
+                    .into()
+            }
             RunStepsToolOutput::Finished { steps, .. } => {
                 let summary = serde_json::json!({ "steps": steps });
                 serde_json::to_string(&summary)
@@ -197,7 +226,8 @@ pub(crate) fn latest_checklist<'a>(
                     .clone()
                     .and_then(|output| serde_json::from_value(output).ok())
                     .and_then(|output| match output {
-                        RunStepsToolOutput::Finished { checklist, .. } => Some(checklist),
+                        RunStepsToolOutput::Running { checklist, .. }
+                        | RunStepsToolOutput::Finished { checklist, .. } => Some(checklist),
                         RunStepsToolOutput::Error { .. } => None,
                     }),
                 _ => None,
@@ -411,16 +441,38 @@ impl AgentTool for RunStepsTool {
                 .collect();
             let claims = FileClaims::default();
             let mut running = FuturesUnordered::new();
+            let mut running_steps = Vec::new();
+            let mut background_session_ids = Vec::new();
+            let background_owner = cx.update(|cx| {
+                event_stream.owning_thread().filter(|owner| {
+                    owner
+                        .upgrade()
+                        .is_some_and(|owner| owner.read(cx).can_wake_for_background_work())
+                })
+            });
             for (index, (name, step)) in names.iter().zip(&input.steps).enumerate() {
                 let message = step_message(name, &step.instructions, &names);
                 let created = cx.update(|cx| {
                     let subagent = self.environment.create_subagent(name.clone(), None, cx)?;
                     subagent.set_file_claim(claims.claim_for(name), cx);
+                    let session_id = subagent.id();
                     progress[index].session = Some(SubagentSessionInfo {
-                        session_id: subagent.id(),
+                        session_id: session_id.clone(),
                         message_start_index: subagent.num_entries(cx),
                         message_end_index: None,
                     });
+                    if let Some(owner) = &background_owner {
+                        running_steps.push(RunningParallelStep {
+                            step: name.clone(),
+                            session_id: session_id.clone(),
+                        });
+                        background_session_ids.push(session_id.clone());
+                        owner
+                            .update(cx, |owner, _| {
+                                owner.subagent_started_in_background(session_id)
+                            })
+                            .ok();
+                    }
                     anyhow::Ok(subagent)
                 });
                 let started = created.map(|subagent| {
@@ -435,6 +487,90 @@ impl AgentTool for RunStepsTool {
                 });
             }
             event_stream.update_fields(|update| update.meta(parallel_steps_meta(&progress)));
+
+            if let Some(owner) = background_owner
+                && !background_session_ids.is_empty()
+            {
+                let tool = self.clone();
+                let batch_stream = event_stream.clone();
+                cx.spawn(async move |cx| {
+                    let mut results: Vec<
+                        Option<(Option<acp_v2::SessionId>, Result<String, String>)>,
+                    > = vec![None; names.len()];
+                    while let Some((index, subagent, result)) = running.next().await {
+                        let name = &names[index];
+                        let result = result.map_err(|error| format!("{error:#}"));
+                        let step = &mut progress[index];
+                        if let (Some(subagent), Some(session)) = (&subagent, step.session.as_mut())
+                        {
+                            session.message_end_index =
+                                cx.update(|cx| Some(subagent.num_entries(cx).saturating_sub(1)));
+                        }
+                        let status = match &result {
+                            Ok(_) => {
+                                step.status = ParallelStepStatus::Done;
+                                PlanStepStatus::Completed
+                            }
+                            Err(error) => {
+                                step.status = ParallelStepStatus::NotFinished;
+                                step.error = Some(error.clone());
+                                PlanStepStatus::Pending
+                            }
+                        };
+                        batch_stream
+                            .update_fields(|update| update.meta(parallel_steps_meta(&progress)));
+                        match tool.mark_steps(std::slice::from_ref(name), status, cx) {
+                            Ok(checklist) => {
+                                batch_stream.update_plan(AGENT_PLAN_ID, plan_entries(&checklist))
+                            }
+                            Err(error) => log::debug!(
+                                "The conversation closed before its checklist changed: {error:#}"
+                            ),
+                        }
+                        results[index] = Some((subagent.map(|subagent| subagent.id()), result));
+                    }
+
+                    let outcomes: Vec<StepOutcome> = names
+                        .into_iter()
+                        .zip(results)
+                        .map(|(name, result)| {
+                            let (session_id, result) = result
+                                .unwrap_or_else(|| (None, Err("The step did not run.".into())));
+                            let (completed, output) = match result {
+                                Ok(output) => (true, output),
+                                Err(error) => (false, error),
+                            };
+                            StepOutcome {
+                                changed_files: claims.files_for(&name),
+                                step: name,
+                                completed,
+                                session_id,
+                                output,
+                            }
+                        })
+                        .collect();
+                    let summary = serde_json::to_string(&serde_json::json!({ "steps": outcomes }))
+                        .unwrap_or_else(|error| format!("Failed to serialize run_steps: {error}"));
+                    let notice = format!(
+                        "Parallel steps finished. Outcomes:\n\n{summary}"
+                    );
+                    owner
+                        .update(cx, |owner, cx| {
+                            owner.finish_background_subagent_batch(
+                                &background_session_ids,
+                                notice,
+                                cx,
+                            )
+                        })
+                        .ok();
+                })
+                .detach();
+                return Ok(RunStepsToolOutput::Running {
+                    steps: running_steps,
+                    checklist,
+                    background: true,
+                });
+            }
 
             let mut results: Vec<Option<(Option<acp_v2::SessionId>, Result<String, String>)>> =
                 vec![None; names.len()];
@@ -810,5 +946,29 @@ mod tests {
         thread.read_with(cx, |thread, _| {
             assert_eq!(thread.agent_checklist(), checklist.as_slice());
         });
+    }
+
+    #[test]
+    fn running_output_round_trips_and_formats_note() -> Result<(), serde_json::Error> {
+        let output = RunStepsToolOutput::Running {
+            steps: vec![RunningParallelStep {
+                step: "Alpha".into(),
+                session_id: acp_v2::SessionId::new("session-Alpha"),
+            }],
+            checklist: vec![PlanStep {
+                step: "Alpha".into(),
+                status: PlanStepStatus::InProgress,
+            }],
+            background: true,
+        };
+        let saved = serde_json::to_value(&output)?;
+        let restored: RunStepsToolOutput = serde_json::from_value(saved)?;
+        assert!(matches!(restored, RunStepsToolOutput::Running { .. }));
+        let LanguageModelToolResultContent::Text(text) = restored.into() else {
+            panic!("expected text");
+        };
+        assert!(text.contains("\"status\":\"running\""), "{text}");
+        assert!(text.contains("Parallel steps started in the background"), "{text}");
+        Ok(())
     }
 }

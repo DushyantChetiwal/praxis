@@ -1,11 +1,10 @@
-use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
+use std::{rc::Rc, sync::Arc};
 
 use acp_thread::AcpThread;
 use agent_client_protocol::v2::schema as acp;
 use anyhow::{Context as _, Result, ensure};
 use architect::{NodePath, StepModel};
-use futures::{FutureExt as _, channel::oneshot};
-use gpui::{App, Entity, SharedString, Subscription, Task, WeakEntity};
+use gpui::{App, Entity, SharedString, Task, WeakEntity};
 use language_model::LanguageModelToolResultContent;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -1057,183 +1056,6 @@ impl AgentTool for ControlArchitectRunTool {
 /// zero snapshots immediately). after_sequence is the last next_sequence you
 /// consumed. Drain
 /// has_more pages before waiting. User-input/liveness changes can wake this tool
-/// with an unchanged cursor; inspect wait_reason and active records, not just
-/// event_sequence. This does not run, resume, or approve anything.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct WaitArchitectRunToolInput {
-    pub after_sequence: u64,
-    #[serde(default = "default_wait_timeout")]
-    pub timeout_ms: u64,
-}
-
-fn default_wait_timeout() -> u64 {
-    30_000
-}
-
-/// Long enough to sleep through a long step instead of waking the model every
-/// few seconds. Any run transition or user-input change still wakes it early.
-const MAX_WAIT_TIMEOUT_MS: u64 = 30 * 60 * 1000;
-
-pub struct WaitArchitectRunTool {
-    thread: WeakEntity<Thread>,
-    acp_thread: WeakEntity<AcpThread>,
-}
-
-impl WaitArchitectRunTool {
-    pub fn new(thread: WeakEntity<Thread>, acp_thread: WeakEntity<AcpThread>) -> Self {
-        Self { thread, acp_thread }
-    }
-}
-
-type WaitSender = Rc<RefCell<Option<oneshot::Sender<&'static str>>>>;
-
-fn wake_wait(sender: &WaitSender, reason: &'static str) {
-    if let Some(sender) = sender.borrow_mut().take() {
-        // A cancelled tool drops its receiver; that is not an execution failure.
-        if sender.send(reason).is_err() {
-            return;
-        }
-    }
-}
-
-fn observe_run_wait(
-    thread: &Entity<Thread>,
-    coordinator: &Entity<AcpThread>,
-    sender: WaitSender,
-    cx: &mut App,
-) -> Vec<Subscription> {
-    let sequence = thread.read(cx).architect_event_sequence();
-    let revision = thread.read(cx).architect_revision();
-    let status = run_status(thread.read(cx));
-    let mut observers = vec![cx.observe(thread, {
-        let sender = sender.clone();
-        move |thread, cx| {
-            let owner = thread.read(cx);
-            if owner.architect_event_sequence() != sequence
-                || owner.architect_revision() != revision
-                || run_status(owner) != status
-            {
-                wake_wait(&sender, "run_transition");
-            }
-        }
-    })];
-    for active in active_threads(thread.read(cx)) {
-        let before = thread_activity(active.read(cx));
-        let sender = sender.clone();
-        observers.push(cx.observe(&active, move |active, cx| {
-            let activity = thread_activity(active.read(cx));
-            if activity != before {
-                wake_wait(
-                    &sender,
-                    if activity["waiting_for_user_input"] == true {
-                        "user_input"
-                    } else {
-                        "active_call_changed"
-                    },
-                );
-            }
-        }));
-    }
-    // Ignore the coordinator wait tool's own liveness, or it wakes itself.
-    let waiting = waiting_for_user_input(coordinator.read(cx));
-    observers.push(cx.observe(coordinator, move |thread, cx| {
-        if waiting_for_user_input(thread.read(cx)) != waiting {
-            wake_wait(&sender, "user_input_changed");
-        }
-    }));
-    observers
-}
-
-fn wait_snapshot(
-    thread: &Thread,
-    coordinator: &AcpThread,
-    after: u64,
-    reason: &str,
-    cx: &App,
-) -> Result<Value> {
-    let events = event_page(thread, after, 10, None)?;
-    bounded_page(
-        "active",
-        &active_records(thread, cx),
-        0,
-        10,
-        json!({
-            "wait_reason": reason, "state": run_status(thread),
-            "waiting_for_user_input": waiting_for_user_input(coordinator)
-                || active_threads(thread).iter().any(|thread| waiting_for_user_input(thread.read(cx))),
-            "events": events["events"], "next_sequence": events["next_sequence"],
-            "event_sequence": events["event_sequence"], "has_more": events["has_more"],
-            "cursor_gap": events["cursor_gap"], "oldest_sequence": events["oldest_sequence"],
-            "note": "next_offset pages active records via inspect_architect_run(active=true). Follow next_sequence for events; user-input changes may leave it unchanged. Liveness timestamps are local observations, not backend heartbeats.",
-        }),
-    )
-}
-
-impl AgentTool for WaitArchitectRunTool {
-    type Input = WaitArchitectRunToolInput;
-    type Output = ArchitectRunToolOutput;
-    const NAME: &'static str = "wait_architect_run";
-
-    fn capability() -> ToolCapability {
-        ToolCapability::ReadOnly
-    }
-
-    fn kind() -> acp::ToolKind {
-        acp::ToolKind::Read
-    }
-    fn initial_title(&self, _input: Result<Self::Input, Value>, _cx: &mut App) -> SharedString {
-        "Wait for Architect run".into()
-    }
-    fn run(
-        self: Arc<Self>,
-        input: ToolInput<Self::Input>,
-        events: ToolCallEventStream,
-        cx: &mut App,
-    ) -> Task<Result<Self::Output, Self::Output>> {
-        cx.spawn(async move |cx| {
-            let result = async {
-                let input = input.recv().await?;
-                let (sender, receiver) = oneshot::channel();
-                let sender = Rc::new(RefCell::new(Some(sender)));
-                // Check the cursor and install observers in one foreground update,
-                // so a transition cannot fall into an await/subscription gap.
-                let (thread, coordinator, observers) = cx.update(|cx| {
-                    let thread = main_thread(&self.thread, cx)?;
-                    let coordinator = self.acp_thread.upgrade().context("The main conversation is closed.")?;
-                    ensure!(coordinator.read(cx).session_id() == thread.read(cx).id(), "Mismatched coordinator session.");
-                    let owner = thread.read(cx);
-                    ensure!(input.after_sequence <= owner.architect_event_sequence(), "Event cursor is ahead of this conversation.");
-                    if owner.architect_event_sequence() > input.after_sequence {
-                        wake_wait(&sender, "events_available");
-                    } else if waiting_for_user_input(coordinator.read(cx))
-                        || active_threads(owner).iter().any(|active| waiting_for_user_input(active.read(cx))) {
-                        wake_wait(&sender, "user_input");
-                    } else if owner.architect_run().is_none_or(|run| !run.is_running()) {
-                        wake_wait(&sender, "not_running");
-                    }
-                    let observers = observe_run_wait(&thread, &coordinator, sender, cx);
-                    Ok::<_, anyhow::Error>((thread, coordinator, observers))
-                })?;
-                let timer = cx.background_executor().timer(Duration::from_millis(input.timeout_ms.min(MAX_WAIT_TIMEOUT_MS))).fuse();
-                let receiver = receiver.fuse();
-                // A cancelled turn waits for its running tools, so Stop must end the wait.
-                let cancelled = events.cancelled_by_user().fuse();
-                futures::pin_mut!(timer, receiver, cancelled);
-                let reason = futures::select_biased! {
-                    _ = cancelled => anyhow::bail!("The wait was cancelled."),
-                    result = receiver => result.context("Run observer closed before a transition.")?,
-                    _ = timer => "timeout",
-                };
-                drop(observers);
-                cx.update(|cx| wait_snapshot(thread.read(cx), coordinator.read(cx), input.after_sequence, reason, cx))
-            }.await;
-            result.map(|data| ArchitectRunToolOutput::Success { data })
-                .map_err(ArchitectRunToolOutput::error)
-        })
-    }
-}
-
 #[cfg(test)]
 pub(super) async fn architect_tool_test_session(
     cx: &mut gpui::TestAppContext,
@@ -1389,7 +1211,6 @@ mod tests {
         for schema in [
             InspectArchitectRunTool::input_schema(),
             ControlArchitectRunTool::input_schema(),
-            WaitArchitectRunTool::input_schema(),
         ] {
             assert!(schema.to_value()["properties"].is_object());
         }
@@ -1473,36 +1294,12 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn wait_observes_checkpoints_and_ignores_unrelated_notifications(
+    async fn architect_run_wake_watcher_notifies_on_finish_stop_and_user_input(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (_connection, _agent, thread, coordinator) = architect_tool_test_session(cx).await;
-        let (sender, mut receiver) = oneshot::channel();
-        let observers = cx.update(|cx| {
-            observe_run_wait(
-                &thread,
-                &coordinator,
-                Rc::new(RefCell::new(Some(sender))),
-                cx,
-            )
-        });
-        thread.update(cx, |_, cx| cx.notify());
-        cx.run_until_parked();
-        assert!(receiver.try_recv().unwrap().is_none());
-        thread.update(cx, |thread, cx| {
-            thread.set_architect_graph(Some(architect::ArchitectGraph::default()), cx);
-        });
-        assert_eq!(receiver.await.unwrap(), "run_transition");
-        drop(observers);
-    }
-
-    #[gpui::test]
-    async fn active_permission_wakes_wait_without_advancing_event_cursor(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (connection, _agent, thread, coordinator) = architect_tool_test_session(cx).await;
+        let (connection, _agent, thread, _coordinator) = architect_tool_test_session(cx).await;
+        let path = NodePath::root("step".into());
         let visit = thread.update(cx, |thread, cx| {
-            let path = NodePath::root("step".into());
             thread.start_architect_run(path.clone(), "Step".into(), Task::ready(()), cx);
             thread.note_architect_run_position(path, "Step".into(), 1, 1, cx)
         });
@@ -1519,19 +1316,10 @@ mod tests {
             })
             .unwrap();
         thread.update(cx, |thread, cx| {
-            thread.set_architect_run_step_thread(visit, &child, cx)
+            thread.set_architect_run_step_thread(visit, &child, cx);
         });
         cx.run_until_parked();
-        let sequence = thread.read_with(cx, |thread, _| thread.architect_event_sequence());
-        let (sender, receiver) = oneshot::channel();
-        let observers = cx.update(|cx| {
-            observe_run_wait(
-                &thread,
-                &coordinator,
-                Rc::new(RefCell::new(Some(sender))),
-                cx,
-            )
-        });
+
         let call_id = acp::ToolCallId::new("opaque-active-call");
         let permission = child
             .update(cx, |thread, cx| {
@@ -1543,108 +1331,44 @@ mod tests {
                 )
             })
             .unwrap();
-        assert_eq!(receiver.await.unwrap(), "user_input");
-        thread.read_with(cx, |thread, cx| {
-            assert_eq!(thread.architect_event_sequence(), sequence);
-            let records = active_records(thread, cx);
-            let call = records
-                .iter()
-                .find(|record| record["call_id"] == json!(call_id))
-                .unwrap();
-            assert_eq!(call["liveness"]["status"], "awaiting_confirmation");
-            assert!(call.get("content").is_none());
+        cx.run_until_parked();
+        thread.update(cx, |thread, _| {
+            let notes = thread.tool_result_notes("grep");
             assert!(
-                records
+                notes
                     .iter()
-                    .any(|record| record["waiting_for_user_input"] == true)
+                    .any(|note| note.contains("waiting for user input")),
+                "{notes:?}"
             );
         });
-        drop(observers);
         child.update(cx, |thread, cx| {
             thread.cancel_tool_call_authorization(&call_id, cx)
         });
         drop(permission);
-    }
 
-    #[gpui::test]
-    async fn wait_timeout_is_bounded_and_title_does_not_reenter_owner(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (_connection, _agent, thread, coordinator) = architect_tool_test_session(cx).await;
+        thread.update(cx, |thread, cx| {
+            thread.finish_architect_run(architect::RunOutcome::Completed, cx);
+            let notes = thread.tool_result_notes("grep");
+            assert!(
+                notes.iter().any(|note| note.contains("Architect run completed")),
+                "{notes:?}"
+            );
+        });
+
         thread.update(cx, |thread, cx| {
             thread.start_architect_run(
-                NodePath::root("step".into()),
-                "Step".into(),
+                NodePath::root("step2".into()),
+                "Step 2".into(),
                 Task::ready(()),
                 cx,
             );
-        });
-        let tool = Arc::new(WaitArchitectRunTool::new(
-            thread.downgrade(),
-            coordinator.downgrade(),
-        ));
-        thread.update(cx, |_, cx| {
-            assert_eq!(
-                tool.initial_title(Err(Value::Null), cx),
-                "Wait for Architect run"
+            thread.stop_architect_run(cx);
+            let notes = thread.tool_result_notes("grep");
+            assert!(
+                notes.iter().any(|note| note.contains("Architect run stopped")),
+                "{notes:?}"
             );
         });
-        let after_sequence = thread.read_with(cx, |thread, _| thread.architect_event_sequence());
-        let (events, _receiver) = ToolCallEventStream::test();
-        let task = cx.update(|cx| {
-            tool.run(
-                ToolInput::resolved(WaitArchitectRunToolInput {
-                    after_sequence,
-                    timeout_ms: 0,
-                }),
-                events,
-                cx,
-            )
-        });
-        let ArchitectRunToolOutput::Success { data } = task.await.unwrap() else {
-            panic!("expected snapshot");
-        };
-        assert_eq!(data["wait_reason"], "timeout");
-        assert_eq!(data["next_sequence"], after_sequence);
-    }
-
-    #[gpui::test]
-    async fn wait_ends_when_the_turn_is_cancelled(cx: &mut gpui::TestAppContext) {
-        let (_connection, _agent, thread, coordinator) = architect_tool_test_session(cx).await;
-        thread.update(cx, |thread, cx| {
-            thread.start_architect_run(
-                NodePath::root("step".into()),
-                "Step".into(),
-                Task::ready(()),
-                cx,
-            );
-        });
-        let tool = Arc::new(WaitArchitectRunTool::new(
-            thread.downgrade(),
-            coordinator.downgrade(),
-        ));
-        let after_sequence = thread.read_with(cx, |thread, _| thread.architect_event_sequence());
-        let (events, _receiver, mut cancellation_tx) =
-            ToolCallEventStream::test_with_cancellation();
-        let mut task = cx.update(|cx| {
-            tool.run(
-                ToolInput::resolved(WaitArchitectRunToolInput {
-                    after_sequence,
-                    timeout_ms: MAX_WAIT_TIMEOUT_MS,
-                }),
-                events,
-                cx,
-            )
-        });
-        cx.run_until_parked();
-        assert!((&mut task).now_or_never().is_none());
-
-        ToolCallEventStream::signal_cancellation_with_sender(&mut cancellation_tx);
-        cx.run_until_parked();
-        let result = (&mut task)
-            .now_or_never()
-            .expect("cancelling the turn must end the wait without advancing the clock");
-        assert!(result.is_err());
     }
 
     #[gpui::test]

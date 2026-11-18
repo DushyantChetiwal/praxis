@@ -734,17 +734,8 @@ async fn test_background_terminal_tool_result_notes_nudge_waits_and_review_the_c
         assert_eq!(first.len(), 1);
         assert!(first[0].starts_with("Checklist review"), "{first:?}");
         assert!(thread.tool_result_notes("read_file").is_empty());
-        assert!(thread.tool_result_notes("terminal_wait").is_empty());
-        let second = thread.tool_result_notes("terminal_wait");
-        assert_eq!(second.len(), 1);
-        assert!(second[0].contains("waited 2 times"), "{second:?}");
-        assert!(second[0].contains("- Write the docs"), "{second:?}");
         assert!(thread.tool_result_notes("terminal_status").is_empty());
-        assert!(thread.tool_result_notes("terminal_wait").is_empty());
-        assert!(thread.tool_result_notes("terminal_wait").is_empty());
-        assert_eq!(thread.tool_result_notes("terminal_wait").len(), 1);
         assert!(thread.tool_result_notes("grep").is_empty());
-        assert!(thread.tool_result_notes("terminal_wait").is_empty());
     });
 }
 
@@ -798,7 +789,7 @@ async fn test_background_terminal_profiles_refresh_and_subagent_isolation(cx: &m
         thread.read_with(cx, |thread, cx| {
             let tools = thread.enabled_tools(cx);
             assert!(tools.contains_key("terminal_status"));
-            assert!(tools.contains_key("terminal_wait"));
+            assert!(!tools.contains_key("terminal_wait"));
             assert_eq!(
                 tools.contains_key("terminal_stop"),
                 mode == SessionMode::Build
@@ -813,19 +804,14 @@ async fn test_background_terminal_profiles_refresh_and_subagent_isolation(cx: &m
             let profile = settings.profiles.get_mut(&profile_id).unwrap();
             profile.tools.insert("terminal".into(), enabled);
             // Helpers cannot independently override the terminal profile switch.
-            for name in ["terminal_status", "terminal_wait", "terminal_stop"] {
+            for name in ["terminal_status", "terminal_stop"] {
                 profile.tools.insert(name.into(), !enabled);
             }
             AgentSettings::override_global(settings, cx);
         });
         thread.read_with(cx, |thread, cx| {
             let tools = thread.enabled_tools(cx);
-            for name in [
-                "terminal",
-                "terminal_status",
-                "terminal_wait",
-                "terminal_stop",
-            ] {
+            for name in ["terminal", "terminal_status", "terminal_stop"] {
                 assert_eq!(tools.contains_key(name), enabled);
             }
         });
@@ -1097,11 +1083,12 @@ async fn test_background_terminal_survives_next_turn_and_compaction(cx: &mut Tes
     assert!(status.contains("still_running: true"));
     assert!(!handle.was_killed());
     handle.signal_exit();
-    let waited =
-        run_terminal_lifecycle_tool(&thread, "terminal_wait", json!({"task_id": task_id}), cx)
+    cx.run_until_parked();
+    let status =
+        run_terminal_lifecycle_tool(&thread, "terminal_status", json!({"task_id": task_id}), cx)
             .await
             .unwrap();
-    assert!(waited.contains("still_running: false"));
+    assert!(status.contains("still_running: false"));
     cx.run_until_parked();
     assert!(thread.read_with(cx, |thread, _| thread.is_turn_complete()));
     assert!(
@@ -6915,7 +6902,6 @@ async fn test_spawn_agent_tool_forwards_explicit_model(cx: &mut TestAppContext) 
                     message: "prompt".to_string(),
                     session_id: None,
                     model: Some("fake-corp/cheap-model".to_string()),
-                    wait: true,
                 }),
                 event_stream,
                 cx,
@@ -6949,7 +6935,6 @@ async fn test_spawn_agent_tool_rejects_model_when_resuming(cx: &mut TestAppConte
                     message: "prompt".to_string(),
                     session_id: Some(acp_v2::SessionId::new("subagent-id")),
                     model: Some("fake-corp/other-model".to_string()),
-                    wait: true,
                 }),
                 event_stream,
                 cx,
@@ -7020,7 +7005,6 @@ async fn test_subagent_tool_call_end_to_end(cx: &mut TestAppContext) {
         message: "subagent task prompt".to_string(),
         session_id: None,
         model: None,
-        wait: true,
     };
     let subagent_tool_use = LanguageModelToolUse {
         id: "subagent_1".into(),
@@ -7066,7 +7050,7 @@ async fn test_subagent_tool_call_end_to_end(cx: &mut TestAppContext) {
         );
     });
 
-    let request = fake.pending_completions_for(&model).pop().unwrap();
+    let request = fake.pending_completions_for(&model).remove(0);
     fake.send_text(&model, &request, "subagent task response");
     fake.end_stream(&model, &request);
 
@@ -7091,6 +7075,22 @@ async fn test_subagent_tool_call_end_to_end(cx: &mut TestAppContext) {
     fake.end_stream(&model, &request);
 
     send.await.unwrap();
+    cx.run_until_parked();
+
+    let wake_request = fake.pending_completions_for(&model).pop().unwrap();
+    let wake_text: String = wake_request
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            MessageContent::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(wake_text.contains("subagent task response"), "{wake_text}");
+    fake.send_text(&model, &wake_request, "Wake response");
+    fake.end_stream(&model, &wake_request);
+    cx.run_until_parked();
 
     assert_eq!(
         acp_thread.read_with(cx, |thread, cx| thread.to_markdown(cx)),
@@ -7106,11 +7106,13 @@ async fn test_subagent_tool_call_end_to_end(cx: &mut TestAppContext) {
             **Tool Call: label**
             Status: Completed
 
-            subagent task response
-
             ## Assistant
 
             Response
+
+            ## Assistant
+
+            Wake response
 
         "#},
     );
@@ -7170,7 +7172,6 @@ async fn test_subagent_tool_output_does_not_include_thinking(cx: &mut TestAppCon
         message: "subagent task prompt".to_string(),
         session_id: None,
         model: None,
-        wait: true,
     };
     let subagent_tool_use = LanguageModelToolUse {
         id: "subagent_1".into(),
@@ -7209,7 +7210,7 @@ async fn test_subagent_tool_output_does_not_include_thinking(cx: &mut TestAppCon
             .expect("subagent thread should be alive")
     });
 
-    let request = fake.pending_completions_for(&model).pop().unwrap();
+    let request = fake.pending_completions_for(&model).remove(0);
     fake.send_text(&model, &request, "subagent task response 1");
     fake.send_event(
         &model,
@@ -7249,6 +7250,27 @@ async fn test_subagent_tool_output_does_not_include_thinking(cx: &mut TestAppCon
     fake.end_stream(&model, &request);
 
     send.await.unwrap();
+    cx.run_until_parked();
+
+    let wake_request = fake.pending_completions_for(&model).pop().unwrap();
+    let wake_text: String = wake_request
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|content| match content {
+            MessageContent::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(wake_text.contains("subagent task response 1"), "{wake_text}");
+    assert!(wake_text.contains("subagent task response 2"), "{wake_text}");
+    assert!(
+        !wake_text.contains("thinking more about the subagent task"),
+        "{wake_text}"
+    );
+    fake.send_text(&model, &wake_request, "Wake response");
+    fake.end_stream(&model, &wake_request);
+    cx.run_until_parked();
 
     assert_eq!(
         acp_thread.read_with(cx, |thread, cx| thread.to_markdown(cx)),
@@ -7264,13 +7286,13 @@ async fn test_subagent_tool_output_does_not_include_thinking(cx: &mut TestAppCon
             **Tool Call: label**
             Status: Completed
 
-            subagent task response 1
-
-            subagent task response 2
-
             ## Assistant
 
             Response
+
+            ## Assistant
+
+            Wake response
 
         "#},
     );
@@ -7330,7 +7352,6 @@ async fn test_subagent_tool_call_cancellation_during_task_prompt(cx: &mut TestAp
         message: "subagent task prompt".to_string(),
         session_id: None,
         model: None,
-        wait: true,
     };
     let subagent_tool_use = LanguageModelToolUse {
         id: "subagent_1".into(),
@@ -7396,7 +7417,7 @@ async fn test_subagent_tool_call_cancellation_during_task_prompt(cx: &mut TestAp
                 spawning subagent
 
                 **Tool Call: label**
-                Status: Canceled
+                Status: Completed
 
             "}
         );
@@ -7469,7 +7490,6 @@ async fn test_subagent_tool_resume_session(cx: &mut TestAppContext) {
         message: "do the first task".to_string(),
         session_id: None,
         model: None,
-        wait: true,
     };
     let subagent_tool_use = LanguageModelToolUse {
         id: "subagent_1".into(),
@@ -7509,7 +7529,7 @@ async fn test_subagent_tool_resume_session(cx: &mut TestAppContext) {
     });
 
     // Subagent responds
-    let request = fake.pending_completions_for(&model).pop().unwrap();
+    let request = fake.pending_completions_for(&model).remove(0);
     fake.send_text(&model, &request, "first task response");
     fake.end_stream(&model, &request);
 
@@ -7521,6 +7541,13 @@ async fn test_subagent_tool_resume_session(cx: &mut TestAppContext) {
     fake.end_stream(&model, &request);
 
     send.await.unwrap();
+    cx.run_until_parked();
+
+    // Background wake from first subagent completion
+    let wake_request = fake.pending_completions_for(&model).pop().unwrap();
+    fake.send_text(&model, &wake_request, "Wake 1");
+    fake.end_stream(&model, &wake_request);
+    cx.run_until_parked();
 
     // Verify subagent is no longer running
     thread.read_with(cx, |thread, cx| {
@@ -7542,7 +7569,6 @@ async fn test_subagent_tool_resume_session(cx: &mut TestAppContext) {
         message: "do the follow-up task".to_string(),
         session_id: Some(subagent_session_id.clone()),
         model: None,
-        wait: true,
     };
     let resume_tool_use = LanguageModelToolUse {
         id: "subagent_2".into(),
@@ -7578,7 +7604,7 @@ async fn test_subagent_tool_resume_session(cx: &mut TestAppContext) {
     });
 
     // Subagent responds to follow-up
-    let request = fake.pending_completions_for(&model).pop().unwrap();
+    let request = fake.pending_completions_for(&model).remove(0);
     fake.send_text(&model, &request, "follow-up task response");
     fake.end_stream(&model, &request);
 
@@ -7590,6 +7616,13 @@ async fn test_subagent_tool_resume_session(cx: &mut TestAppContext) {
     fake.end_stream(&model, &request);
 
     send2.await.unwrap();
+    cx.run_until_parked();
+
+    // Background wake from follow-up subagent completion
+    let wake_request = fake.pending_completions_for(&model).pop().unwrap();
+    fake.send_text(&model, &wake_request, "Wake 2");
+    fake.end_stream(&model, &wake_request);
+    cx.run_until_parked();
 
     // Verify subagent is no longer running
     thread.read_with(cx, |thread, cx| {
@@ -8776,7 +8809,6 @@ async fn test_subagent_error_propagation(cx: &mut TestAppContext) {
         message: "subagent task prompt".to_string(),
         session_id: None,
         model: None,
-        wait: true,
     };
     let subagent_tool_use = LanguageModelToolUse {
         id: "subagent_1".into(),
@@ -8803,7 +8835,7 @@ async fn test_subagent_error_propagation(cx: &mut TestAppContext) {
         subagent_ids.into_iter().next().unwrap()
     });
 
-    let request = fake.pending_completions_for(&model).pop().unwrap();
+    let request = fake.pending_completions_for(&model).remove(0);
     fake.send_text(&model, &request, "partial work");
     fake.send_error(
         &model,
@@ -8829,36 +8861,32 @@ async fn test_subagent_error_propagation(cx: &mut TestAppContext) {
 
     let request = fake.pending_completions_for(&model).pop().unwrap();
     assert_eq!(request.intent, Some(CompletionIntent::ToolResults));
-    let tool_results = request
+    fake.send_text(&model, &request, "Response after launch");
+    fake.end_stream(&model, &request);
+
+    send.await.unwrap();
+    cx.run_until_parked();
+
+    let wake_request = fake.pending_completions_for(&model).pop().unwrap();
+    let wake_text: String = wake_request
         .messages
         .iter()
         .flat_map(|message| &message.content)
         .filter_map(|content| match content {
-            MessageContent::ToolResult(result) => Some(result),
+            MessageContent::Text(text) => Some(text.as_str()),
             _ => None,
         })
-        .collect::<Vec<_>>();
-    assert_eq!(tool_results.len(), 1);
-    let tool_result = tool_results.first().unwrap();
-    assert_eq!(tool_result.tool_use_id.to_string(), "subagent_1");
-    assert_eq!(&*tool_result.tool_name, SpawnAgentTool::NAME);
-    assert!(tool_result.is_error);
-    assert_eq!(
-        tool_result.text_contents(),
-        json!({
-            "session_id": subagent_session_id,
-            "error": concat!(
-                "prompt too large\n\n",
-                "Partial subagent output (last 3 messages, up to 4096 characters each):\n\n",
-                "partial work",
-            ),
-        })
-        .to_string(),
+        .collect();
+    assert!(wake_text.contains("failed:"), "{wake_text}");
+    assert!(wake_text.contains("prompt too large"), "{wake_text}");
+    assert!(wake_text.contains("partial work"), "{wake_text}");
+    assert!(
+        wake_text.contains(&subagent_session_id.to_string()),
+        "{wake_text}"
     );
-    fake.send_text(&model, &request, "Response after error");
-    fake.end_stream(&model, &request);
-
-    send.await.unwrap();
+    fake.send_text(&model, &wake_request, "Response after error");
+    fake.end_stream(&model, &wake_request);
+    cx.run_until_parked();
 }
 
 #[gpui::test]

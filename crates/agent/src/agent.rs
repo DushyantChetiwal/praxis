@@ -1046,10 +1046,6 @@ impl NativeAgent {
                 ));
                 thread.add_tool(InspectArchitectPlanTool::new(thread_handle.downgrade()));
                 thread.add_tool(EditArchitectPlanTool::new(thread_handle.downgrade()));
-                thread.add_tool(WaitArchitectRunTool::new(
-                    thread_handle.downgrade(),
-                    acp_thread.downgrade(),
-                ));
             }
             // The resolver closure reads `state.skills` at invocation
             // time, so skills added or removed by the SKILL.md watcher

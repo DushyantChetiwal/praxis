@@ -7,7 +7,7 @@ use crate::{
     ListDirectoryTool, MovePathTool, ProjectSnapshot, PullRequestTool, ReadFileTool, RenameTool,
     SandboxedTerminalTool, SetStepLocksTool, SpawnAgentTool, SystemPromptTemplate, Template,
     Templates, TerminalStatusTool, TerminalStopTool, TerminalTaskRegistry, TerminalTaskSummary,
-    TerminalTool, TerminalWaitTool, ToolPermissionDecision, WebSearchTool, WriteFileTool,
+    TerminalTool, ToolPermissionDecision, WebSearchTool, WriteFileTool,
     decide_permission_from_settings,
 };
 use acp_thread::{AgentModelId, ClientUserMessageId, MentionUri, ProcessOutput};
@@ -82,11 +82,10 @@ const TOOL_CALL_INTERRUPTED_BY_FOLLOW_UP_MESSAGE: &str =
 pub(crate) const FOLLOW_UP_PERMISSION_DENIED_OPTION_ID: &str = "follow_up_permission_denied";
 pub const MAX_TOOL_NAME_LENGTH: usize = 64;
 pub const MAX_SUBAGENT_DEPTH: u8 = 1;
-const ARCHITECT_STATE_TOOLS: [&str; 6] = [
+const ARCHITECT_STATE_TOOLS: [&str; 5] = [
     crate::InspectArchitectPlanTool::NAME,
     crate::EditArchitectPlanTool::NAME,
     crate::InspectArchitectRunTool::NAME,
-    crate::WaitArchitectRunTool::NAME,
     crate::ControlArchitectRunTool::NAME,
     crate::SetStepLocksTool::NAME,
 ];
@@ -599,6 +598,9 @@ pub struct ArchitectRun {
     /// turns it has in flight. Kept after a run is stopped, so that stopping
     /// can cancel those turns and the run can be picked up again.
     control: Option<Rc<RefCell<crate::architect_runner::RunState>>>,
+    /// Observers on active step threads that wake the owning conversation when
+    /// a step pauses for user input.
+    step_thread_observers: Vec<gpui::Subscription>,
     /// Dropping this stops the run at its next await point. Held here so that
     /// closing the canvas cannot abandon a run.
     _task: Task<()>,
@@ -726,6 +728,7 @@ impl ArchitectRun {
             running: Vec::new(),
             step_thread: None,
             control,
+            step_thread_observers: Vec::new(),
             _task: Task::ready(()),
         }
     }
@@ -2295,8 +2298,6 @@ pub struct Thread {
     /// so that their completion resumes the conversation.
     background_wake_armed: bool,
     background_completions: Option<Task<()>>,
-    /// Wait calls in a row with no other work in between.
-    consecutive_waits: u32,
     checklist_reviewed_this_turn: bool,
     inherits_parent_model_settings: bool,
     /// The Architect plan drafted in this thread. The conversation governs the
@@ -2541,7 +2542,6 @@ impl Thread {
             step_progress: BTreeMap::default(),
             background_wake_armed: false,
             background_completions: None,
-            consecutive_waits: 0,
             checklist_reviewed_this_turn: false,
             inherits_parent_model_settings: true,
             architect_graph: None,
@@ -3108,7 +3108,6 @@ impl Thread {
             step_progress,
             background_wake_armed: false,
             background_completions: None,
-            consecutive_waits: 0,
             checklist_reviewed_this_turn: false,
             inherits_parent_model_settings: true,
             architect_revision_baseline: architect_graph.clone(),
@@ -3477,14 +3476,19 @@ impl Thread {
         }
     }
 
-    /// A turn that ends while its background commands or sub-agents still run
-    /// resumes the conversation when they finish, so the agent need not wait.
+    /// A turn that ends while its background commands, sub-agents, or Architect
+    /// runs still run resumes the conversation when they finish, so the agent
+    /// need not wait.
     fn arm_background_wake(&mut self, cx: &mut Context<Self>) {
         self.background_wake_armed = self.parent_thread_id().is_none()
             && (self.terminal_tasks.running_in_background() > 0
                 || self.terminal_tasks.has_unreported_completions()
                 || !self.background_subagents.is_empty()
-                || !self.finished_subagent_notices.is_empty());
+                || !self.finished_subagent_notices.is_empty()
+                || self
+                    .architect_run
+                    .as_ref()
+                    .is_some_and(ArchitectRun::is_running));
         self.background_task_finished(cx);
     }
 
@@ -3492,6 +3496,18 @@ impl Thread {
     /// work finishes, so only it starts sub-agents without waiting for them.
     pub(crate) fn can_wake_for_background_work(&self) -> bool {
         self.parent_thread_id().is_none()
+    }
+
+    pub(crate) fn record_background_wake_notice(
+        &mut self,
+        notice: String,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_wake_for_background_work() {
+            return;
+        }
+        self.finished_subagent_notices.push(notice);
+        self.background_task_finished(cx);
     }
 
     pub(crate) fn subagent_started_in_background(&mut self, session_id: acp_v2::SessionId) {
@@ -3512,6 +3528,25 @@ impl Thread {
         self.background_task_finished(cx);
     }
 
+    pub(crate) fn finish_background_subagent_batch(
+        &mut self,
+        session_ids: &[acp_v2::SessionId],
+        notice: String,
+        cx: &mut Context<Self>,
+    ) {
+        let mut any_active = false;
+        for session_id in session_ids {
+            if self.background_subagents.remove(session_id) {
+                any_active = true;
+            }
+        }
+        if !any_active {
+            return;
+        }
+        self.finished_subagent_notices.push(notice);
+        self.background_task_finished(cx);
+    }
+
     /// What finished since the turn ended, for the turn that resumes the
     /// conversation. Empty when nothing should resume it.
     pub(crate) fn take_background_wake_notices(&mut self) -> Vec<String> {
@@ -3526,27 +3561,11 @@ impl Thread {
         notices
     }
 
-    /// Notes appended to a tool result: background commands and sub-agents
-    /// that finished, a nudge away from repeated waiting, and the turn's
-    /// checklist review.
+    /// Notes appended to a tool result: background commands, sub-agents, and
+    /// Architect runs that finished, plus the turn's checklist review.
     pub(crate) fn tool_result_notes(&mut self, tool_name: &str) -> Vec<String> {
         let mut notes = self.terminal_tasks.take_finished_notices();
         notes.append(&mut self.finished_subagent_notices);
-        let waiting = matches!(
-            tool_name,
-            TerminalWaitTool::NAME | crate::WaitArchitectRunTool::NAME
-        );
-        if waiting {
-            self.consecutive_waits += 1;
-            if self.consecutive_waits >= 2 && (self.consecutive_waits - 2).is_multiple_of(3) {
-                notes.push(crate::repeated_wait_note(
-                    self.consecutive_waits,
-                    &self.agent_checklist(),
-                ));
-            }
-        } else if tool_name != TerminalStatusTool::NAME {
-            self.consecutive_waits = 0;
-        }
         if matches!(
             tool_name,
             crate::UpdatePlanTool::NAME | crate::RunStepsTool::NAME
@@ -3768,6 +3787,7 @@ impl Thread {
             running: Vec::new(),
             step_thread: None,
             control: None,
+            step_thread_observers: Vec::new(),
             _task: task,
         });
         self.architect_active_visits.clear();
@@ -3809,15 +3829,57 @@ impl Thread {
     ) {
         let session_id = step_thread.read(cx).session_id().clone();
         let own_thread = session_id == self.id;
+        let mut step_title: SharedString = "Architect step".into();
         if let Some(run) = self.architect_run.as_mut() {
             run.step_thread = Some(step_thread.downgrade());
             if let Some(step) = run.running.iter_mut().find(|step| step.visit == visit) {
                 step.step_thread = Some(step_thread.downgrade());
+                step_title = step.title.clone();
             }
             if !own_thread && let Some(step) = run.history_entry_mut(visit) {
-                step.session_id = Some(session_id);
+                step.session_id = Some(session_id.clone());
             }
             self.record_architect_event("step_session", Some(visit), cx);
+        }
+        if !own_thread && self.can_wake_for_background_work() {
+            let mut was_waiting = {
+                let thread = step_thread.read(cx);
+                thread.is_waiting_for_confirmation() || thread.has_pending_turn_action()
+            };
+            if was_waiting {
+                self.record_background_wake_notice(
+                    format!(
+                        "Architect step \"{step_title}\" ({session_id}) is waiting for user input. Use `inspect_architect_run` to inspect active records."
+                    ),
+                    cx,
+                );
+            }
+            let step_title_for_observer = step_title;
+            let observer = cx.observe(step_thread, move |this, step_thread, cx| {
+                let still_running = this
+                    .architect_run
+                    .as_ref()
+                    .is_some_and(ArchitectRun::is_running);
+                if !still_running {
+                    return;
+                }
+                let thread = step_thread.read(cx);
+                let waiting =
+                    thread.is_waiting_for_confirmation() || thread.has_pending_turn_action();
+                if waiting && !was_waiting {
+                    let step_session = thread.session_id().clone();
+                    this.record_background_wake_notice(
+                        format!(
+                            "Architect step \"{step_title_for_observer}\" ({step_session}) is waiting for user input. Use `inspect_architect_run` to inspect active records."
+                        ),
+                        cx,
+                    );
+                }
+                was_waiting = waiting;
+            });
+            if let Some(run) = self.architect_run.as_mut() {
+                run.step_thread_observers.push(observer);
+            }
         }
     }
 
@@ -3927,6 +3989,35 @@ impl Thread {
     }
 
     pub fn finish_architect_run(&mut self, outcome: architect::RunOutcome, cx: &mut Context<Self>) {
+        let wake_notice = match &outcome {
+            architect::RunOutcome::Completed => {
+                "Architect run completed. Use `inspect_architect_run` to review the run outcome and step summaries.".to_string()
+            }
+            architect::RunOutcome::Failed { message } => {
+                format!(
+                    "Architect run failed: {message}. Use `inspect_architect_run` to inspect the failure and `control_architect_run` to resume or adjust."
+                )
+            }
+            architect::RunOutcome::StepLimit { steps } => {
+                format!(
+                    "Architect run stopped after reaching the {steps}-step limit. Use `inspect_architect_run` to inspect the state."
+                )
+            }
+            architect::RunOutcome::NodeLimit { node, visits } => {
+                format!(
+                    "Architect run stopped after step `{node}` reached {visits} visits. Use `inspect_architect_run` to inspect the state."
+                )
+            }
+            architect::RunOutcome::DepthLimit { node } => {
+                format!(
+                    "Architect run stopped after step `{node}` exceeded the nesting depth limit. Use `inspect_architect_run` to inspect the state."
+                )
+            }
+            architect::RunOutcome::Cancelled => {
+                "Architect run stopped (cancelled). Use `inspect_architect_run` to inspect the state."
+                    .to_string()
+            }
+        };
         if let Some(run) = self.architect_run.as_mut() {
             if let Some(control) = &run.control
                 && let Some(graph) = &mut self.architect_graph
@@ -3943,6 +4034,7 @@ impl Thread {
             }
             run.outcome = Some(outcome);
             run.result_dismissed = false;
+            run.step_thread_observers.clear();
             // A run cancelled mid-step leaves that step open, and a step that
             // never ends reads as one still running.
             run.close_running_steps();
@@ -3950,6 +4042,7 @@ impl Thread {
         self.architect_active_visits.clear();
         self.note_architect_graph_change(cx);
         self.record_architect_event("run_finished", None, cx);
+        self.record_background_wake_notice(wake_notice, cx);
     }
 
     /// Hides the finished run's result without discarding its history or checkpoint.
@@ -3966,8 +4059,10 @@ impl Thread {
     /// Cancels a run by dropping the task driving it while retaining its final
     /// state and history for the workspace-wide run bar and Activity view.
     pub fn stop_architect_run(&mut self, cx: &mut Context<Self>) {
+        let mut was_running = false;
         if let Some(run) = self.architect_run.as_mut() {
             if run.outcome.is_none() {
+                was_running = true;
                 if let Some(control) = &run.control
                     && let Some(graph) = &mut self.architect_graph
                 {
@@ -3978,11 +4073,19 @@ impl Thread {
                 run.result_dismissed = false;
                 run.close_running_steps();
             }
+            run.step_thread_observers.clear();
             run._task = Task::ready(());
         }
         self.architect_active_visits.clear();
         self.note_architect_graph_change(cx);
         self.record_architect_event("run_stopped", None, cx);
+        if was_running {
+            self.record_background_wake_notice(
+                "Architect run stopped. Use `inspect_architect_run` to inspect the state."
+                    .to_string(),
+                cx,
+            );
+        }
     }
 
     pub fn session_mode(&self) -> SessionMode {
@@ -4355,7 +4458,6 @@ impl Thread {
                 .with_task_registry(&self.terminal_tasks),
         );
         self.add_tool(TerminalStatusTool::new(&self.terminal_tasks));
-        self.add_tool(TerminalWaitTool::new(&self.terminal_tasks));
         self.add_tool(TerminalStopTool::new(&self.terminal_tasks));
         self.add_tool(WebSearchTool);
 
@@ -5044,7 +5146,6 @@ impl Thread {
         self.flush_pending_message(cx);
         self.cancel_turn(cx).detach();
         self.background_wake_armed = false;
-        self.consecutive_waits = 0;
         self.checklist_reviewed_this_turn = false;
 
         let (events_tx, events_rx) = mpsc::unbounded::<Result<ThreadEvent>>();
@@ -6728,7 +6829,7 @@ impl Thread {
                 // and restricted-workspace gates above still apply to each helper.
                 let terminal_helper = matches!(
                     tool_name.as_ref(),
-                    TerminalStatusTool::NAME | TerminalWaitTool::NAME | TerminalStopTool::NAME
+                    TerminalStatusTool::NAME | TerminalStopTool::NAME
                 );
                 let profile_tool_name = if terminal_variant || terminal_helper {
                     TerminalTool::NAME

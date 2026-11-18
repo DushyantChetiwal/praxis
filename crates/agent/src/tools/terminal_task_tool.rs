@@ -23,11 +23,6 @@ const MAX_ACTIVE_TASKS: usize = 8;
 const MAX_RETAINED_TASKS: usize = 32;
 pub(super) const DEFAULT_YIELD_MS: u64 = 10_000;
 pub(super) const MAX_YIELD_MS: u64 = 30_000;
-const DEFAULT_WAIT_MS: u64 = 30_000;
-/// Waits are for results needed right away. Longer work should end the turn:
-/// Praxis resumes the conversation when the command finishes, without holding
-/// the turn open.
-const MAX_WAIT_MS: u64 = 2 * 60 * 1000;
 const TRUNCATION_NOTE: &str = "Output was truncated. Head/tail selections apply to the bounded terminal capture, not the complete command history.";
 /// Status checks that see the same output this far apart flag the command as
 /// possibly waiting for input or hung.
@@ -712,62 +707,12 @@ pub struct TerminalStatusToolInput {
     pub task_id: String,
 }
 
-/// Wait for a terminal task in this thread, waking immediately on exit.
-/// Prefer other work first: tool results tell you when background tasks finish.
-/// For a long task with nothing else to do, end your turn instead; Praxis resumes
-/// the conversation when a background task finishes. Use this tool for short
-/// waits whose result you need right away. Never use shell sleep or busy-poll
-/// status. Wait expiry returns still_running without killing the command; the
-/// launch command's hard timeout_ms continues to apply.
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct TerminalWaitToolInput {
-    /// Task id returned by terminal in this thread.
-    pub task_id: String,
-    /// Wait duration in milliseconds, from 1 through 120000 (2 minutes)
-    /// inclusive; longer requests wait 2 minutes. Defaults to 30000 when
-    /// omitted or null. Exit wakes the wait early. This is NOT a process
-    /// runtime limit.
-    #[serde(default)]
-    #[schemars(range(min = 1, max = 120000))]
-    pub timeout_ms: Option<u64>,
-}
-
 /// Stop an existing terminal task owned by this thread and report its output/status.
 /// Cannot execute commands, restart tasks, or stop arbitrary system processes.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct TerminalStopToolInput {
     /// Task id returned by terminal in this thread.
     pub task_id: String,
-}
-
-fn terminal_wait_title(remaining: Duration) -> String {
-    let seconds = remaining.as_millis().div_ceil(1000);
-    format!("Waiting · {}:{:02} remaining", seconds / 60, seconds % 60)
-}
-
-async fn wait_with_countdown(
-    task: &TerminalTask,
-    wait_ms: u64,
-    event_stream: &ToolCallEventStream,
-    cx: &AsyncApp,
-) -> Result<(), String> {
-    let executor = cx.background_executor().clone();
-    let deadline = executor.now() + Duration::from_millis(wait_ms);
-    let completion = task.wait(wait_ms, cx).fuse();
-    futures::pin_mut!(completion);
-    event_stream
-        .update_fields(|update| update.title(terminal_wait_title(Duration::from_millis(wait_ms))));
-    loop {
-        futures::select_biased! {
-            _ = event_stream.cancelled_by_user().fuse() => return Err("Terminal wait cancelled".into()),
-            _ = completion => break,
-            _ = executor.timer(Duration::from_secs(1)).fuse() => {
-                event_stream.update_fields(|update| update.title(terminal_wait_title(deadline.saturating_duration_since(executor.now()))));
-            },
-        }
-    }
-    event_stream.update_fields(|update| update.title("Finished waiting"));
-    Ok(())
 }
 
 macro_rules! terminal_management_tool {
@@ -790,11 +735,7 @@ macro_rules! terminal_management_tool {
                 ToolCapability::$capability
             }
             fn kind() -> acp::ToolKind {
-                if Self::NAME == "terminal_wait" {
-                    acp::ToolKind::Other
-                } else {
-                    acp::ToolKind::Execute
-                }
+                acp::ToolKind::Execute
             }
             fn allow_in_restricted_mode() -> bool {
                 $restricted
@@ -804,9 +745,6 @@ macro_rules! terminal_management_tool {
                 input: Result<Self::Input, serde_json::Value>,
                 _cx: &mut App,
             ) -> SharedString {
-                if Self::NAME == "terminal_wait" {
-                    return $title.into();
-                }
                 match input {
                     Ok(input) => format!("{} {}", $title, input.task_id).into(),
                     Err(_) => $title.into(),
@@ -826,9 +764,7 @@ macro_rules! terminal_management_tool {
                         .ok_or_else(|| "Terminal thread has been released".to_string())?
                         .get(&input.task_id)?;
                     let wait_ms: u64 = ($action)(&task, &input)?;
-                    if wait_ms > 0 && Self::NAME == "terminal_wait" {
-                        wait_with_countdown(&task, wait_ms, &event_stream, cx).await?;
-                    } else if wait_ms > 0 {
+                    if wait_ms > 0 {
                         futures::select_biased! {
                             _ = event_stream.cancelled_by_user().fuse() => {
                                 // Turn replacement cancels this wait, not its job.
@@ -853,21 +789,6 @@ terminal_management_tool!(
     ReadOnly,
     true,
     |_task: &TerminalTask, _input: &TerminalStatusToolInput| Ok::<_, String>(0)
-);
-terminal_management_tool!(
-    TerminalWaitTool,
-    TerminalWaitToolInput,
-    "terminal_wait",
-    "Waiting",
-    ReadOnly,
-    true,
-    |_task: &TerminalTask, input: &TerminalWaitToolInput| {
-        let timeout = input.timeout_ms.unwrap_or(DEFAULT_WAIT_MS);
-        if timeout == 0 {
-            return Err(format!("timeout_ms must be between 1 and {MAX_WAIT_MS}"));
-        }
-        Ok(timeout.min(MAX_WAIT_MS))
-    }
 );
 terminal_management_tool!(
     TerminalStopTool,
@@ -986,7 +907,6 @@ mod tests {
         }
         let mode = crate::SessionMode::Plan;
         assert!(TerminalStatusTool::capability().is_allowed_in(mode));
-        assert!(TerminalWaitTool::capability().is_allowed_in(mode));
         assert!(!TerminalStopTool::capability().is_allowed_in(mode));
         assert!(!TerminalStopTool::allow_in_restricted_mode());
     }
@@ -1090,118 +1010,6 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn terminal_tasks_wait_countdown_is_compact_and_wakes_early(cx: &mut TestAppContext) {
-        let registry = Rc::new(TerminalTaskRegistry::default());
-        let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
-        let task = start(&registry, terminal.clone(), None, cx);
-        let tool = Arc::new(TerminalWaitTool::new(&registry));
-        assert_eq!(TerminalWaitTool::kind(), acp::ToolKind::Other);
-        let title = cx.update(|cx| {
-            tool.initial_title(
-                Ok(TerminalWaitToolInput {
-                    task_id: task.id.clone(),
-                    timeout_ms: None,
-                }),
-                cx,
-            )
-        });
-        assert_eq!(title.as_ref(), "Waiting");
-        assert!(!title.contains(&task.id));
-        let (stream, mut events) = ToolCallEventStream::test();
-        let wait = cx.update(|cx| {
-            tool.run(
-                ToolInput::resolved(TerminalWaitToolInput {
-                    task_id: task.id.clone(),
-                    timeout_ms: None,
-                }),
-                stream,
-                cx,
-            )
-        });
-        cx.run_until_parked();
-        assert_eq!(
-            events
-                .expect_update_fields()
-                .await
-                .title
-                .value()
-                .map(String::as_str),
-            Some("Waiting · 0:30 remaining")
-        );
-        advance(cx, 1000);
-        assert_eq!(
-            events
-                .expect_update_fields()
-                .await
-                .title
-                .value()
-                .map(String::as_str),
-            Some("Waiting · 0:29 remaining")
-        );
-        terminal.signal_exit();
-        cx.run_until_parked();
-        assert_eq!(
-            events
-                .expect_update_fields()
-                .await
-                .title
-                .value()
-                .map(String::as_str),
-            Some("Finished waiting")
-        );
-        assert!(wait.await.expect("wait").contains("still_running: false"));
-        assert!(!terminal.was_killed());
-    }
-
-    #[gpui::test]
-    async fn terminal_tasks_wait_caps_long_waits_and_ends_on_cancel(cx: &mut TestAppContext) {
-        let registry = Rc::new(TerminalTaskRegistry::default());
-        let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
-        let task = start(&registry, terminal.clone(), None, cx);
-        let (stream, _events, mut cancellation_tx) = ToolCallEventStream::test_with_cancellation();
-        let mut wait = cx.update(|cx| {
-            Arc::new(TerminalWaitTool::new(&registry)).run(
-                ToolInput::resolved(TerminalWaitToolInput {
-                    task_id: task.id.clone(),
-                    timeout_ms: Some(30 * 60 * 1000),
-                }),
-                stream,
-                cx,
-            )
-        });
-        cx.run_until_parked();
-        advance(cx, MAX_WAIT_MS - 1000);
-        assert!((&mut wait).now_or_never().is_none());
-
-        ToolCallEventStream::signal_cancellation_with_sender(&mut cancellation_tx);
-        cx.run_until_parked();
-        let result = (&mut wait)
-            .now_or_never()
-            .expect("cancelling the turn must end the wait immediately");
-        assert!(result.is_err());
-        assert!(!terminal.was_killed());
-
-        let (stream, _events) = ToolCallEventStream::test();
-        let mut capped = cx.update(|cx| {
-            Arc::new(TerminalWaitTool::new(&registry)).run(
-                ToolInput::resolved(TerminalWaitToolInput {
-                    task_id: task.id.clone(),
-                    timeout_ms: Some(30 * 60 * 1000),
-                }),
-                stream,
-                cx,
-            )
-        });
-        cx.run_until_parked();
-        advance(cx, MAX_WAIT_MS);
-        let result = (&mut capped)
-            .now_or_never()
-            .expect("a wait longer than the cap ends at the cap");
-        assert!(result.expect("expiry").contains("still_running: true"));
-        assert!(!terminal.was_killed());
-    }
-
-    #[gpui::test]
     async fn terminal_tasks_flag_output_that_stops_changing(cx: &mut TestAppContext) {
         let registry = Rc::new(TerminalTaskRegistry::default());
         let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
@@ -1256,74 +1064,6 @@ mod tests {
         task.completion.clone().await;
         assert!(registry.reveal_task(&task.id, &cx.to_async()).is_err());
         assert_eq!(terminal.panel_exposures(), 1);
-    }
-
-    #[gpui::test]
-    async fn terminal_tasks_wait_wakes_on_exit(cx: &mut TestAppContext) {
-        let registry = Rc::new(TerminalTaskRegistry::default());
-        let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
-        let task = start(&registry, terminal.clone(), None, cx);
-        let (stream, _events) = ToolCallEventStream::test();
-        let mut wait = cx.update(|cx| {
-            Arc::new(TerminalWaitTool::new(&registry)).run(
-                ToolInput::resolved(TerminalWaitToolInput {
-                    task_id: task.id.clone(),
-                    timeout_ms: Some(60_000),
-                }),
-                stream,
-                cx,
-            )
-        });
-        cx.run_until_parked();
-        assert!((&mut wait).now_or_never().is_none());
-        terminal.signal_exit();
-        cx.run_until_parked();
-        let response = (&mut wait)
-            .now_or_never()
-            .expect("exit must wake the waiter without advancing the clock")
-            .unwrap();
-        assert!(response.contains("still_running: false"));
-        assert!(!terminal.was_killed());
-    }
-
-    #[gpui::test]
-    async fn terminal_tasks_wait_expiry_does_not_kill(cx: &mut TestAppContext) {
-        let registry = Rc::new(TerminalTaskRegistry::default());
-        let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
-        let task = start(&registry, terminal.clone(), None, cx);
-        for timeout in [Some(0)] {
-            let (stream, _events) = ToolCallEventStream::test();
-            let result = cx
-                .update(|cx| {
-                    Arc::new(TerminalWaitTool::new(&registry)).run(
-                        ToolInput::resolved(TerminalWaitToolInput {
-                            task_id: task.id.clone(),
-                            timeout_ms: timeout,
-                        }),
-                        stream,
-                        cx,
-                    )
-                })
-                .await;
-            assert!(result.unwrap_err().contains("between 1 and 120000"));
-        }
-        let (stream, _events) = ToolCallEventStream::test();
-        let mut wait = cx.update(|cx| {
-            Arc::new(TerminalWaitTool::new(&registry)).run(
-                ToolInput::resolved(TerminalWaitToolInput {
-                    task_id: task.id.clone(),
-                    timeout_ms: None,
-                }),
-                stream,
-                cx,
-            )
-        });
-        cx.run_until_parked();
-        advance(cx, 29_999);
-        assert!((&mut wait).now_or_never().is_none());
-        advance(cx, 1);
-        assert!(wait.await.unwrap().contains("still_running: true"));
-        assert!(!terminal.was_killed());
     }
 
     #[gpui::test]
@@ -1518,33 +1258,6 @@ mod tests {
                 .unwrap()
                 .contains("user stopped")
         );
-    }
-
-    #[gpui::test]
-    async fn terminal_tasks_interrupted_wait_does_not_stop_job(cx: &mut TestAppContext) {
-        let registry = Rc::new(TerminalTaskRegistry::default());
-        let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
-        let task = start(&registry, terminal.clone(), None, cx);
-        task.background(&cx.to_async());
-        let (stream, _events, mut cancellation) = ToolCallEventStream::test_with_cancellation();
-        let wait = cx.update(|cx| {
-            Arc::new(TerminalWaitTool::new(&registry)).run(
-                ToolInput::resolved(TerminalWaitToolInput {
-                    task_id: task.id.clone(),
-                    timeout_ms: None,
-                }),
-                stream,
-                cx,
-            )
-        });
-        cx.run_until_parked();
-        cancellation.send(true).unwrap();
-        assert!(wait.await.is_err());
-        cx.run_until_parked();
-        assert!(!terminal.was_killed());
-        registry.cancel_all();
-        task.completion.await;
-        assert!(terminal.was_killed());
     }
 
     #[gpui::test]

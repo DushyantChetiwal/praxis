@@ -10533,57 +10533,6 @@ impl ThreadView {
 
         let generic_permissions =
             self.render_generic_tool_permissions(active_session_id, tool_call, cx);
-        let needs_confirmation =
-            matches!(tool_call.status(), ToolCallStatus::WaitingForConfirmation)
-                || generic_permissions.is_some();
-        if tool_call.tool_name.as_deref() == Some("terminal_wait")
-            && !needs_confirmation
-            && !matches!(
-                tool_call.status(),
-                ToolCallStatus::Failed | ToolCallStatus::Rejected
-            )
-        {
-            let waiting = matches!(
-                tool_call.status(),
-                ToolCallStatus::Pending | ToolCallStatus::InProgress
-            );
-            if waiting {
-                let entries = self.thread.read(cx).entries();
-                let visible =
-                    Self::latest_active_terminal_wait_id(entries.iter().filter_map(|entry| {
-                        let AgentThreadEntry::ToolCall(call) = entry else {
-                            return None;
-                        };
-                        Some((&call.id, call.tool_name.as_deref(), call.status()))
-                    }));
-                if visible.is_some_and(|id| id != &tool_call.id) {
-                    return div();
-                }
-            }
-            let label: SharedString = match tool_call.status() {
-                ToolCallStatus::Completed => "Finished waiting".into(),
-                ToolCallStatus::Canceled => "Wait cancelled".into(),
-                _ => tool_call.label.read(cx).source().clone(),
-            };
-            return div().px_5().py_1().w_full().child(
-                h_flex()
-                    .gap_1()
-                    .w_full()
-                    .child(Divider::horizontal())
-                    .child(
-                        Button::new(("terminal-wait-status", entry_ix), label)
-                            .label_size(LabelSize::Small)
-                            .loading(waiting)
-                            .disabled(true)
-                            .start_icon(
-                                Icon::new(IconName::Clock)
-                                    .size(IconSize::XSmall)
-                                    .color(Color::Muted),
-                            ),
-                    )
-                    .child(Divider::horizontal()),
-            );
-        }
         let is_terminal_tool = matches!(tool_call.kind(), acp_v2::ToolKind::Execute);
 
         let is_edit = matches!(tool_call.kind(), acp_v2::ToolKind::Edit)
@@ -12420,18 +12369,6 @@ impl ThreadView {
                 .content()
                 .iter()
                 .any(|content| content.image().is_some())
-    }
-
-    fn latest_active_terminal_wait_id<'a>(
-        calls: impl DoubleEndedIterator<
-            Item = (&'a acp_v2::ToolCallId, Option<&'a str>, ToolCallStatus),
-        >,
-    ) -> Option<&'a acp_v2::ToolCallId> {
-        calls.rev().find_map(|(id, name, status)| {
-            (name == Some("terminal_wait")
-                && matches!(status, ToolCallStatus::Pending | ToolCallStatus::InProgress))
-            .then_some(id)
-        })
     }
 
     fn tool_call_icon_tooltip(
@@ -15820,37 +15757,7 @@ mod tests {
         let first: acp_v2::ToolCallId = "first".into();
         let second: acp_v2::ToolCallId = "second".into();
         let unrelated: acp_v2::ToolCallId = "read".into();
-        let mut calls = [
-            (
-                first.clone(),
-                Some("terminal_wait"),
-                ToolCallStatus::InProgress,
-            ),
-            (
-                second.clone(),
-                Some("terminal_wait"),
-                ToolCallStatus::Pending,
-            ),
-            (unrelated, Some("read_file"), ToolCallStatus::InProgress),
-        ];
-        let selected = |calls: &[(acp_v2::ToolCallId, Option<&str>, ToolCallStatus)]| {
-            ThreadView::latest_active_terminal_wait_id(
-                calls.iter().map(|(id, name, status)| (id, *name, *status)),
-            )
-            .cloned()
-        };
-        assert_eq!(selected(&calls), Some(second));
-        calls[1].2 = ToolCallStatus::Completed;
-        assert_eq!(selected(&calls), Some(first));
-        calls[0].2 = ToolCallStatus::Failed;
-        assert_eq!(
-            selected(&calls),
-            None,
-            "failures retain their normal inspectable tool card"
-        );
-    }
-
-    #[test]
+        #[test]
     fn test_reported_activity_completion_status() {
         use acp_v2::StopReason::*;
         for (reason, expected) in [

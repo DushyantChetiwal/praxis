@@ -107,19 +107,15 @@ The lifecycle tools below follow the profile's existing `terminal` switch; they 
 
 At most eight tasks can run per conversation, with up to 32 task records retained. Background-capable commands cap captured output at 100 KiB and selected model output at 16 KiB. Head/tail selection operates on the captured output, so truncated captures may not include the command's final lines.
 
-**Example:** Start a test command with a hard runtime limit and `tail_lines: 30`, then inspect unrelated code while it runs. When no independent work remains, call `terminal_wait` using the returned task ID and check the final output before claiming the tests passed.
+**Example:** Start a test command with a hard runtime limit and `tail_lines: 30`, then inspect unrelated code while it runs. When no independent work remains, end your turn—Praxis automatically resumes the conversation when the background task exits so you can inspect the final output.
 
 ### `terminal_status`
 
 Returns a task's current bounded output, whether it is still running, and its exit status when available. This is a snapshot, not a wait; the agent should not repeatedly poll it while idle.
 
-### `terminal_wait`
-
-Waits for a task to finish without busy-polling. It returns immediately when the process exits, or reports that it is still running after the wait limit (30 seconds by default, configurable from 1 to 60000 milliseconds). **The wait limit does not kill the process.** This is the tool to use when the agent has nothing useful left to do except wait.
-
 ### `terminal_stop`
 
-Stops an existing task in the same conversation and reports its output/status. It cannot execute a command or stop arbitrary system processes. Like terminal execution, it is unavailable in Plan, Architect, and restricted-workspace mode; status and waiting are read-only.
+Stops an existing task in the same conversation and reports its output/status. It cannot execute a command or stop arbitrary system processes. Like terminal execution, it is unavailable in Plan, Architect, and restricted-workspace mode; status is read-only.
 
 ## Other Tools
 
