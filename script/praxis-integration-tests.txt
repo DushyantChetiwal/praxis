@@ -4,7 +4,7 @@
 # Test lossless history memory behavior
 agent db::tests::
 agent cleared_architect_plan_
-agent terminal_tasks_wait_
+agent worktree_isolation::tests::
 markdown deferred_markdown_
 acp_thread deferred_tool_
 acp_thread test_tool_call_label_
@@ -15,7 +15,7 @@ agent tools::write_file_tool::tests::
 agent_ui historical_diff_cards_
 agent_ui entry_view_state::tests::test_legacy_diff_sync
 agent_ui test_rewind_views
-agent_ui compact_terminal_wait_
+agent_ui test_subagent_telemetry_summary
 agent_ui test_deferred_tool_input_
 agent_ui test_thread_search_
 agent_ui test_mixed_assistant_content_
