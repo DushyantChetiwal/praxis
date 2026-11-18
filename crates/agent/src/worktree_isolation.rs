@@ -293,65 +293,63 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_local_git_worktree_create_diff_and_merge() {
-        smol::block_on(async {
-            let temp = tempfile::tempdir().unwrap();
-            let repo_path = temp.path().join("repo");
-            std::fs::create_dir_all(&repo_path).unwrap();
+    #[gpui::test]
+    async fn test_local_git_worktree_create_diff_and_merge(_cx: &mut gpui::TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
 
-            run_git(&repo_path, &["init"]);
-            run_git(&repo_path, &["config", "user.email", "test@praxis.dev"]);
-            run_git(&repo_path, &["config", "user.name", "Praxis Test"]);
+        run_git(&repo_path, &["init"]);
+        run_git(&repo_path, &["config", "user.email", "test@praxis.dev"]);
+        run_git(&repo_path, &["config", "user.name", "Praxis Test"]);
 
-            std::fs::write(repo_path.join("README.md"), "initial\n").unwrap();
-            run_git(&repo_path, &["add", "README.md"]);
-            run_git(&repo_path, &["commit", "-m", "Initial commit"]);
+        std::fs::write(repo_path.join("README.md"), "initial\n").unwrap();
+        run_git(&repo_path, &["add", "README.md"]);
+        run_git(&repo_path, &["commit", "-m", "Initial commit"]);
 
-            let spec = plan_isolated_worktree(
-                &repo_path,
-                "Worker Task",
-                "t1",
-                "../worktrees",
-                PathStyle::local(),
-            )
+        let spec = plan_isolated_worktree(
+            &repo_path,
+            "Worker Task",
+            "t1",
+            "../worktrees",
+            PathStyle::local(),
+        )
+        .unwrap();
+
+        create_local_git_worktree(&spec).await.unwrap();
+        assert!(spec.worktree_path.exists());
+
+        std::fs::write(
+            spec.worktree_path.join("README.md"),
+            "updated in worktree\n",
+        )
+        .unwrap();
+
+        let diff = summarize_local_worktree_diff(&spec.worktree_path, &spec.branch_name)
+            .await
             .unwrap();
+        assert_eq!(diff.branch, spec.branch_name);
+        assert_eq!(diff.changed_files, 1);
+        assert!(diff.summary.contains("README.md"));
 
-            create_local_git_worktree(&spec).await.unwrap();
-            assert!(spec.worktree_path.exists());
+        run_git(&spec.worktree_path, &["add", "README.md"]);
+        run_git(&spec.worktree_path, &["commit", "-m", "Worktree change"]);
 
-            std::fs::write(
-                spec.worktree_path.join("README.md"),
-                "updated in worktree\n",
-            )
+        // Dirty main repo must refuse merge
+        std::fs::write(repo_path.join("dirty.txt"), "uncommitted\n").unwrap();
+        assert!(
+            merge_local_git_worktree(&repo_path, &spec.branch_name)
+                .await
+                .is_err()
+        );
+        std::fs::remove_file(repo_path.join("dirty.txt")).unwrap();
+
+        let outcome = merge_local_git_worktree(&repo_path, &spec.branch_name)
+            .await
             .unwrap();
-
-            let diff = summarize_local_worktree_diff(&spec.worktree_path, &spec.branch_name)
-                .await
-                .unwrap();
-            assert_eq!(diff.branch, spec.branch_name);
-            assert_eq!(diff.changed_files, 1);
-            assert!(diff.summary.contains("README.md"));
-
-            run_git(&spec.worktree_path, &["add", "README.md"]);
-            run_git(&spec.worktree_path, &["commit", "-m", "Worktree change"]);
-
-            // Dirty main repo must refuse merge
-            std::fs::write(repo_path.join("dirty.txt"), "uncommitted\n").unwrap();
-            assert!(
-                merge_local_git_worktree(&repo_path, &spec.branch_name)
-                    .await
-                    .is_err()
-            );
-            std::fs::remove_file(repo_path.join("dirty.txt")).unwrap();
-
-            let outcome = merge_local_git_worktree(&repo_path, &spec.branch_name)
-                .await
-                .unwrap();
-            assert!(outcome.merged);
-            assert_eq!(outcome.branch, spec.branch_name);
-            let merged_contents = std::fs::read_to_string(repo_path.join("README.md")).unwrap();
-            assert_eq!(merged_contents, "updated in worktree\n");
-        });
+        assert!(outcome.merged);
+        assert_eq!(outcome.branch, spec.branch_name);
+        let merged_contents = std::fs::read_to_string(repo_path.join("README.md")).unwrap();
+        assert_eq!(merged_contents, "updated in worktree\n");
     }
 }
