@@ -277,11 +277,7 @@ impl Render for ArchitectStatusItem {
                         .border_color(cx.theme().status().info_border)
                         .bg(cx.theme().status().info_background)
                         .tooltip(Tooltip::text(tooltip))
-                        .child(
-                            Label::new(label)
-                                .size(LabelSize::XSmall)
-                                .color(Color::Info),
-                        ),
+                        .child(Label::new(label).size(LabelSize::XSmall).color(Color::Info)),
                 )
             })
             .into_any()

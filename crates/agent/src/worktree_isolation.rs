@@ -89,11 +89,7 @@ pub fn plan_isolated_worktree(
     worktree_setting: &str,
     path_style: PathStyle,
 ) -> Result<IsolatedWorktreeSpec> {
-    let base_dir = worktrees_directory_for_repo(
-        main_repo_path,
-        worktree_setting,
-        path_style,
-    )?;
+    let base_dir = worktrees_directory_for_repo(main_repo_path, worktree_setting, path_style)?;
     let branch_name = sanitize_worktree_branch(label, suffix);
     let dir_name = branch_name.replace('/', "-");
     let worktree_path = base_dir.join(dir_name);
@@ -107,12 +103,8 @@ pub fn plan_isolated_worktree(
 
 pub async fn create_local_git_worktree(spec: &IsolatedWorktreeSpec) -> Result<()> {
     if let Some(parent) = spec.worktree_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "creating worktree parent directory {}",
-                parent.display()
-            )
-        })?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating worktree parent directory {}", parent.display()))?;
     }
 
     let output = new_command("git")
@@ -162,9 +154,7 @@ pub async fn summarize_local_worktree_diff(
         let lines: Vec<&str> = summary.lines().collect();
         if lines.len() >= 2
             && lines.last().is_some_and(|last| {
-                last.contains("changed")
-                    || last.contains("insertion")
-                    || last.contains("deletion")
+                last.contains("changed") || last.contains("insertion") || last.contains("deletion")
             })
         {
             lines.len().saturating_sub(1)
@@ -251,10 +241,7 @@ mod tests {
             sanitize_worktree_branch("branch.lock", "99"),
             "praxis/branch-99"
         );
-        assert_eq!(
-            sanitize_worktree_branch("---...///", ""),
-            "praxis/agent"
-        );
+        assert_eq!(sanitize_worktree_branch("---...///", ""), "praxis/agent");
         assert_eq!(
             sanitize_worktree_branch("🚀 Unicode Café", "s1"),
             "praxis/unicode-caf-s1"
@@ -288,9 +275,7 @@ mod tests {
             PathBuf::from("/code/worktrees/praxis/praxis-parallel-feature-w1")
         );
 
-        assert!(
-            plan_isolated_worktree(repo, "Test", "1", "..", PathStyle::Unix).is_err()
-        );
+        assert!(plan_isolated_worktree(repo, "Test", "1", "..", PathStyle::Unix).is_err());
     }
 
     fn run_git(repo: &Path, args: &[&str]) {
@@ -335,8 +320,11 @@ mod tests {
             create_local_git_worktree(&spec).await.unwrap();
             assert!(spec.worktree_path.exists());
 
-            std::fs::write(spec.worktree_path.join("README.md"), "updated in worktree\n")
-                .unwrap();
+            std::fs::write(
+                spec.worktree_path.join("README.md"),
+                "updated in worktree\n",
+            )
+            .unwrap();
 
             let diff = summarize_local_worktree_diff(&spec.worktree_path, &spec.branch_name)
                 .await
@@ -350,9 +338,11 @@ mod tests {
 
             // Dirty main repo must refuse merge
             std::fs::write(repo_path.join("dirty.txt"), "uncommitted\n").unwrap();
-            assert!(merge_local_git_worktree(&repo_path, &spec.branch_name)
-                .await
-                .is_err());
+            assert!(
+                merge_local_git_worktree(&repo_path, &spec.branch_name)
+                    .await
+                    .is_err()
+            );
             std::fs::remove_file(repo_path.join("dirty.txt")).unwrap();
 
             let outcome = merge_local_git_worktree(&repo_path, &spec.branch_name)
@@ -360,8 +350,7 @@ mod tests {
                 .unwrap();
             assert!(outcome.merged);
             assert_eq!(outcome.branch, spec.branch_name);
-            let merged_contents =
-                std::fs::read_to_string(repo_path.join("README.md")).unwrap();
+            let merged_contents = std::fs::read_to_string(repo_path.join("README.md")).unwrap();
             assert_eq!(merged_contents, "updated in worktree\n");
         });
     }

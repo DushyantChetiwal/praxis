@@ -1754,19 +1754,13 @@ impl AgentPanel {
         }
     }
 
-    pub fn start_isolated_worktree_thread(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn start_isolated_worktree_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        let has_git_repo = !crate::thread_worktree_archive::list_workspace_worktrees(
-            workspace.read(cx),
-            cx,
-        )
-        .is_empty();
+        let has_git_repo =
+            !crate::thread_worktree_archive::list_workspace_worktrees(workspace.read(cx), cx)
+                .is_empty();
         if !has_git_repo {
             return;
         }
@@ -1777,11 +1771,7 @@ impl AgentPanel {
             };
             let creation = workspace.update(cx, |workspace, cx| {
                 git_ui_core::worktree_service::create_worktree_workspace(
-                    workspace,
-                    &action,
-                    window,
-                    None,
-                    cx,
+                    workspace, &action, window, None, cx,
                 )
             });
             window
@@ -6194,11 +6184,8 @@ impl AgentPanel {
 
             let workspace = self.workspace.clone();
             let has_git_repo = workspace.upgrade().is_some_and(|workspace| {
-                !crate::thread_worktree_archive::list_workspace_worktrees(
-                    workspace.read(cx),
-                    cx,
-                )
-                .is_empty()
+                !crate::thread_worktree_archive::list_workspace_worktrees(workspace.read(cx), cx)
+                    .is_empty()
             });
             let is_via_collab = workspace
                 .update(cx, |workspace, cx| {

@@ -22449,13 +22449,8 @@ pub(crate) mod tests {
 
         let (root, child_idle, child_tokens) = cx.update(|cx| {
             let root_id = acp_v2::SessionId::new("root");
-            let root = create_test_acp_thread(
-                None,
-                "root",
-                connection.clone(),
-                project.clone(),
-                cx,
-            );
+            let root =
+                create_test_acp_thread(None, "root", connection.clone(), project.clone(), cx);
             let child_idle = create_test_acp_subagent(
                 root_id.clone(),
                 "child-idle",
@@ -22463,13 +22458,8 @@ pub(crate) mod tests {
                 project.clone(),
                 cx,
             );
-            let child_tokens = create_test_acp_subagent(
-                root_id,
-                "child-tokens",
-                connection,
-                project,
-                cx,
-            );
+            let child_tokens =
+                create_test_acp_subagent(root_id, "child-tokens", connection, project, cx);
             (root, child_idle, child_tokens)
         });
 
@@ -22481,10 +22471,7 @@ pub(crate) mod tests {
         });
 
         child_idle.update(cx, |thread, cx| {
-            thread.update_session_info(
-                acp_v2::SessionInfoUpdate::new().title("Inspect tests"),
-                cx,
-            );
+            thread.update_session_info(acp_v2::SessionInfoUpdate::new().title("Inspect tests"), cx);
             thread.update_token_usage(
                 Some(acp_thread::TokenUsage {
                     max_tokens: 10_000,

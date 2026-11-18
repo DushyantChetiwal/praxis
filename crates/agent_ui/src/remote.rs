@@ -1053,9 +1053,8 @@ fn handle_paired(
                 .spawn(async move { watchdog_restart(&reason) });
         }
         "worktree_list" => {
-            return match with_workspace(window, cx, |workspace, _, cx| {
-                worktree_list(workspace, cx)
-            }) {
+            return match with_workspace(window, cx, |workspace, _, cx| worktree_list(workspace, cx))
+            {
                 Ok(task) => task,
                 Err(error) => Task::ready(Err(error)),
             };
@@ -3156,10 +3155,7 @@ fn latest_session_for_worktree(
         .map(|session_id| session_id.0.as_ref().to_string())
 }
 
-fn worktree_list(
-    workspace: &Entity<Workspace>,
-    cx: &App,
-) -> Result<Task<Result<Value>>> {
+fn worktree_list(workspace: &Entity<Workspace>, cx: &App) -> Result<Task<Result<Value>>> {
     let summaries =
         crate::thread_worktree_archive::list_workspace_worktrees(workspace.read(cx), cx);
     let git_store = workspace.read(cx).project().read(cx).git_store().read(cx);

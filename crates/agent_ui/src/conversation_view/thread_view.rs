@@ -10533,8 +10533,9 @@ impl ThreadView {
 
         let generic_permissions =
             self.render_generic_tool_permissions(active_session_id, tool_call, cx);
-        let needs_confirmation = matches!(tool_call.status(), ToolCallStatus::WaitingForConfirmation)
-            || generic_permissions.is_some();
+        let needs_confirmation =
+            matches!(tool_call.status(), ToolCallStatus::WaitingForConfirmation)
+                || generic_permissions.is_some();
         let is_terminal_tool = matches!(tool_call.kind(), acp_v2::ToolKind::Execute);
 
         let is_edit = matches!(tool_call.kind(), acp_v2::ToolKind::Edit)

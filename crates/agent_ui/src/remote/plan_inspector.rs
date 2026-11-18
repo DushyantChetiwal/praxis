@@ -37,7 +37,12 @@ pub(super) fn inspect(workspace: &gpui::Entity<Workspace>, cx: &App) -> Result<V
                 .enumerate()
                 .rev()
                 .find_map(|(index, entry)| transcript_entry(index, entry, false, cx))
-                .and_then(|value| value.get("text").and_then(Value::as_str).map(str::to_string))
+                .and_then(|value| {
+                    value
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
                 .unwrap_or_default();
             let title = sub
                 .title()
