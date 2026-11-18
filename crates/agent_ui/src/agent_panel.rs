@@ -94,6 +94,14 @@ use workspace::{
 };
 
 const AGENT_PANEL_KEY: &str = "agent_panel";
+
+gpui::actions!(
+    agent,
+    [
+        /// Starts a new agent thread in an isolated linked Git worktree.
+        NewWorktreeThread,
+    ]
+);
 const MIN_PANEL_WIDTH: Pixels = px(300.);
 const LAST_USED_AGENT_KEY: &str = "agent_panel__last_used_external_agent";
 const LAST_CREATED_ENTRY_KIND_KEY: &str = "agent_panel__last_created_entry_kind";
@@ -369,6 +377,14 @@ pub fn init(cx: &mut App) {
                                 window,
                                 cx,
                             )
+                        });
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    }
+                })
+                .register_action(|workspace, _: &NewWorktreeThread, window, cx| {
+                    if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                        panel.update(cx, |panel, cx| {
+                            panel.start_isolated_worktree_thread(window, cx);
                         });
                         workspace.focus_panel::<AgentPanel>(window, cx);
                     }
@@ -1736,6 +1752,53 @@ impl AgentPanel {
         } else {
             self.activate_new_thread(true, AgentThreadSource::AgentPanel, window, cx);
         }
+    }
+
+    pub fn start_isolated_worktree_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let has_git_repo =
+            !crate::thread_worktree_archive::list_workspace_worktrees(workspace.read(cx), cx)
+                .is_empty();
+        if !has_git_repo {
+            return;
+        }
+        window.defer(cx, move |window, cx| {
+            let action = zed_actions::CreateWorktree {
+                worktree_name: None,
+                branch_target: zed_actions::NewWorktreeBranchTarget::CurrentBranch,
+            };
+            let creation = workspace.update(cx, |workspace, cx| {
+                git_ui_core::worktree_service::create_worktree_workspace(
+                    workspace, &action, window, None, cx,
+                )
+            });
+            window
+                .spawn(cx, async move |cx| {
+                    let created = match creation.await {
+                        Ok(created) => created,
+                        Err(error) => {
+                            log::error!("Failed to create isolated worktree thread: {error:#}");
+                            return;
+                        }
+                    };
+                    cx.update(|window, cx| {
+                        if let Some(panel) = created.workspace.read(cx).panel::<AgentPanel>(cx) {
+                            panel.update(cx, |panel, cx| {
+                                panel.activate_new_thread(
+                                    true,
+                                    AgentThreadSource::AgentPanel,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    })
+                    .log_err();
+                })
+                .detach();
+        });
     }
 
     pub fn activate_new_thread(
@@ -6120,6 +6183,10 @@ impl AgentPanel {
             let is_agent_selected = move |agent: Agent| selected_agent == agent;
 
             let workspace = self.workspace.clone();
+            let has_git_repo = workspace.upgrade().is_some_and(|workspace| {
+                !crate::thread_worktree_archive::list_workspace_worktrees(workspace.read(cx), cx)
+                    .is_empty()
+            });
             let is_via_collab = workspace
                 .update(cx, |workspace, cx| {
                     workspace.project().read(cx).is_via_collab()
@@ -6283,6 +6350,32 @@ impl AgentPanel {
                             }
 
                             menu
+                        })
+                        .when(has_git_repo, |menu| {
+                            menu.separator().item(
+                                ContextMenuEntry::new("New Worktree Thread")
+                                    .icon(IconName::GitBranch)
+                                    .icon_color(Color::Muted)
+                                    .action(Box::new(NewWorktreeThread))
+                                    .handler({
+                                        let workspace = workspace.clone();
+                                        move |window, cx| {
+                                            if let Some(workspace) = workspace.upgrade() {
+                                                workspace.update(cx, |workspace, cx| {
+                                                    if let Some(panel) =
+                                                        workspace.panel::<AgentPanel>(cx)
+                                                    {
+                                                        panel.update(cx, |panel, cx| {
+                                                            panel.start_isolated_worktree_thread(
+                                                                window, cx,
+                                                            );
+                                                        });
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }),
+                            )
                         })
                         .separator()
                         .item(
@@ -6776,6 +6869,10 @@ impl Render for AgentPanel {
             .on_action(cx.listener(|this, _: &NewTerminalThread, window, cx| {
                 cx.stop_propagation();
                 this.new_terminal(None, AgentThreadSource::AgentPanel, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewWorktreeThread, window, cx| {
+                cx.stop_propagation();
+                this.start_isolated_worktree_thread(window, cx);
             }))
             .on_action(cx.listener(|this, _: &RenameSelectedThread, window, cx| {
                 let Some(terminal_id) = this.active_terminal_id() else {

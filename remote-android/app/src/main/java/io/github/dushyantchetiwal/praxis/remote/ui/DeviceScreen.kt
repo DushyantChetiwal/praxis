@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Folder
@@ -112,6 +113,11 @@ fun DeviceScreen(state: AppState, ui: DeviceUi, busy: Int, vm: MainViewModel, sn
                         }
                         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
 
+                            if (ui.tab != Tab.Plan) DropdownMenuItem(
+                                text = { Text(stringResource(R.string.tab_plan)) },
+                                leadingIcon = { Icon(Icons.Outlined.AccountTree, contentDescription = null) },
+                                onClick = { menu = false; vm.switchTab(Tab.Plan) },
+                            )
                             if (ui.tab != Tab.Threads) DropdownMenuItem(
                                 text = { Text(stringResource(R.string.tab_threads)) },
                                 leadingIcon = { Icon(Icons.Outlined.History, contentDescription = null) },
@@ -173,6 +179,7 @@ fun DeviceScreen(state: AppState, ui: DeviceUi, busy: Int, vm: MainViewModel, sn
             Box(Modifier.weight(1f)) {
                 when (ui.tab) {
                     Tab.Chat -> ChatTab(ui, vm)
+                    Tab.Plan -> PlanTab(ui.plan, vm.planCallbacks())
                     Tab.Threads -> ThreadsTab(ui, vm)
                     Tab.Files -> FilesTab(ui, vm)
                 }
@@ -299,6 +306,7 @@ private fun DeviceTitle(ui: DeviceUi) {
         Text(
             when (ui.tab) {
                 Tab.Chat -> chatTitle(ui)
+                Tab.Plan -> stringResource(R.string.tab_plan)
                 Tab.Threads -> stringResource(R.string.tab_threads)
                 Tab.Files -> stringResource(R.string.tab_files)
             },

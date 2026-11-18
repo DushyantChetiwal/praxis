@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod reliability;
+mod watchdog;
 mod watcher_debug;
 mod zed;
 
@@ -264,6 +265,15 @@ fn main() {
         restart_arguments.push(std::ffi::OsString::from("--headless"));
     }
 
+    if args.watchdog && env::var_os(watchdog::UNDER_WATCHDOG_ENV_VAR).is_none() {
+        let child_args: Vec<std::ffi::OsString> = env::args_os().skip(1).collect();
+        if let Err(error) = watchdog::run_watchdog_supervisor(child_args) {
+            eprintln!("Praxis watchdog supervisor exited with error: {error:#}");
+            process::exit(1);
+        }
+        return;
+    }
+
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
     #[cfg(not(target_os = "windows"))]
     if let Some(socket) = &args.askpass {
@@ -423,6 +433,8 @@ fn main() {
         println!("Praxis is already running");
         return;
     }
+
+    watchdog::start_heartbeat_writer(headless);
 
     let session_id = Uuid::new_v4().to_string();
     let session = app.background_executor().spawn(Session::new(
@@ -1055,6 +1067,8 @@ fn main() {
         })
         .detach();
     });
+
+    watchdog::mark_clean_shutdown();
 }
 
 const STARTUP_RESTORE_WAIT: Duration = Duration::from_secs(5);
@@ -2262,9 +2276,13 @@ struct Args {
     #[arg(long, hide = true)]
     crash_handler: Option<PathBuf>,
 
-    /// Run Praxis without a display server or desktop windows.
+    /// Run Praxis without a display server or desktop windows
     #[arg(long)]
     headless: bool,
+
+    /// Supervise Praxis with an out-of-process watchdog that restarts on crash or hang
+    #[arg(long)]
+    watchdog: bool,
 
     /// Run zed in the foreground, only used on Windows, to match the behavior on macOS.
     #[arg(long)]

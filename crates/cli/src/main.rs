@@ -43,12 +43,14 @@ trait InstalledApp {
         ipc_url: String,
         user_data_dir: Option<&str>,
         headless: bool,
+        watchdog: bool,
     ) -> anyhow::Result<()>;
     fn run_foreground(
         &self,
         ipc_url: String,
         user_data_dir: Option<&str>,
         headless: bool,
+        watchdog: bool,
     ) -> io::Result<ExitStatus>;
     fn path(&self) -> PathBuf;
 }
@@ -116,6 +118,12 @@ struct Args {
     /// Run Praxis without a display server or desktop windows
     #[arg(long)]
     headless: bool,
+    /// Supervise Praxis with an out-of-process watchdog that restarts on crash or hang
+    #[arg(long)]
+    watchdog: bool,
+    /// Print the current Praxis watchdog status and heartbeat JSON, then exit
+    #[arg(long)]
+    watchdog_status: bool,
     /// Custom path to Zed.app or the zed binary
     #[arg(long)]
     zed: Option<PathBuf>,
@@ -507,6 +515,23 @@ fn run() -> Result<()> {
         paths::set_data_dir_for_app(release_channel::RELEASE_CHANNEL.display_name());
     }
 
+    if args.watchdog_status {
+        let watchdog_dir = paths::data_dir().join("watchdog");
+        let status_path = watchdog_dir.join("status.json");
+        let heartbeat_path = watchdog_dir.join("heartbeat.json");
+        match fs::read_to_string(&status_path) {
+            Ok(status) => println!("status.json:\n{status}"),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                println!("Praxis watchdog is not active (no status.json found).");
+            }
+            Err(error) => return Err(error.into()),
+        }
+        if let Ok(heartbeat) = fs::read_to_string(&heartbeat_path) {
+            println!("heartbeat.json:\n{heartbeat}");
+        }
+        return Ok(());
+    }
+
     #[cfg(target_os = "linux")]
     let args = flatpak::set_bin_if_no_escape(args);
 
@@ -806,9 +831,19 @@ fn run() -> Result<()> {
         .collect();
 
     if args.foreground {
-        app.run_foreground(url, user_data_dir.as_deref(), launch_headless)?;
+        app.run_foreground(
+            url,
+            user_data_dir.as_deref(),
+            launch_headless,
+            args.watchdog,
+        )?;
     } else {
-        app.launch(url, user_data_dir.as_deref(), launch_headless)?;
+        app.launch(
+            url,
+            user_data_dir.as_deref(),
+            launch_headless,
+            args.watchdog,
+        )?;
         sender.join().unwrap()?;
         if let Some(handle) = stdin_pipe_handle {
             handle.join().unwrap()?;
@@ -988,6 +1023,7 @@ mod linux {
             ipc_url: String,
             user_data_dir: Option<&str>,
             headless: bool,
+            watchdog: bool,
         ) -> anyhow::Result<()> {
             let data_dir = user_data_dir
                 .map(PathBuf::from)
@@ -999,7 +1035,7 @@ mod linux {
             ));
             let sock = UnixDatagram::unbound()?;
             if sock.connect(&sock_path).is_err() {
-                self.boot_background(ipc_url, user_data_dir, headless)?;
+                self.boot_background(ipc_url, user_data_dir, headless, watchdog)?;
             } else {
                 sock.send(ipc_url.as_bytes())?;
             }
@@ -1011,11 +1047,15 @@ mod linux {
             ipc_url: String,
             user_data_dir: Option<&str>,
             headless: bool,
+            watchdog: bool,
         ) -> io::Result<ExitStatus> {
             let mut cmd = std::process::Command::new(self.0.clone());
             cmd.arg(ipc_url);
             if headless {
                 cmd.arg("--headless");
+            }
+            if watchdog {
+                cmd.arg("--watchdog");
             }
             if let Some(dir) = user_data_dir {
                 cmd.arg("--user-data-dir").arg(dir);
@@ -1034,6 +1074,7 @@ mod linux {
             ipc_url: String,
             user_data_dir: Option<&str>,
             headless: bool,
+            watchdog: bool,
         ) -> anyhow::Result<()> {
             let path = &self.0;
 
@@ -1052,6 +1093,9 @@ mod linux {
                         vec![path.as_os_str().to_owned(), OsString::from(ipc_url)];
                     if headless {
                         args.push(OsString::from("--headless"));
+                    }
+                    if watchdog {
+                        args.push(OsString::from("--watchdog"));
                     }
                     if let Some(dir) = user_data_dir {
                         args.push(OsString::from("--user-data-dir"));
@@ -1278,12 +1322,16 @@ mod windows {
             ipc_url: String,
             user_data_dir: Option<&str>,
             headless: bool,
+            watchdog: bool,
         ) -> anyhow::Result<()> {
             if check_single_instance() {
                 let mut cmd = std::process::Command::new(self.0.clone());
                 cmd.arg(ipc_url);
                 if headless {
                     cmd.arg("--headless");
+                }
+                if watchdog {
+                    cmd.arg("--watchdog");
                 }
                 if let Some(dir) = user_data_dir {
                     cmd.arg("--user-data-dir").arg(dir);
@@ -1317,11 +1365,15 @@ mod windows {
             ipc_url: String,
             user_data_dir: Option<&str>,
             headless: bool,
+            watchdog: bool,
         ) -> io::Result<ExitStatus> {
             let mut cmd = std::process::Command::new(self.0.clone());
             cmd.arg(ipc_url).arg("--foreground");
             if headless {
                 cmd.arg("--headless");
+            }
+            if watchdog {
+                cmd.arg("--watchdog");
             }
             if let Some(dir) = user_data_dir {
                 cmd.arg("--user-data-dir").arg(dir);
@@ -1470,6 +1522,7 @@ mod mac_os {
             url: String,
             user_data_dir: Option<&str>,
             headless: bool,
+            watchdog: bool,
         ) -> anyhow::Result<()> {
             let sock_path = user_data_dir
                 .map(PathBuf::from)
@@ -1485,10 +1538,15 @@ mod mac_os {
                 return Ok(());
             }
 
-            if headless {
+            if headless || watchdog {
                 let mut command = std::process::Command::new(self.path());
                 command.env(FORCE_CLI_MODE_ENV_VAR_NAME, "");
-                command.arg("--headless");
+                if headless {
+                    command.arg("--headless");
+                }
+                if watchdog {
+                    command.arg("--watchdog");
+                }
                 if let Some(dir) = user_data_dir {
                     command.arg("--user-data-dir").arg(dir);
                 }
@@ -1575,6 +1633,7 @@ mod mac_os {
             ipc_url: String,
             user_data_dir: Option<&str>,
             headless: bool,
+            watchdog: bool,
         ) -> io::Result<ExitStatus> {
             let path = match self {
                 Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/zed"),
@@ -1585,6 +1644,9 @@ mod mac_os {
             cmd.arg(ipc_url);
             if headless {
                 cmd.arg("--headless");
+            }
+            if watchdog {
+                cmd.arg("--watchdog");
             }
             if let Some(dir) = user_data_dir {
                 cmd.arg("--user-data-dir").arg(dir);

@@ -6,6 +6,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.material.icons.outlined.AddPhotoAlternate
 import androidx.compose.material3.IconButton
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.layout.ContentScale
 import io.github.dushyantchetiwal.praxis.remote.data.PromptImage
 import androidx.compose.animation.AnimatedVisibility
@@ -696,7 +698,8 @@ private fun ArchitectCard(architect: Architect, vm: MainViewModel) {
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 4.dp),
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .clickable { vm.switchTab(Tab.Plan) },
     ) {
         Row(Modifier.padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Outlined.AccountTree, contentDescription = null)
@@ -720,6 +723,9 @@ private fun ArchitectCard(architect: Architect, vm: MainViewModel) {
                 }
             }
             Spacer(Modifier.width(8.dp))
+            TextButton(onClick = { vm.switchTab(Tab.Plan) }) {
+                Text(stringResource(R.string.architect_view))
+            }
             if (architect.running) {
                 OutlinedButton(
                     onClick = { vm.architectAction(run = false) },
@@ -1514,6 +1520,14 @@ internal fun UploadProgress(upload: UploadState, onCancel: () -> Unit, modifier:
 private fun Composer(ui: DeviceUi, vm: MainViewModel, generating: Boolean) {
     val scheme = MaterialTheme.colorScheme
     Column(Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 4.dp, bottom = 10.dp)) {
+        if (ui.composerSuggestions.trigger != null) {
+            ComposerSuggestionsPopup(
+                state = ui.composerSuggestions,
+                onSelect = vm::selectComposerSuggestion,
+                onDismiss = vm::dismissComposerSuggestions,
+                modifier = Modifier.padding(bottom = 6.dp),
+            )
+        }
         if (generating && ui.currentWindow()?.thread?.sendNow == true && vm.hasPrompt && !vm.preparingImage) {
             Row(Modifier.align(Alignment.End)) {
                 if (ui.currentWindow()?.thread?.steering == true) TextButton(onClick = { vm.sendPrompt(steer = true) }) {
@@ -1582,9 +1596,25 @@ private fun ComposerInput(ui: DeviceUi, vm: MainViewModel, generating: Boolean) 
                 )
             }
         }
+        var fieldValue by remember {
+            mutableStateOf(
+                TextFieldValue(
+                    text = vm.composer,
+                    selection = TextRange(vm.composerCursor.coerceIn(0, vm.composer.length)),
+                ),
+            )
+        }
+        val latestText = vm.composer
+        val latestCursor = vm.composerCursor.coerceIn(0, latestText.length)
+        if (fieldValue.text != latestText) {
+            fieldValue = TextFieldValue(text = latestText, selection = TextRange(latestCursor))
+        }
         TextField(
-            value = vm.composer,
-            onValueChange = { vm.composer = it },
+            value = fieldValue,
+            onValueChange = { updated ->
+                fieldValue = updated
+                vm.updateComposer(updated.text, updated.selection.end)
+            },
             placeholder = { Text(stringResource(R.string.composer_placeholder)) },
             enabled = ui.device != null,
             maxLines = 6,
@@ -1599,6 +1629,14 @@ private fun ComposerInput(ui: DeviceUi, vm: MainViewModel, generating: Boolean) 
             ),
             modifier = Modifier.weight(1f),
         )
+        if (ui.device != null) {
+            VoiceInputButton(
+                isGenerating = generating && ui.currentWindow()?.thread?.steering == true,
+                onTranscript = vm::onVoiceTranscript,
+                onError = vm::onVoiceError,
+                modifier = Modifier.padding(bottom = 2.dp),
+            )
+        }
         if (stopTarget != null) {
             val stopLabel = stringResource(if (stopTarget == StopTarget.Plan) R.string.action_stop_plan else R.string.action_stop)
             TooltipBox(

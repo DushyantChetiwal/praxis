@@ -122,6 +122,7 @@
     <string name="action_stop_plan">Stop plan</string>
     <string name="action_stop_agent">Stop agent</string>
     <string name="tab_chat">Chat</string>
+    <string name="tab_plan">Plan</string>
     <string name="tab_threads">Threads</string>
     <string name="tab_files">Files</string>
     <string name="window_choose">Choose window</string>
@@ -231,6 +232,7 @@
         <item quantity="other">%d steps planned</item>
     </plurals>
     <string name="architect_run">Run plan</string>
+    <string name="architect_view">View</string>
     <string name="permission_needed">Permission needed</string>
     <string name="permission_tool_call">Tool call</string>
     <string name="permission_show_details">Show details</string>

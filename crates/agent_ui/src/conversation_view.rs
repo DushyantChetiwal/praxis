@@ -4151,6 +4151,162 @@ impl ConversationView {
     }
 }
 
+impl ConversationView {
+    fn render_subagent_telemetry_hud(&self, cx: &App) -> Option<AnyElement> {
+        let root_thread = self.root_thread(cx)?;
+        let summary = SubagentTelemetrySummary::from_thread(root_thread.read(cx), cx)?;
+
+        let status_icon = if summary.running_count > 0 {
+            Icon::new(IconName::PlayFilled)
+                .size(IconSize::XSmall)
+                .color(Color::Accent)
+        } else {
+            Icon::new(IconName::Check)
+                .size(IconSize::XSmall)
+                .color(Color::Success)
+        };
+
+        let status_text = if summary.running_count > 0 {
+            format!(
+                "{} running · {} done",
+                summary.running_count, summary.completed_count
+            )
+        } else if summary.completed_count == 1 {
+            "1 sub-agent done".to_string()
+        } else {
+            format!("{} sub-agents done", summary.completed_count)
+        };
+
+        let titles_text = if summary.active_titles.is_empty() {
+            None
+        } else {
+            Some(summary.active_titles.join(", "))
+        };
+
+        Some(
+            h_flex()
+                .id("subagent-telemetry-hud")
+                .w_full()
+                .px_3()
+                .py_1()
+                .gap_2()
+                .justify_between()
+                .border_t_1()
+                .border_color(cx.theme().colors().border_variant)
+                .bg(cx.theme().colors().surface_background)
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .min_w_0()
+                        .flex_1()
+                        .child(status_icon)
+                        .child(Label::new(status_text).size(LabelSize::XSmall))
+                        .when_some(titles_text, |this, titles| {
+                            this.child(
+                                Label::new(titles)
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted)
+                                    .truncate(),
+                            )
+                        }),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .flex_none()
+                        .when(summary.total_tokens > 0, |this| {
+                            this.child(
+                                Label::new(format!("{} tok", summary.total_tokens))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                        })
+                        .when_some(summary.workhorse_label, |this, workhorse| {
+                            this.child(
+                                h_flex()
+                                    .id("workhorse-model-badge")
+                                    .px_1p5()
+                                    .py_0p5()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(cx.theme().colors().border_variant)
+                                    .bg(cx.theme().colors().element_background)
+                                    .tooltip(Tooltip::text(
+                                        "Configured Workhorse model for background sub-agents",
+                                    ))
+                                    .child(
+                                        Label::new(workhorse)
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
+                                    ),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SubagentTelemetrySummary {
+    pub running_count: usize,
+    pub completed_count: usize,
+    pub total_count: usize,
+    pub active_titles: Vec<SharedString>,
+    pub workhorse_label: Option<SharedString>,
+    pub total_tokens: u64,
+}
+
+impl SubagentTelemetrySummary {
+    pub(crate) fn from_thread(thread: &AcpThread, cx: &App) -> Option<Self> {
+        let mut running_count = 0usize;
+        let mut completed_count = 0usize;
+        let mut active_titles = Vec::new();
+        let mut total_tokens = 0u64;
+
+        for subagent in thread.subagents() {
+            let subagent = subagent.read(cx);
+            if subagent.status() != ThreadStatus::Idle {
+                running_count += 1;
+                if active_titles.len() < 3 {
+                    let title = subagent
+                        .title()
+                        .unwrap_or_else(|| SharedString::from("Sub-agent"));
+                    active_titles.push(title);
+                }
+            } else {
+                completed_count += 1;
+            }
+
+            if let Some(usage) = subagent.token_usage() {
+                let tokens = usage
+                    .used_tokens
+                    .max(usage.input_tokens.saturating_add(usage.output_tokens));
+                total_tokens = total_tokens.saturating_add(tokens);
+            }
+        }
+
+        let total_count = running_count + completed_count;
+        if total_count == 0 {
+            return None;
+        }
+
+        let workhorse_label = AgentSettings::get_global(cx)
+            .workhorse_model
+            .as_ref()
+            .map(|selection| SharedString::from(selection.model.clone()));
+
+        Some(Self {
+            running_count,
+            completed_count,
+            total_count,
+            active_titles,
+            workhorse_label,
+            total_tokens,
+        })
+    }
+}
+
 impl Render for ConversationView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_request_elicitation_states(window, cx);
@@ -4221,6 +4377,7 @@ impl Render for ConversationView {
             .size_full()
             .bg(cx.theme().colors().panel_background)
             .child(v_flex().flex_1().min_h_0().child(content))
+            .children(self.render_subagent_telemetry_hud(cx))
             .when(self.has_saved_input(), |this| {
                 this.child(
                     h_flex()
@@ -22272,5 +22429,108 @@ pub(crate) mod tests {
         fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
             self
         }
+    }
+
+    #[gpui::test]
+    async fn test_subagent_telemetry_summary(cx: &mut TestAppContext) {
+        init_test(cx);
+        let project = Project::test(FakeFs::new(cx.executor()), [], cx).await;
+        let connection: Rc<dyn AgentConnection> = Rc::new(StubAgentConnection::new());
+
+        cx.update(|cx| {
+            let mut settings = AgentSettings::get_global(cx).clone();
+            settings.workhorse_model = Some(
+                serde_json::from_value(serde_json::json!({
+                    "provider": "google",
+                    "model": "gemini-4-hydrogen",
+                }))
+                .expect("valid workhorse selection"),
+            );
+            AgentSettings::override_global(settings, cx);
+        });
+
+        let (root, child_idle, child_tokens) = cx.update(|cx| {
+            let root_id = acp_v2::SessionId::new("root");
+            let root =
+                create_test_acp_thread(None, "root", connection.clone(), project.clone(), cx);
+            let child_idle = create_test_acp_subagent(
+                root_id.clone(),
+                "child-idle",
+                connection.clone(),
+                project.clone(),
+                cx,
+            );
+            let child_tokens =
+                create_test_acp_subagent(root_id, "child-tokens", connection, project, cx);
+            (root, child_idle, child_tokens)
+        });
+
+        cx.read(|cx| {
+            assert_eq!(
+                super::SubagentTelemetrySummary::from_thread(root.read(cx), cx),
+                None
+            );
+        });
+
+        child_idle.update(cx, |thread, cx| {
+            thread.update_session_info(acp_v2::SessionInfoUpdate::new().title("Inspect tests"), cx);
+            thread.update_token_usage(
+                Some(acp_thread::TokenUsage {
+                    max_tokens: 10_000,
+                    used_tokens: 450,
+                    input_tokens: 300,
+                    output_tokens: 150,
+                    max_output_tokens: None,
+                }),
+                cx,
+            );
+        });
+        child_tokens.update(cx, |thread, cx| {
+            thread.update_token_usage(
+                Some(acp_thread::TokenUsage {
+                    max_tokens: 10_000,
+                    used_tokens: 0,
+                    input_tokens: 200,
+                    output_tokens: 100,
+                    max_output_tokens: None,
+                }),
+                cx,
+            );
+        });
+
+        root.update(cx, |root, cx| {
+            root.register_subagent(child_idle.clone(), cx);
+            root.register_subagent(child_tokens.clone(), cx);
+        });
+
+        cx.read(|cx| {
+            let summary = super::SubagentTelemetrySummary::from_thread(root.read(cx), cx)
+                .expect("summary should exist when subagents are registered");
+            assert_eq!(summary.total_count, 2);
+            assert_eq!(summary.running_count, 2);
+            assert_eq!(summary.completed_count, 0);
+            assert_eq!(summary.total_tokens, 750);
+            assert_eq!(
+                summary.workhorse_label,
+                Some(SharedString::from("gemini-4-hydrogen"))
+            );
+        });
+
+        child_idle.update(cx, |thread, cx| {
+            thread
+                .update_session_state(
+                    acp_v2::StateUpdate::Idle(acp_v2::IdleStateUpdate::new()),
+                    cx,
+                )
+                .expect("idle state should apply");
+        });
+
+        cx.read(|cx| {
+            let summary = super::SubagentTelemetrySummary::from_thread(root.read(cx), cx)
+                .expect("summary should exist after idle transition");
+            assert_eq!(summary.total_count, 2);
+            assert_eq!(summary.running_count, 1);
+            assert_eq!(summary.completed_count, 1);
+        });
     }
 }

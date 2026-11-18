@@ -112,6 +112,81 @@ data class TranscriptHistory(
         return TranscriptHistory(session, shownSteps, records, request)
     }
 
+    fun applyDelta(delta: ThreadDelta): TranscriptHistory? {
+        if (rootSession != delta.sessionId) return null
+        val old = records[delta.sessionId] ?: return null
+        if (delta.total < old.view.total) return null
+        if (delta.nextBefore !in 0..delta.total) return null
+        if (delta.hasMore != (delta.nextBefore > 0)) return null
+
+        val range = HistoryRange(delta.nextBefore, delta.total)
+        val disjointJump = delta.upserts.isNotEmpty() && delta.nextBefore > (old.ranges.lastOrNull()?.end ?: 0)
+        val retained = old.takeUnless { disjointJump }
+        var nextRequest = request
+        if (retained == null && nextRequest?.session == delta.sessionId) nextRequest = null
+
+        val updatedRoot = HistoryRecord(
+            view = old.view.copy(
+                title = delta.title ?: old.view.title,
+                status = delta.threadStatus ?: old.view.status,
+                total = delta.total,
+                entries = mergeEntries(retained?.view?.entries.orEmpty(), delta.upserts, delta.total),
+                nextBefore = delta.nextBefore,
+                hasMore = delta.hasMore,
+                pagingValid = true,
+                stepThreads = emptyList(),
+            ),
+            ranges = mergeRanges(retained?.ranges.orEmpty() + range),
+            failure = retained?.failure,
+        )
+        val nextBeforeAfter = updatedRoot.nextBefore
+        val progressed = nextBeforeAfter != null && retained?.nextBefore?.let { nextBeforeAfter < it } == true
+        val finalRoot = if (nextBeforeAfter == null || nextBeforeAfter == 0 || progressed) {
+            updatedRoot.copy(failure = null)
+        } else {
+            updatedRoot
+        }
+
+        val nextRecords = records.toMutableMap()
+        nextRecords[delta.sessionId] = finalRoot
+        var nextShownSteps = shownSteps
+        if (delta.stepThreads != null) {
+            val liveSteps = delta.stepThreads.filter { it.pagingValid }
+            val liveIds = liveSteps.mapNotNull { it.sessionId }.toSet()
+            for (id in shownSteps.filter { it !in liveIds }) {
+                nextRecords[id]?.let { nextRecords[id] = it.copy(view = it.view.copy(status = "idle"), live = false) }
+            }
+            for (view in liveSteps) {
+                val id = view.sessionId ?: continue
+                val oldStep = nextRecords[id]?.takeIf { it.view.total <= view.total }
+                val stepRange = view.nextBefore?.takeIf { it in 0..view.total }?.let { HistoryRange(it, view.total) }
+                val stepDisjoint = oldStep != null && stepRange != null && view.entries.isNotEmpty() &&
+                    stepRange.start > (oldStep.ranges.lastOrNull()?.end ?: 0)
+                val stepRetained = oldStep?.takeUnless { stepDisjoint }
+                if (stepRetained == null && nextRequest?.session == id) nextRequest = null
+                val updatedStep = HistoryRecord(
+                    view = view.copy(
+                        entries = mergeEntries(stepRetained?.view?.entries.orEmpty(), view.entries, view.total),
+                        stepThreads = emptyList(),
+                    ),
+                    ranges = mergeRanges(stepRetained?.ranges.orEmpty() + listOfNotNull(stepRange)),
+                    failure = stepRetained?.failure,
+                )
+                val stepNext = updatedStep.nextBefore
+                val stepProgressed = stepNext != null && stepRetained?.nextBefore?.let { stepNext < it } == true
+                nextRecords[id] = if (stepNext == null || stepNext == 0 || stepProgressed) {
+                    updatedStep.copy(failure = null)
+                } else {
+                    updatedStep
+                }
+            }
+            nextShownSteps = (shownSteps + liveSteps.mapNotNull { it.sessionId })
+                .filter { it != delta.sessionId }
+                .distinct()
+        }
+        return TranscriptHistory(delta.sessionId, nextShownSteps, nextRecords, nextRequest)
+    }
+
     fun begin(session: String, id: Long, retry: Boolean = false): TranscriptHistory {
         if (!canLoad(session, retry)) return this
         val record = records.getValue(session)

@@ -186,7 +186,8 @@ The main conversation has these coordinator tools:
 - `inspect_architect_run` reads current or archived runs, paginated visits, saved step conversations, dependency readiness, events, and active tool calls. Visit IDs and full paths disambiguate repeated or nested steps.
 - `control_architect_run` can pause, interrupt, resume, change models, or revise pending briefs. `resume_at` selects an unfinished, eligible step from an inactive checkpoint without replaying completed results; unresolved prerequisites are refused. `set_step_models` applies a validated batch atomically without redrawing the graph. Copy each native model's `{provider, model}` object directly from `list_agents_and_models`'s `configuration` field.
 - `edit_architect_plan` previews targeted graph edits and applies only the returned preview token after permission approval. Operations insert/remove nodes and edges, reconnect edges, move nodes on the canvas, or replace file surfaces with `set_file_surface`; moves do not reparent nodes.
-- `wait_architect_run` subscribes to execution transitions or user-input waits for up to 30 seconds. It returns immediately for available events, failures or stopped execution, or pending user input. Follow its event cursor rather than repeatedly polling. This is an on-demand observer, not a new agent started automatically in the background.
+
+When an Architect run finishes, stops on an error, or pauses waiting for user input, Praxis automatically wakes and resumes the owning conversation via an async background watcher—no polling or wait tool is needed.
 
 Execution controls require **Build** mode and configured tool permission approval. Topology editing is also available in **Plan** mode but cannot start execution or approve locks. Step agents cannot control sibling steps.
 

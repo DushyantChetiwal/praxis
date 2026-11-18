@@ -225,26 +225,6 @@ pub(crate) fn checklist_review_note(steps: &[PlanStep]) -> Option<String> {
     ))
 }
 
-/// Points an agent that keeps waiting at work it could do instead.
-pub(crate) fn repeated_wait_note(waits: u32, steps: &[PlanStep]) -> String {
-    let open = steps
-        .iter()
-        .filter(|step| is_open(step))
-        .map(|step| format!("- {}", step.step.trim()))
-        .collect::<Vec<_>>();
-    let resume = "If nothing else can be done, end your turn instead of waiting again: \
-                  Praxis resumes this conversation when a background task finishes.";
-    if open.is_empty() {
-        return format!("You have waited {waits} times in a row. {resume}");
-    }
-    format!(
-        "You have waited {waits} times in a row. Work on a checklist step that does \
-         not depend on what you are waiting for, or run independent steps side by side \
-         with `run_steps` if it is available:\n{}\n{resume}",
-        open.join("\n")
-    )
-}
-
 /// Asks for the checklist to follow the work step by step when an update
 /// batched several completions or left no step in progress.
 fn pacing_note(before: &[PlanStep], after: &[PlanStep]) -> Option<String> {
@@ -601,13 +581,6 @@ mod tests {
         let done = [step("Read the loader", PlanStepStatus::Completed)];
         assert_eq!(checklist_review_note(&done), None);
         assert_eq!(checklist_review_note(&[]), None);
-
-        let nudge = repeated_wait_note(2, &steps);
-        assert!(nudge.contains("waited 2 times"), "{nudge}");
-        assert!(nudge.contains("- Write the docs"), "{nudge}");
-        assert!(!nudge.contains("Read the loader"), "{nudge}");
-        assert!(nudge.contains("end your turn"), "{nudge}");
-        assert!(repeated_wait_note(5, &done).contains("end your turn"));
     }
 
     #[test]

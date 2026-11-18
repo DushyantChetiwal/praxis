@@ -493,6 +493,54 @@ fun parseMeta(text: String?, gistId: String): Device? {
     )
 }
 
+data class ThreadDelta(
+    val updatedAtRaw: String?,
+    val updatedAt: Long?,
+    val watch: WatchInfo?,
+    val status: Status?,
+    val sessionId: String,
+    val title: String?,
+    val threadStatus: String?,
+    val total: Int,
+    val nextBefore: Int,
+    val hasMore: Boolean,
+    val upserts: List<Entry>,
+    val stepThreads: List<ThreadView>?,
+)
+
+fun parseThreadDelta(json: String?): ThreadDelta? {
+    val o = json?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return null
+    val sessionId = o.str("session_id")?.takeIf { it.isNotBlank() } ?: return null
+    val total = o.index("total") ?: return null
+    val nextBefore = o.index("next_before") ?: return null
+    val hasMore = o.opt("has_more") as? Boolean ?: return null
+    val rawUpserts = o.arr("upserts") ?: return null
+    val upsertObjects = rawUpserts.objects()
+    if (upsertObjects.size != rawUpserts.length()) return null
+    var valid = true
+    val upserts = upsertObjects.map { parseEntry(it) { valid = false } }
+    if (!valid) return null
+    val stepThreads = if (o.has("step_threads") && !o.isNull("step_threads")) {
+        o.arr("step_threads")?.objects()?.map { parseThreadView(it, includeSteps = false) }
+    } else {
+        null
+    }
+    return ThreadDelta(
+        updatedAtRaw = o.str("updated_at"),
+        updatedAt = parseTime(o.str("updated_at")),
+        watch = o.obj("watch")?.let { w -> WatchInfo(w.long("window"), w.str("session_id"), parseTime(w.str("until"))) },
+        status = o.obj("status")?.let(::parseStatus),
+        sessionId = sessionId,
+        title = o.str("title"),
+        threadStatus = o.str("thread_status"),
+        total = total,
+        nextBefore = nextBefore,
+        hasMore = hasMore,
+        upserts = upserts,
+        stepThreads = stepThreads,
+    )
+}
+
 /** A decrypted snapshot: `{updated_at, watch, status, thread, thread_error}`. */
 fun parseSnapshot(json: String?): Snapshot? {
     val o = json?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return null
@@ -586,6 +634,28 @@ private fun parseThreadSummary(o: JSONObject): ThreadSummary = ThreadSummary(
     }.orEmpty(),
 )
 
+internal fun parseEntry(e: JSONObject, onInvalid: () -> Unit = {}): Entry {
+    fun index(objectValue: JSONObject, key: String): Int? =
+        objectValue.index(key).also { if (it == null) onInvalid() }
+    return Entry(
+        index = index(e, "index") ?: -1,
+        role = e.str("role") ?: "notice",
+        text = e.str("text").orEmpty(),
+        status = e.str("status"),
+        truncated = e.bool("truncated"),
+        truncation = e.str("truncation"),
+        detailsPending = e.bool("details_pending"),
+        fingerprint = e.str("fingerprint"),
+        parts = e.arr("parts")?.objects()?.mapIndexedNotNull { partOffset, part ->
+            val text = part.str("text").orEmpty()
+            val pending = part.bool("details_pending")
+            if (text.isBlank() && !pending) return@mapIndexedNotNull null
+            val partIndex = if (part.has("index")) index(part, "index") ?: -1 else partOffset
+            EntryPart(partIndex, part.str("role") ?: "notice", text, pending)
+        }.orEmpty(),
+    )
+}
+
 fun parseThreadView(o: JSONObject): ThreadView = parseThreadView(o, includeSteps = true)
 
 private fun parseThreadView(o: JSONObject, includeSteps: Boolean): ThreadView {
@@ -604,23 +674,7 @@ private fun parseThreadView(o: JSONObject, includeSteps: Boolean): ThreadView {
     if (paging && rawEntries == null) valid = false
     if (rawEntries != null && rawEntries.objects().size != rawEntries.length()) valid = false
     val entries = o.arr("entries")?.objects()?.map { e ->
-        Entry(
-            index = index(e, "index") ?: -1,
-            role = e.str("role") ?: "notice",
-            text = e.str("text").orEmpty(),
-            status = e.str("status"),
-            truncated = e.bool("truncated"),
-            truncation = e.str("truncation"),
-            detailsPending = e.bool("details_pending"),
-            fingerprint = e.str("fingerprint"),
-            parts = e.arr("parts")?.objects()?.mapIndexedNotNull { partOffset, part ->
-                val text = part.str("text").orEmpty()
-                val pending = part.bool("details_pending")
-                if (text.isBlank() && !pending) return@mapIndexedNotNull null
-                val partIndex = if (part.has("index")) index(part, "index") ?: -1 else partOffset
-                EntryPart(partIndex, part.str("role") ?: "notice", text, pending)
-            }.orEmpty(),
-        )
+        parseEntry(e) { valid = false }
     }.orEmpty()
     return ThreadView(
         sessionId = o.str("session_id"),

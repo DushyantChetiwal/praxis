@@ -266,9 +266,7 @@ tools! {
     TerminalTool,
     TerminalStatusTool,
     TerminalStopTool,
-    TerminalWaitTool,
     UpdatePlanTool,
-    WaitArchitectRunTool,
     WebSearchTool,
     WriteFileTool,
 }

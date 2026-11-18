@@ -955,6 +955,50 @@ fn current_app_state(cx: &mut AsyncApp) -> Option<Arc<AppState>> {
             .map(|workspace| workspace.read(cx).app_state().clone())
     })
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedWorktreeSummary {
+    pub path: PathBuf,
+    pub name: String,
+    pub branch: Option<String>,
+    pub is_main: bool,
+}
+
+pub fn list_workspace_worktrees(workspace: &Workspace, cx: &App) -> Vec<LinkedWorktreeSummary> {
+    let mut summaries: Vec<LinkedWorktreeSummary> = workspace
+        .project()
+        .read(cx)
+        .repositories(cx)
+        .values()
+        .map(|repo| {
+            let snapshot = repo.read(cx).snapshot();
+            let path = snapshot.work_directory_abs_path.to_path_buf();
+            let name = path
+                .file_name()
+                .map(|file_name| file_name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            let branch = snapshot
+                .branch
+                .as_ref()
+                .map(|branch| branch.name().to_string());
+            LinkedWorktreeSummary {
+                path,
+                name,
+                branch,
+                is_main: snapshot.is_main_worktree(),
+            }
+        })
+        .collect();
+
+    summaries.sort_by(|left, right| {
+        (!left.is_main)
+            .cmp(&(!right.is_main))
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    summaries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

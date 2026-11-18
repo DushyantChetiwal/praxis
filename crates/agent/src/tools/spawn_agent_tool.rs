@@ -39,12 +39,11 @@ use crate::{AgentTool, ThreadEnvironment, ToolCallEventStream, ToolCapability, T
 /// - A resumed session keeps its existing model, so `model` cannot be combined with `session_id`.
 ///
 /// ### Running in the background
-/// - By default the agent runs in the background and this tool returns at once
-///   with its session_id. Keep working on something that does not depend on it.
-///   Its final message arrives with a later tool result, or Praxis resumes this
-///   conversation when it finishes, so never wait or poll for it.
-/// - Set `wait` only when you cannot do anything else until it answers. Then
-///   this tool returns the agent's final message.
+/// - `spawn_agent` always runs the agent in the background and returns at once
+///   with its `session_id`. Keep working on something that does not depend on
+///   it. Its final message arrives with a later tool result, or Praxis resumes
+///   this conversation when it finishes, so never wait or poll for it. If
+///   nothing independent remains, end your turn.
 ///
 /// ### Output
 /// - You receive only the agent's final message, never its other work.
@@ -65,10 +64,6 @@ pub struct SpawnAgentToolInput {
     /// Omit to preserve default behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Wait for the agent's final message instead of letting it run in the
-    /// background. Only for answers you need before you can do anything else.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub wait: bool,
 }
 
 fn deserialize_session_id<'de, D>(deserializer: D) -> Result<Option<acp_v2::SessionId>, D::Error>
@@ -215,16 +210,14 @@ impl AgentTool for SpawnAgentTool {
                 message,
                 session_id,
                 model,
-                wait,
             } = input;
             let owner = event_stream.owning_thread();
             let notice_label = label.clone();
             let (subagent, mut session_info, background_owner) = cx.update(|cx| {
                 let background_owner = owner.filter(|owner| {
-                    !wait
-                        && owner
-                            .upgrade()
-                            .is_some_and(|owner| owner.read(cx).can_wake_for_background_work())
+                    owner
+                        .upgrade()
+                        .is_some_and(|owner| owner.read(cx).can_wake_for_background_work())
                 });
                 let subagent = match (session_id, model) {
                     (Some(_), Some(_)) => Err(anyhow::anyhow!(
@@ -446,10 +439,7 @@ mod tests {
 
         let input: SpawnAgentToolInput =
             serde_json::from_value(json!({ "label": "label", "message": "message" }))?;
-        assert!(
-            !input.wait,
-            "agents run in the background unless asked to wait"
-        );
+        assert!(input.session_id.is_none());
         Ok(())
     }
 

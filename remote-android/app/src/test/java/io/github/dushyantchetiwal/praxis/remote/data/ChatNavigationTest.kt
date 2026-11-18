@@ -13,6 +13,7 @@ class ChatNavigationTest {
     @Test
     fun secondaryPagesReturnToChatBeforeLeavingTheComputer() {
         assertNull(DeviceUi(tab = Tab.Chat).parentTab())
+        assertEquals(Tab.Chat, DeviceUi(tab = Tab.Plan).parentTab())
         assertEquals(Tab.Chat, DeviceUi(tab = Tab.Threads).parentTab())
         assertEquals(Tab.Chat, DeviceUi(tab = Tab.Files).parentTab())
     }

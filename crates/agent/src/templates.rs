@@ -126,7 +126,7 @@ mod tests {
         let tools = [
             "inspect_architect_plan",
             "edit_architect_plan",
-            "wait_architect_run",
+            "inspect_architect_run",
         ];
         for visible in tools {
             let rendered = SystemPromptTemplate {
@@ -157,8 +157,8 @@ mod tests {
                 assert!(rendered.contains("flat acyclic graph"));
                 assert!(rendered.contains("cannot infer retained conditional verdicts"));
             }
-            if visible == "wait_architect_run" {
-                assert!(rendered.contains("event_sequence unchanged"));
+            if visible == "inspect_architect_run" {
+                assert!(rendered.contains("wake this conversation automatically"));
             }
         }
     }
@@ -419,11 +419,11 @@ mod tests {
             .render(&Templates::new())
             .expect("system prompt should render")
         };
-        let background = render(vec!["terminal".into(), "terminal_wait".into()]);
+        let background = render(vec!["terminal".into()]);
         assert!(background.contains("## Background terminal tasks"));
         assert!(background.contains("When nothing independent remains"));
         assert!(background.contains("Praxis resumes this conversation automatically"));
-        assert!(background.contains("A wait expiring does not kill the process"));
+        assert!(!background.contains("terminal_wait"));
         assert!(!render(vec!["read_file".into()]).contains("## Background terminal tasks"));
     }
 

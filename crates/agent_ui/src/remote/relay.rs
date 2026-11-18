@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::crypto::{self, Key};
+use super::delta::PeerDeltaTracker;
 use super::direct::{DirectConnection, DirectTransport, OnDirectMessage};
 use super::{Watch, channel, handle_paired, snapshot, status};
 
@@ -433,149 +434,182 @@ async fn serve(
         ),
     );
     let result = until_stopped(&stopped, async {
-    let mut receipts = Receipts::default();
-    let mut watches: HashMap<String, Watch> = HashMap::new();
-    let mut published: HashMap<String, (String, Instant)> = HashMap::new();
-    let mut sequence = 0u64;
-    let mut next_snapshot = Instant::now();
-    loop {
-        if stopped.is_closed() {
-            break;
-        }
-        if Instant::now() >= next_snapshot {
-            next_snapshot = Instant::now() + Duration::from_secs(1);
-            let now = Utc::now();
-            watches.retain(|phone, watch| watch.until > now && peers.read().contains_key(phone));
-            published.retain(|phone, _| watches.contains_key(phone));
-            for (phone, watch) in &watches {
-                let Some(peer) = peers.read().get(phone).cloned() else {
-                    continue;
+        let mut receipts = Receipts::default();
+        let mut watches: HashMap<String, Watch> = HashMap::new();
+        let mut delta_tracker = PeerDeltaTracker::new();
+        let mut non_delta_checked_at: HashMap<String, Instant> = HashMap::new();
+        let mut sequence = 0u64;
+        let mut next_snapshot = Instant::now();
+        loop {
+            if stopped.is_closed() {
+                break;
+            }
+            let now_instant = Instant::now();
+            if now_instant >= next_snapshot {
+                let now = Utc::now();
+                watches
+                    .retain(|phone, watch| watch.until > now && peers.read().contains_key(phone));
+                delta_tracker.retain_phones(&watches);
+                non_delta_checked_at.retain(|phone, _| watches.contains_key(phone));
+                let has_delta_watch = watches
+                    .values()
+                    .any(|watch| watch.deltas && watch.until > now);
+                let tick_interval = if has_delta_watch {
+                    Duration::from_millis(80)
+                } else {
+                    Duration::from_secs(1)
                 };
-                if peer
-                    .last_seen
-                    .lock()
-                    .is_none_or(|at| at.elapsed() >= Duration::from_secs(45))
-                {
-                    continue;
-                }
-                let value = cx.update(|cx| {
-                    let current = status(&device, cx);
-                    snapshot(&current, Some(watch), cx)
-                });
-                let fingerprint = value.to_string();
-                let unchanged = published.get(phone).is_some_and(|(previous, at)| {
-                    previous == &fingerprint && at.elapsed() < Duration::from_secs(15)
-                });
-                if unchanged {
-                    continue;
-                }
-                let snapshot: Value = serde_json::from_str(&channel::fit_snapshot(value, now))?;
-                sequence = sequence.saturating_add(1);
-                let packet = json!({"type": "snapshot", "epoch": epoch, "sequence": sequence, "snapshot": snapshot}).to_string();
-                match outgoing.try_send((peer, packet)) {
-                    Ok(()) => {
-                        published.insert(phone.clone(), (fingerprint, Instant::now()));
+                next_snapshot = now_instant + tick_interval;
+                for (phone, watch) in &watches {
+                    if !watch.deltas
+                        && non_delta_checked_at
+                            .get(phone)
+                            .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+                    {
+                        continue;
                     }
-                    Err(async_channel::TrySendError::Full(_)) => {}
-                    Err(error) => return Err(anyhow!("live connection stopped: {error}")),
-                }
-            }
-        }
-        let timer = cx.background_executor().timer(Duration::from_millis(250));
-        let packet = futures::select_biased! {
-            _ = stopped.recv().fuse() => break,
-            packet = requests.recv().fuse() => packet.ok(),
-            _ = timer.fuse() => continue,
-        };
-        let Some((peer, plain)) = packet else {
-            break;
-        };
-        if !current(&peers, &peer) {
-            continue;
-        }
-        let Ok(request) = serde_json::from_str::<Request>(&plain) else {
-            continue;
-        };
-        if request.id.is_empty()
-            || request.id.len() > 64
-            || !request
-                .id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
-            continue;
-        }
-        let answer = if request.op == "hello" {
-            *peer.last_seen.lock() = Some(Instant::now());
-            channel::envelope(&request.id, Ok(json!({"epoch": epoch})))
-        } else {
-            match receipts.begin(&peer.id, &request, &plain, &epoch, Utc::now().timestamp()) {
-                Ok(Some(answer)) => answer,
-                Err(error) => channel::envelope(&request.id, Err(error)),
-                Ok(None) => {
-                    let result = if request.op == "watch" {
-                        let seconds = request
-                            .args
-                            .get("seconds")
-                            .and_then(Value::as_i64)
-                            .unwrap_or(300)
-                            .clamp(1, 900);
-                        let watch = Watch {
-                            window: request.args.get("window").and_then(Value::as_u64),
-                            session_id: request
-                                .args
-                                .get("session_id")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
-                            include_details: request
-                                .args
-                                .get("include_details")
-                                .and_then(Value::as_bool)
-                                != Some(false),
-                            until: Utc::now() + chrono::Duration::seconds(seconds),
-                        };
-                        let until = watch.until.to_rfc3339();
-                        watches.insert(peer.id.clone(), watch);
-                        published.remove(&peer.id);
-                        next_snapshot = Instant::now();
-                        Ok(json!({"until": until}))
-                    } else if request.op == "direct_offer" {
-                        accept_direct(
-                            transport.as_ref(),
-                            &links,
-                            &channel_name,
-                            &peer,
-                            &direct_incoming,
-                            &request.args,
-                        )
-                        .await
-                    } else if matches!(request.op.as_str(), "unpair" | "batch") {
-                        Err(anyhow!("Use the GitHub channel for this operation"))
-                    } else {
-                        let task = cx.update(|cx| {
-                            handle_paired(&request.op, &request.args, &device, &peer.id, cx)
-                        });
-                        let response = task.await;
-                        if response.is_ok() && !is_read_only_op(&request.op) {
-                            next_snapshot = Instant::now();
-                        }
-                        response
+                    let Some(peer) = peers.read().get(phone).cloned() else {
+                        continue;
                     };
-                    let answer = channel::envelope(&request.id, result);
-                    receipts.finish(&peer.id, &request.id, answer.clone());
-                    answer
+                    if peer
+                        .last_seen
+                        .lock()
+                        .is_none_or(|at| at.elapsed() >= Duration::from_secs(45))
+                    {
+                        continue;
+                    }
+                    non_delta_checked_at.insert(phone.clone(), now_instant);
+                    let value = cx.update(|cx| {
+                        let current = status(&device, cx);
+                        snapshot(&current, Some(watch), cx)
+                    });
+                    let Some(packet) = delta_tracker.next_packet(
+                        phone,
+                        &epoch,
+                        value,
+                        watch.deltas,
+                        now,
+                        now_instant,
+                        &mut sequence,
+                    )?
+                    else {
+                        continue;
+                    };
+                    match outgoing.try_send((peer, packet)) {
+                        Ok(()) => {}
+                        Err(async_channel::TrySendError::Full(_)) => {}
+                        Err(error) => return Err(anyhow!("live connection stopped: {error}")),
+                    }
                 }
             }
-        };
-        let mut answer: Value = serde_json::from_str(&answer)?;
-        answer["type"] = json!("response");
-        answer["epoch"] = json!(epoch);
-        if outgoing.send((peer, answer.to_string())).await.is_err() {
-            break;
+            let now = Utc::now();
+            let timer_duration = if watches
+                .values()
+                .any(|watch| watch.deltas && watch.until > now)
+            {
+                Duration::from_millis(80)
+            } else {
+                Duration::from_millis(250)
+            };
+            let timer = cx.background_executor().timer(timer_duration);
+            let packet = futures::select_biased! {
+                _ = stopped.recv().fuse() => break,
+                packet = requests.recv().fuse() => packet.ok(),
+                _ = timer.fuse() => continue,
+            };
+            let Some((peer, plain)) = packet else {
+                break;
+            };
+            if !current(&peers, &peer) {
+                continue;
+            }
+            let Ok(request) = serde_json::from_str::<Request>(&plain) else {
+                continue;
+            };
+            if request.id.is_empty()
+                || request.id.len() > 64
+                || !request
+                    .id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                continue;
+            }
+            let answer = if request.op == "hello" {
+                *peer.last_seen.lock() = Some(Instant::now());
+                channel::envelope(&request.id, Ok(json!({"epoch": epoch})))
+            } else {
+                match receipts.begin(&peer.id, &request, &plain, &epoch, Utc::now().timestamp()) {
+                    Ok(Some(answer)) => answer,
+                    Err(error) => channel::envelope(&request.id, Err(error)),
+                    Ok(None) => {
+                        let result = if request.op == "watch" {
+                            let seconds = request
+                                .args
+                                .get("seconds")
+                                .and_then(Value::as_i64)
+                                .unwrap_or(300)
+                                .clamp(1, 900);
+                            let watch = Watch {
+                                window: request.args.get("window").and_then(Value::as_u64),
+                                session_id: request
+                                    .args
+                                    .get("session_id")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string),
+                                include_details: request
+                                    .args
+                                    .get("include_details")
+                                    .and_then(Value::as_bool)
+                                    != Some(false),
+                                deltas: request.args.get("deltas").and_then(Value::as_bool)
+                                    == Some(true),
+                                until: Utc::now() + chrono::Duration::seconds(seconds),
+                            };
+                            let until = watch.until.to_rfc3339();
+                            watches.insert(peer.id.clone(), watch);
+                            delta_tracker.remove_phone(&peer.id);
+                            non_delta_checked_at.remove(&peer.id);
+                            next_snapshot = Instant::now();
+                            Ok(json!({"until": until}))
+                        } else if request.op == "direct_offer" {
+                            accept_direct(
+                                transport.as_ref(),
+                                &links,
+                                &channel_name,
+                                &peer,
+                                &direct_incoming,
+                                &request.args,
+                            )
+                            .await
+                        } else if matches!(request.op.as_str(), "unpair" | "batch") {
+                            Err(anyhow!("Use the GitHub channel for this operation"))
+                        } else {
+                            let task = cx.update(|cx| {
+                                handle_paired(&request.op, &request.args, &device, &peer.id, cx)
+                            });
+                            let response = task.await;
+                            if response.is_ok() && !is_read_only_op(&request.op) {
+                                next_snapshot = Instant::now();
+                            }
+                            response
+                        };
+                        let answer = channel::envelope(&request.id, result);
+                        receipts.finish(&peer.id, &request.id, answer.clone());
+                        answer
+                    }
+                }
+            };
+            let mut answer: Value = serde_json::from_str(&answer)?;
+            answer["type"] = json!("response");
+            answer["epoch"] = json!(epoch);
+            if outgoing.send((peer, answer.to_string())).await.is_err() {
+                break;
+            }
         }
-    }
-    Ok::<_, anyhow::Error>(())
-    }).await;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
     drop(network_stop);
     drop(outgoing);
     drop(requests);
@@ -603,6 +637,11 @@ fn is_read_only_op(op: &str) -> bool {
             | "list_dir"
             | "read_file"
             | "download"
+            | "plan_inspect"
+            | "mentions"
+            | "skills"
+            | "watchdog_status"
+            | "worktree_list"
     )
 }
 

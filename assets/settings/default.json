@@ -1360,7 +1360,6 @@
           "inspect_architect_plan": true,
           "edit_architect_plan": true,
           "inspect_architect_run": true,
-          "wait_architect_run": true,
           "control_architect_run": true,
           // Locking and unlocking steps when the user asks for it in chat.
           "set_step_locks": true,
@@ -1410,7 +1409,6 @@
         "tools": {
           "inspect_architect_plan": true,
           "inspect_architect_run": true,
-          "wait_architect_run": true,
           "ask_question": true,
           "exit_plan_mode": true,
           "ask_user": false,

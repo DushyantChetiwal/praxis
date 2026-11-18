@@ -1551,7 +1551,6 @@ mod tests {
             // Reads only the owning plan's run and recorded step conversations.
             "inspect_architect_run",
             "inspect_architect_plan",
-            "wait_architect_run",
             "list_directory",
             "open",
             "read_file",
@@ -1560,7 +1559,6 @@ mod tests {
             // Lifecycle-only helpers for already-authorized terminals owned by
             // this thread. They cannot launch commands or address arbitrary PIDs.
             "terminal_status",
-            "terminal_wait",
             "terminal_stop",
             // streaming_edit_file uses "edit_file" for permission lookups,
             // so its rules are configured under the edit_file entry.
