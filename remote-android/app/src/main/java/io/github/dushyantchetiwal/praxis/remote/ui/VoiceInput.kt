@@ -295,7 +295,7 @@ fun rememberVoiceInputController(
         }
     }
 
-    val toggleListening = {
+    val toggleListening: () -> Unit = {
         if (state.phase == VoiceInputPhase.Listening) {
             try {
                 recognizer?.stopListening()
