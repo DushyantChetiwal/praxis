@@ -104,6 +104,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -779,9 +781,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var shouldReconcileInitial = runInitial
             setDevices { copy(loading = true) }
             try {
-                val found = kotlinx.coroutines.coroutineScope {
+                val found = coroutineScope {
                     val userJob = if (store.login == null) {
-                        kotlinx.coroutines.async { fetchUser() }
+                        async { fetchUser() }
                     } else {
                         null
                     }
