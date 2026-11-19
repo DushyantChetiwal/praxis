@@ -1043,6 +1043,47 @@ impl BackgroundWakeInfo {
     }
 }
 
+/// Detects when a model fails to emit an end-of-turn stop token and begins
+/// role-playing a `BackgroundWakeInfo` user prompt inside assistant text.
+fn find_hallucinated_background_wake_offset(text: &str) -> Option<usize> {
+    const WAKE_HEADER: &str = "Praxis resumed this conversation because background work finished:";
+    let mut search_from = 0;
+    while let Some(relative_index) = text[search_from..].find(WAKE_HEADER) {
+        let header_index = search_from + relative_index;
+        search_from = header_index + WAKE_HEADER.len();
+
+        let prefix = &text[..header_index];
+        let marker_start = if let Some(stripped) = prefix.strip_suffix("user\n") {
+            if stripped.is_empty() || stripped.ends_with('\n') {
+                Some(
+                    stripped
+                        .len()
+                        .saturating_sub(usize::from(stripped.ends_with('\n'))),
+                )
+            } else {
+                None
+            }
+        } else if (prefix.is_empty() || prefix.ends_with('\n'))
+            && text[header_index + WAKE_HEADER.len()..].starts_with("\n- ")
+        {
+            Some(
+                prefix
+                    .len()
+                    .saturating_sub(usize::from(prefix.ends_with('\n'))),
+            )
+        } else {
+            None
+        };
+
+        if let Some(start) = marker_start
+            && text[..start].matches("```").count().is_multiple_of(2)
+        {
+            return Some(start);
+        }
+    }
+    None
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum CompactionInfo {
     Summary(SharedString),
@@ -4757,6 +4798,19 @@ impl Thread {
         Ok(())
     }
 
+    fn has_completed_tool_output_since(&self, message_ix: usize) -> bool {
+        self.messages.iter().skip(message_ix).any(|message| {
+            message.as_agent_message().is_some_and(|agent| {
+                agent.tool_results.values().any(|result| {
+                    result.content.as_slice()
+                        != [LanguageModelToolResultContent::Text(
+                            TOOL_CANCELED_MESSAGE.into(),
+                        )]
+                })
+            })
+        })
+    }
+
     fn remove_messages_from(&mut self, ix: usize) {
         let ix = ix.min(self.messages.len());
         for message in self.messages.drain(ix..) {
@@ -5175,7 +5229,21 @@ impl Thread {
                     return;
                 }
 
-                _ = this.update(cx, |this, cx| this.flush_pending_message(cx));
+                let is_refusal = matches!(
+                    &turn_result,
+                    Err(error)
+                        if error
+                            .downcast_ref::<CompletionError>()
+                            .is_some_and(|error| matches!(error, CompletionError::Refusal(_)))
+                );
+                if is_refusal {
+                    _ = this.update(cx, |this, cx| {
+                        this.pending_message = None;
+                        cx.notify();
+                    });
+                } else {
+                    _ = this.update(cx, |this, cx| this.flush_pending_message(cx));
+                }
 
                 let ended_normally = turn_result.is_ok();
                 match turn_result {
@@ -5188,8 +5256,14 @@ impl Thread {
                         match error.downcast::<CompletionError>() {
                             Ok(CompletionError::Refusal(_)) => {
                                 event_stream.send_stop(acp_v2::StopReason::Refusal);
-                                _ = this
-                                    .update(cx, |this, _| this.remove_messages_from(message_ix));
+                                _ = this.update(cx, |this, _| {
+                                    // Completed tool output makes this a mid-turn refusal rather
+                                    // than a refusal of the user's prompt, so keep completed steps
+                                    // in sync with AcpThread, workspace edits, and step_progress.
+                                    if !this.has_completed_tool_output_since(message_ix) {
+                                        this.remove_messages_from(message_ix);
+                                    }
+                                });
                             }
                             Ok(CompletionError::MaxTokens) => {
                                 event_stream.send_stop(acp_v2::StopReason::MaxTokens);
@@ -5420,6 +5494,7 @@ impl Thread {
                 let batch_result = this.update(cx, |this, cx| {
                     let mut batch_tool_results = Vec::new();
                     let mut batch_error = None;
+                    let mut stop_stream = false;
 
                     for event in batch {
                         log::trace!("Received completion event: {:?}", event);
@@ -5429,10 +5504,15 @@ impl Thread {
                                     event,
                                     event_stream,
                                     cancellation_rx.clone(),
+                                    &mut stop_stream,
                                     cx,
                                 ) {
                                     Ok(Some(task)) => batch_tool_results.push(task),
-                                    Ok(None) => {}
+                                    Ok(None) => {
+                                        if stop_stream {
+                                            break;
+                                        }
+                                    }
                                     Err(err) => {
                                         batch_error = Some(err);
                                         break;
@@ -5447,7 +5527,7 @@ impl Thread {
                     }
 
                     cx.notify();
-                    (batch_tool_results, batch_error)
+                    (batch_tool_results, batch_error, stop_stream)
                 })?;
 
                 tool_results.extend(batch_result.0);
@@ -5461,6 +5541,9 @@ impl Thread {
                         break;
                     }
                     error = Some(err.downcast()?);
+                    break;
+                }
+                if batch_result.2 {
                     break;
                 }
             }
@@ -6017,6 +6100,7 @@ impl Thread {
         event: LanguageModelCompletionEvent,
         event_stream: &ThreadEventStream,
         cancellation_rx: watch::Receiver<bool>,
+        stop_stream: &mut bool,
         cx: &mut Context<Self>,
     ) -> Result<Option<Task<(usize, LanguageModelToolResult)>>> {
         log::trace!("Handling streamed completion event: {:?}", event);
@@ -6027,7 +6111,11 @@ impl Thread {
                 self.flush_pending_message(cx);
                 self.pending_message = Some(AgentMessage::default());
             }
-            Text(new_text) => self.handle_text_event(new_text, event_stream),
+            Text(new_text) => {
+                if self.handle_text_event(new_text, event_stream) {
+                    *stop_stream = true;
+                }
+            }
             Thinking { text, signature } => {
                 self.handle_thinking_event(text, signature, event_stream)
             }
@@ -6095,14 +6183,39 @@ impl Thread {
         Ok(None)
     }
 
-    fn handle_text_event(&mut self, new_text: String, event_stream: &ThreadEventStream) {
-        event_stream.send_text(&new_text);
+    fn handle_text_event(&mut self, new_text: String, event_stream: &ThreadEventStream) -> bool {
         let message = self.pending_message();
+        let previous_len = match message.content.last() {
+            Some(AgentMessageContent::Text(text)) => text.len(),
+            _ => 0,
+        };
         if let Some(AgentMessageContent::Text(text)) = message.content.last_mut() {
             text.push_str(&new_text);
         } else {
-            message.content.push(AgentMessageContent::Text(new_text));
+            message
+                .content
+                .push(AgentMessageContent::Text(new_text.clone()));
         }
+        if let Some(AgentMessageContent::Text(text)) = message.content.last_mut()
+            && let Some(cutoff) = find_hallucinated_background_wake_offset(text)
+        {
+            text.truncate(cutoff);
+            if cutoff > previous_len {
+                let valid_delta = &new_text[..cutoff - previous_len];
+                if !valid_delta.is_empty() {
+                    event_stream.send_text(valid_delta);
+                }
+            }
+            if text.is_empty() {
+                message.content.pop();
+            }
+            log::warn!(
+                "Stopped turn after model emitted a simulated BackgroundWake header in assistant text"
+            );
+            return true;
+        }
+        event_stream.send_text(&new_text);
+        false
     }
 
     fn handle_thinking_event(
@@ -12732,6 +12845,104 @@ mod tests {
             matches!(&event, Some(Ok(ThreadEvent::AgentText(text))) if text == "CI passed."),
             "expected replayed agent text, got {event:?}"
         );
+    }
+
+    #[test]
+    fn test_find_hallucinated_background_wake_offset() {
+        let with_user_role = "Waiting for subagents to finish.\nuser\n\
+            Praxis resumed this conversation because background work finished:\n\
+            - Sub-agent \"R6-S1\" finished.";
+        assert_eq!(
+            find_hallucinated_background_wake_offset(with_user_role),
+            Some("Waiting for subagents to finish.".len())
+        );
+
+        let direct_header = "Yielding turn now.\n\
+            Praxis resumed this conversation because background work finished:\n\
+            - Background task 1 exited with code 0.";
+        assert_eq!(
+            find_hallucinated_background_wake_offset(direct_header),
+            Some("Yielding turn now.".len())
+        );
+
+        let start_of_block = "user\n\
+            Praxis resumed this conversation because background work finished:\n\
+            - Sub-agent \"R7-C1\" finished.";
+        assert_eq!(
+            find_hallucinated_background_wake_offset(start_of_block),
+            Some(0)
+        );
+
+        let inline_code = "Guard against `user\n\
+            Praxis resumed this conversation because background work finished:`";
+        assert_eq!(find_hallucinated_background_wake_offset(inline_code), None);
+
+        let fenced_code = "Example:\n```text\nuser\n\
+            Praxis resumed this conversation because background work finished:\n\
+            - Sub-agent \"R6-S1\" finished.\n```";
+        assert_eq!(find_hallucinated_background_wake_offset(fenced_code), None);
+    }
+
+    #[gpui::test]
+    async fn test_turn_stops_on_hallucinated_background_wake_and_arms_real_wake(
+        cx: &mut TestAppContext,
+    ) {
+        let (thread, _event_stream, fake) = setup_thread_for_test(cx).await;
+        let model = fake.model("fake");
+        let child_id = acp_v2::SessionId::new("child-subagent");
+
+        let events = thread.update(cx, |thread, cx| {
+            thread.set_model(model.clone(), cx);
+            thread.subagent_started_in_background(child_id);
+            thread
+                .send(ClientUserMessageId::new(), vec!["Launch subagents"], cx)
+                .unwrap()
+        });
+        cx.run_until_parked();
+
+        fake.send_last_event(
+            &model,
+            LanguageModelCompletionEvent::Text(
+                "Launched subagents; waiting for reports.\nuser\n\
+                 Praxis resumed this conversation because background work finished:\n\
+                 - Sub-agent \"Hallucinated\" finished."
+                    .into(),
+            ),
+        );
+        cx.run_until_parked();
+
+        let collected = events.collect::<Vec<_>>().await;
+        let streamed_text: String = collected
+            .iter()
+            .filter_map(|event| match event {
+                Ok(ThreadEvent::AgentText(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(streamed_text, "Launched subagents; waiting for reports.");
+        let saw_end_turn = collected
+            .iter()
+            .any(|event| matches!(event, Ok(ThreadEvent::Stop(acp_v2::StopReason::EndTurn))));
+        assert!(
+            saw_end_turn,
+            "expected clean EndTurn stop after truncating fake wake continuation"
+        );
+
+        thread.read_with(cx, |thread, _| {
+            assert!(
+                thread.background_wake_armed,
+                "real background subagents must still arm background_wake_armed"
+            );
+            let last_agent = thread
+                .messages
+                .last()
+                .and_then(|message| message.as_agent_message())
+                .expect("saved assistant message");
+            assert_eq!(
+                last_agent.to_markdown().trim(),
+                "Launched subagents; waiting for reports."
+            );
+        });
     }
 
     #[gpui::test]

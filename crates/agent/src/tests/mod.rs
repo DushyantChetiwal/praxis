@@ -4365,6 +4365,70 @@ async fn test_refusal(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_mid_turn_refusal_retains_tool_history_and_checklist(cx: &mut TestAppContext) {
+    let ThreadTest {
+        model,
+        fake,
+        thread,
+        ..
+    } = setup(cx, TestModel::Fake).await;
+
+    let events = thread
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["Run audit rounds"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    let checklist_input = json!({
+        "steps": [
+            {"step": "Run round 1", "status": "completed"},
+            {"step": "Run E2E suite", "status": "in_progress"}
+        ]
+    });
+    fake.send_last_event(
+        &model,
+        LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
+            id: "plan_1".into(),
+            name: crate::UpdatePlanTool::NAME.into(),
+            raw_input: checklist_input.to_string(),
+            input: language_model::LanguageModelToolUseInput::Json(checklist_input),
+            is_input_complete: true,
+            thought_signature: None,
+        }),
+    );
+    fake.end_last(&model);
+    cx.run_until_parked();
+
+    // On the follow-up completion within the same turn, stream partial text and then emit Refusal.
+    fake.send_last_text(&model, "Partial refused output");
+    cx.run_until_parked();
+    fake.send_last_event(
+        &model,
+        LanguageModelCompletionEvent::Stop(StopReason::Refusal(None)),
+    );
+    let events = events.collect::<Vec<_>>().await;
+    assert_eq!(stop_events(events), vec![acp_v2::StopReason::Refusal]);
+
+    thread.read_with(cx, |thread, _| {
+        let checklist = thread.agent_checklist();
+        assert_eq!(checklist.len(), 2);
+        assert_eq!(checklist[0].status, crate::PlanStepStatus::Completed);
+        assert_eq!(checklist[1].status, crate::PlanStepStatus::InProgress);
+
+        let markdown = thread.to_markdown();
+        assert!(
+            markdown.contains("Run audit rounds") && markdown.contains("update_plan"),
+            "completed tool history must stay aligned with step_progress on mid-turn refusal: {markdown}"
+        );
+        assert!(
+            !markdown.contains("Partial refused output"),
+            "partial output from the refused request itself should be discarded: {markdown}"
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_truncate_first_message(cx: &mut TestAppContext) {
     let ThreadTest {
         model,
