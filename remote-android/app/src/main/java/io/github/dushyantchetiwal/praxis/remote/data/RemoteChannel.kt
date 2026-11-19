@@ -11,6 +11,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -739,8 +742,78 @@ class Link(
  */
 class GistRead(val body: String?, val gist: JSONObject?, val device: Device?)
 
+/**
+ * Remembers each gist's `praxis-remote.json` content keyed by its immutable
+ * `raw_url` (which embeds the blob's revision hash), so unchanged gists in
+ * `GET /gists` require zero per-gist HTTP round-trips across cold launches.
+ */
+interface GistMetaCache {
+    fun get(gistId: String, rawUrl: String): String?
+    fun put(gistId: String, rawUrl: String, metaJson: String)
+    fun retainOnly(gistIds: Set<String>)
+}
+
+internal suspend fun discoverDevices(
+    known: Collection<String> = emptyList(),
+    metaCache: GistMetaCache? = null,
+    listPage: suspend (Int) -> JSONArray?,
+    fetchRaw: suspend (String) -> String,
+    readGist: suspend (String) -> Device?,
+): List<Device> {
+    val listed = LinkedHashMap<String, String?>()
+    for (page in 1..GIST_PAGES) {
+        val list = listPage(page) ?: break
+        for (gist in list.objects()) {
+            val metaFile = gist.obj("files")?.obj(META_FILE) ?: continue
+            val id = gist.str("id")?.takeIf { it.isNotBlank() } ?: continue
+            listed[id] = metaFile.str("raw_url")?.takeIf { it.isNotBlank() }
+        }
+        if (list.length() < GIST_PAGE_SIZE) break
+    }
+    for (id in known) {
+        if (id.isNotBlank() && id !in listed) {
+            listed[id] = null
+        }
+    }
+    metaCache?.retainOnly(listed.keys)
+    val found = coroutineScope {
+        listed.entries.map { (id, rawUrl) ->
+            async {
+                if (rawUrl != null) {
+                    val cached = metaCache?.get(id, rawUrl)
+                    if (cached != null) {
+                        return@async parseMeta(cached, id)
+                    }
+                    try {
+                        val metaJson = fetchRaw(rawUrl)
+                        if (metaJson.isNotBlank()) {
+                            metaCache?.put(id, rawUrl, metaJson)
+                        }
+                        return@async parseMeta(metaJson, id)
+                    } catch (e: ApiException) {
+                        if (e.kind == ErrorKind.NotFound) return@async null
+                        if (e.kind == ErrorKind.Auth || e.kind == ErrorKind.RateLimit) throw e
+                        // Fall back to GET /gists/{id} if raw_url CDN fails.
+                    }
+                }
+                try {
+                    readGist(id)
+                } catch (e: ApiException) {
+                    // Deleted since it was listed.
+                    if (e.kind != ErrorKind.NotFound) throw e
+                    null
+                }
+            }
+        }.awaitAll().filterNotNull()
+    }
+    return found.groupBy { it.channel }.values.map { copies -> copies.maxBy { it.lastSeen ?: 0L } }
+}
+
 /** Finds computers among the user's gists and reads their files. */
-class Gists(private val gh: GitHubClient) {
+class Gists(
+    private val gh: GitHubClient,
+    private val metaCache: GistMetaCache? = null,
+) {
     suspend fun read(gistId: String): GistRead {
         val reply = gh.call("GET", "/gists/$gistId", conditional = true)
         val gist = reply.obj()
@@ -761,27 +834,15 @@ class Gists(private val gh: GitHubClient) {
      * Every computer in the user's gists, one per channel (the most recently
      * seen). [known] gist ids are read too, in case they are past the pages listed.
      */
-    suspend fun discover(known: Collection<String> = emptyList()): List<Device> {
-        val ids = LinkedHashSet<String>()
-        for (page in 1..GIST_PAGES) {
-            val list = gh.call("GET", "/gists?per_page=$GIST_PAGE_SIZE&page=$page", conditional = true).array() ?: break
-            for (gist in list.objects()) {
-                if (gist.obj("files")?.has(META_FILE) == true) gist.str("id")?.let(ids::add)
-            }
-            if (list.length() < GIST_PAGE_SIZE) break
-        }
-        ids += known
-        val found = mutableListOf<Device>()
-        for (id in ids) {
-            try {
-                read(id).device?.let(found::add)
-            } catch (e: ApiException) {
-                // Deleted since it was listed.
-                if (e.kind != ErrorKind.NotFound) throw e
-            }
-        }
-        return found.groupBy { it.channel }.values.map { copies -> copies.maxBy { it.lastSeen ?: 0L } }
-    }
+    suspend fun discover(known: Collection<String> = emptyList()): List<Device> = discoverDevices(
+        known = known,
+        metaCache = metaCache,
+        listPage = { page ->
+            gh.call("GET", "/gists?per_page=$GIST_PAGE_SIZE&page=$page", conditional = true).array()
+        },
+        fetchRaw = gh::fetchRaw,
+        readGist = { id -> read(id).device },
+    )
 
     /**
      * This phone's snapshot from `state.json`, or null when the computer has

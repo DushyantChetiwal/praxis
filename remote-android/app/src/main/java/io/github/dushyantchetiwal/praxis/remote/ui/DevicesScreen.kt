@@ -73,8 +73,8 @@ fun DevicesScreen(state: AppState, ui: DeviceUi, vm: MainViewModel, snackbar: Sn
         snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
         PullToRefreshBox(
-            isRefreshing = devices.loading && devices.loaded,
-            onRefresh = { vm.loadDevices() },
+            isRefreshing = devices.loading && (devices.loaded || devices.devices.isNotEmpty()),
+            onRefresh = { vm.loadDevices(force = true) },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
@@ -89,24 +89,26 @@ fun DevicesScreen(state: AppState, ui: DeviceUi, vm: MainViewModel, snackbar: Sn
                 }
                 devices.error?.let { error -> item(key = "error") { ErrorText(error) } }
                 when {
-                    !devices.loaded -> item(key = "loading") { LoadingRow(stringResource(R.string.devices_loading)) }
-                    devices.devices.isEmpty() -> item(key = "empty") {
-                        EmptyState(
-                            title = stringResource(R.string.devices_empty_title),
-                            body = state.login?.let { stringResource(R.string.devices_empty_body, it) }
-                                ?: stringResource(R.string.devices_empty_body_generic),
-                            icon = Icons.Outlined.Computer,
-                        ) {
-                            OutlinedButton(onClick = { vm.loadDevices() }) { Text(stringResource(R.string.action_refresh)) }
-                        }
-                    }
-                    else -> items(devices.devices, key = { it.channel }) { device ->
+                    devices.devices.isNotEmpty() -> items(devices.devices, key = { it.channel }) { device ->
                         val pairing = when (device.channel) {
                             in devices.paired -> Pairing.Paired
                             in devices.unpairedByComputer -> Pairing.RemovedByComputer
                             else -> Pairing.NotPaired
                         }
                         DeviceCard(device, ui.isOnline(device, now), pairing, now) { vm.openDevice(device) }
+                    }
+                    !devices.loaded || devices.loading -> item(key = "loading") {
+                        LoadingRow(stringResource(R.string.devices_loading))
+                    }
+                    else -> item(key = "empty") {
+                        EmptyState(
+                            title = stringResource(R.string.devices_empty_title),
+                            body = state.login?.let { stringResource(R.string.devices_empty_body, it) }
+                                ?: stringResource(R.string.devices_empty_body_generic),
+                            icon = Icons.Outlined.Computer,
+                        ) {
+                            OutlinedButton(onClick = { vm.loadDevices(force = true) }) { Text(stringResource(R.string.action_refresh)) }
+                        }
                     }
                 }
             }
