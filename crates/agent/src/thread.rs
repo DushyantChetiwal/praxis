@@ -1055,14 +1055,22 @@ fn find_hallucinated_background_wake_offset(text: &str) -> Option<usize> {
         let prefix = &text[..header_index];
         let marker_start = if let Some(stripped) = prefix.strip_suffix("user\n") {
             if stripped.is_empty() || stripped.ends_with('\n') {
-                Some(stripped.len().saturating_sub(usize::from(stripped.ends_with('\n'))))
+                Some(
+                    stripped
+                        .len()
+                        .saturating_sub(usize::from(stripped.ends_with('\n'))),
+                )
             } else {
                 None
             }
         } else if (prefix.is_empty() || prefix.ends_with('\n'))
             && text[header_index + WAKE_HEADER.len()..].starts_with("\n- ")
         {
-            Some(prefix.len().saturating_sub(usize::from(prefix.ends_with('\n'))))
+            Some(
+                prefix
+                    .len()
+                    .saturating_sub(usize::from(prefix.ends_with('\n'))),
+            )
         } else {
             None
         };
