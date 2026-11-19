@@ -10,7 +10,7 @@ plugins {
 fun env(name: String): String? = System.getenv(name)?.trim()?.takeIf { it.isNotEmpty() }
 
 val remoteVersionCode = env("PRAXIS_REMOTE_VERSION_CODE")?.toIntOrNull() ?: 1
-val remoteVersionName = env("PRAXIS_REMOTE_VERSION_NAME") ?: "0.1.0-dev"
+val remoteVersionName = env("PRAXIS_REMOTE_VERSION_NAME") ?: "2.0.0-dev"
 val githubClientId = env("PRAXIS_REMOTE_CLIENT_ID") ?: ""
 val keystorePath = env("ANDROID_KEYSTORE_PATH")
 
