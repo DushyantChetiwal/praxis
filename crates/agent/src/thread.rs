@@ -1076,7 +1076,7 @@ fn find_hallucinated_background_wake_offset(text: &str) -> Option<usize> {
         };
 
         if let Some(start) = marker_start
-            && text[..start].matches("```").count() % 2 == 0
+            && text[..start].matches("```").count().is_multiple_of(2)
         {
             return Some(start);
         }
