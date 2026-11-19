@@ -13,7 +13,7 @@ import java.util.concurrent.ConcurrentHashMap
  * phone's id, where each computer's gist is, selections, update checks) is
  * not secret.
  */
-class Store(context: Context) {
+class Store(context: Context) : GistMetaCache {
     private val appContext = context.applicationContext
     private val prefs: SharedPreferences =
         appContext.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
@@ -175,18 +175,64 @@ class Store(context: Context) {
 
     fun gistFor(channel: String): String? = prefs.getString(KEY_GIST_PREFIX + channel, null)
 
-    fun rememberComputer(channel: String, gistId: String, name: String) {
-        if (gistFor(channel) == gistId && prefs.getString(KEY_NAME_PREFIX + channel, null) == name) return
+    fun rememberComputer(device: Device) {
+        val lastSeen = device.lastSeen ?: 0L
+        val startedAt = device.startedAt ?: 0L
+        if (gistFor(device.channel) == device.gistId &&
+            prefs.getString(KEY_NAME_PREFIX + device.channel, null) == device.name &&
+            prefs.getLong(KEY_LAST_SEEN_PREFIX + device.channel, 0L) == lastSeen &&
+            prefs.getLong(KEY_STARTED_AT_PREFIX + device.channel, 0L) == startedAt &&
+            prefs.getBoolean(KEY_NOSTR_PREFIX + device.channel, false) == device.nostr
+        ) return
         prefs.edit()
-            .putString(KEY_GIST_PREFIX + channel, gistId)
-            .putString(KEY_NAME_PREFIX + channel, name)
+            .putString(KEY_GIST_PREFIX + device.channel, device.gistId)
+            .putString(KEY_NAME_PREFIX + device.channel, device.name)
+            .putLong(KEY_LAST_SEEN_PREFIX + device.channel, lastSeen)
+            .putLong(KEY_STARTED_AT_PREFIX + device.channel, startedAt)
+            .putBoolean(KEY_NOSTR_PREFIX + device.channel, device.nostr)
             .apply()
     }
 
     fun cachedComputers(): List<Device> = pairedChannels().mapNotNull { channel ->
         val gist = gistFor(channel) ?: return@mapNotNull null
-        Device(channel, gist, prefs.getString(KEY_NAME_PREFIX + channel, null) ?: "Paired computer",
-            null, null, emptyList(), cached = true)
+        Device(
+            channel = channel,
+            gistId = gist,
+            name = prefs.getString(KEY_NAME_PREFIX + channel, null) ?: "Paired computer",
+            startedAt = prefs.getLong(KEY_STARTED_AT_PREFIX + channel, 0L).takeIf { it > 0L },
+            lastSeen = prefs.getLong(KEY_LAST_SEEN_PREFIX + channel, 0L).takeIf { it > 0L },
+            phones = emptyList(),
+            nostr = prefs.getBoolean(KEY_NOSTR_PREFIX + channel, false),
+            cached = true,
+        )
+    }
+
+    override fun get(gistId: String, rawUrl: String): String? {
+        if (prefs.getString(KEY_GIST_META_URL_PREFIX + gistId, null) != rawUrl) return null
+        return prefs.getString(KEY_GIST_META_JSON_PREFIX + gistId, null)
+    }
+
+    override fun put(gistId: String, rawUrl: String, metaJson: String) {
+        if (prefs.getString(KEY_GIST_META_URL_PREFIX + gistId, null) == rawUrl &&
+            prefs.getString(KEY_GIST_META_JSON_PREFIX + gistId, null) == metaJson
+        ) return
+        prefs.edit()
+            .putString(KEY_GIST_META_URL_PREFIX + gistId, rawUrl)
+            .putString(KEY_GIST_META_JSON_PREFIX + gistId, metaJson)
+            .apply()
+    }
+
+    override fun retainOnly(gistIds: Set<String>) {
+        val staleKeys = prefs.all.keys.filter { key ->
+            val id = when {
+                key.startsWith(KEY_GIST_META_URL_PREFIX) -> key.removePrefix(KEY_GIST_META_URL_PREFIX)
+                key.startsWith(KEY_GIST_META_JSON_PREFIX) -> key.removePrefix(KEY_GIST_META_JSON_PREFIX)
+                else -> null
+            }
+            id != null && id !in gistIds
+        }
+        if (staleKeys.isEmpty()) return
+        prefs.edit().apply { staleKeys.forEach(::remove) }.apply()
     }
 
     /** The computer opened last, by channel. */
@@ -246,7 +292,17 @@ class Store(context: Context) {
         refreshToken = null
         keys.clear()
         secure?.edit()?.clear()?.apply()
-        val accountPrefixes = listOf(KEY_GIST_PREFIX, KEY_NAME_PREFIX, KEY_PAIRED_AT_PREFIX, KEY_WINDOW_PREFIX)
+        val accountPrefixes = listOf(
+            KEY_GIST_PREFIX,
+            KEY_NAME_PREFIX,
+            KEY_LAST_SEEN_PREFIX,
+            KEY_STARTED_AT_PREFIX,
+            KEY_NOSTR_PREFIX,
+            KEY_GIST_META_URL_PREFIX,
+            KEY_GIST_META_JSON_PREFIX,
+            KEY_PAIRED_AT_PREFIX,
+            KEY_WINDOW_PREFIX,
+        )
         prefs.edit().apply {
             remove(KEY_TOKEN_EXPIRES_AT)
             remove(KEY_TOKEN_CLIENT_ID)
@@ -272,6 +328,11 @@ class Store(context: Context) {
         const val KEY_PHONE_ID = "phone_id"
         const val KEY_GIST_PREFIX = "gist."
         const val KEY_NAME_PREFIX = "name."
+        const val KEY_LAST_SEEN_PREFIX = "last_seen."
+        const val KEY_STARTED_AT_PREFIX = "started_at."
+        const val KEY_NOSTR_PREFIX = "nostr."
+        const val KEY_GIST_META_URL_PREFIX = "gist_meta_url."
+        const val KEY_GIST_META_JSON_PREFIX = "gist_meta_json."
         const val KEY_PAIRED_AT_PREFIX = "paired_at."
         const val KEY_SAVED_CHANNEL = "saved_channel"
         const val KEY_WINDOW_PREFIX = "window."

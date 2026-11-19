@@ -104,6 +104,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -176,7 +178,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         onUnauthorized = { viewModelScope.launch(Dispatchers.Main) { onUnauthorized() } },
     )
     private val channel = RemoteChannel(application, gh) { store.login }
-    private val gists = Gists(gh)
+    private val gists = Gists(gh, store)
     private val pairer = Pairer(application, gh) { store.login }
     private val phoneId: String by lazy { store.phoneId }
     private var detailCache = newDetailCache()
@@ -420,6 +422,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var appliedGist: String? = null
     private var signInJob: Job? = null
     private var devicesJob: Job? = null
+    private var loadDevicesJob: Job? = null
+    private var loadDevicesInitialPending = false
     private var pairJob: Job? = null
     private var outboxSeq = 0
     private val watcher = Watcher()
@@ -610,6 +614,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pollJob = null
         devicesJob?.cancel()
         devicesJob = null
+        loadDevicesJob?.cancel()
+        loadDevicesJob = null
+        loadDevicesInitialPending = false
         syncRunNotification()
     }
 
@@ -711,6 +718,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun signOut(explicit: Boolean = true) {
         signInJob?.cancel()
+        loadDevicesJob?.cancel()
+        loadDevicesJob = null
+        loadDevicesInitialPending = false
         pairJob?.cancel()
         pairJob = null
         stopDevice()
@@ -756,16 +766,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _app.update { it.copy(devices = it.devices.block()) }
     }
 
-    fun loadDevices(initial: Boolean = false) {
+    fun loadDevices(initial: Boolean = false, force: Boolean = false) {
         if (store.token == null) return
-        viewModelScope.launch {
+        if (loadDevicesJob?.isActive == true) {
+            if (!force) {
+                if (initial) loadDevicesInitialPending = true
+                return
+            }
+            loadDevicesJob?.cancel()
+        }
+        val runInitial = initial || loadDevicesInitialPending
+        loadDevicesInitialPending = false
+        loadDevicesJob = viewModelScope.launch {
+            var shouldReconcileInitial = runInitial
             setDevices { copy(loading = true) }
             try {
-                // Comments are only trusted when written by this account, so learn it first.
-                if (store.login == null) fetchUser()
-                val found = gists.discover(known = store.pairedChannels().mapNotNull(store::gistFor))
+                val found = coroutineScope {
+                    val userJob = if (store.login == null) {
+                        async { fetchUser() }
+                    } else {
+                        null
+                    }
+                    val discovered = gists.discover(known = store.pairedChannels().mapNotNull(store::gistFor))
+                    userJob?.await()
+                    discovered
+                }
                 if (store.token == null) return@launch
-                found.forEach { store.rememberComputer(it.channel, it.gistId, it.name) }
+                found.forEach(store::rememberComputer)
                 setDevices { copy(devices = found, error = null) }
                 _app.value.pairing.device?.let { pairing ->
                     val fresh = found.find { it.channel == pairing.channel }
@@ -773,7 +800,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 found.forEach(::checkPairing)
                 setDevices { copy(paired = found.filter(::isPaired).map { it.channel }.toSet()) }
-                reconcileDevice(initial)
+                shouldReconcileInitial = shouldReconcileInitial || loadDevicesInitialPending
+                loadDevicesInitialPending = false
+                reconcileDevice(shouldReconcileInitial)
             } catch (e: ApiException) {
                 if (e.kind != ErrorKind.Auth) {
                     val cached = store.cachedComputers()
@@ -782,7 +811,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         paired = paired + cached.map { it.channel },
                         error = str(R.string.devices_error, e.message.orEmpty()),
                     ) }
-                    reconcileDevice(initial)
+                    shouldReconcileInitial = shouldReconcileInitial || loadDevicesInitialPending
+                    loadDevicesInitialPending = false
+                    reconcileDevice(shouldReconcileInitial)
                 }
             } finally {
                 setDevices { copy(loading = false, loaded = true) }
@@ -922,7 +953,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             val failure = when (result) {
                 is PairResult.Approved -> {
-                    withContext(Dispatchers.IO) { store.savePairing(device.channel, result.key, now()) }
+                    withContext(Dispatchers.IO) {
+                        store.savePairing(device.channel, result.key, now())
+                        store.rememberComputer(device)
+                    }
                     setDevices {
                         copy(paired = paired + device.channel, unpairedByComputer = unpairedByComputer - device.channel)
                     }
