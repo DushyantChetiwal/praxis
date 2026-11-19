@@ -73,7 +73,7 @@ jobs:
     timeout-minutes: 45
     env:
       PRAXIS_REMOTE_VERSION_CODE: ${{ github.run_number }}
-      PRAXIS_REMOTE_VERSION_NAME: 0.1.${{ github.run_number }}
+      PRAXIS_REMOTE_VERSION_NAME: 2.0.${{ github.run_number }}
       PRAXIS_REMOTE_CLIENT_ID: ${{ vars.PRAXIS_REMOTE_CLIENT_ID }}
     steps:
       - name: Check out the source
