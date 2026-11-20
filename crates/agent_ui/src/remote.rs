@@ -3395,7 +3395,7 @@ fn worktree_create(
             .repositories()
             .values()
             .map(|repo| repo.read(cx).snapshot())
-            .find(|snapshot| snapshot.is_main_worktree())
+            .find(|snapshot| !snapshot.is_linked_worktree())
             .or_else(|| {
                 git_store
                     .repositories()
@@ -3454,7 +3454,7 @@ fn worktree_merge(
             .repositories()
             .values()
             .map(|repo| repo.read(cx).snapshot())
-            .find(|snapshot| snapshot.is_main_worktree())
+            .find(|snapshot| !snapshot.is_linked_worktree())
             .or_else(|| {
                 git_store
                     .repositories()

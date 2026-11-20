@@ -985,7 +985,7 @@ pub fn list_workspace_worktrees(workspace: &Workspace, cx: &App) -> Vec<LinkedWo
                 path,
                 name,
                 branch,
-                is_main: snapshot.is_main_worktree(),
+                is_main: !snapshot.is_linked_worktree(),
             }
         })
         .collect();

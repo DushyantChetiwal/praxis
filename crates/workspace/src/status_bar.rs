@@ -387,7 +387,7 @@ impl StatusBar {
         self.left_items
             .iter()
             .chain(&self.right_items)
-            .filter(|item| item.item_type() == TypeId::of::<T>())
+            .filter(|item| item.to_any().downcast::<T>().is_ok())
             .any(|item| !exclusive || item.show_over_exclusive_item(cx))
     }
 
