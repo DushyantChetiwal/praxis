@@ -77,6 +77,92 @@ impl ConfigOptionsView {
         self.config_options.is_read_only()
     }
 
+    pub fn has_selectable_category(&self, category: acp::SessionConfigOptionCategory) -> bool {
+        !self.is_read_only()
+            && self
+                .first_config_option_id_matching(category, |option| {
+                    matches!(&option.kind, acp::SessionConfigKind::Select(_))
+                })
+                .is_some()
+    }
+
+    pub fn selected_category_option(
+        &self,
+        category: acp::SessionConfigOptionCategory,
+    ) -> Option<(String, String)> {
+        let config_id = self.first_config_option_id_matching(category, |option| {
+            matches!(&option.kind, acp::SessionConfigKind::Select(_))
+        })?;
+        let current = get_current_select_value(&self.config_options, &config_id)?;
+        let name = extract_options(&self.config_options, &config_id)
+            .into_iter()
+            .find(|option| option.value == current)
+            .map(|option| option.name)
+            .unwrap_or_else(|| current.0.to_string());
+        Some((current.0.to_string(), name))
+    }
+
+    pub fn category_model_options(
+        &self,
+        category: acp::SessionConfigOptionCategory,
+    ) -> Option<(String, Vec<(Option<String>, acp_thread::AgentModelInfo)>)> {
+        let config_id = self.first_config_option_id_matching(category, |option| {
+            matches!(&option.kind, acp::SessionConfigKind::Select(_))
+        })?;
+        let current = get_current_select_value(&self.config_options, &config_id)?
+            .0
+            .to_string();
+        let options = extract_options(&self.config_options, &config_id)
+            .into_iter()
+            .map(|option| {
+                (
+                    option.group,
+                    acp_thread::AgentModelInfo {
+                        id: acp_thread::AgentModelId::from(option.value.0.to_string()),
+                        name: option.name.into(),
+                        description: option.description.map(Into::into),
+                        icon: None,
+                        is_latest: false,
+                        cost: None,
+                        disabled: None,
+                    },
+                )
+            })
+            .collect();
+        Some((current, options))
+    }
+
+    pub fn select_category_option(
+        &self,
+        category: acp::SessionConfigOptionCategory,
+        value_id: &str,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<()>> {
+        let Some(config_id) = self.first_config_option_id_matching(category, |option| {
+            matches!(&option.kind, acp::SessionConfigKind::Select(_))
+        }) else {
+            return Task::ready(Err(anyhow::anyhow!(
+                "This agent does not support model selection"
+            )));
+        };
+        if !extract_options(&self.config_options, &config_id)
+            .iter()
+            .any(|option| option.value.0.as_ref() == value_id)
+        {
+            return Task::ready(Err(anyhow::anyhow!(
+                "That model is no longer available. Refresh the model list."
+            )));
+        }
+        set_config_option_and_default(
+            self.config_options.clone(),
+            self.agent_server.clone(),
+            config_id,
+            acp::SessionConfigOptionValue::id(acp::SessionConfigValueId::new(value_id.to_string())),
+            self.fs.clone(),
+            cx,
+        )
+    }
+
     pub fn toggle_category_picker(
         &mut self,
         category: acp::SessionConfigOptionCategory,

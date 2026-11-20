@@ -839,11 +839,6 @@ fn handle_paired(
             return match with_workspace(window, cx, |workspace, _, cx| {
                 required(args, "session_id")?;
                 let view = requested_root_view(workspace, args, cx)?;
-                let thread = view.read(cx).thread.read(cx);
-                let selector = thread
-                    .connection()
-                    .model_selector(thread.session_id())
-                    .context("This agent does not support model selection")?;
                 let model = if op == "model" {
                     Some(required(args, "model")?.to_string())
                 } else {
@@ -854,7 +849,36 @@ fn handle_paired(
                     .and_then(Value::as_u64)
                     .and_then(|offset| usize::try_from(offset).ok())
                     .unwrap_or(0);
-                Ok(request_models(selector, model, offset, cx))
+                let query = args
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|query| !query.is_empty())
+                    .map(ToOwned::to_owned);
+                let selector = {
+                    let thread = view.read(cx).thread.read(cx);
+                    thread.connection().model_selector(thread.session_id())
+                };
+                if let Some(selector) = selector {
+                    return Ok(request_models(selector, model, offset, query, cx));
+                }
+                let config_view = view
+                    .read(cx)
+                    .config_options_view
+                    .clone()
+                    .filter(|config_view| {
+                        config_view
+                            .read(cx)
+                            .has_selectable_category(acp::SessionConfigOptionCategory::Model)
+                    })
+                    .context("This agent does not support model selection")?;
+                Ok(request_config_option_models(
+                    config_view,
+                    model,
+                    offset,
+                    query,
+                    cx,
+                ))
             }) {
                 Ok(task) => task,
                 Err(error) => Task::ready(Err(error)),
@@ -1253,10 +1277,61 @@ fn requested_root_view(
     Ok(view)
 }
 
+fn deduplicate_and_filter_models(
+    models: Vec<(Option<String>, acp_thread::AgentModelInfo)>,
+    query: Option<&str>,
+) -> Vec<(Option<String>, acp_thread::AgentModelInfo)> {
+    let mut provider_groups = std::collections::HashMap::<String, String>::new();
+    for (group, model) in &models {
+        if let Some(group_name) = group.as_deref()
+            && !group_name.eq_ignore_ascii_case("Recommended")
+        {
+            provider_groups
+                .entry(model.id.as_str().to_string())
+                .or_insert_with(|| group_name.to_string());
+        }
+    }
+
+    let mut seen = HashSet::new();
+    let needle = query
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+    let mut filtered = Vec::with_capacity(models.len());
+
+    for (group, model) in models {
+        if !seen.insert(model.id.as_str().to_string()) {
+            continue;
+        }
+        let merged_group = match (group, provider_groups.get(model.id.as_str())) {
+            (Some(group_name), Some(provider))
+                if group_name.eq_ignore_ascii_case("Recommended")
+                    && !provider.eq_ignore_ascii_case("Recommended") =>
+            {
+                Some(format!("{group_name} · {provider}"))
+            }
+            (group_name, _) => group_name,
+        };
+        if let Some(needle) = needle.as_deref() {
+            let matches = model.name.as_ref().to_lowercase().contains(needle)
+                || model.id.as_str().to_lowercase().contains(needle)
+                || merged_group
+                    .as_deref()
+                    .is_some_and(|group_name| group_name.to_lowercase().contains(needle));
+            if !matches {
+                continue;
+            }
+        }
+        filtered.push((merged_group, model));
+    }
+    filtered
+}
+
 fn request_models(
     selector: std::rc::Rc<dyn acp_thread::AgentModelSelector>,
     requested: Option<String>,
     offset: usize,
+    query: Option<String>,
     cx: &mut App,
 ) -> Task<Result<Value>> {
     let models = selector.list_models(cx);
@@ -1287,7 +1362,37 @@ fn request_models(
                 .await?;
         }
         let selected = cx.update(|cx| selector.selected_model(cx)).await?;
+        let models = deduplicate_and_filter_models(models, query.as_deref());
         model_page(models, selected.id.as_str(), offset)
+    })
+}
+
+fn request_config_option_models(
+    config_view: Entity<crate::config_options::ConfigOptionsView>,
+    requested: Option<String>,
+    offset: usize,
+    query: Option<String>,
+    cx: &mut App,
+) -> Task<Result<Value>> {
+    cx.spawn(async move |cx| {
+        if let Some(requested) = requested {
+            cx.update(|cx| {
+                config_view.read(cx).select_category_option(
+                    acp::SessionConfigOptionCategory::Model,
+                    &requested,
+                    cx,
+                )
+            })
+            .await?;
+        }
+        let (selected, models) = cx.update(|cx| {
+            config_view
+                .read(cx)
+                .category_model_options(acp::SessionConfigOptionCategory::Model)
+                .context("This agent does not support model selection")
+        })?;
+        let models = deduplicate_and_filter_models(models, query.as_deref());
+        model_page(models, &selected, offset)
     })
 }
 
@@ -1456,12 +1561,41 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
     let questions = questions::headers(&question_threads(conversation_view.read(cx), cx), cx);
     let question_count = questions.len();
     let questions: Vec<_> = questions.into_iter().take(8).collect();
-    let model_name = view.model_selector.as_ref().and_then(|selector| {
-        selector
-            .read(cx)
-            .active_model(cx)
-            .map(|model| model.name.to_string())
-    });
+    let native_thread = view.as_native_thread(cx);
+    let (model_id, model_name) = native_thread
+        .as_ref()
+        .and_then(|native| {
+            let model = native.read(cx).model()?;
+            Some((
+                format!("{}/{}", model.provider_id().0, model.id().0),
+                model.name().0.to_string(),
+            ))
+        })
+        .or_else(|| {
+            let selector = view.model_selector.as_ref()?;
+            let model = selector.read(cx).active_model(cx)?;
+            Some((model.id.to_string(), model.name.to_string()))
+        })
+        .or_else(|| {
+            view.config_options_view
+                .as_ref()?
+                .read(cx)
+                .selected_category_option(acp::SessionConfigOptionCategory::Model)
+        })
+        .map_or((None, None), |(id, name)| (Some(id), Some(name)));
+    let has_model_selector = thread
+        .connection()
+        .model_selector(thread.session_id())
+        .is_some();
+    let has_config_model = view
+        .config_options_view
+        .as_ref()
+        .is_some_and(|config_view| {
+            config_view
+                .read(cx)
+                .has_selectable_category(acp::SessionConfigOptionCategory::Model)
+        });
+    let model_selection = has_model_selector || has_config_model;
     let error = view
         .thread_error_description(cx)
         .map(|(kind, message)| {
@@ -1479,7 +1613,6 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
                 "message": status.last_error,
             })
         });
-    let native_thread = view.as_native_thread(cx);
     let plan = plan_summary(thread);
     Some(json!({
         "session_id": thread.session_id().0.as_ref(),
@@ -1488,9 +1621,9 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
         "entries": thread.entries().len(),
         "queued": view.message_queue.len(),
         "mode": mode,
-        "model": view.current_model_id(cx),
+        "model": model_id,
         "model_name": model_name,
-        "model_selection": thread.connection().model_selector(thread.session_id()).is_some(),
+        "model_selection": model_selection,
         "send_now": true,
         "steering": view.as_native_thread(cx).is_some(),
         "queue_management": true,
@@ -3596,6 +3729,49 @@ mod tests {
         let last = model_page(models, "provider/model/0", 200).expect("last page");
         assert_eq!(last["available"].as_array().expect("models").len(), 1);
         assert_eq!(last["next_offset"], Value::Null);
+    }
+
+    #[test]
+    fn model_list_deduplicates_recommended_duplicates_and_filters_queries() {
+        let neon = acp_thread::AgentModelInfo {
+            id: acp_thread::AgentModelId::new("google/gemini-4-neon"),
+            name: "Gemini 4 Neon".into(),
+            description: None,
+            icon: None,
+            is_latest: true,
+            cost: None,
+            disabled: None,
+        };
+        let sonnet = acp_thread::AgentModelInfo {
+            id: acp_thread::AgentModelId::new("openrouter/anthropic/claude-sonnet-4"),
+            name: "Claude Sonnet 4".into(),
+            description: None,
+            icon: None,
+            is_latest: false,
+            cost: None,
+            disabled: None,
+        };
+        let raw = vec![
+            (Some("Recommended".to_string()), neon.clone()),
+            (Some("Google".to_string()), neon),
+            (Some("OpenRouter".to_string()), sonnet),
+        ];
+
+        let deduplicated = deduplicate_and_filter_models(raw.clone(), None);
+        assert_eq!(deduplicated.len(), 2);
+        assert_eq!(deduplicated[0].1.id.as_str(), "google/gemini-4-neon");
+        assert_eq!(deduplicated[0].0.as_deref(), Some("Recommended · Google"));
+
+        let by_provider = deduplicate_and_filter_models(raw.clone(), Some("google"));
+        assert_eq!(by_provider.len(), 1);
+        assert_eq!(by_provider[0].1.id.as_str(), "google/gemini-4-neon");
+
+        let by_id = deduplicate_and_filter_models(raw, Some("sonnet"));
+        assert_eq!(by_id.len(), 1);
+        assert_eq!(
+            by_id[0].1.id.as_str(),
+            "openrouter/anthropic/claude-sonnet-4"
+        );
     }
 
     #[test]

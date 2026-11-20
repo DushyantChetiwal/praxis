@@ -262,6 +262,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val localStateCache = LocalStateCache(application)
     private var suggestionsJob: Job? = null
     private var planJob: Job? = null
+    private var modelsJob: Job? = null
     private val imageDrafts = mutableStateMapOf<String, List<PromptImage>>()
     private fun imageDraftKey() = "${viewKey()}:${d.currentWindow()?.thread?.sessionId}"
     val composerImages: List<PromptImage> get() = imageDrafts[imageDraftKey()].orEmpty()
@@ -1022,6 +1023,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         suggestionsJob = null
         planJob?.cancel()
         planJob = null
+        modelsJob?.cancel()
+        modelsJob = null
         attaching = null
         generation++
         resetWatcher()
@@ -1056,6 +1059,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 threadKnown = false,
                 threadError = null,
                 modeOverride = null,
+                modelOverride = null,
                 models = ModelsState(),
                 folderBrowser = FolderBrowserState(),
                 queue = QueueState(),
@@ -1404,9 +1408,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (currentThread?.sessionId != previousThread?.sessionId) {
             invalidateQuestionRequests()
-            edit { copy(models = ModelsState(), queue = QueueState(), question = QuestionState(), questionList = QuestionListState(), answeredQuestions = emptySet()) }
-        } else if (currentThread?.model != previousThread?.model && !d.models.changing) {
-            edit { copy(models = models.copy(info = models.info?.copy(current = currentThread?.model))) }
+            modelsJob?.cancel()
+            modelsJob = null
+            edit {
+                copy(
+                    modelOverride = null,
+                    models = ModelsState(),
+                    queue = QueueState(),
+                    question = QuestionState(),
+                    questionList = QuestionListState(),
+                    answeredQuestions = emptySet(),
+                )
+            }
+        } else {
+            val activeOverride = d.modelOverride
+            if (activeOverride != null && currentThread?.model == activeOverride.id) {
+                edit { copy(modelOverride = null) }
+            } else if (currentThread?.model != previousThread?.model && currentThread?.model != null && !d.models.changing) {
+                edit {
+                    copy(
+                        modelOverride = null,
+                        models = models.copy(info = models.info?.copy(current = currentThread.model)),
+                    )
+                }
+            }
         }
         val windows = status.windows
         if (windows.none { it.id == d.windowId }) {
@@ -1762,13 +1787,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val scope = requestScope()
         val args = windowArgs { put("session_id", session); put("offset", offset) }
         edit { copy(models = ModelsState(session = session, loading = true, info = previous)) }
-        viewModelScope.launch {
+        modelsJob = viewModelScope.launch {
             try {
                 val result = praxis("models", args, scope)
                     ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
                 if (scope != requestScope() || d.currentWindow()?.thread?.sessionId != session) return@launch
                 val page = parseModels(result)
-                edit { copy(models = ModelsState(session = session, info = previous?.append(page) ?: page)) }
+                val merged = previous?.append(page) ?: page
+                val effectiveCurrent = d.modelOverride?.takeIf { it.session == session }?.id ?: merged.current
+                edit { copy(models = ModelsState(session = session, info = merged.copy(current = effectiveCurrent))) }
             } catch (error: ApiException) {
                 if (scope == requestScope() && d.currentWindow()?.thread?.sessionId == session) {
                     edit { copy(models = ModelsState(session = session, info = previous, error = error.message ?: str(R.string.error_unreadable_response))) }
@@ -1777,21 +1804,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun setModel(model: ModelOption) {
-        val session = d.models.session ?: return
-        if (d.models.loading || d.models.changing || model.disabled || d.currentWindow()?.thread?.sessionId != session) return
-        if (d.models.info?.current == model.id) return
-        val previous = d.models.info
+    fun setModel(model: ModelOption, onSelected: (() -> Unit)? = null) {
+        val session = d.models.session ?: d.currentWindow()?.thread?.sessionId ?: return
+        if (d.models.changing || model.disabled || d.currentWindow()?.thread?.sessionId != session) return
+        if (d.currentModelId() == model.id) {
+            onSelected?.invoke()
+            return
+        }
+        modelsJob?.cancel()
+        modelsJob = null
+        val previous = d.models.info.takeIf { d.models.session == session }
         val scope = requestScope()
         val args = windowArgs { put("session_id", session); put("model", model.id) }
-        edit { copy(models = models.copy(changing = true, error = null)) }
+        edit { copy(models = ModelsState(session = session, changing = true, info = previous)) }
         viewModelScope.launch {
             try {
                 val result = praxis("model", args, scope)
                     ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
                 if (scope != requestScope() || d.currentWindow()?.thread?.sessionId != session) return@launch
                 val selected = parseModels(result)
-                edit { copy(models = ModelsState(session = session, info = previous?.copy(current = selected.current) ?: selected)) }
+                val confirmedId = selected.current ?: model.id
+                val confirmedName = (previous?.available.orEmpty() + selected.available)
+                    .find { it.id == confirmedId }
+                    ?.name
+                    ?: model.name
+                edit {
+                    copy(
+                        modelOverride = ModelOverride(session = session, id = confirmedId, name = confirmedName),
+                        models = ModelsState(
+                            session = session,
+                            info = (previous ?: selected).copy(current = confirmedId),
+                        ),
+                    )
+                }
+                onSelected?.invoke()
                 requestPoll()
             } catch (error: ApiException) {
                 if (scope == requestScope() && d.currentWindow()?.thread?.sessionId == session) {

@@ -3518,6 +3518,9 @@ impl acp_thread::AgentModelSelector for NativeAgentModelSelector {
                 thread.set_speed(speed, cx);
             }
         });
+        self.connection.0.update(cx, |agent, _| {
+            agent.models.notify_model_selection_changed();
+        });
 
         update_settings_file(
             self.connection.0.read(cx).fs.clone(),
