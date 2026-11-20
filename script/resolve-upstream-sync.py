@@ -216,6 +216,7 @@ def format_rust_imports(imports: list[str], indent: str) -> str:
 
 def resolve_rust_use_hunks(text: str) -> tuple[str, bool]:
     changed = False
+    top_level_merged_items: set[str] = set()
 
     def replace_diff3(match: re.Match[str]) -> str:
         nonlocal changed
@@ -243,10 +244,21 @@ def resolve_rust_use_hunks(text: str) -> tuple[str, bool]:
             if indent:
                 break
 
+        if not indent:
+            top_level_merged_items.update(merged)
+
         changed = True
         return format_rust_imports(merged, indent)
 
     resolved = DIFF3_RE.sub(replace_diff3, text)
+    if changed and top_level_merged_items and re.search(r"^\s+use super::\*;$", resolved, re.MULTILINE):
+        for item in sorted(top_level_merged_items):
+            resolved = re.sub(
+                rf"^[ \t]+use {re.escape(item)};\n",
+                "",
+                resolved,
+                flags=re.MULTILINE,
+            )
     still_conflicted = "<<<<<<< " in resolved
     return resolved, changed and not still_conflicted
 

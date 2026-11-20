@@ -2452,7 +2452,6 @@ mod tests {
     use super::*;
     use futures::StreamExt as _;
     use project::agent_server_store::AgentServerCommand;
-    use settings::Settings as _;
 
     #[test]
     fn test_auth_error_mapping_retains_sdk_record_and_description() {

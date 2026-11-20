@@ -87,6 +87,29 @@ class ResolveUpstreamSyncTests(unittest.TestCase):
         _, ok = resolver.resolve_rust_use_hunks(code_hunk)
         self.assertFalse(ok)
 
+    def test_diff3_rust_use_merge_prunes_redundant_submodule_import_under_super_glob(self):
+        conflicted = (
+            "<<<<<<< HEAD\n"
+            "use settings::{Settings as _, SettingsStore};\n"
+            "||||||| base\n"
+            "use settings::SettingsStore;\n"
+            "=======\n"
+            "use settings::{AgentConfigOptionValue, SettingsStore};\n"
+            ">>>>>>> upstream/main\n\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    use super::*;\n"
+            "    use settings::Settings as _;\n"
+            "}\n"
+        )
+        resolved, ok = resolver.resolve_rust_use_hunks(conflicted)
+        self.assertTrue(ok)
+        self.assertIn(
+            "use settings::{AgentConfigOptionValue, Settings as _, SettingsStore};\n",
+            resolved,
+        )
+        self.assertNotIn("    use settings::Settings as _;\n", resolved)
+
     def test_deleted_in_praxis_checks_for_mod_declarations(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
