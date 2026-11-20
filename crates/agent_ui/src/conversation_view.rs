@@ -1399,7 +1399,6 @@ impl ConversationView {
                 });
             });
         }
-        cx.notify();
     }
 
     fn initial_state(
@@ -1787,7 +1786,7 @@ impl ConversationView {
         let agent_display_name = self
             .agent_server_store
             .read(cx)
-            .agent_display_name(&agent_id.clone())
+            .agent_display_name(&agent_id)
             .unwrap_or_else(|| agent_id.0.clone());
 
         let agent_icon = self.agent.logo();

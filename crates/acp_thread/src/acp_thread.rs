@@ -4460,22 +4460,6 @@ pub enum TerminalProviderEvent {
     },
 }
 
-#[derive(Debug, Clone)]
-pub enum TerminalProviderCommand {
-    WriteInput {
-        terminal_id: acp_v2::TerminalId,
-        bytes: Vec<u8>,
-    },
-    Resize {
-        terminal_id: acp_v2::TerminalId,
-        cols: u16,
-        rows: u16,
-    },
-    Close {
-        terminal_id: acp_v2::TerminalId,
-    },
-}
-
 #[derive(PartialEq, Eq, Debug)]
 pub enum ThreadStatus {
     Unconfirmed,
@@ -9013,11 +8997,9 @@ impl AcpThread {
             let buffer = load.await?;
 
             let snapshot = if reuse_shared_snapshot {
-                this.read_with(cx, |this, _| {
-                    this.shared_buffers.get(&buffer.clone()).cloned()
-                })
-                .log_err()
-                .flatten()
+                this.read_with(cx, |this, _| this.shared_buffers.get(&buffer).cloned())
+                    .log_err()
+                    .flatten()
             } else {
                 None
             };

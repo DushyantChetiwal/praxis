@@ -129,6 +129,9 @@ jobs:
       - name: Test the integration test list
         run: python script/test-praxis-integration-tests.py
 
+      - name: Test the upstream sync auto-resolver
+        run: python script/test-resolve-upstream-sync.py
+
       - name: Test Unix split release packaging
         if: hashFiles('script/test-bundle-split-modes.py') != ''
         run: python script/test-bundle-split-modes.py

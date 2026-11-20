@@ -29,6 +29,7 @@ mod github;
 mod images;
 mod mentions;
 mod modal;
+mod model_options;
 mod plan_inspector;
 mod questions;
 mod relay;
@@ -867,9 +868,7 @@ fn handle_paired(
                     .config_options_view
                     .clone()
                     .filter(|config_view| {
-                        config_view
-                            .read(cx)
-                            .has_selectable_category(acp::SessionConfigOptionCategory::Model)
+                        model_options::has_selectable_model_option(config_view.read(cx))
                     })
                     .context("This agent does not support model selection")?;
                 Ok(request_config_option_models(
@@ -1378,19 +1377,13 @@ fn request_config_option_models(
         if let Some(requested) = requested {
             cx.update(|cx| {
                 config_view.update(cx, |config_view, cx| {
-                    config_view.select_category_option(
-                        acp::SessionConfigOptionCategory::Model,
-                        &requested,
-                        cx,
-                    )
+                    model_options::select_model_option(config_view, &requested, cx)
                 })
             })
             .await?;
         }
         let (selected, models) = cx.update(|cx| {
-            config_view
-                .read(cx)
-                .category_model_options(acp::SessionConfigOptionCategory::Model)
+            model_options::model_options(config_view.read(cx))
                 .context("This agent does not support model selection")
         })?;
         let models = deduplicate_and_filter_models(models, query.as_deref());
@@ -1579,10 +1572,8 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
             Some((model.id.to_string(), model.name.to_string()))
         })
         .or_else(|| {
-            view.config_options_view
-                .as_ref()?
-                .read(cx)
-                .selected_category_option(acp::SessionConfigOptionCategory::Model)
+            let config_view = view.config_options_view.as_ref()?;
+            model_options::selected_model_option(config_view.read(cx))
         })
         .map_or((None, None), |(id, name)| (Some(id), Some(name)));
     let has_model_selector = thread
@@ -1593,9 +1584,7 @@ fn thread_summary(panel: &Entity<AgentPanel>, cx: &App) -> Option<Value> {
         .config_options_view
         .as_ref()
         .is_some_and(|config_view| {
-            config_view
-                .read(cx)
-                .has_selectable_category(acp::SessionConfigOptionCategory::Model)
+            model_options::has_selectable_model_option(config_view.read(cx))
         });
     let model_selection = has_model_selector || has_config_model;
     let error = view
@@ -3406,7 +3395,7 @@ fn worktree_create(
             .repositories()
             .values()
             .map(|repo| repo.read(cx).snapshot())
-            .find(|snapshot| snapshot.is_main_worktree())
+            .find(|snapshot| !snapshot.is_linked_worktree())
             .or_else(|| {
                 git_store
                     .repositories()
@@ -3465,7 +3454,7 @@ fn worktree_merge(
             .repositories()
             .values()
             .map(|repo| repo.read(cx).snapshot())
-            .find(|snapshot| snapshot.is_main_worktree())
+            .find(|snapshot| !snapshot.is_linked_worktree())
             .or_else(|| {
                 git_store
                     .repositories()

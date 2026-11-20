@@ -76,7 +76,9 @@ use std::{
 use util::{ResultExt, debug_panic, markdown::MarkdownCodeBlock, paths::PathStyle};
 use uuid::Uuid;
 
-const TOOL_CANCELED_MESSAGE: &str = "Tool canceled by user";
+use crate::praxis_guards::{find_hallucinated_background_wake_offset, has_completed_tool_output};
+
+pub(crate) const TOOL_CANCELED_MESSAGE: &str = "Tool canceled by user";
 const TOOL_CALL_INTERRUPTED_BY_FOLLOW_UP_MESSAGE: &str =
     "Permission denied: user sent a follow-up message instead of approving the tool call.";
 pub(crate) const FOLLOW_UP_PERMISSION_DENIED_OPTION_ID: &str = "follow_up_permission_denied";
@@ -1041,47 +1043,6 @@ impl BackgroundWakeInfo {
             finished: self.notices.len(),
         }
     }
-}
-
-/// Detects when a model fails to emit an end-of-turn stop token and begins
-/// role-playing a `BackgroundWakeInfo` user prompt inside assistant text.
-fn find_hallucinated_background_wake_offset(text: &str) -> Option<usize> {
-    const WAKE_HEADER: &str = "Praxis resumed this conversation because background work finished:";
-    let mut search_from = 0;
-    while let Some(relative_index) = text[search_from..].find(WAKE_HEADER) {
-        let header_index = search_from + relative_index;
-        search_from = header_index + WAKE_HEADER.len();
-
-        let prefix = &text[..header_index];
-        let marker_start = if let Some(stripped) = prefix.strip_suffix("user\n") {
-            if stripped.is_empty() || stripped.ends_with('\n') {
-                Some(
-                    stripped
-                        .len()
-                        .saturating_sub(usize::from(stripped.ends_with('\n'))),
-                )
-            } else {
-                None
-            }
-        } else if (prefix.is_empty() || prefix.ends_with('\n'))
-            && text[header_index + WAKE_HEADER.len()..].starts_with("\n- ")
-        {
-            Some(
-                prefix
-                    .len()
-                    .saturating_sub(usize::from(prefix.ends_with('\n'))),
-            )
-        } else {
-            None
-        };
-
-        if let Some(start) = marker_start
-            && text[..start].matches("```").count().is_multiple_of(2)
-        {
-            return Some(start);
-        }
-    }
-    None
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -2299,7 +2260,6 @@ pub struct Thread {
     /// the start of each request.
     current_request_token_usage: TokenUsage,
     pending_compaction_telemetry: Option<CompactionTelemetry>,
-    #[allow(unused)]
     initial_project_snapshot: Shared<Task<Option<Arc<ProjectSnapshot>>>>,
     pub(crate) context_server_registry: Entity<ContextServerRegistry>,
     profile_id: AgentProfileId,
@@ -2626,7 +2586,7 @@ impl Thread {
 
         self.thinking_enabled = selection.enable_thinking && model.supports_thinking();
         self.thinking_effort = selection.effort.clone();
-        self.speed = selection.speed.filter(|_| model.supports_fast_mode());
+        self.speed = selection.speed.filter(|speed| model.supports_speed(*speed));
         self.prompt_capabilities_tx
             .send(Self::prompt_capabilities(Some(&model)))
             .log_err();
@@ -4798,19 +4758,6 @@ impl Thread {
         Ok(())
     }
 
-    fn has_completed_tool_output_since(&self, message_ix: usize) -> bool {
-        self.messages.iter().skip(message_ix).any(|message| {
-            message.as_agent_message().is_some_and(|agent| {
-                agent.tool_results.values().any(|result| {
-                    result.content.as_slice()
-                        != [LanguageModelToolResultContent::Text(
-                            TOOL_CANCELED_MESSAGE.into(),
-                        )]
-                })
-            })
-        })
-    }
-
     fn remove_messages_from(&mut self, ix: usize) {
         let ix = ix.min(self.messages.len());
         for message in self.messages.drain(ix..) {
@@ -5260,7 +5207,9 @@ impl Thread {
                                     // Completed tool output makes this a mid-turn refusal rather
                                     // than a refusal of the user's prompt, so keep completed steps
                                     // in sync with AcpThread, workspace edits, and step_progress.
-                                    if !this.has_completed_tool_output_since(message_ix) {
+                                    let turn_slice =
+                                        this.messages.get(message_ix..).unwrap_or_default();
+                                    if !has_completed_tool_output(turn_slice) {
                                         this.remove_messages_from(message_ix);
                                     }
                                 });
@@ -6576,10 +6525,6 @@ impl Thread {
         self.title.clone()
     }
 
-    pub fn is_generating_summary(&self) -> bool {
-        self.pending_summary_generation.is_some()
-    }
-
     pub fn is_generating_title(&self) -> bool {
         self.pending_title_generation.is_some()
     }
@@ -6876,7 +6821,7 @@ impl Thread {
             thinking_allowed: self.thinking_enabled
                 || !model.supports_disabling_thinking_at_effort(self.thinking_effort.as_deref()),
             thinking_effort: self.thinking_effort.clone(),
-            speed: self.speed(),
+            speed: self.speed().filter(|speed| model.supports_speed(*speed)),
             compact_at_tokens: None,
             max_output_tokens: None,
         };
@@ -7022,10 +6967,6 @@ impl Thread {
         tool.capability()
             .is_allowed_in(self.session_mode.get())
             .then(|| tool.clone())
-    }
-
-    pub fn has_tool(&self, name: &str) -> bool {
-        self.tool(name).is_some()
     }
 
     /// Whether the model could read project files itself on its next request,
@@ -7420,7 +7361,7 @@ impl Thread {
             thinking_allowed,
             thinking_effort,
             speed: if preserves_request_prefix {
-                self.speed()
+                self.speed().filter(|speed| model.supports_speed(*speed))
             } else {
                 None
             },
@@ -10248,18 +10189,6 @@ impl ToolCallEventStreamReceiver {
             panic!("Expected diff but got: {:?}", event);
         }
     }
-
-    pub async fn expect_terminal(&mut self) -> Entity<acp_thread::Terminal> {
-        let event = self.0.next().await;
-        if let Some(Ok(ThreadEvent::ToolCallUpdate(acp_thread::ToolCallUpdate::UpdateTerminal(
-            update,
-        )))) = event
-        {
-            update.terminal
-        } else {
-            panic!("Expected terminal but got: {:?}", event);
-        }
-    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -12095,6 +12024,7 @@ mod tests {
         let model = fake.update_model("fake", |model| {
             supports_tools_and_tool_choice(model);
             model.supports_thinking = true;
+            model.supports_ultrafast_mode = true;
             model.prompt_compaction_strategy = PromptCompactionStrategy::PreserveRequestPrefix;
         });
 
@@ -12104,7 +12034,7 @@ mod tests {
                 thread.set_model(model.clone(), cx);
                 thread.set_thinking_enabled(true, cx);
                 thread.set_thinking_effort(Some("high".to_string()), cx);
-                thread.set_speed(Speed::Fast, cx);
+                thread.set_speed(Speed::Ultrafast, cx);
             });
         });
 
@@ -12150,7 +12080,7 @@ mod tests {
             compaction_request.thinking_effort,
             completion_request.thinking_effort
         );
-        assert_eq!(completion_request.speed, Some(Speed::Fast));
+        assert_eq!(completion_request.speed, Some(Speed::Ultrafast));
         assert_eq!(compaction_request.speed, completion_request.speed);
         // The compaction request extends the previous request with the
         // assistant response and the compaction prompt.
@@ -12845,42 +12775,6 @@ mod tests {
             matches!(&event, Some(Ok(ThreadEvent::AgentText(text))) if text == "CI passed."),
             "expected replayed agent text, got {event:?}"
         );
-    }
-
-    #[test]
-    fn test_find_hallucinated_background_wake_offset() {
-        let with_user_role = "Waiting for subagents to finish.\nuser\n\
-            Praxis resumed this conversation because background work finished:\n\
-            - Sub-agent \"R6-S1\" finished.";
-        assert_eq!(
-            find_hallucinated_background_wake_offset(with_user_role),
-            Some("Waiting for subagents to finish.".len())
-        );
-
-        let direct_header = "Yielding turn now.\n\
-            Praxis resumed this conversation because background work finished:\n\
-            - Background task 1 exited with code 0.";
-        assert_eq!(
-            find_hallucinated_background_wake_offset(direct_header),
-            Some("Yielding turn now.".len())
-        );
-
-        let start_of_block = "user\n\
-            Praxis resumed this conversation because background work finished:\n\
-            - Sub-agent \"R7-C1\" finished.";
-        assert_eq!(
-            find_hallucinated_background_wake_offset(start_of_block),
-            Some(0)
-        );
-
-        let inline_code = "Guard against `user\n\
-            Praxis resumed this conversation because background work finished:`";
-        assert_eq!(find_hallucinated_background_wake_offset(inline_code), None);
-
-        let fenced_code = "Example:\n```text\nuser\n\
-            Praxis resumed this conversation because background work finished:\n\
-            - Sub-agent \"R6-S1\" finished.\n```";
-        assert_eq!(find_hallucinated_background_wake_offset(fenced_code), None);
     }
 
     #[gpui::test]

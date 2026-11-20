@@ -23,13 +23,14 @@ use agent_client_protocol::{
     v2::schema as acp_v2,
 };
 use anyhow::anyhow;
-use async_channel;
 use collections::HashMap;
 use feature_flags::{AcpBetaFeatureFlag, FeatureFlagAppExt as _};
 use futures::channel::mpsc;
 use futures::future::Shared;
 use futures::{Future, FutureExt as _};
-use project::agent_server_store::{AgentServerCommand, AgentServerStore, AllAgentServersSettings};
+use project::agent_server_store::{
+    AgentServerStore, AllAgentServersSettings, ResolvedAgentServerCommand,
+};
 use project::{AgentId, Project};
 use serde::Deserialize;
 use settings::{AgentConfigOptionValue, Settings as _, SettingsStore};
@@ -373,7 +374,7 @@ impl AgentSessionList for AcpSessionList {
 pub async fn connect(
     agent_id: AgentId,
     project: Entity<Project>,
-    command: AgentServerCommand,
+    command: ResolvedAgentServerCommand,
     agent_server_store: WeakEntity<AgentServerStore>,
     default_mode: Option<acp_v2::SessionConfigValueId>,
     default_config_options: HashMap<String, AgentConfigOptionValue>,
@@ -382,7 +383,7 @@ pub async fn connect(
     let conn = AcpConnection::stdio(
         agent_id,
         project,
-        command.clone(),
+        command,
         agent_server_store,
         default_mode,
         default_config_options,
@@ -562,12 +563,16 @@ impl AcpConnection {
     pub async fn stdio(
         agent_id: AgentId,
         project: Entity<Project>,
-        command: AgentServerCommand,
+        command: ResolvedAgentServerCommand,
         agent_server_store: WeakEntity<AgentServerStore>,
         default_mode: Option<acp_v2::SessionConfigValueId>,
         default_config_options: HashMap<String, AgentConfigOptionValue>,
         cx: &mut AsyncApp,
     ) -> Result<Self> {
+        let ResolvedAgentServerCommand {
+            command,
+            installation_lease,
+        } = command;
         let original_command = command.clone();
         let transport::StdioProcess {
             child,
@@ -628,13 +633,7 @@ impl AcpConnection {
                 .context("Failed to receive ACP connection handle")
         }
         .boxed_local();
-        let status_fut = child
-            .0
-            .status()
-            .map(|status| {
-                status.map_err(|error| anyhow!("failed to wait for agent server exit: {error}"))
-            })
-            .boxed_local();
+        let status_fut = child.exit_status(installation_lease);
         let (connection, status_fut, _) = runtime::race_startup(
             connection_rx,
             status_fut,
@@ -2452,6 +2451,7 @@ mod tests {
     use super::super::*;
     use super::*;
     use futures::StreamExt as _;
+    use project::agent_server_store::AgentServerCommand;
 
     #[test]
     fn test_auth_error_mapping_retains_sdk_record_and_description() {
@@ -7291,7 +7291,7 @@ mod tests {
         let startup = AcpConnection::stdio(
             AgentId::new("test-agent"),
             project,
-            command,
+            ResolvedAgentServerCommand::without_installation_lease(command),
             agent_server_store,
             None,
             HashMap::default(),
@@ -7404,7 +7404,7 @@ exec cat >/dev/null
                 let connection = AcpConnection::stdio(
                     AgentId::new("subagent-agent"),
                     project.clone(),
-                    command,
+                    ResolvedAgentServerCommand::without_installation_lease(command),
                     agent_server_store.clone(),
                     None,
                     HashMap::default(),
@@ -7567,7 +7567,7 @@ exit 7
                 AcpConnection::stdio(
                     AgentId::new("exiting-agent"),
                     project.clone(),
-                    command,
+                    ResolvedAgentServerCommand::without_installation_lease(command),
                     agent_server_store,
                     None,
                     HashMap::default(),
