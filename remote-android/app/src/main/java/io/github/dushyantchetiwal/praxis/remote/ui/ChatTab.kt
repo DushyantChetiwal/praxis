@@ -492,15 +492,19 @@ private fun ModelPicker(ui: DeviceUi, vm: MainViewModel) {
     var query by remember(session) { mutableStateOf("") }
     val models = ui.models.takeIf { it.session == session }
     val info = models?.info
-    val current = info?.available?.find { it.id == info?.current }?.name
-        ?: ui.currentWindow()?.thread?.modelName
-        ?: ui.currentWindow()?.thread?.model
+    val activeModelId = ui.currentModelId()
+    val current = ui.currentModelName()
     TextButton(onClick = { open = true }, modifier = Modifier.padding(horizontal = 8.dp)) {
         Text(stringResource(R.string.model_current, current ?: stringResource(R.string.model_select)), maxLines = 1, overflow = TextOverflow.Ellipsis)
         Icon(Icons.Filled.ExpandMore, contentDescription = null)
     }
     if (open) {
         LaunchedEffect(session) { vm.loadModels() }
+        if (query.isNotBlank() && info?.nextOffset != null && models?.loading != true && models?.changing != true) {
+            LaunchedEffect(session, query, info.nextOffset) {
+                vm.loadModels(more = true)
+            }
+        }
         AlertDialog(
             onDismissRequest = { open = false },
             title = { Text(stringResource(R.string.model_select)) },
@@ -523,20 +527,26 @@ private fun ModelPicker(ui: DeviceUi, vm: MainViewModel) {
                             Text(stringResource(R.string.model_load_more))
                         }
                     }
+                    val trimmedQuery = query.trim()
+                    val visibleModels = info?.available.orEmpty().filter {
+                        trimmedQuery.isEmpty() ||
+                            it.name.contains(trimmedQuery, ignoreCase = true) ||
+                            it.id.contains(trimmedQuery, ignoreCase = true) ||
+                            it.group.orEmpty().contains(trimmedQuery, ignoreCase = true)
+                    }
                     LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                        items(info?.available.orEmpty().filter {
-                            it.name.contains(query, ignoreCase = true) || it.group.orEmpty().contains(query, ignoreCase = true)
-                        }, key = { it.id }) { model ->
+                        items(visibleModels, key = { it.id }) { model ->
+                            val isSelected = activeModelId == model.id
                             Row(
                                 Modifier.fillMaxWidth().selectable(
-                                    selected = info?.current == model.id,
-                                    enabled = !model.disabled && models?.changing != true && models?.loading != true,
+                                    selected = isSelected,
+                                    enabled = !model.disabled && models?.changing != true,
                                     role = Role.RadioButton,
-                                    onClick = { vm.setModel(model) },
+                                    onClick = { vm.setModel(model) { open = false } },
                                 ).padding(vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                RadioButton(selected = info?.current == model.id, onClick = null, enabled = !model.disabled)
+                                RadioButton(selected = isSelected, onClick = null, enabled = !model.disabled)
                                 Spacer(Modifier.width(8.dp))
                                 Column {
                                     Text(model.name, color = if (model.disabled) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface)

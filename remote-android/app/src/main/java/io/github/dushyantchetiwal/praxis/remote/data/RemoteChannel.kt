@@ -152,17 +152,42 @@ data class ModeOption(val id: String, val name: String)
 data class ModeInfo(val current: String?, val available: List<ModeOption>)
 
 data class ModelOption(val id: String, val name: String, val group: String?, val disabled: Boolean)
+
+fun deduplicateModels(raw: List<ModelOption>): List<ModelOption> {
+    val providerGroups = HashMap<String, String>()
+    for (option in raw) {
+        val group = option.group?.takeIf { !it.equals("Recommended", ignoreCase = true) } ?: continue
+        providerGroups.putIfAbsent(option.id, group)
+    }
+    val seen = HashSet<String>()
+    return raw.mapNotNull { option ->
+        if (!seen.add(option.id)) return@mapNotNull null
+        val provider = providerGroups[option.id]
+        val mergedGroup = if (option.group?.equals("Recommended", ignoreCase = true) == true &&
+            provider != null &&
+            !provider.equals("Recommended", ignoreCase = true)
+        ) {
+            "${option.group} · $provider"
+        } else {
+            option.group
+        }
+        if (mergedGroup == option.group) option else option.copy(group = mergedGroup)
+    }
+}
+
 data class ModelInfo(val current: String?, val available: List<ModelOption>, val nextOffset: Int? = null) {
-    fun append(page: ModelInfo): ModelInfo = page.copy(available = (available + page.available).associateBy { it.id }.values.toList())
+    fun append(page: ModelInfo): ModelInfo = page.copy(available = deduplicateModels(available + page.available))
 }
 
 fun parseModels(result: JSONObject): ModelInfo = ModelInfo(
     current = result.str("current"),
     nextOffset = result.index("next_offset"),
-    available = result.arr("available")?.objects()?.mapNotNull { model ->
-        val id = model.str("id") ?: return@mapNotNull null
-        ModelOption(id, model.str("name") ?: id, model.str("group"), model.bool("disabled"))
-    }.orEmpty(),
+    available = deduplicateModels(
+        result.arr("available")?.objects()?.mapNotNull { model ->
+            val id = model.str("id") ?: return@mapNotNull null
+            ModelOption(id, model.str("name") ?: id, model.str("group"), model.bool("disabled"))
+        }.orEmpty(),
+    ),
 )
 
 data class DetailRequest(val session: String, val entry: Int = 0, val part: Int? = null, val queueId: String? = null) {

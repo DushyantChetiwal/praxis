@@ -140,6 +140,9 @@ data class ModelsState(
 /** A mode picked on the phone, shown until a snapshot confirms it. */
 data class ModeOverride(val window: Long?, val id: String, val expiresAt: Long)
 
+/** A model confirmed by `model` RPC, retained until desktop status catches up or changes. */
+data class ModelOverride(val session: String, val id: String, val name: String)
+
 data class ThreadsState(
     val loading: Boolean = false,
     val items: List<ThreadItem>? = null,
@@ -256,6 +259,7 @@ data class DeviceUi(
     val threadKnown: Boolean = false,
     val threadError: String? = null,
     val modeOverride: ModeOverride? = null,
+    val modelOverride: ModelOverride? = null,
     val models: ModelsState = ModelsState(),
     val folderBrowser: FolderBrowserState = FolderBrowserState(),
     val queue: QueueState = QueueState(),
@@ -322,6 +326,29 @@ data class DeviceUi(
         val override = modeOverride
         if (override != null && override.window == windowId && override.expiresAt > now) return override.id
         return currentWindow()?.thread?.mode?.current
+    }
+
+    fun currentModelId(): String? {
+        val summary = currentWindow()?.thread ?: return null
+        val session = summary.sessionId
+        if (session != null && modelOverride?.session == session) return modelOverride.id
+        val loaded = models.takeIf { it.session == session }?.info?.current
+        return loaded ?: summary.model
+    }
+
+    fun currentModelName(): String? {
+        val summary = currentWindow()?.thread ?: return null
+        val session = summary.sessionId
+        val activeId = currentModelId()
+        if (session != null && modelOverride?.session == session && modelOverride.id == activeId) {
+            return modelOverride.name
+        }
+        val loadedName = models.takeIf { it.session == session }
+            ?.info
+            ?.available
+            ?.find { it.id == activeId }
+            ?.name
+        return loadedName ?: summary.modelName ?: activeId
     }
 
     /** Whether a snapshot's watch describes what the user is looking at. */
