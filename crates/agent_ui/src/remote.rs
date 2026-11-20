@@ -1377,11 +1377,13 @@ fn request_config_option_models(
     cx.spawn(async move |cx| {
         if let Some(requested) = requested {
             cx.update(|cx| {
-                config_view.read(cx).select_category_option(
-                    acp::SessionConfigOptionCategory::Model,
-                    &requested,
-                    cx,
-                )
+                config_view.update(cx, |config_view, cx| {
+                    config_view.select_category_option(
+                        acp::SessionConfigOptionCategory::Model,
+                        &requested,
+                        cx,
+                    )
+                })
             })
             .await?;
         }
@@ -3667,17 +3669,25 @@ mod tests {
     ) {
         let selector = acp_thread::StubAgentConnection::new().model_selector_impl();
         let listed = cx
-            .update(|cx| request_models(selector.clone(), None, 0, cx))
+            .update(|cx| request_models(selector.clone(), None, 0, None, cx))
             .await
             .expect("model list");
         assert_eq!(listed["current"], "visual-test-model");
         let selected = cx
-            .update(|cx| request_models(selector.clone(), Some("visual-test-model".into()), 0, cx))
+            .update(|cx| {
+                request_models(
+                    selector.clone(),
+                    Some("visual-test-model".into()),
+                    0,
+                    None,
+                    cx,
+                )
+            })
             .await
             .expect("select listed model");
         assert_eq!(selected["current"], "visual-test-model");
         assert!(
-            cx.update(|cx| request_models(selector, Some("unknown/model".into()), 0, cx))
+            cx.update(|cx| request_models(selector, Some("unknown/model".into()), 0, None, cx))
                 .await
                 .is_err()
         );
