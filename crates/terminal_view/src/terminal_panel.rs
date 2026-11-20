@@ -528,7 +528,7 @@ impl TerminalPanel {
             }
             pane::Event::Remove { focus_on_pane } => {
                 let pane_count_before_removal = self.center.panes().len();
-                let _removal_result = self.center.remove(pane, cx);
+                let _removal_result = self.center.remove(pane);
                 if pane_count_before_removal == 1 {
                     self.center.first_pane().update(cx, |pane, cx| {
                         pane.set_zoomed(false, cx);
@@ -581,7 +581,7 @@ impl TerminalPanel {
                             };
                             panel
                                 .update_in(cx, |panel, window, cx| {
-                                    panel.center.split(&pane, &new_pane, direction, cx);
+                                    panel.center.split(&pane, &new_pane, direction);
                                     window.focus(&new_pane.focus_handle(cx), cx);
                                 })
                                 .ok();
@@ -605,7 +605,7 @@ impl TerminalPanel {
                         new_pane.update(cx, |pane, cx| {
                             pane.add_item(item, true, true, None, window, cx);
                         });
-                        self.center.split(&pane, &new_pane, direction, cx);
+                        self.center.split(&pane, &new_pane, direction);
                         window.focus(&new_pane.focus_handle(cx), cx);
                     }
                 };
@@ -1358,7 +1358,7 @@ impl TerminalPanel {
             .find_pane_in_direction(&self.active_pane, direction, cx)
             .cloned()
         {
-            self.center.swap(&self.active_pane, &to, cx);
+            self.center.swap(&self.active_pane, &to);
             cx.notify();
         }
     }
@@ -1366,7 +1366,7 @@ impl TerminalPanel {
     fn move_pane_to_border(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
         if self
             .center
-            .move_to_border(&self.active_pane, direction, cx)
+            .move_to_border(&self.active_pane, direction)
             .unwrap()
         {
             cx.notify();
@@ -1418,7 +1418,6 @@ pub fn new_terminal_pane(
             cx,
         );
         pane.set_zoomed(zoomed, cx);
-        pane.set_can_navigate(false, cx);
         pane.display_nav_history_buttons(None);
         pane.set_should_display_tab_bar(|_, _| true);
         pane.set_zoom_out_on_close(false);
@@ -1686,7 +1685,6 @@ impl Render for TerminalPanel {
                                                 &terminal_panel.active_pane,
                                                 &new_pane,
                                                 SplitDirection::Right,
-                                                cx,
                                             );
                                             let new_pane = new_pane.read(cx);
                                             window.focus(&new_pane.focus_handle(cx), cx);

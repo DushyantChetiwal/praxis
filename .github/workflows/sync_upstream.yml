@@ -86,23 +86,32 @@ jobs:
             exit 0
           fi
 
-          if ! git merge --no-ff --no-edit upstream/main; then
-            delimiter="conflicts-${GITHUB_RUN_ID}-${RANDOM}${RANDOM}"
-            {
-              echo "conflicts<<${delimiter}"
-              git diff --name-only --diff-filter=U
-              echo "${delimiter}"
-            } >> "${GITHUB_OUTPUT}"
-            {
-              echo "## Upstream merge needs manual resolution"
-              echo
-              echo '```text'
-              git diff --name-only --diff-filter=U
-              echo '```'
-            } >> "${GITHUB_STEP_SUMMARY}"
-            git merge --abort
-            echo "state=conflict" >> "${GITHUB_OUTPUT}"
-            exit 0
+          if ! git -c merge.conflictStyle=diff3 merge --no-ff --no-edit -X diff-algorithm=histogram upstream/main; then
+            python3 script/resolve-upstream-sync.py --with-cargo || true
+            if [ -z "$(git diff --name-only --diff-filter=U)" ]; then
+              if command -v cargo >/dev/null 2>&1; then
+                cargo fmt --all || true
+                git add -u
+              fi
+              git commit --no-edit
+            else
+              delimiter="conflicts-${GITHUB_RUN_ID}-${RANDOM}${RANDOM}"
+              {
+                echo "conflicts<<${delimiter}"
+                git diff --name-only --diff-filter=U
+                echo "${delimiter}"
+              } >> "${GITHUB_OUTPUT}"
+              {
+                echo "## Upstream merge needs manual resolution"
+                echo
+                echo '```text'
+                git diff --name-only --diff-filter=U
+                echo '```'
+              } >> "${GITHUB_STEP_SUMMARY}"
+              git merge --abort
+              echo "state=conflict" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
           fi
 
           staging_branch="praxis-sync/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
