@@ -3,7 +3,7 @@ use std::{fmt::Write as _, sync::Arc};
 use crate::{AgentTool, ToolCallEventStream, ToolCapability, ToolInput};
 use agent_client_protocol::v2::schema as acp;
 use git::{
-    repository::DiffType,
+    repository::{DiffType, UpstreamTracking},
     status::{FileStatus, StatusCode},
 };
 use gpui::{App, Entity, SharedString, Task};
@@ -219,15 +219,18 @@ impl AgentTool for GitStatusTool {
                     write!(output, "Branch: {}", branch.name()).unwrap();
                     if let Some(upstream) = branch.upstream.as_ref() {
                         write!(output, " -> {}", upstream.ref_name).unwrap();
-                        if let Some(tracking) = upstream.tracking.status() {
-                            write!(
-                                output,
-                                " (ahead {}, behind {})",
-                                tracking.ahead, tracking.behind
-                            )
-                            .unwrap();
-                        } else if upstream.tracking.is_gone() {
-                            output.push_str(" (upstream gone)");
+                        match upstream.tracking {
+                            UpstreamTracking::Tracked(tracking) => {
+                                write!(
+                                    output,
+                                    " (ahead {}, behind {})",
+                                    tracking.ahead, tracking.behind
+                                )
+                                .unwrap();
+                            }
+                            UpstreamTracking::Gone => {
+                                output.push_str(" (upstream gone)");
+                            }
                         }
                     }
                     output.push('\n');
