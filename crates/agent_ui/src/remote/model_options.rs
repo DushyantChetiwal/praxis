@@ -144,12 +144,10 @@ pub(super) fn select_model_option(
             .iter()
             .find(|option| option.config_id == config_id)
             .and_then(|option| match &option.kind {
-                acp::SessionConfigKind::Select(select) => {
-                    flatten_select_options(&select.options)
-                        .iter()
-                        .any(|(_, item)| item.value == select.current_value)
-                        .then(|| AgentConfigOptionValue::ValueId(select.current_value.0.to_string()))
-                }
+                acp::SessionConfigKind::Select(select) => flatten_select_options(&select.options)
+                    .iter()
+                    .any(|(_, item)| item.value == select.current_value)
+                    .then(|| AgentConfigOptionValue::ValueId(select.current_value.0.to_string())),
                 _ => None,
             })
         {
