@@ -39,7 +39,7 @@ async fn install_script(cx: &AsyncApp) -> Result<Option<PathBuf>> {
 
     // Don't re-create symlink if it points to the same CLI binary.
     if smol::fs::read_link(&link_path).await.ok().as_ref() == Some(&cli_path) {
-        return Ok(Some(link_path.into()));
+        return Ok(Some(link_path));
     }
 
     // If the symlink is not there or is outdated, first try replacing it
@@ -50,7 +50,7 @@ async fn install_script(cx: &AsyncApp) -> Result<Option<PathBuf>> {
         .log_err()
         .is_some()
     {
-        return Ok(Some(link_path.into()));
+        return Ok(Some(link_path));
     }
 
     // The symlink could not be created without escalating, so use osascript
@@ -72,7 +72,7 @@ async fn install_script(cx: &AsyncApp) -> Result<Option<PathBuf>> {
         .await?;
 
     if output.status.success() {
-        return Ok(Some(link_path.into()));
+        return Ok(Some(link_path));
     }
 
     // osascript reports "User canceled." (error -128) when the administrator
