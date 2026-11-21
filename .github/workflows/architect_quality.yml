@@ -100,6 +100,7 @@ jobs:
         .github/workflows/bundle_fork.yml
         .github/workflows/bundle_after_merge.yml
         .github/workflows/android_remote.yml
+        .github/workflows/deploy_pages.yml
         .github/workflows/remote_relay_probe.yml
         .github/workflows/incremental_ci.yml
         .github/workflows/warm_ci_caches.yml
