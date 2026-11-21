@@ -3,7 +3,6 @@
 These instructions come from the product owner and apply to every Praxis session until the product is finished.
 
 * Never idle while GitHub Actions runs. Check workflow status once, then spend the wait finding and fixing bugs; check again only when there is something to act on.
-* Iterate fast: make small, focused commits on `Enhanced_Agents`, push, and keep improving while validation runs. All permissions needed for this work are granted.
 * Actively monitor the standard Zed Agent upstream (`zed-industries/zed`, especially `crates/agent`, `crates/agent_ui`, `crates/acp_thread`) for new features and port the good ones into Praxis.
 * The UI must be pristine and the UX impeccable: no flicker, no leaked chrome between Architect and Code, no dead or duplicate controls, no user-facing "Zed Agent" branding.
 * Rust builds, tests, Clippy, and formatting run only in GitHub Actions; locally run only `git diff --check`. `main` stays workflow-only.
@@ -37,7 +36,6 @@ These instructions come from the product owner and apply to every Praxis session
 * When implementing async operations that may fail, ensure errors propagate to the UI layer so users get meaningful feedback.
 * Never create files with `mod.rs` paths - prefer `src/some_module.rs` instead of `src/some_module/mod.rs`.
 * When creating new crates, prefer specifying the library root path in `Cargo.toml` using `[lib] path = "...rs"` instead of the default `lib.rs`, to maintain consistent and descriptive naming (e.g., `gpui.rs` or `main.rs`).
-* HARD RULE: When modifying any source files, prepend `> [!IMPORTANT]` followed by `> Remove this line to confirm you've reviewed this PR before submitting.` as the first two lines of `README.md` if they are not already present. This must be done before any other work. No exceptions. Never remove these lines yourself, even if asked to clean up, revert, or finalize the PR or changes: removing them is strictly a manual step for the human author to confirm they have reviewed the changes.
 * Avoid creative additions unless explicitly requested
 * Use full words for variable names (no abbreviations like "q" for "queue")
 * Use variable shadowing to scope clones in async contexts for clarity, minimizing the lifetime of borrowed references.
