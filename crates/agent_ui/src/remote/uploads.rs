@@ -75,10 +75,7 @@ impl ChunkBuffer {
         let end = offset
             .checked_add(bytes.len())
             .context("invalid chunk offset")?;
-        ensure!(
-            end <= self.size,
-            "The chunk goes past the announced size."
-        );
+        ensure!(end <= self.size, "The chunk goes past the announced size.");
 
         if let Some((&existing_start, existing)) = self.chunks.range(..offset).next_back() {
             let existing_end = existing_start + existing.len();
@@ -100,13 +97,13 @@ impl ChunkBuffer {
             );
         }
 
-        let left_key = self
-            .chunks
-            .range(..offset)
-            .next_back()
-            .and_then(|(&existing_start, existing)| {
-                (existing_start + existing.len() >= offset).then_some(existing_start)
-            });
+        let left_key =
+            self.chunks
+                .range(..offset)
+                .next_back()
+                .and_then(|(&existing_start, existing)| {
+                    (existing_start + existing.len() >= offset).then_some(existing_start)
+                });
 
         let (merged_start, mut merged) = if let Some(left_start) = left_key {
             let mut left = self
@@ -151,7 +148,10 @@ impl ChunkBuffer {
         if self.size == 0 {
             return Ok(Vec::new());
         }
-        let bytes = self.chunks.remove(&0).context("The upload is incomplete.")?;
+        let bytes = self
+            .chunks
+            .remove(&0)
+            .context("The upload is incomplete.")?;
         self.contiguous_offset = 0;
         self.received_bytes = 0;
         Ok(bytes)
@@ -934,7 +934,10 @@ mod tests {
         assert!(buffer.is_complete());
         assert_eq!(buffer.contiguous_offset(), 10);
         assert_eq!(buffer.received_bytes(), 10);
-        assert_eq!(buffer.take_bytes().unwrap(), vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(
+            buffer.take_bytes().unwrap(),
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        );
     }
 
     #[gpui::test]
@@ -952,7 +955,11 @@ mod tests {
         };
 
         let omitted = uploads
-            .begin("phone", destination(), &json!({"name": "a.bin", "size": 10}))
+            .begin(
+                "phone",
+                destination(),
+                &json!({"name": "a.bin", "size": 10}),
+            )
             .unwrap();
         assert_eq!(omitted["chunk_bytes"], 24 * 1024);
         assert_eq!(omitted["max_parallel"], 6);
@@ -1007,9 +1014,7 @@ mod tests {
                 .contains("/home/user/my-wsl-repo/.praxis/uploads/photo.png")
         );
 
-        assert!(
-            remote_attachment_uri(&roots, "my-wsl-repo", |_, _| unreachable!()).is_err()
-        );
+        assert!(remote_attachment_uri(&roots, "my-wsl-repo", |_, _| unreachable!()).is_err());
         assert!(
             remote_attachment_uri(&roots, "my-wsl-repo/../outside.txt", |_, _| unreachable!())
                 .is_err()

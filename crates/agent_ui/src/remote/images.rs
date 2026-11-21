@@ -8,9 +8,7 @@ use gpui::{App, AppContext as _, Global, Task};
 use image::{ImageFormat, ImageReader};
 use serde_json::{Value, json};
 
-use super::uploads::{
-    ChunkBuffer, MAX_CHUNK_BYTES, MAX_PARALLEL_CHUNKS, negotiate_chunk_bytes,
-};
+use super::uploads::{ChunkBuffer, MAX_CHUNK_BYTES, MAX_PARALLEL_CHUNKS, negotiate_chunk_bytes};
 use super::{crypto, required, transcript};
 
 const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
