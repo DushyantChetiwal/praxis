@@ -210,45 +210,83 @@ def format_rust_imports(imports: list[str], indent: str) -> str:
             lines.append(f"{indent}use {prefix}::{leaves[0]};")
         else:
             joined = ", ".join(leaves)
-            lines.append(f"{indent}use {prefix}::{{{joined}}};")
+            single = f"{indent}use {prefix}::{{{joined}}};"
+            if len(single) <= 100:
+                lines.append(single)
+            else:
+                lines.append(f"{indent}use {prefix}::{{")
+                lines.append(f"{indent}    {joined},")
+                lines.append(f"{indent}}};")
     return "\n".join(lines) + "\n"
+
+
+RUST_MOD_LINE_RE = re.compile(
+    r"^[ \t]*((?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*);)[ \t]*$"
+)
+
+
+def parse_rust_mod_block(block: str) -> list[str] | None:
+    """Returns normalized `mod <name>;` declarations if block contains only pure mod lines."""
+    decls: list[str] = []
+    for raw_line in block.splitlines():
+        if not raw_line.strip():
+            continue
+        match = RUST_MOD_LINE_RE.match(raw_line)
+        if not match:
+            return None
+        decls.append(" ".join(match.group(1).split()))
+    return decls
 
 
 def resolve_rust_use_hunks(text: str) -> tuple[str, bool]:
     changed = False
     top_level_merged_items: set[str] = set()
 
+    def detect_indent(*samples: str) -> str:
+        for sample in samples:
+            for line in sample.splitlines():
+                if line.strip():
+                    return line[: len(line) - len(line.lstrip())]
+        return ""
+
     def replace_diff3(match: re.Match[str]) -> str:
         nonlocal changed
         ours_raw = match.group("ours")
         base_raw = match.group("base")
         theirs_raw = match.group("theirs")
-        ours = parse_rust_use_block(ours_raw)
-        base = parse_rust_use_block(base_raw)
-        theirs = parse_rust_use_block(theirs_raw)
-        if ours is None or base is None or theirs is None:
-            return match.group(0)
 
-        ours_set = set(ours)
-        base_set = set(base)
-        theirs_set = set(theirs)
-        removed = (base_set - ours_set) | (base_set - theirs_set)
-        merged = sorted((ours_set | theirs_set) - removed)
+        ours_use = parse_rust_use_block(ours_raw)
+        base_use = parse_rust_use_block(base_raw)
+        theirs_use = parse_rust_use_block(theirs_raw)
+        if ours_use is not None and base_use is not None and theirs_use is not None:
+            ours_set = set(ours_use)
+            base_set = set(base_use)
+            theirs_set = set(theirs_use)
+            removed = (base_set - ours_set) | (base_set - theirs_set)
+            merged = sorted((ours_set | theirs_set) - removed)
+            indent = detect_indent(ours_raw, theirs_raw, base_raw)
+            if not indent:
+                top_level_merged_items.update(merged)
+            changed = True
+            return format_rust_imports(merged, indent)
 
-        indent = ""
-        for sample in (ours_raw, theirs_raw, base_raw):
-            for line in sample.splitlines():
-                if line.strip():
-                    indent = line[: len(line) - len(line.lstrip())]
-                    break
-            if indent:
-                break
+        ours_mod = parse_rust_mod_block(ours_raw)
+        base_mod = parse_rust_mod_block(base_raw)
+        theirs_mod = parse_rust_mod_block(theirs_raw)
+        if ours_mod is not None and base_mod is not None and theirs_mod is not None:
+            ours_set = set(ours_mod)
+            base_set = set(base_mod)
+            theirs_set = set(theirs_mod)
+            removed = (base_set - ours_set) | (base_set - theirs_set)
+            merged = sorted(
+                (ours_set | theirs_set) - removed,
+                key=lambda decl: (decl.rsplit("mod ", 1)[-1], decl),
+            )
+            indent = detect_indent(ours_raw, theirs_raw, base_raw)
+            changed = True
+            return "".join(f"{indent}{decl}\n" for decl in merged)
 
-        if not indent:
-            top_level_merged_items.update(merged)
-
-        changed = True
-        return format_rust_imports(merged, indent)
+        return match.group(0)
 
     resolved = DIFF3_RE.sub(replace_diff3, text)
     if changed and top_level_merged_items and re.search(r"^\s+use super::\*;$", resolved, re.MULTILINE):
