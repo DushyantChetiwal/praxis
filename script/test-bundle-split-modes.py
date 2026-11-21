@@ -26,6 +26,7 @@ import gzip
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 command = Path(sys.argv[0]).name
@@ -150,9 +151,21 @@ elif command == "hdiutil":
     create(arguments[-1], b"desktop dmg")
 elif command == "xcode-select":
     print(root / "xcode")
+elif command == "curl":
+    if "--output" in arguments:
+        create(value("--output"), arguments[-1].encode())
+elif command == "shasum":
+    archive = Path(arguments[-1])
+    assert archive.is_file(), archive
+    url = archive.read_text(errors="replace")
+    key = "GIT_X64_SHA256" if "x64" in url else "GIT_ARM64_SHA256"
+    script_text = (root / "script/bundle-mac").read_text()
+    match = re.search(rf'^{key}="([0-9a-f]+)"', script_text, re.MULTILINE)
+    assert match, f"missing {key} in script/bundle-mac"
+    print(f"{match.group(1)}  {archive}")
 elif command == "envsubst":
     print(sys.stdin.read())
-elif command not in {"rustup", "curl", "npm", "dmg-license", "security", "notarytool", "stapler", "open"}:
+elif command not in {"rustup", "npm", "dmg-license", "security", "notarytool", "stapler", "open"}:
     raise AssertionError("Unexpected command: " + command)
 '''
 
@@ -188,7 +201,7 @@ class BundleSplitModes(unittest.TestCase):
         for command in (
             "cargo", "rustc", "rustup", "git", "uname", "dsymutil", "strip",
             "llvm-objcopy", "sentry-cli", "ldd", "gzip", "tar", "codesign",
-            "hdiutil", "xcode-select", "envsubst", "curl", "npm", "dmg-license",
+            "hdiutil", "xcode-select", "envsubst", "curl", "shasum", "npm", "dmg-license",
             "security", "open", "ld.lld",
         ):
             (self.root / "bin" / command).symlink_to(driver)
