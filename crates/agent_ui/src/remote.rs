@@ -3383,9 +3383,7 @@ fn validate_git_branch_name(branch: &str) -> Result<String> {
             && !branch.starts_with('.')
             && !branch.ends_with('.')
             && !branch.contains("/.")
-            && !branch
-                .split('/')
-                .any(|segment| segment.ends_with(".lock"))
+            && !branch.split('/').any(|segment| segment.ends_with(".lock"))
             && !branch.bytes().any(|byte| {
                 byte.is_ascii_control()
                     || byte.is_ascii_whitespace()
@@ -3869,8 +3867,19 @@ mod tests {
             validate_worktree_path(root, "worktrees/feat").expect("relative path"),
             root.join("worktrees/feat")
         );
-        for invalid in ["", "   ", ".", "./.", "../outside", "a/../../b", "/abs/path"] {
-            assert!(validate_worktree_path(root, invalid).is_err(), "{invalid:?}");
+        for invalid in [
+            "",
+            "   ",
+            ".",
+            "./.",
+            "../outside",
+            "a/../../b",
+            "/abs/path",
+        ] {
+            assert!(
+                validate_worktree_path(root, invalid).is_err(),
+                "{invalid:?}"
+            );
         }
     }
 

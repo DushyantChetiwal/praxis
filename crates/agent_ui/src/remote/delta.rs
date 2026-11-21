@@ -123,8 +123,15 @@ impl PeerDeltaTracker {
         now_instant: Instant,
         sequence: &mut u64,
     ) -> Result<Option<String>> {
-        let Some((payload, prepared)) =
-            self.prepare_packet(phone, epoch, raw_snapshot, deltas, now, now_instant, *sequence)?
+        let Some((payload, prepared)) = self.prepare_packet(
+            phone,
+            epoch,
+            raw_snapshot,
+            deltas,
+            now,
+            now_instant,
+            *sequence,
+        )?
         else {
             return Ok(None);
         };

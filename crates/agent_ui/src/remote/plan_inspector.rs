@@ -528,12 +528,6 @@ mod tests {
         });
         let fitted = fit_plan_payload(payload, 2_000);
         assert!(fitted.to_string().len() <= 2_000);
-        assert!(
-            fitted["edges"]
-                .as_array()
-                .expect("edges array")
-                .len()
-                < 100
-        );
+        assert!(fitted["edges"].as_array().expect("edges array").len() < 100);
     }
 }

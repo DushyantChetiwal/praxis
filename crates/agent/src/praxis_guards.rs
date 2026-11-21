@@ -5,7 +5,8 @@ use language_model::LanguageModelToolResultContent;
 use crate::thread::{Message, TOOL_CANCELED_MESSAGE};
 
 fn strip_trailing_line_break(text: &str) -> Option<&str> {
-    text.strip_suffix("\r\n").or_else(|| text.strip_suffix('\n'))
+    text.strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix('\n'))
 }
 
 /// Detects when a model fails to emit an end-of-turn stop token and begins
