@@ -18,6 +18,12 @@ struct PeerBaseline {
     sent_at: Instant,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct PreparedPacket {
+    phone: String,
+    baseline: PeerBaseline,
+}
+
 #[derive(Default)]
 pub(super) struct PeerDeltaTracker {
     baselines: HashMap<String, PeerBaseline>,
@@ -37,16 +43,16 @@ impl PeerDeltaTracker {
         self.baselines.remove(phone);
     }
 
-    pub(super) fn next_packet(
-        &mut self,
+    pub(super) fn prepare_packet(
+        &self,
         phone: &str,
         epoch: &str,
         raw_snapshot: Value,
         deltas: bool,
         now: DateTime<Utc>,
         now_instant: Instant,
-        sequence: &mut u64,
-    ) -> Result<Option<String>> {
+        sequence: u64,
+    ) -> Result<Option<(String, PreparedPacket)>> {
         let fingerprint = raw_snapshot.to_string();
         let previous = self.baselines.get(phone);
         let unchanged = previous.is_some_and(|baseline| {
@@ -58,85 +64,72 @@ impl PeerDeltaTracker {
         }
 
         let fitted: Value = serde_json::from_str(&channel::fit_snapshot(raw_snapshot, now))?;
+        let next_sequence = sequence.saturating_add(1);
 
-        if !deltas {
-            return self.record_and_emit_snapshot(
-                phone,
-                epoch,
-                fingerprint,
-                fitted,
-                now_instant,
-                sequence,
-            );
-        }
-
-        let Some(baseline) = previous else {
-            return self.record_and_emit_snapshot(
-                phone,
-                epoch,
-                fingerprint,
-                fitted,
-                now_instant,
-                sequence,
-            );
+        let delta_packet = if deltas {
+            previous.and_then(|baseline| {
+                let delta_body = compute_delta(&baseline.snapshot, &fitted, now)?;
+                let packet = json!({
+                    "type": "delta",
+                    "epoch": epoch,
+                    "sequence": next_sequence,
+                    "base_sequence": baseline.sequence,
+                    "delta": delta_body,
+                })
+                .to_string();
+                (packet.len() <= MAX_DELTA_BYTES).then_some(packet)
+            })
+        } else {
+            None
         };
 
-        if let Some(delta_body) = compute_delta(&baseline.snapshot, &fitted, now) {
-            let next_sequence = sequence.saturating_add(1);
-            let packet = json!({
-                "type": "delta",
+        let payload = delta_packet.unwrap_or_else(|| {
+            json!({
+                "type": "snapshot",
                 "epoch": epoch,
                 "sequence": next_sequence,
-                "base_sequence": baseline.sequence,
-                "delta": delta_body,
+                "snapshot": fitted,
             })
-            .to_string();
-            if packet.len() <= MAX_DELTA_BYTES {
-                *sequence = next_sequence;
-                self.baselines.insert(
-                    phone.to_string(),
-                    PeerBaseline {
-                        sequence: next_sequence,
-                        fingerprint,
-                        snapshot: fitted,
-                        sent_at: now_instant,
-                    },
-                );
-                return Ok(Some(packet));
-            }
-        }
+            .to_string()
+        });
 
-        self.record_and_emit_snapshot(phone, epoch, fingerprint, fitted, now_instant, sequence)
+        Ok(Some((
+            payload,
+            PreparedPacket {
+                phone: phone.to_string(),
+                baseline: PeerBaseline {
+                    sequence: next_sequence,
+                    fingerprint,
+                    snapshot: fitted,
+                    sent_at: now_instant,
+                },
+            },
+        )))
     }
 
-    fn record_and_emit_snapshot(
+    pub(super) fn commit_packet(&mut self, prepared: PreparedPacket, sequence: &mut u64) {
+        *sequence = prepared.baseline.sequence;
+        self.baselines.insert(prepared.phone, prepared.baseline);
+    }
+
+    #[cfg(test)]
+    pub(super) fn next_packet(
         &mut self,
         phone: &str,
         epoch: &str,
-        fingerprint: String,
-        fitted: Value,
+        raw_snapshot: Value,
+        deltas: bool,
+        now: DateTime<Utc>,
         now_instant: Instant,
         sequence: &mut u64,
     ) -> Result<Option<String>> {
-        let next_sequence = sequence.saturating_add(1);
-        let packet = json!({
-            "type": "snapshot",
-            "epoch": epoch,
-            "sequence": next_sequence,
-            "snapshot": fitted,
-        })
-        .to_string();
-        *sequence = next_sequence;
-        self.baselines.insert(
-            phone.to_string(),
-            PeerBaseline {
-                sequence: next_sequence,
-                fingerprint,
-                snapshot: fitted,
-                sent_at: now_instant,
-            },
-        );
-        Ok(Some(packet))
+        let Some((payload, prepared)) =
+            self.prepare_packet(phone, epoch, raw_snapshot, deltas, now, now_instant, *sequence)?
+        else {
+            return Ok(None);
+        };
+        self.commit_packet(prepared, sequence);
+        Ok(Some(payload))
     }
 }
 
@@ -509,5 +502,89 @@ mod tests {
         .expect("json");
         assert_eq!(packet["type"], "snapshot");
         assert_eq!(packet["sequence"], 2);
+    }
+
+    #[test]
+    fn dropped_prepared_packet_does_not_advance_sequence_or_baseline() {
+        let mut tracker = PeerDeltaTracker::new();
+        let mut sequence = 0u64;
+        let now = Utc::now();
+        let t0 = Instant::now();
+
+        let first = sample_snapshot(
+            "s1",
+            "generating",
+            1,
+            vec![json!({"index": 0, "kind": "user", "text": "hi"})],
+            true,
+        );
+        let (first_payload, first_prepared) = tracker
+            .prepare_packet("phone1", "e1", first, true, now, t0, sequence)
+            .expect("ok")
+            .expect("prepared");
+        let first_json: Value = serde_json::from_str(&first_payload).expect("json");
+        assert_eq!(first_json["type"], "snapshot");
+        assert_eq!(first_json["sequence"], 1);
+        tracker.commit_packet(first_prepared, &mut sequence);
+        assert_eq!(sequence, 1);
+
+        // Simulate a dropped send (prepared packet is never committed).
+        let dropped = sample_snapshot(
+            "s1",
+            "generating",
+            2,
+            vec![
+                json!({"index": 0, "kind": "user", "text": "hi"}),
+                json!({"index": 1, "kind": "assistant", "text": "working"}),
+            ],
+            true,
+        );
+        let (dropped_payload, _dropped_prepared) = tracker
+            .prepare_packet(
+                "phone1",
+                "e1",
+                dropped,
+                true,
+                now,
+                t0 + Duration::from_millis(80),
+                sequence,
+            )
+            .expect("ok")
+            .expect("prepared");
+        let dropped_json: Value = serde_json::from_str(&dropped_payload).expect("json");
+        assert_eq!(dropped_json["type"], "delta");
+        assert_eq!(dropped_json["sequence"], 2);
+        assert_eq!(dropped_json["base_sequence"], 1);
+        assert_eq!(sequence, 1);
+
+        // Next successful packet must still base its delta on sequence 1, not 2.
+        let retried = sample_snapshot(
+            "s1",
+            "idle",
+            2,
+            vec![
+                json!({"index": 0, "kind": "user", "text": "hi"}),
+                json!({"index": 1, "kind": "assistant", "text": "done"}),
+            ],
+            false,
+        );
+        let (retried_payload, retried_prepared) = tracker
+            .prepare_packet(
+                "phone1",
+                "e1",
+                retried,
+                true,
+                now,
+                t0 + Duration::from_millis(160),
+                sequence,
+            )
+            .expect("ok")
+            .expect("prepared");
+        tracker.commit_packet(retried_prepared, &mut sequence);
+        let retried_json: Value = serde_json::from_str(&retried_payload).expect("json");
+        assert_eq!(retried_json["type"], "delta");
+        assert_eq!(retried_json["sequence"], 2);
+        assert_eq!(retried_json["base_sequence"], 1);
+        assert_eq!(sequence, 2);
     }
 }

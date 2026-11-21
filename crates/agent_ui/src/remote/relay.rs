@@ -478,25 +478,28 @@ async fn serve(
                     {
                         continue;
                     }
+                    if outgoing.is_full() {
+                        continue;
+                    }
                     non_delta_checked_at.insert(phone.clone(), now_instant);
                     let value = cx.update(|cx| {
                         let current = status(&device, cx);
                         snapshot(&current, Some(watch), cx)
                     });
-                    let Some(packet) = delta_tracker.next_packet(
+                    let Some((packet, prepared)) = delta_tracker.prepare_packet(
                         phone,
                         &epoch,
                         value,
                         watch.deltas,
                         now,
                         now_instant,
-                        &mut sequence,
+                        sequence,
                     )?
                     else {
                         continue;
                     };
                     match outgoing.try_send((peer, packet)) {
-                        Ok(()) => {}
+                        Ok(()) => delta_tracker.commit_packet(prepared, &mut sequence),
                         Err(async_channel::TrySendError::Full(_)) => {}
                         Err(error) => return Err(anyhow!("live connection stopped: {error}")),
                     }

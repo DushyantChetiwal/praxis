@@ -224,4 +224,68 @@ class ComposerSuggestionsTest {
         assertEquals("/fallback-skill", parsed[2].label)
         assertEquals("/fallback-skill ", parsed[2].insertText)
     }
+
+    @Test
+    fun parseSuggestionsIgnoresJsonNullValues() {
+        val mentionPayload = JSONObject(
+            """
+            {
+              "items": [
+                {
+                  "kind": null,
+                  "label": null,
+                  "path": "src/main.rs",
+                  "insert_text": "@src/main.rs "
+                },
+                {
+                  "kind": "file",
+                  "label": "null-insert",
+                  "path": "src/ignored.rs",
+                  "insert_text": null
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+        val mentions = parseMentionSuggestions(mentionPayload)
+        assertEquals(1, mentions.size)
+        assertEquals("File", mentions[0].badge)
+        assertEquals("src/main.rs", mentions[0].label)
+        assertEquals("src/main.rs", mentions[0].subtitle)
+        assertEquals("@src/main.rs ", mentions[0].insertText)
+
+        val skillPayload = JSONObject(
+            """
+            {
+              "commands": [
+                {
+                  "name": null,
+                  "description": "ignored",
+                  "insert_text": null
+                },
+                {
+                  "name": "compact",
+                  "description": null,
+                  "insert_text": null
+                }
+              ],
+              "skills": [
+                {
+                  "name": "gpui-test",
+                  "description": null,
+                  "insert_text": null
+                }
+              ]
+            }
+            """.trimIndent(),
+        )
+        val skills = parseSkillSuggestions(skillPayload)
+        assertEquals(2, skills.size)
+        assertEquals("/compact", skills[0].label)
+        assertEquals("", skills[0].subtitle)
+        assertEquals("/compact ", skills[0].insertText)
+        assertEquals("/gpui-test", skills[1].label)
+        assertEquals("", skills[1].subtitle)
+        assertEquals("/gpui-test ", skills[1].insertText)
+    }
 }

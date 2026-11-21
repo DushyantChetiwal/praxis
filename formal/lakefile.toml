@@ -1,0 +1,6 @@
+name = "PraxisSpecs"
+version = "0.1.0"
+defaultTargets = ["PraxisSpecs"]
+
+[[lean_lib]]
+name = "PraxisSpecs"

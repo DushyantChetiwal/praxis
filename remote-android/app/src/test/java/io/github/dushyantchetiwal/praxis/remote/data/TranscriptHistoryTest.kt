@@ -390,7 +390,7 @@ class TranscriptHistoryTest {
     }
 
     @Test
-    fun applyDeltaDisjointJumpSnapsToTail() {
+    fun applyDeltaDisjointJumpReturnsNullToForceSnapshotResync() {
         val base = TranscriptHistory().live(view(start = 0, total = 5))
         val disjoint = ThreadDelta(
             updatedAtRaw = null,
@@ -406,10 +406,9 @@ class TranscriptHistoryTest {
             upserts = (15 until 20).map { Entry(it, "assistant", "tail $it", null) },
             stepThreads = null,
         )
-        val snapped = base.applyDelta(disjoint)!!
-        assertEquals((15 until 20).toList(), snapped.thread!!.entries.map { it.index })
-        assertEquals(15, snapped.records.getValue("root").nextBefore)
-        assertEquals(listOf(HistoryRange(15, 20)), snapped.records.getValue("root").ranges)
+        assertNull(base.applyDelta(disjoint))
+        assertNull(base.applyDelta(disjoint.copy(upserts = emptyList())))
+        assertEquals((0 until 5).toList(), base.thread!!.entries.map { it.index })
     }
 
     @Test

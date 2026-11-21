@@ -54,7 +54,7 @@ pub(crate) struct TerminalTaskRegistry {
     reservations: RefCell<Vec<Weak<TerminalLaunchCancellation>>>,
     children: RefCell<Vec<Weak<TerminalTaskRegistry>>>,
     /// Told whenever a task exits, so the thread can report or wake on it.
-    completion_signal: RefCell<Option<mpsc::UnboundedSender<()>>>,
+    completion_signal: Rc<RefCell<Option<mpsc::UnboundedSender<()>>>>,
 }
 
 struct TerminalLaunchCancellation {
@@ -314,7 +314,7 @@ impl TerminalTaskRegistry {
             backgrounded: Cell::new(false),
             reported: Cell::new(false),
         });
-        let completion_signal = self.completion_signal.borrow().clone();
+        let completion_signal = self.completion_signal.clone();
         // Construct the timer before spawning: yielding never resets the hard deadline.
         let deadline =
             timeout_ms.map(|ms| cx.background_executor().timer(Duration::from_millis(ms)));
@@ -397,7 +397,7 @@ impl TerminalTaskRegistry {
                     .map_err(|error| error.to_string());
                     *state.result.borrow_mut() = Some(result);
                     state.terminal.borrow_mut().take();
-                    if let Some(signal) = completion_signal {
+                    if let Some(signal) = completion_signal.borrow().clone() {
                         // The receiver is gone only when its thread is.
                         signal.unbounded_send(()).ok();
                     }
@@ -882,6 +882,21 @@ mod tests {
         terminal.signal_exit();
         task.completion.clone().await;
         assert!(!registry.has_unreported_completions());
+    }
+
+    #[gpui::test]
+    async fn terminal_tasks_completion_signals_after_start_reaches_running_task(
+        cx: &mut TestAppContext,
+    ) {
+        use futures::StreamExt as _;
+
+        let registry = Rc::new(TerminalTaskRegistry::default());
+        let terminal = Rc::new(cx.update(FakeTerminalHandle::new_never_exits));
+        let task = start(&registry, terminal.clone(), None, cx);
+        let mut signals = registry.completion_signals();
+        terminal.signal_exit();
+        task.completion.clone().await;
+        assert!(signals.next().await.is_some());
     }
 
     fn advance(cx: &mut TestAppContext, milliseconds: u64) {

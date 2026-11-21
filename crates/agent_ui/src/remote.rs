@@ -1693,6 +1693,17 @@ fn terminal_output_page(output: &str, before: Option<usize>, running: bool) -> V
     while !output.is_char_boundary(start) {
         start += 1;
     }
+    loop {
+        let escaped = json_len(&output[start..end]);
+        if escaped <= FILE_JSON_BUDGET {
+            break;
+        }
+        let step = ((escaped - FILE_JSON_BUDGET) / 6).max(1);
+        start = (start + step).min(end);
+        while !output.is_char_boundary(start) {
+            start += 1;
+        }
+    }
     json!({
         "text": &output[start..end],
         "start": start,
@@ -3363,13 +3374,55 @@ fn validate_git_branch_name(branch: &str) -> Result<String> {
     anyhow::ensure!(!branch.is_empty(), "expected a non-empty \"branch\"");
     anyhow::ensure!(
         !branch.starts_with('-')
+            && branch != "@"
             && !branch.contains("..")
+            && !branch.contains("@{")
+            && !branch.starts_with('/')
+            && !branch.ends_with('/')
+            && !branch.contains("//")
+            && !branch.starts_with('.')
+            && !branch.ends_with('.')
+            && !branch.contains("/.")
             && !branch
-                .bytes()
-                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()),
+                .split('/')
+                .any(|segment| segment.ends_with(".lock"))
+            && !branch.bytes().any(|byte| {
+                byte.is_ascii_control()
+                    || byte.is_ascii_whitespace()
+                    || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+            }),
         "invalid branch name {branch:?}"
     );
     Ok(branch.to_string())
+}
+
+fn validate_worktree_path(repo_root: &Path, raw: &str) -> Result<PathBuf> {
+    let trimmed = raw.trim();
+    anyhow::ensure!(!trimmed.is_empty(), "expected a non-empty \"path\"");
+    let candidate = Path::new(trimmed);
+    anyhow::ensure!(
+        !candidate.is_absolute(),
+        "worktree path must be relative to the repository: {trimmed:?}"
+    );
+    let mut has_normal = false;
+    for component in candidate.components() {
+        match component {
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => {
+                bail!("worktree path cannot escape the repository: {trimmed:?}");
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(_) => {
+                has_normal = true;
+            }
+        }
+    }
+    anyhow::ensure!(
+        has_normal,
+        "worktree path must name a subdirectory inside the repository: {trimmed:?}"
+    );
+    Ok(repo_root.join(candidate))
 }
 
 fn worktree_create(
@@ -3381,12 +3434,6 @@ fn worktree_create(
         bail!("Creating a git worktree on a remote WSL or SSH project is not supported yet.");
     }
     let branch = validate_git_branch_name(required(args, "branch")?)?;
-    let explicit_path = args
-        .get("path")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from);
 
     let repo_path = {
         let project = workspace.read(cx).project().read(cx);
@@ -3406,6 +3453,14 @@ fn worktree_create(
             .map(|snapshot| snapshot.work_directory_abs_path.to_path_buf())
             .context("No git repository is open in this window.")?
     };
+
+    let explicit_path = args
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+        .map(|raw| validate_worktree_path(&repo_path, raw))
+        .transpose()?;
 
     let spec = match explicit_path {
         Some(path) => agent::worktree_isolation::IsolatedWorktreeSpec {
@@ -3794,6 +3849,58 @@ mod tests {
         let empty = terminal_output_page("", Some(10), false);
         assert_eq!(empty["text"], "");
         assert_eq!(empty["end"].as_u64(), Some(0));
+    }
+
+    #[test]
+    fn terminal_output_page_respects_json_budget_for_escaped_output() {
+        let output = "\x1b".repeat(TERMINAL_OUTPUT_PAGE_BYTES);
+        let page = terminal_output_page(&output, None, false);
+        let text = page["text"].as_str().expect("text");
+        assert!(json_len(text) <= FILE_JSON_BUDGET);
+        assert!(page.to_string().len() <= channel::MAX_ANSWER_LEN);
+        assert!(page["start"].as_u64().expect("start") > 0);
+        assert_eq!(page["end"].as_u64(), Some(output.len() as u64));
+    }
+
+    #[test]
+    fn validate_worktree_path_rejects_traversal_and_absolute_paths() {
+        let root = Path::new("repo");
+        assert_eq!(
+            validate_worktree_path(root, "worktrees/feat").expect("relative path"),
+            root.join("worktrees/feat")
+        );
+        for invalid in ["", "   ", ".", "./.", "../outside", "a/../../b", "/abs/path"] {
+            assert!(validate_worktree_path(root, invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn validate_git_branch_name_rejects_revision_syntax() {
+        for valid in ["main", "feature/test-1", "release_v2", "user@host/topic"] {
+            assert!(validate_git_branch_name(valid).is_ok(), "{valid:?}");
+        }
+        for invalid in [
+            "-flag",
+            "@",
+            "main@{0}",
+            "main~1",
+            "main^2",
+            "a:b",
+            "a?b",
+            "a*b",
+            "a[0]",
+            "a\\b",
+            "/leading",
+            "trailing/",
+            "a//b",
+            ".hidden",
+            "dot.",
+            "a/.b",
+            "branch.lock",
+            "dir.lock/branch",
+        ] {
+            assert!(validate_git_branch_name(invalid).is_err(), "{invalid:?}");
+        }
     }
 
     #[test]

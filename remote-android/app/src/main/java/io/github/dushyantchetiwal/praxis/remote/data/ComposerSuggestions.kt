@@ -107,10 +107,10 @@ fun parseMentionSuggestions(json: JSONObject?): List<ComposerSuggestion> {
     val result = ArrayList<ComposerSuggestion>(items.length())
     for (index in 0 until items.length()) {
         val item = items.optJSONObject(index) ?: continue
-        val kind = item.optString("kind", "").trim()
-        val label = item.optString("label", "").trim()
-        val path = item.optString("path", "").trim()
-        val insertText = item.optString("insert_text", "").takeIf { it.isNotBlank() } ?: continue
+        val kind = item.str("kind").orEmpty().trim()
+        val label = item.str("label").orEmpty().trim()
+        val path = item.str("path").orEmpty().trim()
+        val insertText = item.str("insert_text")?.takeIf { it.isNotBlank() } ?: continue
         if (label.isEmpty() && path.isEmpty()) continue
 
         val badge = if (kind.equals("symbol", ignoreCase = true)) "Symbol" else "File"
@@ -137,10 +137,10 @@ fun parseSkillSuggestions(json: JSONObject?): List<ComposerSuggestion> {
     if (commands != null) {
         for (index in 0 until commands.length()) {
             val command = commands.optJSONObject(index) ?: continue
-            val name = command.optString("name", "").trim()
+            val name = command.str("name").orEmpty().trim()
             if (name.isEmpty()) continue
-            val description = command.optString("description", "").trim()
-            val insertText = command.optString("insert_text", "").takeIf { it.isNotBlank() } ?: "/$name "
+            val description = command.str("description").orEmpty().trim()
+            val insertText = command.str("insert_text")?.takeIf { it.isNotBlank() } ?: "/$name "
             result.add(
                 ComposerSuggestion(
                     id = "command:$name:$index",
@@ -158,10 +158,10 @@ fun parseSkillSuggestions(json: JSONObject?): List<ComposerSuggestion> {
     if (skills != null) {
         for (index in 0 until skills.length()) {
             val skill = skills.optJSONObject(index) ?: continue
-            val name = skill.optString("name", "").trim()
+            val name = skill.str("name").orEmpty().trim()
             if (name.isEmpty()) continue
-            val description = skill.optString("description", "").trim()
-            val insertText = skill.optString("insert_text", "").takeIf { it.isNotBlank() } ?: "/$name "
+            val description = skill.str("description").orEmpty().trim()
+            val insertText = skill.str("insert_text")?.takeIf { it.isNotBlank() } ?: "/$name "
             result.add(
                 ComposerSuggestion(
                     id = "skill:$name:$index",

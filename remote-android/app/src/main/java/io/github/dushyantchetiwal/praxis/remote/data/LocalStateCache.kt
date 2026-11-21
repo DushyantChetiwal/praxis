@@ -206,9 +206,34 @@ class LocalStateCache(
             size > maxMemoryEntries
     }
     private val ioMutex = Mutex()
+    private val tableLock = Any()
+    private var activeTableOps = 0
+    private var tableClosed = false
 
     @Volatile
     private var closed = false
+
+    private inline fun <T> withTable(block: (KeyValueTable) -> T): T? {
+        synchronized(tableLock) {
+            if (closed || tableClosed) return null
+            activeTableOps++
+        }
+        try {
+            return block(table)
+        } finally {
+            var shouldClose = false
+            synchronized(tableLock) {
+                activeTableOps--
+                if (closed && !tableClosed && activeTableOps == 0) {
+                    tableClosed = true
+                    shouldClose = true
+                }
+            }
+            if (shouldClose) {
+                table.close()
+            }
+        }
+    }
 
     fun peek(channel: String, windowId: Long?): CachedWindowState? {
         if (closed) return null
@@ -228,16 +253,18 @@ class LocalStateCache(
         val restored = withContext(ioDispatcher) {
             ioMutex.withLock {
                 if (closed) return@withLock null
-                val sealed = table.get(key) ?: return@withLock null
-                val decoded = runCatching {
-                    val derived = cacheKey(channel, channelKey)
-                    val plain = RemoteCrypto.open(derived, sealed, aad(channel, slot))
-                    decodeCachedWindowState(String(plain, Charsets.UTF_8))
-                }.getOrNull()
-                if (decoded == null) {
-                    runCatching { table.delete(key) }
+                withTable { activeTable ->
+                    val sealed = activeTable.get(key) ?: return@withTable null
+                    val decoded = runCatching {
+                        val derived = cacheKey(channel, channelKey)
+                        val plain = RemoteCrypto.open(derived, sealed, aad(channel, slot))
+                        decodeCachedWindowState(String(plain, Charsets.UTF_8))
+                    }.getOrNull()
+                    if (decoded == null) {
+                        runCatching { activeTable.delete(key) }
+                    }
+                    decoded
                 }
-                decoded
             }
         } ?: return null
 
@@ -280,8 +307,10 @@ class LocalStateCache(
                 val derived = cacheKey(channel, channelKey)
                 val jsonBytes = encodeCachedWindowState(state).toByteArray(Charsets.UTF_8)
                 val sealed = RemoteCrypto.seal(derived, jsonBytes, aad(channel, slot))
-                table.put(key, sealed, nowMillis)
-                table.trimToMaxRows(maxRows)
+                withTable { activeTable ->
+                    activeTable.put(key, sealed, nowMillis)
+                    activeTable.trimToMaxRows(maxRows)
+                }
             }
         }
     }
@@ -296,8 +325,9 @@ class LocalStateCache(
         }
         withContext(ioDispatcher) {
             ioMutex.withLock {
-                if (!closed) {
-                    table.deletePrefix(prefix)
+                if (closed) return@withLock
+                withTable { activeTable ->
+                    activeTable.deletePrefix(prefix)
                 }
             }
         }
@@ -308,7 +338,16 @@ class LocalStateCache(
         synchronized(memoryLock) {
             memory.clear()
         }
-        table.close()
+        var shouldClose = false
+        synchronized(tableLock) {
+            if (!tableClosed && activeTableOps == 0) {
+                tableClosed = true
+                shouldClose = true
+            }
+        }
+        if (shouldClose) {
+            table.close()
+        }
     }
 
     companion object {
@@ -370,8 +409,8 @@ class LocalStateCache(
                 entry.copy(
                     text = boundedText,
                     parts = boundedParts,
-                    truncated = entry.truncated || textTruncated,
-                    truncation = entry.truncation ?: if (textTruncated) "snapshot_budget" else null,
+                    truncated = true,
+                    truncation = entry.truncation ?: "snapshot_budget",
                     detailsPending = true,
                 )
             } else {

@@ -4,6 +4,10 @@ use language_model::LanguageModelToolResultContent;
 
 use crate::thread::{Message, TOOL_CANCELED_MESSAGE};
 
+fn strip_trailing_line_break(text: &str) -> Option<&str> {
+    text.strip_suffix("\r\n").or_else(|| text.strip_suffix('\n'))
+}
+
 /// Detects when a model fails to emit an end-of-turn stop token and begins
 /// role-playing a `BackgroundWakeInfo` user prompt inside assistant text.
 pub(crate) fn find_hallucinated_background_wake_offset(text: &str) -> Option<usize> {
@@ -11,33 +15,33 @@ pub(crate) fn find_hallucinated_background_wake_offset(text: &str) -> Option<usi
     let mut search_from = 0;
     while let Some(relative_index) = text[search_from..].find(WAKE_HEADER) {
         let header_index = search_from + relative_index;
-        search_from = header_index + WAKE_HEADER.len();
+        let after_header_index = header_index + WAKE_HEADER.len();
+        search_from = after_header_index;
 
         let prefix = &text[..header_index];
-        let marker_start = if let Some(stripped) = prefix.strip_suffix("user\n") {
-            if stripped.is_empty() || stripped.ends_with('\n') {
-                Some(
-                    stripped
-                        .len()
-                        .saturating_sub(usize::from(stripped.ends_with('\n'))),
-                )
-            } else {
-                None
-            }
-        } else if (prefix.is_empty() || prefix.ends_with('\n'))
-            && text[header_index + WAKE_HEADER.len()..].starts_with("\n- ")
+        let after_header = &text[after_header_index..];
+        let marker_start = if let Some(stripped) = prefix
+            .strip_suffix("user\r\n")
+            .or_else(|| prefix.strip_suffix("user\n"))
         {
-            Some(
-                prefix
-                    .len()
-                    .saturating_sub(usize::from(prefix.ends_with('\n'))),
-            )
+            if stripped.is_empty() {
+                Some(0)
+            } else {
+                strip_trailing_line_break(stripped).map(str::len)
+            }
+        } else if after_header.starts_with("\r\n- ") || after_header.starts_with("\n- ") {
+            if prefix.is_empty() {
+                Some(0)
+            } else {
+                strip_trailing_line_break(prefix).map(str::len)
+            }
         } else {
             None
         };
 
         if let Some(start) = marker_start
             && text[..start].matches("```").count().is_multiple_of(2)
+            && text[..start].matches("~~~").count().is_multiple_of(2)
         {
             return Some(start);
         }
@@ -98,5 +102,37 @@ mod tests {
             Praxis resumed this conversation because background work finished:\n\
             - Sub-agent \"R6-S1\" finished.\n```";
         assert_eq!(find_hallucinated_background_wake_offset(fenced_code), None);
+    }
+
+    #[test]
+    fn test_find_hallucinated_background_wake_offset_crlf_and_tilde_fences() {
+        let crlf_with_user = "Waiting for subagents.\r\nuser\r\n\
+            Praxis resumed this conversation because background work finished:\r\n\
+            - Sub-agent \"R6-S1\" finished.";
+        assert_eq!(
+            find_hallucinated_background_wake_offset(crlf_with_user),
+            Some("Waiting for subagents.".len())
+        );
+
+        let crlf_direct = "Yielding turn now.\r\n\
+            Praxis resumed this conversation because background work finished:\r\n\
+            - Background task 1 exited with code 0.";
+        assert_eq!(
+            find_hallucinated_background_wake_offset(crlf_direct),
+            Some("Yielding turn now.".len())
+        );
+
+        let tilde_fenced = "Example:\r\n~~~text\r\nuser\r\n\
+            Praxis resumed this conversation because background work finished:\r\n\
+            - Sub-agent \"R6-S1\" finished.\r\n~~~";
+        assert_eq!(find_hallucinated_background_wake_offset(tilde_fenced), None);
+
+        let after_closed_tilde = "Example:\n~~~\ntext\n~~~\n\
+            Praxis resumed this conversation because background work finished:\n\
+            - Background task 1 exited with code 0.";
+        assert_eq!(
+            find_hallucinated_background_wake_offset(after_closed_tilde),
+            Some("Example:\n~~~\ntext\n~~~".len())
+        );
     }
 }

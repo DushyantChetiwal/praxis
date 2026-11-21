@@ -119,28 +119,27 @@ data class TranscriptHistory(
         if (delta.nextBefore !in 0..delta.total) return null
         if (delta.hasMore != (delta.nextBefore > 0)) return null
 
+        if (delta.nextBefore > (old.ranges.lastOrNull()?.end ?: 0)) return null
+
         val range = HistoryRange(delta.nextBefore, delta.total)
-        val disjointJump = delta.upserts.isNotEmpty() && delta.nextBefore > (old.ranges.lastOrNull()?.end ?: 0)
-        val retained = old.takeUnless { disjointJump }
         var nextRequest = request
-        if (retained == null && nextRequest?.session == delta.sessionId) nextRequest = null
 
         val updatedRoot = HistoryRecord(
             view = old.view.copy(
                 title = delta.title ?: old.view.title,
                 status = delta.threadStatus ?: old.view.status,
                 total = delta.total,
-                entries = mergeEntries(retained?.view?.entries.orEmpty(), delta.upserts, delta.total),
+                entries = mergeEntries(old.view.entries, delta.upserts, delta.total),
                 nextBefore = delta.nextBefore,
                 hasMore = delta.hasMore,
                 pagingValid = true,
                 stepThreads = emptyList(),
             ),
-            ranges = mergeRanges(retained?.ranges.orEmpty() + range),
-            failure = retained?.failure,
+            ranges = mergeRanges(old.ranges + range),
+            failure = old.failure,
         )
         val nextBeforeAfter = updatedRoot.nextBefore
-        val progressed = nextBeforeAfter != null && retained?.nextBefore?.let { nextBeforeAfter < it } == true
+        val progressed = nextBeforeAfter != null && old.nextBefore?.let { nextBeforeAfter < it } == true
         val finalRoot = if (nextBeforeAfter == null || nextBeforeAfter == 0 || progressed) {
             updatedRoot.copy(failure = null)
         } else {
