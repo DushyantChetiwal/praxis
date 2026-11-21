@@ -110,6 +110,32 @@ class ResolveUpstreamSyncTests(unittest.TestCase):
         )
         self.assertNotIn("    use settings::Settings as _;\n", resolved)
 
+    def test_diff3_rust_mod_merge_handles_sibling_modules_and_rejects_attrs(self):
+        conflicted = (
+            "<<<<<<< HEAD\n"
+            "mod cursor_ext;\n"
+            "||||||| base\n"
+            "=======\n"
+            "mod auth_status;\n"
+            ">>>>>>> upstream/main\n"
+            "mod debug_log;\n"
+        )
+        resolved, ok = resolver.resolve_rust_use_hunks(conflicted)
+        self.assertTrue(ok)
+        self.assertEqual(resolved, "mod auth_status;\nmod cursor_ext;\nmod debug_log;\n")
+
+        attr_hunk = (
+            "<<<<<<< HEAD\n"
+            "#[cfg(test)]\n"
+            "mod a;\n"
+            "||||||| base\n"
+            "=======\n"
+            "mod b;\n"
+            ">>>>>>> upstream/main\n"
+        )
+        _, ok = resolver.resolve_rust_use_hunks(attr_hunk)
+        self.assertFalse(ok)
+
     def test_deleted_in_praxis_checks_for_mod_declarations(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

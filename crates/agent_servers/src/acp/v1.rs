@@ -1,3 +1,6 @@
+use super::auth_status::{
+    ConnectionAuthStatus, from_v1 as auth_status_from_v1, update_v1 as handle_auth_status_update,
+};
 use super::cursor_ext::{handle_cursor_ask_question, handle_cursor_create_plan};
 use super::{
     AcpDebugLog, AcpDebugMessage, AcpSession, ClientContext, ConfigOptions, FlattenAcpResult as _,
@@ -79,6 +82,7 @@ pub struct AcpConnection {
     sessions: Rc<RefCell<HashMap<acp_v2::SessionId, AcpSession>>>,
     pending_sessions: RefCell<HashMap<acp_v2::SessionId, PendingAcpSession>>,
     auth_methods: Vec<acp_v2::AuthMethod>,
+    auth_status: Option<Rc<ConnectionAuthStatus>>,
     agent_server_store: WeakEntity<AgentServerStore>,
     agent_capabilities: acp::AgentCapabilities,
     /// Whether Zed advertised the subagents RFD, so the agent reports subagents with it.
@@ -495,6 +499,10 @@ fn client_builder(
         )
         // --- Notification handlers (agent→client) ---
         .on_receive_notification(
+            on_notification!(handle_auth_status_update),
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .on_receive_notification(
             on_notification!(handle_session_notification),
             agent_client_protocol::on_receive_notification!(),
         )
@@ -599,7 +607,9 @@ impl AcpConnection {
         let client_capabilities = client_capabilities_for_agent(&agent_id, acp_beta);
 
         let accepts_subagent_updates = client_capabilities.subagents.is_some();
+        let auth_status = acp_beta.then(ConnectionAuthStatus::new);
         let dispatch_context = ClientContext {
+            auth_status: auth_status.as_ref().map(Rc::downgrade).unwrap_or_default(),
             sessions: sessions.clone(),
             session_list: client_session_list.clone(),
             request_elicitations: request_elicitations.clone(),
@@ -740,9 +750,11 @@ impl AcpConnection {
             move |cx| defaults.observe_settings(agent_id, cx)
         });
 
-        Ok(Self {
+        let auth_status = auth_status.filter(|_| response.agent_capabilities.auth.status.is_some());
+        let result = Self {
             id: agent_id,
             auth_methods,
+            auth_status,
             agent_server_store,
             connection,
             telemetry_id,
@@ -761,7 +773,9 @@ impl AcpConnection {
             _wait_task: wait_task,
             _stderr_task: stderr_task,
             _child: Some(child),
-        })
+        };
+        cx.update(|cx| result.refresh_auth_status(cx));
+        Ok(result)
     }
 
     pub fn prompt_capabilities(&self) -> acp_v2::PromptCapabilities {
@@ -795,6 +809,7 @@ impl AcpConnection {
             sessions,
             pending_sessions: RefCell::new(HashMap::default()),
             auth_methods: vec![],
+            auth_status: None,
             agent_server_store,
             agent_capabilities,
             accepts_subagent_updates,
@@ -1617,6 +1632,28 @@ impl AgentConnection for AcpConnection {
         &self.auth_methods
     }
 
+    fn auth_status(&self) -> Option<watch::Receiver<Option<acp_v2::AuthStatusResponse>>> {
+        Some(self.auth_status.as_ref()?.receiver())
+    }
+
+    fn refresh_auth_status(&self, cx: &App) {
+        if let Some(status) = &self.auth_status {
+            let request = self
+                .connection
+                .send_request(acp::AuthStatusRequest::new())
+                .block_task();
+            status.query(
+                async move {
+                    request
+                        .await
+                        .ok()
+                        .map(|response| auth_status_from_v1(response.state, response.accounts))
+                },
+                cx,
+            );
+        }
+    }
+
     fn terminal_auth_task(
         &self,
         method_id: &acp_v2::AuthMethodId,
@@ -2305,6 +2342,7 @@ pub mod test_support {
 
         let request_elicitations = cx.new(|_| ElicitationStore::default());
         let dispatch_context = ClientContext {
+            auth_status: Default::default(),
             sessions: sessions.clone(),
             session_list: client_session_list.clone(),
             request_elicitations: request_elicitations.clone(),
@@ -7953,6 +7991,7 @@ exit 7
             active_request_scopes: None,
             pending_session_updates: None,
             accepts_subagent_updates,
+            auth_status: Default::default(),
         };
         // `TestAppContext::spawn` hands out an `AsyncApp` by value, whereas the
         // production path uses `Context::spawn` which hands out `&mut AsyncApp`.
@@ -8335,6 +8374,7 @@ exit 7
             sessions: Rc::new(RefCell::new(HashMap::default())),
             session_list: Rc::new(RefCell::new(None)),
             request_elicitations: store.clone(),
+            auth_status: Default::default(),
             active_request_scopes: None,
             pending_session_updates: None,
             accepts_subagent_updates: false,
@@ -8488,6 +8528,7 @@ exit 7
             },
         );
         let context_for = |accepts_subagent_updates, cx: &mut gpui::TestAppContext| ClientContext {
+            auth_status: Default::default(),
             sessions: sessions.clone(),
             session_list: Rc::new(RefCell::new(None)),
             request_elicitations: cx.new(|_| ElicitationStore::default()),
@@ -8696,6 +8737,7 @@ exit 7
             sessions: Rc::new(RefCell::new(HashMap::default())),
             session_list: Rc::new(RefCell::new(None)),
             request_elicitations: cx.new(|_| ElicitationStore::default()),
+            auth_status: Default::default(),
             active_request_scopes: None,
             pending_session_updates: None,
             accepts_subagent_updates: false,
