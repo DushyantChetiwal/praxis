@@ -236,10 +236,7 @@ impl Prerequisites {
 
     fn waiting(&self, graph: &ArchitectGraph, node: &NodeId) -> bool {
         graph.edges.iter().any(|edge| {
-            &edge.to == node
-                && edge.max_repeats != Some(0)
-                && self.nodes.contains(&edge.from)
-                && !self.settled(&edge.from)
+            &edge.to == node && self.nodes.contains(&edge.from) && !self.settled(&edge.from)
         })
     }
 
@@ -1346,12 +1343,7 @@ fn reachable_before(graph: &ArchitectGraph, entries: &[NodeId], stops: &[NodeId]
             continue;
         }
         reached.push(node.clone());
-        queue.extend(
-            graph
-                .edges_from(&node)
-                .filter(|edge| edge.max_repeats != Some(0))
-                .map(|edge| edge.to.clone()),
-        );
+        queue.extend(graph.edges_from(&node).map(|edge| edge.to.clone()));
     }
     graph
         .nodes
@@ -1530,10 +1522,7 @@ fn distances_from(local: &ArchitectGraph, start: &NodeId) -> HashMap<NodeId, usi
     let mut queue = VecDeque::from([start.clone()]);
     while let Some(id) = queue.pop_front() {
         let distance = distances.get(&id).copied().unwrap_or(0);
-        for edge in local
-            .edges_from(&id)
-            .filter(|edge| edge.max_repeats != Some(0))
-        {
+        for edge in local.edges_from(&id) {
             if local.node(&edge.to).is_none() || distances.contains_key(&edge.to) {
                 continue;
             }
@@ -3489,31 +3478,5 @@ mod tests {
     fn a_reply_that_does_not_start_with_a_verdict_is_not_guessed_at() {
         assert_eq!(parse_verdict("I think the tests failed, so yes"), None);
         assert_eq!(parse_verdict(""), None);
-    }
-
-    #[test]
-    fn zero_max_repeats_edges_are_ignored_in_reachability_distances_and_prerequisites() {
-        let mut graph = plain_graph(&["a", "b", "c"], &[("a", "b"), ("a", "c"), ("b", "c")]);
-        graph.edges[1].max_repeats = Some(0);
-        graph.edges[2].max_repeats = Some(0);
-
-        assert_eq!(
-            reachable_before(&graph, &[id("a")], &[]),
-            vec![id("a"), id("b")]
-        );
-        let distances = distances_from(&graph, &id("a"));
-        assert_eq!(distances.get(&id("a")), Some(&0));
-        assert_eq!(distances.get(&id("b")), Some(&1));
-        assert_eq!(distances.get(&id("c")), None);
-
-        let prerequisites = Prerequisites {
-            nodes: vec![id("a"), id("b"), id("c")],
-            entries: vec![id("a")],
-            completed: Vec::new(),
-            skipped: Vec::new(),
-            selected: Vec::new(),
-        };
-        assert!(prerequisites.waiting(&graph, &id("b")));
-        assert!(!prerequisites.waiting(&graph, &id("c")));
     }
 }
