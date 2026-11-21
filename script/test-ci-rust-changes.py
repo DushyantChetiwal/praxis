@@ -33,8 +33,10 @@ class RustChangeTests(unittest.TestCase):
         self.assertFalse(rust_changes.needs_rust([
             "remote-android/app/src/main/java/Main.kt",
             "docs/src/praxis.md",
+            "site/index.html",
             "README.md",
             ".github/workflows/android_remote.yml",
+            ".github/workflows/deploy_pages.yml",
         ]))
 
     def test_any_other_path_needs_rust(self):

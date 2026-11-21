@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Praxis — Plan-Driven AI Code Editor for Desktop &amp; Android</title>
+    <meta
+      name="description"
+      content="Praxis is a fast, native Rust plan-driven AI code editor built on Zed, featuring an interactive Architect canvas, parallel Git worktree agents, and encrypted Android remote control."
+    />
+    <meta
+      name="keywords"
+      content="Praxis, Praxis editor, plan-driven code editor, AI code editor, Architect view, Zed fork, Rust IDE, AI coding agent, Git worktree agents, Praxis Remote Android"
+    />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href="https://dushyantchetiwal.github.io/praxis/" />
+    <!-- Google Search Console: paste your <meta name="google-site-verification" content="..." /> tag below -->
+
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Praxis" />
+    <meta property="og:url" content="https://dushyantchetiwal.github.io/praxis/" />
+    <meta
+      property="og:title"
+      content="Praxis — Plan-Driven AI Code Editor for Desktop &amp; Android"
+    />
+    <meta
+      property="og:description"
+      content="Plan systems. Ship code. Native Rust code editor built on Zed with an interactive Architect graph, parallel Git worktree agents, and encrypted Android remote control."
+    />
+    <meta
+      property="og:image"
+      content="https://github.com/user-attachments/assets/65da59db-5857-454c-92fd-811ecc45c74a"
+    />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta
+      name="twitter:title"
+      content="Praxis — Plan-Driven AI Code Editor"
+    />
+    <meta
+      name="twitter:description"
+      content="Detailed, deterministic AI planning on a native Rust canvas—plus encrypted remote control from Android."
+    />
+    <meta
+      name="twitter:image"
+      content="https://github.com/user-attachments/assets/65da59db-5857-454c-92fd-811ecc45c74a"
+    />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Praxis",
+        "alternateName": "Praxis Code Editor",
+        "description": "Plan-driven software workspace built on the open-source Zed editor with an Architect plan canvas, parallel Git worktree agents, non-blocking async watchers, and encrypted Android remote control.",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Windows, Linux, macOS, Android",
+        "softwareVersion": "2.0",
+        "url": "https://dushyantchetiwal.github.io/praxis/",
+        "downloadUrl": "https://github.com/DushyantChetiwal/praxis/releases/latest",
+        "codeRepository": "https://github.com/DushyantChetiwal/praxis",
+        "license": "https://github.com/DushyantChetiwal/praxis/blob/main/LICENSE-GPL",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "author": {
+          "@type": "Person",
+          "name": "Dushyant Chetiwal",
+          "url": "https://github.com/DushyantChetiwal"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="container nav-row">
+        <a class="brand" href="./" aria-label="Praxis home">
+          <img src="./favicon.svg" alt="" width="28" height="28" />
+          <span>Praxis</span>
+        </a>
+        <nav class="nav-links" aria-label="Primary">
+          <a href="#features">Features</a>
+          <a href="#remote">Praxis Remote</a>
+          <a href="#download">Download</a>
+          <a
+            href="https://github.com/DushyantChetiwal/praxis"
+            class="nav-github"
+            >GitHub</a
+          >
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="container">
+          <p class="eyebrow">Open-Source &middot; Built in Rust on Zed &middot; v2.0</p>
+          <h1>Praxis &mdash; Plan-Driven AI Code Editor</h1>
+          <p class="lead">
+            <strong>Plan systems. Ship code.</strong> Praxis elevates planning
+            from ephemeral chat prompts into an interactive Architect canvas
+            with explicit steps, constraints, file surfaces, parallel Git
+            worktree agents, and encrypted remote control from Android.
+          </p>
+          <div class="cta-row">
+            <a
+              class="btn btn-primary"
+              href="https://github.com/DushyantChetiwal/praxis/releases/latest"
+            >
+              Download Praxis 2.0
+            </a>
+            <a
+              class="btn btn-secondary"
+              href="https://github.com/DushyantChetiwal/praxis"
+            >
+              View Source on GitHub
+            </a>
+            <a
+              class="btn btn-ghost"
+              href="https://github.com/DushyantChetiwal/praxis/releases?q=praxis-remote-android"
+            >
+              Android Remote APK
+            </a>
+          </div>
+
+          <figure class="hero-shot">
+            <img
+              src="https://github.com/user-attachments/assets/65da59db-5857-454c-92fd-811ecc45c74a"
+              alt="Praxis Architect View showing a plan graph of connected steps, constraints, and per-step refinement alongside Code View"
+              width="1437"
+              height="824"
+              loading="eager"
+            />
+            <figcaption>
+              Architect View: draft, inspect, and execute structured engineering
+              plans without losing the speed of a native Rust editor.
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section id="features" class="section">
+        <div class="container">
+          <div class="section-head">
+            <p class="eyebrow">Architecture</p>
+            <h2>Built for deterministic, multi-step engineering</h2>
+          </div>
+          <div class="card-grid">
+            <article class="card">
+              <h3>Interactive Architect Canvas</h3>
+              <p>
+                Model complex tasks as an inspectable DAG of steps, rules,
+                hand-off captures, branches, and bounded retry loops. Discuss
+                individual nodes in dedicated step chats and resume safely from
+                checkpoints.
+              </p>
+            </article>
+            <article class="card">
+              <h3>Parallel Worktree Agents</h3>
+              <p>
+                Run independent sub-agents and concurrent plan branches inside
+                isolated Git worktrees with static file-surface conflict checks,
+                then review and merge clean diffs back to your primary checkout.
+              </p>
+            </article>
+            <article class="card">
+              <h3>Non-Blocking Async Watchers</h3>
+              <p>
+                Long-running builds, CI watches, sub-agents, and Architect runs
+                execute asynchronously and wake the parent conversation when
+                they finish, fail, or need input&mdash;no wasted polling turns.
+              </p>
+            </article>
+            <article class="card">
+              <h3>Native Rust &amp; Multi-Agent ACP</h3>
+              <p>
+                Powered by Zed&rsquo;s GPU-accelerated GPUI renderer. Use native
+                Gemini, Claude, OpenAI, OpenRouter, or Ollama models alongside
+                external ACP agents like Cursor, Claude Code, and Codex.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="remote" class="section section-alt">
+        <div class="container remote-grid">
+          <div>
+            <p class="eyebrow">Praxis Remote for Android</p>
+            <h2>Operate your desktop or headless Linux host from your phone</h2>
+            <p class="body-copy">
+              Pair once with a zero-server setup over encrypted WebRTC and Nostr
+              relays. Inspect live streaming diffs and plan progress, approve
+              permissions, switch models, answer agent questions, or steer runs
+              by voice&mdash;even on headless WSL/SSH hosts paired directly from
+              the CLI.
+            </p>
+            <ul class="bullet-list">
+              <li>0&nbsp;ms startup with an on-device SQLite state cache</li>
+              <li>Sub-100&nbsp;ms Protocol v3 delta streaming &amp; lazy history</li>
+              <li>Interactive Plan, Sub-Agent, and Git Worktree inspector</li>
+              <li>
+                No paid relay servers or cloud lock-in&mdash;end-to-end
+                encrypted
+              </li>
+            </ul>
+            <div class="cta-row compact">
+              <a
+                class="btn btn-secondary"
+                href="https://github.com/DushyantChetiwal/praxis/releases?q=praxis-remote-android"
+              >
+                Download Android APK
+              </a>
+              <a
+                class="btn btn-ghost"
+                href="https://github.com/DushyantChetiwal/praxis/blob/main/docs/src/ai/praxis-remote-protocol.md"
+              >
+                Read Protocol Spec
+              </a>
+            </div>
+          </div>
+          <aside class="spec-panel" aria-label="Technical specifications">
+            <h3>Key Modules in the Repository</h3>
+            <dl class="spec-list">
+              <div>
+                <dt><code>crates/architect</code></dt>
+                <dd>Plan DAG compiler, file-surface validator, checkpoints &amp; runner</dd>
+              </div>
+              <div>
+                <dt><code>crates/agent</code></dt>
+                <dd>Native tools, async watchers, Git worktree isolation &amp; guards</dd>
+              </div>
+              <div>
+                <dt><code>crates/agent_ui</code></dt>
+                <dd>Architect canvas UI, conversation view &amp; Remote Protocol v3 host</dd>
+              </div>
+              <div>
+                <dt><code>remote-android</code></dt>
+                <dd>Kotlin + Jetpack Compose companion app with SQLite cache</dd>
+              </div>
+            </dl>
+          </aside>
+        </div>
+      </section>
+
+      <section id="download" class="section">
+        <div class="container">
+          <div class="section-head">
+            <p class="eyebrow">Get Started</p>
+            <h2>Download Praxis 2.0</h2>
+            <p class="body-copy">
+              Pre-built binaries are published automatically on GitHub Releases
+              for desktop and Android.
+            </p>
+          </div>
+          <div class="download-grid">
+            <a
+              class="download-card"
+              href="https://github.com/DushyantChetiwal/praxis/releases/latest"
+            >
+              <span class="download-label">Desktop</span>
+              <strong>Windows, Linux &amp; macOS</strong>
+              <span>Installer &amp; portable bundles on GitHub Releases &rarr;</span>
+            </a>
+            <a
+              class="download-card"
+              href="https://github.com/DushyantChetiwal/praxis/releases?q=praxis-remote-android"
+            >
+              <span class="download-label">Mobile</span>
+              <strong>Praxis Remote for Android</strong>
+              <span>Signed release APK for pairing with Desktop or CLI &rarr;</span>
+            </a>
+            <a
+              class="download-card"
+              href="https://github.com/DushyantChetiwal/praxis/blob/main/docs/src/ai/architect-portfolio.md"
+            >
+              <span class="download-label">Documentation</span>
+              <strong>Architecture &amp; Demo Guide</strong>
+              <span>Explore how Architect plans compile and execute &rarr;</span>
+            </a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container footer-row">
+        <p>
+          Praxis is an independent open-source product built on
+          <a href="https://github.com/zed-industries/zed">Zed</a> and is not
+          affiliated with or endorsed by Zed Industries.
+        </p>
+        <p class="footer-links">
+          <a href="https://github.com/DushyantChetiwal/praxis">Repository</a>
+          &middot;
+          <a href="https://github.com/DushyantChetiwal/praxis/releases"
+            >Releases</a
+          >
+          &middot;
+          <a href="https://github.com/DushyantChetiwal/praxis/issues">Issues</a>
+        </p>
+      </div>
+    </footer>
+  </body>
+</html>
