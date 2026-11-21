@@ -1,4 +1,0 @@
-User-agent: *
-Allow: /
-
-Sitemap: https://dushyantchetiwal.github.io/praxis/sitemap.xml
