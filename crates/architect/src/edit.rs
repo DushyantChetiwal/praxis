@@ -606,7 +606,9 @@ fn apply_operation(
                 });
             }
             check_endpoints(local, parent, edge)?;
-            local.edges.push(edge.clone());
+            let mut edge = edge.clone();
+            edge.max_repeats = edge.max_repeats.map(|limit| limit.max(1));
+            local.edges.push(edge);
         }
         GraphEdit::RemoveEdge { parent, edge_id } => {
             let local = graph_at_mut(graph, parent)?;
@@ -2094,5 +2096,24 @@ mod tests {
             serde_json::from_value::<GraphEditPreview>(json).expect("deserialize preview"),
             preview
         );
+    }
+
+    #[test]
+    fn insert_edge_clamps_zero_max_repeats_to_one() {
+        let mut graph = ArchitectGraph::default();
+        graph.nodes.push(ArchitectNode::new("a", "A"));
+        graph.nodes.push(ArchitectNode::new("b", "B"));
+        let mut edge = ArchitectEdge::new("ab", "a", "b");
+        edge.max_repeats = Some(0);
+
+        let preview = preview_graph_edits(
+            &graph,
+            &[GraphEdit::InsertEdge {
+                parent: NodePath::default(),
+                edge,
+            }],
+        )
+        .expect("insert edge");
+        assert_eq!(preview.graph.edges[0].max_repeats, Some(1));
     }
 }

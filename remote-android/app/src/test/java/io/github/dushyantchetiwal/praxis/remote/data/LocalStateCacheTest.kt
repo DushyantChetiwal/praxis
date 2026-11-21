@@ -1,5 +1,10 @@
 package io.github.dushyantchetiwal.praxis.remote.data
 
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -123,6 +128,9 @@ class LocalStateCacheTest {
             assertEquals(LocalStateCache.MAX_PREVIEW_CHARS, partEntry.parts.single().text.length)
             assertTrue(partEntry.parts.single().detailsPending)
             assertTrue(partEntry.detailsPending)
+            assertTrue(partEntry.truncated)
+            assertEquals("snapshot_budget", partEntry.truncation)
+            assertTrue(partEntry.snapshotPreview)
 
             // Restore populates memory LRU for subsequent 0ms peeks.
             assertEquals(restored, coldCache.peek(channel, 42L))
@@ -222,5 +230,45 @@ class LocalStateCacheTest {
         } finally {
             cache.close()
         }
+    }
+
+    @Test
+    fun closeDefersTableCloseUntilInFlightIoCompletes() = runTest {
+        val delegate = InMemoryKeyValueTable()
+        val putStarted = CountDownLatch(1)
+        val allowPutToFinish = CountDownLatch(1)
+        val closeCount = AtomicInteger(0)
+        val blockingTable = object : KeyValueTable {
+            override fun get(key: String): String? = delegate.get(key)
+            override fun put(key: String, value: String, updatedAt: Long) {
+                putStarted.countDown()
+                allowPutToFinish.await(5, TimeUnit.SECONDS)
+                delegate.put(key, value, updatedAt)
+            }
+            override fun delete(key: String) = delegate.delete(key)
+            override fun deletePrefix(prefix: String) = delegate.deletePrefix(prefix)
+            override fun trimToMaxRows(maxRows: Int) = delegate.trimToMaxRows(maxRows)
+            override fun close() {
+                closeCount.incrementAndGet()
+                delegate.close()
+            }
+        }
+
+        val cache = LocalStateCache(table = blockingTable, ioDispatcher = Dispatchers.IO)
+        val saveJob = launch(Dispatchers.IO) {
+            cache.save("dddddddddddddddddddddddddddddddd", key(7), 1L, sampleStatus("PC", 1L), null, nowMillis = 100L)
+        }
+
+        assertTrue(putStarted.await(5, TimeUnit.SECONDS))
+        cache.close()
+        assertEquals(0, closeCount.get())
+
+        allowPutToFinish.countDown()
+        saveJob.join()
+        assertEquals(1, closeCount.get())
+
+        // Subsequent close() is a no-op and does not double-close.
+        cache.close()
+        assertEquals(1, closeCount.get())
     }
 }

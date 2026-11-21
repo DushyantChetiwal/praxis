@@ -147,8 +147,8 @@ pub async fn summarize_local_worktree_diff(
         bail!("git diff --stat HEAD failed: {}", stderr.trim());
     }
 
-    let summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let changed_files = if summary.is_empty() {
+    let mut summary = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let mut changed_files = if summary.is_empty() {
         0
     } else {
         let lines: Vec<&str> = summary.lines().collect();
@@ -162,6 +162,39 @@ pub async fn summarize_local_worktree_diff(
             lines.len()
         }
     };
+
+    let status_output = new_command("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .arg("--no-pager")
+        .arg("status")
+        .arg("--porcelain")
+        .arg("--untracked-files=all")
+        .output()
+        .await
+        .context("running `git status --porcelain --untracked-files=all`")?;
+
+    if !status_output.status.success() {
+        let stderr = String::from_utf8_lossy(&status_output.stderr);
+        bail!("git status --porcelain failed: {}", stderr.trim());
+    }
+
+    let untracked_lines: Vec<String> = String::from_utf8_lossy(&status_output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("?? ").map(str::trim))
+        .filter(|path| !path.is_empty())
+        .map(|path| format!("new file: {path}"))
+        .collect();
+
+    if !untracked_lines.is_empty() {
+        changed_files += untracked_lines.len();
+        let untracked_summary = untracked_lines.join("\n");
+        if summary.is_empty() {
+            summary = untracked_summary;
+        } else {
+            summary = format!("{summary}\n{untracked_summary}");
+        }
+    }
 
     Ok(WorktreeDiffSummary {
         branch: branch.to_string(),
@@ -209,6 +242,35 @@ pub async fn merge_local_git_worktree(
 
     if !merge_output.status.success() {
         let stderr = String::from_utf8_lossy(&merge_output.stderr);
+        let merge_head_exists = new_command("git")
+            .arg("-C")
+            .arg(main_repo_path)
+            .arg("rev-parse")
+            .arg("--verify")
+            .arg("-q")
+            .arg("MERGE_HEAD")
+            .output()
+            .await
+            .is_ok_and(|output| output.status.success());
+        if merge_head_exists {
+            match new_command("git")
+                .arg("-C")
+                .arg(main_repo_path)
+                .arg("merge")
+                .arg("--abort")
+                .output()
+                .await
+            {
+                Ok(abort_output) if !abort_output.status.success() => {
+                    let abort_stderr = String::from_utf8_lossy(&abort_output.stderr);
+                    log::warn!("git merge --abort failed: {}", abort_stderr.trim());
+                }
+                Ok(_) => {}
+                Err(abort_error) => {
+                    log::warn!("Failed to run `git merge --abort`: {abort_error:#}");
+                }
+            }
+        }
         bail!("git merge failed: {}", stderr.trim());
     }
 
@@ -353,5 +415,102 @@ mod tests {
         assert_eq!(outcome.branch, spec.branch_name);
         let merged_contents = std::fs::read_to_string(repo_path.join("README.md")).unwrap();
         assert_eq!(merged_contents, "updated in worktree\n");
+    }
+
+    #[gpui::test]
+    async fn test_summarize_local_worktree_diff_includes_untracked_files(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        run_git(&repo_path, &["init"]).await;
+        run_git(&repo_path, &["config", "user.email", "test@praxis.dev"]).await;
+        run_git(&repo_path, &["config", "user.name", "Praxis Test"]).await;
+
+        std::fs::write(repo_path.join("README.md"), "initial\n").unwrap();
+        run_git(&repo_path, &["add", "README.md"]).await;
+        run_git(&repo_path, &["commit", "-m", "Initial commit"]).await;
+
+        let spec = plan_isolated_worktree(
+            &repo_path,
+            "Untracked Task",
+            "u1",
+            "../worktrees",
+            PathStyle::local(),
+        )
+        .unwrap();
+        create_local_git_worktree(&spec).await.unwrap();
+
+        std::fs::write(spec.worktree_path.join("brand_new.txt"), "hello\n").unwrap();
+        let diff = summarize_local_worktree_diff(&spec.worktree_path, &spec.branch_name)
+            .await
+            .unwrap();
+        assert_eq!(diff.changed_files, 1);
+        assert!(diff.summary.contains("new file: brand_new.txt"));
+    }
+
+    #[gpui::test]
+    async fn test_merge_local_git_worktree_aborts_on_conflict(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        run_git(&repo_path, &["init"]).await;
+        run_git(&repo_path, &["config", "user.email", "test@praxis.dev"]).await;
+        run_git(&repo_path, &["config", "user.name", "Praxis Test"]).await;
+
+        std::fs::write(repo_path.join("README.md"), "initial\n").unwrap();
+        run_git(&repo_path, &["add", "README.md"]).await;
+        run_git(&repo_path, &["commit", "-m", "Initial commit"]).await;
+
+        let spec = plan_isolated_worktree(
+            &repo_path,
+            "Conflict Task",
+            "c1",
+            "../worktrees",
+            PathStyle::local(),
+        )
+        .unwrap();
+        create_local_git_worktree(&spec).await.unwrap();
+
+        std::fs::write(spec.worktree_path.join("README.md"), "worktree edit\n").unwrap();
+        run_git(&spec.worktree_path, &["add", "README.md"]).await;
+        run_git(&spec.worktree_path, &["commit", "-m", "Worktree edit"]).await;
+
+        std::fs::write(repo_path.join("README.md"), "main edit\n").unwrap();
+        run_git(&repo_path, &["add", "README.md"]).await;
+        run_git(&repo_path, &["commit", "-m", "Main edit"]).await;
+
+        assert!(
+            merge_local_git_worktree(&repo_path, &spec.branch_name)
+                .await
+                .is_err()
+        );
+
+        let merge_head = new_command("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("rev-parse")
+            .arg("--verify")
+            .arg("-q")
+            .arg("MERGE_HEAD")
+            .output()
+            .await
+            .unwrap();
+        assert!(!merge_head.status.success());
+
+        let status = new_command("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("status")
+            .arg("--porcelain")
+            .output()
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&status.stdout).trim().is_empty());
     }
 }

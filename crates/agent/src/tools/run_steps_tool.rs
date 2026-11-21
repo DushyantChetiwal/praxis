@@ -269,7 +269,11 @@ fn validate(steps: &[ParallelStep]) -> Result<(), String> {
 }
 
 fn set_status(checklist: &mut Vec<PlanStep>, step: &str, status: PlanStepStatus) {
-    match checklist.iter_mut().find(|entry| entry.step.trim() == step) {
+    let trimmed = step.trim();
+    match checklist
+        .iter_mut()
+        .find(|entry| entry.step.trim().eq_ignore_ascii_case(trimmed))
+    {
         Some(entry) => entry.status = status,
         None => checklist.push(PlanStep {
             step: step.to_string(),
@@ -971,5 +975,17 @@ mod tests {
             "{text}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn set_status_matches_case_insensitively_and_trims() {
+        let mut checklist = vec![PlanStep {
+            step: "Write Tests".into(),
+            status: PlanStepStatus::Pending,
+        }];
+        set_status(&mut checklist, "  write tests ", PlanStepStatus::InProgress);
+        assert_eq!(checklist.len(), 1);
+        assert_eq!(checklist[0].step, "Write Tests");
+        assert_eq!(checklist[0].status, PlanStepStatus::InProgress);
     }
 }

@@ -22,6 +22,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
@@ -69,20 +71,67 @@ internal class RelayCursor {
         return true
     }
 
-    @Synchronized fun accept(packet: JSONObject): Boolean {
+    @Synchronized fun validateSnapshot(packet: JSONObject): Long? {
+        val incoming = packet.long("sequence") ?: return null
+        if (packet.str("epoch") != epoch || incoming <= sequence) return null
+        return incoming
+    }
+
+    @Synchronized fun validateDelta(packet: JSONObject): DeltaDecision {
+        val incoming = packet.long("sequence") ?: return DeltaDecision.Ignore
+        val base = packet.long("base_sequence") ?: return DeltaDecision.Ignore
+        if (packet.str("epoch") != epoch || incoming <= sequence) return DeltaDecision.Ignore
+        if (base != sequence) return DeltaDecision.Gap
+        return DeltaDecision.Accept
+    }
+
+    @Synchronized fun commit(packet: JSONObject): Boolean {
         val incoming = packet.long("sequence") ?: return false
         if (packet.str("epoch") != epoch || incoming <= sequence) return false
         sequence = incoming
         return true
     }
 
+    @Synchronized fun accept(packet: JSONObject): Boolean {
+        if (validateSnapshot(packet) == null) return false
+        return commit(packet)
+    }
+
     @Synchronized fun acceptDelta(packet: JSONObject): DeltaDecision {
-        val incoming = packet.long("sequence") ?: return DeltaDecision.Ignore
-        val base = packet.long("base_sequence") ?: return DeltaDecision.Ignore
-        if (packet.str("epoch") != epoch || incoming <= sequence) return DeltaDecision.Ignore
-        if (base != sequence) return DeltaDecision.Gap
-        sequence = incoming
-        return DeltaDecision.Accept
+        val decision = validateDelta(packet)
+        if (decision == DeltaDecision.Accept) commit(packet)
+        return decision
+    }
+}
+
+internal suspend fun receiveLivePacket(
+    packet: JSONObject,
+    cursor: RelayCursor,
+    channel: String,
+    phoneId: String,
+    onResponse: (String, JSONObject) -> Unit,
+    onSnapshot: suspend (LiveSnapshot) -> Unit,
+    onDelta: suspend (LiveDelta) -> Unit,
+    onGap: () -> Unit,
+) {
+    when (packet.str("type")) {
+        "response" -> packet.str("id")?.let { onResponse(it, packet) }
+        "snapshot" -> if (cursor.validateSnapshot(packet) != null) {
+            val snapshot = parseSnapshot(packet.obj("snapshot")?.toString())
+            if (snapshot != null && cursor.commit(packet)) {
+                onSnapshot(LiveSnapshot(channel, phoneId, snapshot))
+            }
+        }
+        "delta" -> when (cursor.validateDelta(packet)) {
+            RelayCursor.DeltaDecision.Accept -> {
+                val delta = parseThreadDelta(packet.obj("delta")?.toString())
+                if (delta != null && cursor.commit(packet)) {
+                    onDelta(LiveDelta(channel, phoneId, delta))
+                }
+            }
+            RelayCursor.DeltaDecision.Gap -> onGap()
+            RelayCursor.DeltaDecision.Ignore -> Unit
+        }
     }
 }
 
@@ -146,6 +195,7 @@ class NostrChannel(private val directLinks: DirectLinks? = null) {
         private var desktop: Keys? = null
         private val pending = ConcurrentHashMap<String, CompletableDeferred<JSONObject>>()
         private val cursor = RelayCursor()
+        private val receiveMutex = Mutex()
         @Volatile private var epoch: String? = null
         @Volatile private var lastHello = 0L
         @Volatile private var initialHandshake = true
@@ -249,30 +299,20 @@ class NostrChannel(private val directLinks: DirectLinks? = null) {
             }
         }
 
-        private suspend fun receive(blob: String) {
+        private suspend fun receive(blob: String) = receiveMutex.withLock {
             val plain = RemoteCrypto.open(link.key, blob, relayAad(link, "desktop"))
             val packet = JSONObject(String(plain, Charsets.UTF_8))
-            when (packet.str("type")) {
-                "response" -> packet.str("id")?.let { pending[it]?.complete(packet) }
-                "snapshot" -> if (cursor.accept(packet)) {
-                    parseSnapshot(packet.obj("snapshot")?.toString())?.takeIf { session === this@Session }?.let {
-                        _snapshots.emit(LiveSnapshot(link.channel, link.phoneId, it))
-                    }
-                }
-                "delta" -> when (cursor.acceptDelta(packet)) {
-                    RelayCursor.DeltaDecision.Accept -> {
-                        parseThreadDelta(packet.obj("delta")?.toString())?.takeIf { session === this@Session }?.let {
-                            _deltas.emit(LiveDelta(link.channel, link.phoneId, it))
-                        }
-                    }
-                    RelayCursor.DeltaDecision.Gap -> {
-                        if (session === this@Session) {
-                            _gaps.tryEmit(LiveGap(link.channel, link.phoneId))
-                        }
-                    }
-                    RelayCursor.DeltaDecision.Ignore -> Unit
-                }
-            }
+            if (session !== this@Session) return@withLock
+            receiveLivePacket(
+                packet = packet,
+                cursor = cursor,
+                channel = link.channel,
+                phoneId = link.phoneId,
+                onResponse = { id, pkt -> pending[id]?.complete(pkt) },
+                onSnapshot = { _snapshots.emit(it) },
+                onDelta = { _deltas.emit(it) },
+                onGap = { _gaps.tryEmit(LiveGap(link.channel, link.phoneId)) },
+            )
         }
 
         /** Offers a direct link in the background; the relays carry everything until it opens. */

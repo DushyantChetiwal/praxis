@@ -86,6 +86,7 @@ struct HeartbeatRuntimeState {
 static CLEAN_EXIT: AtomicBool = AtomicBool::new(false);
 static HEARTBEAT_STARTED: AtomicBool = AtomicBool::new(false);
 static HEARTBEAT_STATE: OnceLock<Mutex<HeartbeatRuntimeState>> = OnceLock::new();
+static HEARTBEAT_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn watchdog_dir() -> PathBuf {
     paths::data_dir().join("watchdog")
@@ -128,16 +129,15 @@ pub fn start_heartbeat_writer(headless: bool) {
     };
 
     let state_lock = HEARTBEAT_STATE.get_or_init(|| Mutex::new(initial_state));
-    write_current_heartbeat(state_lock, CLEAN_EXIT.load(Ordering::SeqCst));
+    write_current_heartbeat(state_lock);
 
     let spawn_result = thread::Builder::new()
         .name("praxis-watchdog-heartbeat".to_string())
         .spawn(move || {
             loop {
                 thread::sleep(HEARTBEAT_INTERVAL);
-                let clean_exit = CLEAN_EXIT.load(Ordering::SeqCst);
-                write_current_heartbeat(state_lock, clean_exit);
-                if clean_exit {
+                write_current_heartbeat(state_lock);
+                if CLEAN_EXIT.load(Ordering::SeqCst) {
                     break;
                 }
             }
@@ -151,7 +151,7 @@ pub fn start_heartbeat_writer(headless: bool) {
 pub fn mark_clean_shutdown() {
     CLEAN_EXIT.store(true, Ordering::SeqCst);
     if let Some(state_lock) = HEARTBEAT_STATE.get() {
-        write_current_heartbeat(state_lock, true);
+        write_current_heartbeat(state_lock);
     }
 }
 
@@ -217,6 +217,7 @@ pub fn run_watchdog_supervisor(child_args: Vec<std::ffi::OsString>) -> Result<()
     let directory = watchdog_dir();
     ensure_watchdog_dir(&directory)?;
     let token = load_or_create_token(&directory)?;
+    clear_stale_restart_request(&directory);
 
     let executable = env::current_exe().context("resolving current executable for watchdog")?;
     let filtered_args: Vec<std::ffi::OsString> = child_args
@@ -497,7 +498,21 @@ fn validate_restart_request(request: &RestartRequest, expected_token: &str, now_
     token_matches && not_expired && not_far_future
 }
 
-fn write_current_heartbeat(state_lock: &Mutex<HeartbeatRuntimeState>, clean_exit: bool) {
+fn clear_stale_restart_request(directory: &Path) {
+    let request_path = directory.join(RESTART_REQUEST_FILE);
+    if let Err(error) = fs::remove_file(&request_path)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        log::warn!(
+            "Failed to clear stale restart request {}: {error:#}",
+            request_path.display()
+        );
+    }
+}
+
+fn write_current_heartbeat(state_lock: &Mutex<HeartbeatRuntimeState>) {
+    let _write_guard = HEARTBEAT_WRITE_LOCK.lock();
+    let clean_exit = CLEAN_EXIT.load(Ordering::SeqCst);
     let (directory, heartbeat) = {
         let state = state_lock.lock();
         let heartbeat = Heartbeat {
@@ -574,7 +589,7 @@ fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("watchdog");
-    let temp_path = path.with_file_name(format!("{file_name}.tmp"));
+    let temp_path = path.with_file_name(format!("{file_name}.{}.tmp", Uuid::new_v4()));
     fs::write(&temp_path, contents)?;
     fs::rename(&temp_path, path)?;
     Ok(())
@@ -852,5 +867,81 @@ mod tests {
             window_guard.should_restart_after_exit(false, 15_000, 220_000),
             RestartDecision::AbortCrashLoop
         );
+    }
+
+    #[test]
+    fn clear_stale_restart_request_removes_existing_and_ignores_missing() {
+        let temp_dir = TestDir::new();
+        let dir = temp_dir.path().join("watchdog");
+        ensure_watchdog_dir(&dir).unwrap();
+
+        clear_stale_restart_request(&dir);
+
+        let token = load_or_create_token(&dir).unwrap();
+        assert!(request_restart_in(&dir, "stale", 50_000).unwrap());
+        assert!(dir.join(RESTART_REQUEST_FILE).exists());
+
+        clear_stale_restart_request(&dir);
+        assert!(!dir.join(RESTART_REQUEST_FILE).exists());
+        assert_eq!(consume_valid_restart_request(&dir, &token, 50_000), None);
+    }
+
+    #[test]
+    fn write_atomic_concurrent_writes_leave_no_temp_files() {
+        let temp_dir = TestDir::new();
+        let dir = temp_dir.path().join("watchdog");
+        ensure_watchdog_dir(&dir).unwrap();
+        let target = dir.join("concurrent.json");
+
+        thread::scope(|scope| {
+            for worker in 0..4 {
+                let target = target.clone();
+                scope.spawn(move || {
+                    for iteration in 0..20 {
+                        let payload = format!("{{\"worker\":{worker},\"iter\":{iteration}}}");
+                        write_atomic(&target, payload.as_bytes()).unwrap();
+                    }
+                });
+            }
+        });
+
+        let contents = fs::read_to_string(&target).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert!(parsed.get("worker").is_some());
+
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn heartbeat_write_reads_clean_exit_under_write_lock() {
+        let temp_dir = TestDir::new();
+        let dir = temp_dir.path().join("watchdog");
+        ensure_watchdog_dir(&dir).unwrap();
+
+        let state_lock = Mutex::new(HeartbeatRuntimeState {
+            directory: dir.clone(),
+            pid: 4242,
+            started_at_unix_ms: 1_000,
+            headless: true,
+            auth_token_sha256: "abc".to_string(),
+            open_workspaces: Vec::new(),
+        });
+
+        CLEAN_EXIT.store(false, Ordering::SeqCst);
+        write_current_heartbeat(&state_lock);
+        let initial = read_json::<Heartbeat>(&dir.join(HEARTBEAT_FILE)).unwrap();
+        assert!(!initial.clean_exit);
+
+        CLEAN_EXIT.store(true, Ordering::SeqCst);
+        write_current_heartbeat(&state_lock);
+        let updated = read_json::<Heartbeat>(&dir.join(HEARTBEAT_FILE)).unwrap();
+        assert!(updated.clean_exit);
+
+        CLEAN_EXIT.store(false, Ordering::SeqCst);
     }
 }

@@ -396,6 +396,15 @@ pub(super) fn fit_plan_payload(mut payload: Value, budget: usize) -> Value {
             break;
         }
     }
+    while payload.to_string().len() > budget {
+        let popped = payload
+            .get_mut("edges")
+            .and_then(Value::as_array_mut)
+            .and_then(Vec::pop);
+        if popped.is_none() {
+            break;
+        }
+    }
     payload
 }
 
@@ -493,5 +502,32 @@ mod tests {
         });
         let fitted = fit_plan_payload(payload, 4_000);
         assert!(fitted.to_string().len() <= 4_000);
+    }
+
+    #[test]
+    fn fit_plan_payload_trims_edges_when_still_over_budget() {
+        let large_edges: Vec<Value> = (0..100)
+            .map(|index| {
+                json!({
+                    "from": [format!("from_{index}")],
+                    "to": [format!("to_{index}")],
+                    "condition": "c".repeat(120),
+                })
+            })
+            .collect();
+        let payload = json!({
+            "has_plan": true,
+            "revision": 1,
+            "running": false,
+            "paused": false,
+            "can_resume": false,
+            "outcome": null,
+            "nodes": [],
+            "edges": large_edges,
+            "subagents": [],
+        });
+        let fitted = fit_plan_payload(payload, 2_000);
+        assert!(fitted.to_string().len() <= 2_000);
+        assert!(fitted["edges"].as_array().expect("edges array").len() < 100);
     }
 }
