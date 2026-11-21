@@ -415,10 +415,10 @@ async fn serve(
 ) -> Result<()> {
     let epoch = crypto::random_id()?;
     let links: Links = Arc::default();
-    let (incoming, requests) = async_channel::bounded(32);
+    let (incoming, requests) = async_channel::bounded(64);
     let direct_incoming = incoming.clone();
     let channel_name = channel_id.clone();
-    let (outgoing, responses) = async_channel::bounded(32);
+    let (outgoing, responses) = async_channel::bounded(64);
     let (network_stop, network_stopped) = async_channel::bounded(1);
     let network = Tokio::spawn_result(
         cx,

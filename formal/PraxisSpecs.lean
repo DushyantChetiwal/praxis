@@ -3,3 +3,4 @@ import PraxisSpecs.Watchdog
 import PraxisSpecs.ArchitectGraph
 import PraxisSpecs.SyncSetMerge
 import PraxisSpecs.WorktreePathSafety
+import PraxisSpecs.ChunkAssembler

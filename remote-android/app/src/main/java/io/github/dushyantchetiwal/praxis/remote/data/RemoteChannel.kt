@@ -919,6 +919,20 @@ class RemoteChannel(
     }
 
     /**
+     * Posts one request without holding the serialized Gist mutex when the live
+     * channel is ready, falling back to the mutex-serialized Gist path otherwise.
+     */
+    suspend fun exchangeConcurrent(link: Link, op: String, args: JSONObject): JSONObject {
+        _pending.update { it + 1 }
+        try {
+            live.exchange(link, newRequestId(), op, args)?.let { return it }
+            return mutex.withLock { exchange(link, op, args) }
+        } finally {
+            _pending.update { it - 1 }
+        }
+    }
+
+    /**
      * Posts one request and returns the `{id, ok, result | error}` envelope.
      * Throws [ErrorKind.Unpaired] when the computer rejects this phone.
      */

@@ -8,10 +8,10 @@ use gpui::{App, AppContext as _, Global, Task};
 use image::{ImageFormat, ImageReader};
 use serde_json::{Value, json};
 
+use super::uploads::{ChunkBuffer, MAX_CHUNK_BYTES, MAX_PARALLEL_CHUNKS, negotiate_chunk_bytes};
 use super::{crypto, required, transcript};
 
 const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
-const MAX_CHUNK_BYTES: usize = 24 * 1024;
 const MAX_IMAGES: usize = 4;
 const MAX_BUFFERED_BYTES: usize = 16 * 1024 * 1024;
 const EXPIRY: Duration = Duration::from_secs(300);
@@ -23,7 +23,8 @@ struct Upload {
     session: String,
     mime: String,
     size: usize,
-    bytes: Vec<u8>,
+    chunk_bytes: usize,
+    buffer: ChunkBuffer,
     content: Option<acp::ContentBlock>,
     updated: Instant,
 }
@@ -49,6 +50,7 @@ impl Uploads {
             matches!(mime, "image/png" | "image/jpeg" | "image/webp"),
             "Choose a PNG, JPEG, or WebP image."
         );
+        let chunk_bytes = negotiate_chunk_bytes(args)?;
         let client_id = args.get("client_id").and_then(Value::as_str).unwrap_or("");
         if !client_id.is_empty() {
             uuid::Uuid::parse_str(client_id).context("expected an image client ID")?;
@@ -61,9 +63,14 @@ impl Uploads {
                     upload.session == session && upload.mime == mime && upload.size == size,
                     "An image ID was reused with different upload metadata."
                 );
-                return Ok(
-                    json!({"upload_id": id, "chunk_bytes": MAX_CHUNK_BYTES, "next_offset": upload.bytes.len(), "ready": upload.content.is_some()}),
-                );
+                return Ok(json!({
+                    "upload_id": id,
+                    "chunk_bytes": upload.chunk_bytes,
+                    "max_parallel": MAX_PARALLEL_CHUNKS,
+                    "next_offset": upload.buffer.contiguous_offset(),
+                    "received_bytes": upload.buffer.received_bytes(),
+                    "ready": upload.content.is_some(),
+                }));
             }
         }
         ensure!(
@@ -83,14 +90,20 @@ impl Uploads {
                 session: session.into(),
                 mime: mime.into(),
                 size,
-                bytes: Vec::new(),
+                chunk_bytes,
+                buffer: ChunkBuffer::new(size),
                 content: None,
                 updated: Instant::now(),
             },
         );
-        Ok(
-            json!({ "upload_id": id, "chunk_bytes": MAX_CHUNK_BYTES, "next_offset": 0, "ready": false }),
-        )
+        Ok(json!({
+            "upload_id": id,
+            "chunk_bytes": chunk_bytes,
+            "max_parallel": MAX_PARALLEL_CHUNKS,
+            "next_offset": 0,
+            "received_bytes": 0,
+            "ready": false,
+        }))
     }
 
     fn get(&mut self, phone: &str, session: &str, id: &str) -> Result<&mut Upload> {
@@ -124,27 +137,12 @@ impl Uploads {
             upload.content.is_none(),
             "That image upload is already complete."
         );
-        let end = offset
-            .checked_add(bytes.len())
-            .context("invalid image offset")?;
-        ensure!(
-            end <= upload.size,
-            "The image chunk exceeds the announced image size."
-        );
-        if offset < upload.bytes.len() {
-            ensure!(
-                upload.bytes.get(offset..end) == Some(bytes.as_slice()),
-                "The image chunk conflicts with an earlier chunk."
-            );
-        } else {
-            ensure!(
-                offset == upload.bytes.len(),
-                "An image chunk is missing. Restart the upload."
-            );
-            upload.bytes.extend_from_slice(&bytes);
-        }
+        upload.buffer.insert(offset, bytes)?;
         upload.updated = Instant::now();
-        Ok(json!({ "next_offset": upload.bytes.len() }))
+        Ok(json!({
+            "next_offset": upload.buffer.contiguous_offset(),
+            "received_bytes": upload.buffer.received_bytes(),
+        }))
     }
 
     fn contents(
@@ -229,23 +227,37 @@ pub(super) fn handle(
             let pending = (|| -> Result<_> {
                 let id = required(args, "upload_id")?.to_string();
                 let upload = uploads(cx).get(phone, session, &id)?;
+                if upload.content.is_some() {
+                    return Ok((id, None));
+                }
                 ensure!(
-                    upload.bytes.len() == upload.size,
+                    upload.buffer.is_complete(),
                     "The image upload is incomplete."
                 );
-                Ok((id, upload.bytes.clone(), upload.mime.clone()))
+                let bytes = upload.buffer.take_bytes()?;
+                Ok((id, Some((bytes, upload.mime.clone()))))
             })();
-            let (id, bytes, mime) = match pending {
+            let (id, pending_validation) = match pending {
                 Ok(pending) => pending,
                 Err(error) => return Task::ready(Err(error)),
+            };
+            let Some((bytes, mime)) = pending_validation else {
+                return Task::ready(Ok(json!({ "upload_id": id, "ready": true })));
             };
             let phone = phone.to_string();
             let session = session.to_string();
             return cx.spawn(async move |cx| {
-                let content = cx
+                let validated = cx
                     .background_spawn(async move { validate(bytes, &mime) })
-                    .await?;
+                    .await;
                 cx.update(|cx| {
+                    let content = match validated {
+                        Ok(content) => content,
+                        Err(error) => {
+                            uploads(cx).0.remove(&(phone.clone(), id.clone()));
+                            return Err(error);
+                        }
+                    };
                     let upload = uploads(cx).get(&phone, &session, &id)?;
                     upload.content = Some(content);
                     upload.updated = Instant::now();
@@ -356,12 +368,21 @@ mod tests {
                 )
                 .is_err()
         );
+        let after_gap = uploads
+            .chunk(
+                "phone",
+                "session",
+                &json!({"upload_id": id, "offset": 3, "data": crypto::encode(&[3])}),
+            )
+            .unwrap();
+        assert_eq!(after_gap["next_offset"], 2);
+        assert_eq!(after_gap["received_bytes"], 3);
         assert!(
             uploads
                 .chunk(
                     "phone",
                     "session",
-                    &json!({"upload_id": id, "offset": 3, "data": crypto::encode(&[3])})
+                    &json!({"upload_id": id, "offset": 4, "data": crypto::encode(&[4])})
                 )
                 .is_err()
         );
@@ -435,5 +456,79 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn out_of_order_image_chunks_assemble_and_finish_cleanly() {
+        let png = crypto::decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==").unwrap();
+        let mut uploads = Uploads::default();
+        let begin = uploads
+            .begin(
+                "phone",
+                "session",
+                &json!({
+                    "size": png.len(),
+                    "mime_type": "image/png",
+                    "preferred_chunk_bytes": 45056,
+                }),
+            )
+            .unwrap();
+        assert_eq!(begin["chunk_bytes"], MAX_CHUNK_BYTES);
+        assert_eq!(begin["max_parallel"], MAX_PARALLEL_CHUNKS);
+        let id = begin["upload_id"].as_str().unwrap();
+
+        let third = png.len() / 3;
+        let two_thirds = third * 2;
+
+        let c3 = uploads
+            .chunk(
+                "phone",
+                "session",
+                &json!({
+                    "upload_id": id,
+                    "offset": two_thirds,
+                    "data": crypto::encode(&png[two_thirds..]),
+                }),
+            )
+            .unwrap();
+        assert_eq!(c3["next_offset"], 0);
+        assert_eq!(c3["received_bytes"], png.len() - two_thirds);
+
+        let c2 = uploads
+            .chunk(
+                "phone",
+                "session",
+                &json!({
+                    "upload_id": id,
+                    "offset": third,
+                    "data": crypto::encode(&png[third..two_thirds]),
+                }),
+            )
+            .unwrap();
+        assert_eq!(c2["next_offset"], 0);
+        assert_eq!(c2["received_bytes"], png.len() - third);
+
+        let c1 = uploads
+            .chunk(
+                "phone",
+                "session",
+                &json!({
+                    "upload_id": id,
+                    "offset": 0,
+                    "data": crypto::encode(&png[..third]),
+                }),
+            )
+            .unwrap();
+        assert_eq!(c1["next_offset"], png.len());
+        assert_eq!(c1["received_bytes"], png.len());
+
+        let upload = uploads.get("phone", "session", id).unwrap();
+        assert!(upload.buffer.is_complete());
+        let assembled = upload.buffer.take_bytes().unwrap();
+        assert_eq!(assembled, png);
+        assert!(matches!(
+            validate(assembled, "image/png").unwrap(),
+            acp::ContentBlock::Image(_)
+        ));
     }
 }
