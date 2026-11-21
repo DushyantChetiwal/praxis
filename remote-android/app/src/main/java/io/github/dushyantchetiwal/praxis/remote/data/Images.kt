@@ -16,6 +16,10 @@ import java.util.UUID
 import android.util.Log
 
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -124,22 +128,75 @@ internal fun nextImageOffset(reply: JSONObject, expected: Int): Int {
     return offset
 }
 
-suspend fun uploadImage(image: PromptImage, target: JSONObject, request: suspend (String, JSONObject) -> JSONObject?): String {
+suspend fun uploadImage(
+    image: PromptImage,
+    target: JSONObject,
+    preferredChunkBytes: Int = LIVE_UPLOAD_CHUNK_BYTES,
+    maxParallel: Int = MAX_PARALLEL_UPLOAD_CHUNKS,
+    request: suspend (String, JSONObject) -> JSONObject?,
+): String {
     fun args() = JSONObject(target.toString())
-    val begin = request("image_begin", args().put("client_id", image.id).put("size", image.bytes.size).put("mime_type", "image/jpeg"))
-        ?: error("Praxis did not acknowledge the image upload.")
+    val begin = request(
+        "image_begin",
+        args().put("client_id", image.id)
+            .put("size", image.bytes.size)
+            .put("mime_type", "image/jpeg")
+            .put("preferred_chunk_bytes", preferredChunkBytes.coerceIn(1, MAX_UPLOAD_CHUNK_BYTES)),
+    ) ?: error("Praxis did not acknowledge the image upload.")
     val id = begin.str("upload_id")?.takeIf(::isHexId) ?: error("Praxis returned an invalid image upload ID.")
-    val chunkSize = begin.index("chunk_bytes")?.takeIf { it in 1..24 * 1024 } ?: error("Praxis returned an invalid image chunk size.")
+    val chunkSize = begin.index("chunk_bytes")?.takeIf { it in 1..MAX_UPLOAD_CHUNK_BYTES }
+        ?: error("Praxis returned an invalid image chunk size.")
     if (begin.bool("ready")) return id
+    val serverParallel = begin.index("max_parallel")?.coerceIn(1, MAX_PARALLEL_UPLOAD_CHUNKS) ?: 1
+    val parallelism = minOf(maxParallel.coerceAtLeast(1), serverParallel)
     try {
-        var offset = begin.index("next_offset") ?: 0
-        require(offset in 0..image.bytes.size) { "Praxis returned an invalid image resume offset." }
-        while (offset < image.bytes.size) {
-            val end = minOf(image.bytes.size, offset + chunkSize)
-            val reply = request("image_chunk", args().put("upload_id", id).put("offset", offset)
-                .put("data", RemoteCrypto.base64(image.bytes.copyOfRange(offset, end))))
-                ?: error("Praxis did not acknowledge the image chunk.")
-            offset = nextImageOffset(reply, end)
+        val startOffset = begin.index("next_offset") ?: 0
+        require(startOffset in 0..image.bytes.size) { "Praxis returned an invalid image resume offset." }
+        val chunks = (startOffset until image.bytes.size step chunkSize).toList()
+        if (parallelism <= 1 || chunks.size <= 1) {
+            var offset = startOffset
+            while (offset < image.bytes.size) {
+                val end = minOf(image.bytes.size, offset + chunkSize)
+                val reply = request(
+                    "image_chunk",
+                    args().put("upload_id", id).put("offset", offset)
+                        .put("data", RemoteCrypto.base64(image.bytes.copyOfRange(offset, end))),
+                ) ?: error("Praxis did not acknowledge the image chunk.")
+                offset = if (reply.has("next_offset")) {
+                    nextImageOffset(reply, end)
+                } else {
+                    val received = reply.index("received_bytes")
+                    if (received != null) {
+                        require(received >= end) {
+                            "Praxis returned an inconsistent image offset. Attach the image again."
+                        }
+                        end
+                    } else {
+                        nextImageOffset(reply, end)
+                    }
+                }
+            }
+        } else {
+            val semaphore = Semaphore(parallelism)
+            coroutineScope {
+                for (offset in chunks) {
+                    val end = minOf(image.bytes.size, offset + chunkSize)
+                    launch {
+                        semaphore.withPermit {
+                            val reply = request(
+                                "image_chunk",
+                                args().put("upload_id", id).put("offset", offset)
+                                    .put("data", RemoteCrypto.base64(image.bytes.copyOfRange(offset, end))),
+                            ) ?: error("Praxis did not acknowledge the image chunk.")
+                            reply.index("received_bytes")?.let { received ->
+                                require(received > 0) {
+                                    "Praxis returned an inconsistent image offset. Attach the image again."
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         val finish = request("image_finish", args().put("upload_id", id))
         check(finish?.bool("ready") == true && finish.str("upload_id") == id) { "Praxis could not finish the image upload." }

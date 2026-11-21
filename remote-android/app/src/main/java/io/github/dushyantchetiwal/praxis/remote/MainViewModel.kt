@@ -72,7 +72,10 @@ import io.github.dushyantchetiwal.praxis.remote.data.PromptImage
 import io.github.dushyantchetiwal.praxis.remote.data.prepareImage
 import io.github.dushyantchetiwal.praxis.remote.data.uploadImage
 import io.github.dushyantchetiwal.praxis.remote.data.FileAttachment
+import io.github.dushyantchetiwal.praxis.remote.data.GIST_UPLOAD_CHUNK_BYTES
+import io.github.dushyantchetiwal.praxis.remote.data.LIVE_UPLOAD_CHUNK_BYTES
 import io.github.dushyantchetiwal.praxis.remote.data.MAX_ATTACHED_FILES
+import io.github.dushyantchetiwal.praxis.remote.data.MAX_PARALLEL_UPLOAD_CHUNKS
 import io.github.dushyantchetiwal.praxis.remote.data.UploadTooLargeException
 import io.github.dushyantchetiwal.praxis.remote.data.readPickedFile
 import io.github.dushyantchetiwal.praxis.remote.data.uploadFile
@@ -337,8 +340,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val file = readPickedFile(getApplication(), uri, limit)
                 name = file.name
                 attaching = UploadState(file.name, size = file.bytes.size.toLong())
-                val path = uploadFile(file, target, { sent -> attaching = attaching?.copy(sent = sent) }) { op, args ->
-                    praxis(op, args, scope)
+                val live = isLiveReady()
+                val preferredChunkBytes = if (live) LIVE_UPLOAD_CHUNK_BYTES else GIST_UPLOAD_CHUNK_BYTES
+                val maxParallel = if (live) MAX_PARALLEL_UPLOAD_CHUNKS else 1
+                val path = uploadFile(
+                    file,
+                    target,
+                    { sent -> attaching = attaching?.copy(sent = sent) },
+                    preferredChunkBytes = preferredChunkBytes,
+                    maxParallel = maxParallel,
+                ) { op, args ->
+                    praxisConcurrent(op, args, scope)
                 }
                 fileDrafts[draft] = fileDrafts[draft].orEmpty() + FileAttachment(file.id, file.name, path)
                 attaching = null
@@ -376,9 +388,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val file = readPickedFile(getApplication(), uri, limit)
                 name = file.name
                 if (gen == generation) edit { copy(upload = UploadState(file.name, size = file.bytes.size.toLong())) }
-                val path = uploadFile(file, target, { sent ->
-                    if (gen == generation) edit { copy(upload = upload?.copy(sent = sent)) }
-                }) { op, args -> praxis(op, args) }
+                val live = isLiveReady()
+                val preferredChunkBytes = if (live) LIVE_UPLOAD_CHUNK_BYTES else GIST_UPLOAD_CHUNK_BYTES
+                val maxParallel = if (live) MAX_PARALLEL_UPLOAD_CHUNKS else 1
+                val path = uploadFile(
+                    file,
+                    target,
+                    { sent -> if (gen == generation) edit { copy(upload = upload?.copy(sent = sent)) } },
+                    preferredChunkBytes = preferredChunkBytes,
+                    maxParallel = maxParallel,
+                ) { op, args -> praxisConcurrent(op, args) }
                 if (gen != generation) return@launch
                 edit { copy(upload = upload?.copy(savedPath = path)) }
                 if (d.files.path == folder && d.files.file == null) listDir(folder)
@@ -1526,6 +1545,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         throw ApiException(ErrorKind.Praxis, envelope.str("error") ?: str(R.string.error_op_failed, op))
     }
 
+    private fun isLiveReady(): Boolean = d.device?.let(::linkFor)?.let { channel.live.ready(it) } == true
+
+    /** Runs a concurrent-capable op on the selected computer without holding the Gist mutex when live. */
+    private suspend fun praxisConcurrent(op: String, args: JSONObject = JSONObject(), scope: RemoteViewScope = requestScope()): JSONObject? {
+        val device = d.device ?: throw ApiException(ErrorKind.State, str(R.string.error_no_device))
+        val link = linkFor(device) ?: throw ApiException(ErrorKind.Unpaired, str(R.string.error_not_paired, device.name))
+        if (scope != requestScope()) throw ApiException(ErrorKind.Cancelled, str(R.string.error_switched_device))
+        val envelope = try {
+            channel.exchangeConcurrent(link, op, args)
+        } catch (e: ApiException) {
+            if (e.kind == ErrorKind.Unpaired && scope == requestScope()) onUnpaired(device, e.message.orEmpty())
+            throw e
+        }
+        if (scope == requestScope()) edit { copy(lastContact = now()) }
+        if (envelope.optBoolean("ok")) return envelope.obj("result")
+        throw ApiException(ErrorKind.Praxis, envelope.str("error") ?: str(R.string.error_op_failed, op))
+    }
+
     private fun windowArgs(build: JSONObject.() -> Unit = {}): JSONObject {
         val args = JSONObject()
         d.windowId?.let { args.put("window", it) }
@@ -1606,7 +1643,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (images.isNotEmpty()) {
                     val target = JSONObject().put("session_id", session)
                     args.opt("window")?.let { target.put("window", it) }
-                    val ids = images.map { image -> uploadImage(image, target) { op, upload -> praxis(op, upload, scope) } }
+                    val live = isLiveReady()
+                    val preferredChunkBytes = if (live) LIVE_UPLOAD_CHUNK_BYTES else GIST_UPLOAD_CHUNK_BYTES
+                    val maxParallel = if (live) MAX_PARALLEL_UPLOAD_CHUNKS else 1
+                    val ids = images.map { image ->
+                        uploadImage(
+                            image,
+                            target,
+                            preferredChunkBytes = preferredChunkBytes,
+                            maxParallel = maxParallel,
+                        ) { op, upload -> praxisConcurrent(op, upload, scope) }
+                    }
                     args.put("images", org.json.JSONArray(ids))
                 }
                 val result = praxis("prompt", args, scope)

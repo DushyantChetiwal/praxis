@@ -222,12 +222,16 @@ A root's `image_input` flag reflects its current ACP image capability. Clients o
 is true. Image operations require the exact root `session_id` and optional `window`; both uploads and consumption
 are scoped to the authenticated phone and conversation, not to caller-provided phone identifiers.
 
-- `image_begin`: `{session_id, window?, client_id?, size, mime_type}` reserves a bounded in-memory upload and returns
-  `{upload_id, chunk_bytes, next_offset, ready}`. `client_id` is a phone-generated UUID that makes retries resume the
-  same image; reusing it with different target or metadata is rejected. Valid formats are PNG, JPEG, and WebP.
-- `image_chunk`: `{session_id, window?, upload_id, offset, data}` appends at the exact next byte offset. `data` is
-  base64 for at most 24 KiB. Identical already-received chunks are idempotent; missing, conflicting, or overflowing
-  chunks are rejected. The reply contains the authoritative `next_offset`.
+- `image_begin`: `{session_id, window?, client_id?, size, mime_type, preferred_chunk_bytes?}` reserves a bounded in-memory
+  upload and returns `{upload_id, chunk_bytes, max_parallel, next_offset, received_bytes, ready}`. `preferred_chunk_bytes`
+  negotiates the raw chunk size (defaulting to 24 KiB and clamped to 44 KiB); `max_parallel` advertises the supported
+  in-flight chunk pipeline depth (6). `client_id` is a phone-generated UUID that makes retries resume the same image;
+  reusing it with different target or metadata is rejected. Valid formats are PNG, JPEG, and WebP.
+- `image_chunk`: `{session_id, window?, upload_id, offset, data}` accepts chunks at any valid offset within `size`
+  (including out-of-order pipelined chunks). `data` is base64 for at most 44 KiB raw. Identical already-received or
+  overlapping byte ranges are idempotent; conflicting or overflowing chunks are rejected. The reply contains the
+  authoritative contiguous `next_offset` and total `received_bytes`. File uploads (`file_begin` / `file_chunk`) use the
+  same `preferred_chunk_bytes`, `max_parallel`, `received_bytes`, and out-of-order chunk acceptance contract.
 - `image_finish`: validates completeness and decodes the image on a background executor with explicit dimension and
   allocation limits. It returns `{upload_id, ready: true}` only after validation.
 - `image_discard`: removes that phone's upload in that conversation. Uploads also expire after five idle minutes and

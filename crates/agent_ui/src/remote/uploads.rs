@@ -1,7 +1,7 @@
 //! Files a paired phone uploads into a project, either into the folder shown
 //! in its Files tab or as attachments to a chat message.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,7 +20,9 @@ use super::{
 };
 
 pub(super) const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
-const MAX_CHUNK_BYTES: usize = 24 * 1024;
+pub(super) const DEFAULT_CHUNK_BYTES: usize = 24 * 1024;
+pub(super) const MAX_CHUNK_BYTES: usize = 44 * 1024;
+pub(super) const MAX_PARALLEL_CHUNKS: usize = 6;
 const MAX_PENDING_UPLOADS: usize = 4;
 const MAX_BUFFERED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ATTACHED_FILES: usize = 8;
@@ -31,6 +33,131 @@ const ATTACHMENTS_DIR: &str = ".praxis/uploads";
 
 type UploadKey = (String, String);
 
+pub(super) fn negotiate_chunk_bytes(args: &Value) -> Result<usize> {
+    Ok(match transcript::index(args, "preferred_chunk_bytes")? {
+        Some(preferred) if preferred > 0 => preferred.min(MAX_CHUNK_BYTES),
+        _ => DEFAULT_CHUNK_BYTES,
+    })
+}
+
+/// Collects out-of-order byte chunks into minimal disjoint contiguous ranges.
+pub(super) struct ChunkBuffer {
+    size: usize,
+    chunks: BTreeMap<usize, Vec<u8>>,
+    contiguous_offset: usize,
+    received_bytes: usize,
+}
+
+impl ChunkBuffer {
+    pub(super) fn new(size: usize) -> Self {
+        Self {
+            size,
+            chunks: BTreeMap::new(),
+            contiguous_offset: 0,
+            received_bytes: 0,
+        }
+    }
+
+    pub(super) fn contiguous_offset(&self) -> usize {
+        self.contiguous_offset
+    }
+
+    pub(super) fn received_bytes(&self) -> usize {
+        self.received_bytes
+    }
+
+    pub(super) fn is_complete(&self) -> bool {
+        self.contiguous_offset == self.size && self.received_bytes == self.size
+    }
+
+    pub(super) fn insert(&mut self, offset: usize, bytes: Vec<u8>) -> Result<()> {
+        ensure!(!bytes.is_empty(), "The chunk is empty.");
+        let end = offset
+            .checked_add(bytes.len())
+            .context("invalid chunk offset")?;
+        ensure!(
+            end <= self.size,
+            "The chunk goes past the announced size."
+        );
+
+        if let Some((&existing_start, existing)) = self.chunks.range(..offset).next_back() {
+            let existing_end = existing_start + existing.len();
+            if existing_end > offset {
+                let overlap_end = existing_end.min(end);
+                ensure!(
+                    existing[(offset - existing_start)..(overlap_end - existing_start)]
+                        == bytes[..(overlap_end - offset)],
+                    "The chunk conflicts with an earlier one."
+                );
+            }
+        }
+        for (&existing_start, existing) in self.chunks.range(offset..end) {
+            let overlap_end = (existing_start + existing.len()).min(end);
+            ensure!(
+                existing[..(overlap_end - existing_start)]
+                    == bytes[(existing_start - offset)..(overlap_end - offset)],
+                "The chunk conflicts with an earlier one."
+            );
+        }
+
+        let left_key = self
+            .chunks
+            .range(..offset)
+            .next_back()
+            .and_then(|(&existing_start, existing)| {
+                (existing_start + existing.len() >= offset).then_some(existing_start)
+            });
+
+        let (merged_start, mut merged) = if let Some(left_start) = left_key {
+            let mut left = self
+                .chunks
+                .remove(&left_start)
+                .context("missing overlapping chunk")?;
+            self.received_bytes -= left.len();
+            let left_end = left_start + left.len();
+            if end > left_end {
+                left.extend_from_slice(&bytes[(left_end - offset)..]);
+            }
+            (left_start, left)
+        } else {
+            (offset, bytes)
+        };
+
+        let merged_end = merged_start + merged.len();
+        let right_keys: Vec<usize> = self
+            .chunks
+            .range(offset..=merged_end)
+            .map(|(&existing_start, _)| existing_start)
+            .collect();
+        for key in right_keys {
+            if let Some(existing) = self.chunks.remove(&key) {
+                self.received_bytes -= existing.len();
+                let existing_end = key + existing.len();
+                let current_end = merged_start + merged.len();
+                if existing_end > current_end {
+                    merged.extend_from_slice(&existing[(current_end - key)..]);
+                }
+            }
+        }
+
+        self.received_bytes += merged.len();
+        self.chunks.insert(merged_start, merged);
+        self.contiguous_offset = self.chunks.get(&0).map_or(0, Vec::len);
+        Ok(())
+    }
+
+    pub(super) fn take_bytes(&mut self) -> Result<Vec<u8>> {
+        ensure!(self.is_complete(), "The upload is incomplete.");
+        if self.size == 0 {
+            return Ok(Vec::new());
+        }
+        let bytes = self.chunks.remove(&0).context("The upload is incomplete.")?;
+        self.contiguous_offset = 0;
+        self.received_bytes = 0;
+        Ok(bytes)
+    }
+}
+
 struct Upload {
     client_id: String,
     target: UploadTarget,
@@ -39,7 +166,8 @@ struct Upload {
     attachment: bool,
     name: String,
     size: usize,
-    bytes: Vec<u8>,
+    chunk_bytes: usize,
+    buffer: ChunkBuffer,
     saved_path: Option<String>,
     updated: Instant,
 }
@@ -275,24 +403,33 @@ async fn save_remote(
     cx: &mut AsyncApp,
 ) -> Result<String> {
     if attachment {
-        for folder in directory.ancestors().collect::<Vec<_>>().into_iter().rev() {
-            if folder.is_empty() || exists_remotely(&project, &worktree, folder, cx).await {
-                continue;
+        if !exists_remotely(&project, &worktree, directory, cx).await {
+            for folder in directory.ancestors().collect::<Vec<_>>().into_iter().rev() {
+                if folder.is_empty() || exists_remotely(&project, &worktree, folder, cx).await {
+                    continue;
+                }
+                if let Err(error) = worktree
+                    .update(cx, |worktree, cx| {
+                        worktree.create_entry(folder.into_arc(), true, None, cx)
+                    })
+                    .await
+                    && !exists_remotely(&project, &worktree, folder, cx).await
+                {
+                    return Err(error);
+                }
             }
-            worktree
-                .update(cx, |worktree, cx| {
-                    worktree.create_entry(folder.into_arc(), true, None, cx)
-                })
-                .await?;
         }
         // Uploads are the user's files, not the project's.
         let ignore = directory.join(RelPath::from_unix_str(".gitignore")?);
-        if !exists_remotely(&project, &worktree, &ignore, cx).await {
-            worktree
+        if !exists_remotely(&project, &worktree, &ignore, cx).await
+            && let Err(error) = worktree
                 .update(cx, |worktree, cx| {
                     worktree.create_entry(ignore.into_arc(), false, Some(b"*\n".to_vec()), cx)
                 })
-                .await?;
+                .await
+            && !exists_remotely(&project, &worktree, &ignore, cx).await
+        {
+            return Err(error);
         }
     }
 
@@ -330,6 +467,7 @@ impl Uploads {
             "Files must be at most 25 MB. Choose a smaller file."
         );
         let name = safe_file_name(required(args, "name")?)?;
+        let chunk_bytes = negotiate_chunk_bytes(args)?;
         let client_id = args.get("client_id").and_then(Value::as_str).unwrap_or("");
         if !client_id.is_empty() {
             uuid::Uuid::parse_str(client_id).context("expected a file client ID")?;
@@ -346,8 +484,10 @@ impl Uploads {
                 );
                 return Ok(json!({
                     "upload_id": id,
-                    "chunk_bytes": MAX_CHUNK_BYTES,
-                    "next_offset": upload.bytes.len(),
+                    "chunk_bytes": upload.chunk_bytes,
+                    "max_parallel": MAX_PARALLEL_CHUNKS,
+                    "next_offset": upload.buffer.contiguous_offset(),
+                    "received_bytes": upload.buffer.received_bytes(),
                     "path": upload.saved_path,
                 }));
             }
@@ -372,12 +512,19 @@ impl Uploads {
                 attachment: destination.attachment,
                 name,
                 size,
-                bytes: Vec::new(),
+                chunk_bytes,
+                buffer: ChunkBuffer::new(size),
                 saved_path: None,
                 updated: Instant::now(),
             },
         );
-        Ok(json!({ "upload_id": id, "chunk_bytes": MAX_CHUNK_BYTES, "next_offset": 0 }))
+        Ok(json!({
+            "upload_id": id,
+            "chunk_bytes": chunk_bytes,
+            "max_parallel": MAX_PARALLEL_CHUNKS,
+            "next_offset": 0,
+            "received_bytes": 0,
+        }))
     }
 
     fn get(&mut self, phone: &str, id: &str) -> Result<&mut Upload> {
@@ -402,27 +549,12 @@ impl Uploads {
         );
         let upload = self.get(phone, id)?;
         ensure!(upload.saved_path.is_none(), "That upload is already saved.");
-        let end = offset
-            .checked_add(bytes.len())
-            .context("invalid chunk offset")?;
-        ensure!(
-            end <= upload.size,
-            "The chunk goes past the announced file size."
-        );
-        if offset < upload.bytes.len() {
-            ensure!(
-                upload.bytes.get(offset..end) == Some(bytes.as_slice()),
-                "The chunk conflicts with an earlier one."
-            );
-        } else {
-            ensure!(
-                offset == upload.bytes.len(),
-                "A chunk is missing. Restart the upload."
-            );
-            upload.bytes.extend_from_slice(&bytes);
-        }
+        upload.buffer.insert(offset, bytes)?;
         upload.updated = Instant::now();
-        Ok(json!({ "next_offset": upload.bytes.len() }))
+        Ok(json!({
+            "next_offset": upload.buffer.contiguous_offset(),
+            "received_bytes": upload.buffer.received_bytes(),
+        }))
     }
 }
 
@@ -480,7 +612,7 @@ fn finish(phone: &str, args: &Value, cx: &mut App) -> Task<Result<Value>> {
     if let Some(path) = &upload.saved_path {
         return Task::ready(Ok(json!({ "upload_id": id, "path": path })));
     }
-    if upload.bytes.len() != upload.size {
+    if !upload.buffer.is_complete() {
         return Task::ready(Err(anyhow::anyhow!("The upload is incomplete.")));
     }
     let target = upload.target.clone();
@@ -488,7 +620,10 @@ fn finish(phone: &str, args: &Value, cx: &mut App) -> Task<Result<Value>> {
     let display_directory = upload.display_directory.clone();
     let name = upload.name.clone();
     let attachment = upload.attachment;
-    let bytes = std::mem::take(&mut upload.bytes);
+    let bytes = match upload.buffer.take_bytes() {
+        Ok(bytes) => bytes,
+        Err(error) => return Task::ready(Err(error)),
+    };
     let phone = phone.to_string();
     cx.spawn(async move |cx| {
         let saved = match target {
@@ -522,10 +657,29 @@ fn finish(phone: &str, args: &Value, cx: &mut App) -> Task<Result<Value>> {
     })
 }
 
+fn file_resource_link(abs_path: PathBuf) -> acp::ContentBlock {
+    let mention = acp_thread::MentionUri::File { abs_path };
+    acp::ContentBlock::ResourceLink(acp::ResourceLink::new(mention.name(), mention.to_uri()))
+}
+
+fn remote_attachment_uri(
+    roots: &[(String, PathBuf)],
+    path: &str,
+    resolve_worktree: impl FnOnce(&str, &RelPath) -> Result<PathBuf>,
+) -> Result<acp::ContentBlock> {
+    let (root_name, relative) = split_project_path(roots, path)?;
+    ensure!(!relative.is_empty(), "{path} is not a file");
+    let rel_path = RelPath::new(Path::new(relative), PathStyle::Unix)?;
+    let abs_path = resolve_worktree(root_name, &rel_path)?;
+    Ok(file_resource_link(abs_path))
+}
+
 /// The files a chat message attaches, as links the agent can read.
 pub(super) fn attachments(
+    project: &Entity<Project>,
     roots: &[(String, PathBuf)],
     args: &Value,
+    cx: &App,
 ) -> Result<Vec<acp::ContentBlock>> {
     let Some(value) = args.get("files") else {
         return Ok(Vec::new());
@@ -535,22 +689,30 @@ pub(super) fn attachments(
         !paths.is_empty() && paths.len() <= MAX_ATTACHED_FILES,
         "Attach between one and eight files."
     );
+    let is_remote = project.read(cx).remote_connection_options(cx).is_some();
     paths
         .iter()
         .map(|path| {
             let path = path.as_str().context("expected an attached file path")?;
-            let (display, resolved) = resolve_project_path(roots, path)?;
-            ensure!(
-                ensure_inside(roots, &resolved)?.is_file(),
-                "{display} is not a file"
-            );
-            // The path as the project names it, not its canonical form, which
-            // on Windows carries a `\\?\` prefix the agent would not recognize.
-            let mention = acp_thread::MentionUri::File { abs_path: resolved };
-            Ok(acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
-                mention.name(),
-                mention.to_uri(),
-            )))
+            if is_remote {
+                remote_attachment_uri(roots, path, |root_name, rel_path| {
+                    let worktree = project
+                        .read(cx)
+                        .visible_worktrees(cx)
+                        .find(|worktree| worktree.read(cx).root_name_str() == root_name)
+                        .context("That file is not inside a project folder.")?;
+                    Ok(worktree.read(cx).absolutize(rel_path))
+                })
+            } else {
+                let (display, resolved) = resolve_project_path(roots, path)?;
+                ensure!(
+                    ensure_inside(roots, &resolved)?.is_file(),
+                    "{display} is not a file"
+                );
+                // The path as the project names it, not its canonical form, which
+                // on Windows carries a `\\?\` prefix the agent would not recognize.
+                Ok(file_resource_link(resolved))
+            }
         })
         .collect()
 }
@@ -667,37 +829,190 @@ mod tests {
         });
         let begin = uploads.begin("phone", destination(), &args).unwrap();
         let id = begin["upload_id"].as_str().unwrap().to_string();
+        assert_eq!(begin["chunk_bytes"], DEFAULT_CHUNK_BYTES);
+        assert_eq!(begin["max_parallel"], MAX_PARALLEL_CHUNKS);
         let chunk = json!({"upload_id": id, "offset": 0, "data": crypto::encode(&[1, 2])});
         assert!(uploads.chunk("other", &chunk).is_err());
-        assert_eq!(uploads.chunk("phone", &chunk).unwrap()["next_offset"], 2);
-        assert_eq!(uploads.chunk("phone", &chunk).unwrap()["next_offset"], 2);
-        let gap = json!({"upload_id": id, "offset": 3, "data": crypto::encode(&[4])});
-        assert!(uploads.chunk("phone", &gap).is_err());
+        let first = uploads.chunk("phone", &chunk).unwrap();
+        assert_eq!(first["next_offset"], 2);
+        assert_eq!(first["received_bytes"], 2);
+        let duplicate = uploads.chunk("phone", &chunk).unwrap();
+        assert_eq!(duplicate["next_offset"], 2);
+        assert_eq!(duplicate["received_bytes"], 2);
+        let out_of_order = json!({"upload_id": id, "offset": 3, "data": crypto::encode(&[4])});
+        let after_gap = uploads.chunk("phone", &out_of_order).unwrap();
+        assert_eq!(after_gap["next_offset"], 2);
+        assert_eq!(after_gap["received_bytes"], 3);
+        let past_end = json!({"upload_id": id, "offset": 4, "data": crypto::encode(&[5])});
+        assert!(uploads.chunk("phone", &past_end).is_err());
         let resumed = uploads.begin("phone", destination(), &args).unwrap();
         assert_eq!(resumed["upload_id"], id.as_str());
         assert_eq!(resumed["next_offset"], 2);
+        assert_eq!(resumed["received_bytes"], 3);
         assert_eq!(uploads.0.len(), 1);
         let too_large = json!({"name": "big.bin", "size": MAX_UPLOAD_BYTES + 1});
         assert!(uploads.begin("phone", destination(), &too_large).is_err());
     }
 
-    #[test]
-    fn attachments_stay_inside_the_project() {
+    #[gpui::test]
+    async fn attachments_stay_inside_the_project(cx: &mut gpui::TestAppContext) {
+        let app_state = cx.update(workspace::AppState::test);
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("project");
         std::fs::create_dir_all(root.join(".praxis/uploads")).unwrap();
         std::fs::write(root.join(".praxis/uploads/a.txt"), "a").unwrap();
         std::fs::write(directory.path().join("outside.txt"), "x").unwrap();
+        let project = cx.update(|cx| {
+            project::Project::local(
+                app_state.client.clone(),
+                app_state.node_runtime.clone(),
+                app_state.user_store.clone(),
+                app_state.languages.clone(),
+                app_state.fs.clone(),
+                None,
+                project::LocalProjectFlags::default(),
+                cx,
+            )
+        });
         let roots = vec![("project".to_string(), root)];
-        let links =
-            attachments(&roots, &json!({"files": ["project/.praxis/uploads/a.txt"]})).unwrap();
-        let [acp::ContentBlock::ResourceLink(link)] = links.as_slice() else {
-            panic!("expected one link, got {links:?}");
+        cx.update(|cx| {
+            let links = attachments(
+                &project,
+                &roots,
+                &json!({"files": ["project/.praxis/uploads/a.txt"]}),
+                cx,
+            )
+            .unwrap();
+            let [acp::ContentBlock::ResourceLink(link)] = links.as_slice() else {
+                panic!("expected one link, got {links:?}");
+            };
+            assert_eq!(link.name, "a.txt");
+            assert!(
+                attachments(
+                    &project,
+                    &roots,
+                    &json!({"files": ["project/../outside.txt"]}),
+                    cx
+                )
+                .is_err()
+            );
+            assert!(
+                attachments(&project, &roots, &json!({"files": ["project/.praxis"]}), cx).is_err()
+            );
+            assert!(attachments(&project, &roots, &json!({"files": []}), cx).is_err());
+            assert!(
+                attachments(&project, &roots, &json!({}), cx)
+                    .unwrap()
+                    .is_empty()
+            );
+        });
+    }
+
+    #[test]
+    fn chunk_buffer_assembles_out_of_order_and_overlapping_chunks() {
+        let mut buffer = ChunkBuffer::new(10);
+        buffer.insert(6, vec![6, 7, 8, 9]).unwrap();
+        assert_eq!(buffer.contiguous_offset(), 0);
+        assert_eq!(buffer.received_bytes(), 4);
+        assert!(!buffer.is_complete());
+
+        buffer.insert(2, vec![2, 3, 4]).unwrap();
+        assert_eq!(buffer.contiguous_offset(), 0);
+        assert_eq!(buffer.received_bytes(), 7);
+
+        // Idempotent duplicate and matching partial overlap.
+        buffer.insert(2, vec![2, 3, 4]).unwrap();
+        buffer.insert(4, vec![4, 5, 6, 7]).unwrap();
+        assert_eq!(buffer.contiguous_offset(), 0);
+        assert_eq!(buffer.received_bytes(), 8);
+
+        // Conflicting overlap is rejected without corrupting state.
+        assert!(buffer.insert(3, vec![99, 4]).is_err());
+        assert_eq!(buffer.received_bytes(), 8);
+
+        buffer.insert(0, vec![0, 1, 2]).unwrap();
+        assert!(buffer.is_complete());
+        assert_eq!(buffer.contiguous_offset(), 10);
+        assert_eq!(buffer.received_bytes(), 10);
+        assert_eq!(buffer.take_bytes().unwrap(), vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[gpui::test]
+    async fn file_begin_negotiates_chunk_size_and_parallelism(cx: &mut gpui::TestAppContext) {
+        let app_state = cx.update(workspace::AppState::test);
+        let filesystem = app_state.fs.as_fake();
+        let directory = PathBuf::from(util::path!("/project"));
+        filesystem.insert_tree(&directory, json!({})).await;
+        let mut uploads = Uploads::default();
+        let destination = || Destination {
+            target: UploadTarget::Local(filesystem.clone()),
+            directory: directory.clone(),
+            display_directory: "project".into(),
+            attachment: false,
         };
-        assert_eq!(link.name, "a.txt");
-        assert!(attachments(&roots, &json!({"files": ["project/../outside.txt"]})).is_err());
-        assert!(attachments(&roots, &json!({"files": ["project/.praxis"]})).is_err());
-        assert!(attachments(&roots, &json!({"files": []})).is_err());
-        assert!(attachments(&roots, &json!({})).unwrap().is_empty());
+
+        let omitted = uploads
+            .begin("phone", destination(), &json!({"name": "a.bin", "size": 10}))
+            .unwrap();
+        assert_eq!(omitted["chunk_bytes"], 24 * 1024);
+        assert_eq!(omitted["max_parallel"], 6);
+
+        let exact = uploads
+            .begin(
+                "phone",
+                destination(),
+                &json!({"name": "b.bin", "size": 10, "preferred_chunk_bytes": 45056}),
+            )
+            .unwrap();
+        assert_eq!(exact["chunk_bytes"], 44 * 1024);
+        assert_eq!(exact["max_parallel"], 6);
+
+        let clamped = uploads
+            .begin(
+                "phone",
+                destination(),
+                &json!({"name": "c.bin", "size": 10, "preferred_chunk_bytes": 999999}),
+            )
+            .unwrap();
+        assert_eq!(clamped["chunk_bytes"], 44 * 1024);
+        assert_eq!(clamped["max_parallel"], 6);
+    }
+
+    #[test]
+    fn remote_attachment_resolves_posix_uri_without_local_disk() {
+        let roots = vec![(
+            "my-wsl-repo".to_string(),
+            PathBuf::from("/home/user/my-wsl-repo"),
+        )];
+        let block = remote_attachment_uri(
+            &roots,
+            "my-wsl-repo/.praxis/uploads/photo.png",
+            |root_name, rel_path| {
+                assert_eq!(root_name, "my-wsl-repo");
+                assert_eq!(rel_path.as_unix_str(), ".praxis/uploads/photo.png");
+                Ok(PathBuf::from(format!(
+                    "/home/user/my-wsl-repo/{}",
+                    rel_path.as_unix_str()
+                )))
+            },
+        )
+        .unwrap();
+        let acp::ContentBlock::ResourceLink(link) = block else {
+            panic!("expected ResourceLink, got {block:?}");
+        };
+        assert_eq!(link.name, "photo.png");
+        assert!(link.uri.starts_with("file://"));
+        assert!(
+            link.uri
+                .contains("/home/user/my-wsl-repo/.praxis/uploads/photo.png")
+        );
+
+        assert!(
+            remote_attachment_uri(&roots, "my-wsl-repo", |_, _| unreachable!()).is_err()
+        );
+        assert!(
+            remote_attachment_uri(&roots, "my-wsl-repo/../outside.txt", |_, _| unreachable!())
+                .is_err()
+        );
     }
 }

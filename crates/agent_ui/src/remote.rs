@@ -695,7 +695,12 @@ fn handle_paired(
             } else {
                 Vec::new()
             };
-            content.extend(uploads::attachments(&project_roots(workspace, cx), args)?);
+            content.extend(uploads::attachments(
+                workspace.read(cx).project(),
+                &project_roots(workspace, cx),
+                args,
+                cx,
+            )?);
             if !text.trim().is_empty() {
                 content.insert(0, acp::ContentBlock::Text(acp::TextContent::new(text)));
             }
