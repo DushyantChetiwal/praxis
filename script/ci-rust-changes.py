@@ -12,11 +12,8 @@ import subprocess
 
 # Paths that never reach a Rust build. Everything else needs the full suite,
 # including READMEs inside crates: some are compiled in with include_str!.
-NON_RUST_PREFIXES = ("remote-android/", "docs/", "site/")
-NON_RUST_FILES = frozenset({
-    ".github/workflows/android_remote.yml",
-    ".github/workflows/deploy_pages.yml",
-})
+NON_RUST_PREFIXES = ("remote-android/", "docs/")
+NON_RUST_FILES = frozenset({".github/workflows/android_remote.yml"})
 # The compare API lists at most this many files, so a longer diff may hide one.
 COMPARE_FILE_LIMIT = 300
 
