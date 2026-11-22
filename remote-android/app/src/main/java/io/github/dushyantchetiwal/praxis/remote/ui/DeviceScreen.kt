@@ -40,6 +40,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -201,20 +202,34 @@ fun DeviceScreen(state: AppState, ui: DeviceUi, busy: Int, vm: MainViewModel, sn
 private fun HostFolderDialog(ui: DeviceUi, vm: MainViewModel) {
     val browser = ui.folderBrowser
     val listing = browser.listing
+    val activeTarget = browser.target ?: listing?.target?.takeIf(String::isNotEmpty)
     var path by remember(ui.device?.channel) { mutableStateOf("") }
-    LaunchedEffect(listing?.path) { listing?.path?.let { path = it } }
+    LaunchedEffect(listing?.path, listing?.target) { listing?.path?.let { path = it } }
     AlertDialog(
         onDismissRequest = vm::dismissFolderBrowser,
         title = { Text(stringResource(R.string.folder_open)) },
         confirmButton = {
             TextButton(onClick = { vm.openHostFolder(path) }, enabled = path.isNotBlank() && !browser.loading && !browser.opening) {
-                Text(stringResource(R.string.folder_open_new_window))
+                Text(stringResource(if (activeTarget == "remote") R.string.folder_open_remote else R.string.folder_open_new_window))
             }
         },
         dismissButton = { TextButton(onClick = vm::dismissFolderBrowser) { Text(stringResource(if (browser.opening) R.string.action_close else R.string.action_cancel)) } },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(stringResource(R.string.folder_host_hint, ui.device?.name.orEmpty(), listing?.host.orEmpty()))
+                if ((listing?.targets?.size ?: 0) > 1) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listing?.targets.orEmpty().forEach { target ->
+                            val selected = activeTarget == target.id
+                            FilterChip(
+                                selected = selected,
+                                enabled = !browser.loading && !browser.opening,
+                                onClick = { if (!selected) vm.browseHostFolder(path = "", target = target.id) },
+                                label = { Text(target.label) },
+                            )
+                        }
+                    }
+                }
                 OutlinedTextField(value = path, onValueChange = { path = it }, label = { Text(stringResource(R.string.folder_path)) }, singleLine = true)
                 Row {
                     TextButton(onClick = { vm.browseHostFolder(path) }, enabled = !browser.loading && !browser.opening) { Text(stringResource(R.string.folder_browse)) }

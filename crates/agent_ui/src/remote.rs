@@ -627,40 +627,72 @@ fn handle_paired(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            let requested_target = args.get("target").and_then(Value::as_str);
             let offset = match transcript::index(args, "offset") {
                 Ok(offset) => offset.unwrap_or(0),
                 Err(error) => return Task::ready(Err(error)),
             };
-            let (project, fallback, host) = match with_workspace(window, cx, |workspace, _, cx| {
-                let project = workspace.read(cx).project().clone();
-                let remote = project.read(cx).remote_connection_options(cx);
-                // A project on another computer starts at its own folder, since
-                // this computer's home directory is not on that filesystem.
-                let fallback = remote.as_ref().and_then(|_| {
-                    project
-                        .read(cx)
-                        .visible_worktrees(cx)
-                        .next()
-                        .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
-                });
-                let host = remote
-                    .map(|options| options.display_name())
-                    .unwrap_or_else(|| std::env::consts::OS.to_string());
-                Ok((project, fallback, host))
-            }) {
-                Ok(listing) => listing,
+            let app_state = match workspace::AppState::try_global(cx)
+                .context("Praxis is still starting. Retry browsing folders.")
+            {
+                Ok(app_state) => app_state,
                 Err(error) => return Task::ready(Err(error)),
             };
-            return folders::list(project, fallback, host, &path, offset, cx);
+            let (project, fallback, remote_host) =
+                match with_workspace(window, cx, |workspace, _, cx| {
+                    let project = workspace.read(cx).project().clone();
+                    let remote = project.read(cx).remote_connection_options(cx);
+                    // A project on another computer starts at its own folder, since
+                    // this computer's home directory is not on that filesystem.
+                    let fallback = remote.as_ref().and_then(|_| {
+                        project
+                            .read(cx)
+                            .visible_worktrees(cx)
+                            .next()
+                            .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+                    });
+                    let remote_host = remote.map(|options| options.display_name());
+                    Ok((project, fallback, remote_host))
+                }) {
+                    Ok(listing) => listing,
+                    Err(error) => return Task::ready(Err(error)),
+                };
+            let target = match folders::resolve_target(
+                requested_target,
+                &path,
+                remote_host.is_some(),
+                util::paths::PathStyle::local(),
+            ) {
+                Ok(target) => target,
+                Err(error) => return Task::ready(Err(error)),
+            };
+            return match target {
+                folders::FolderTarget::Local => {
+                    folders::list_local(app_state.fs.clone(), remote_host, &path, offset, cx)
+                }
+                folders::FolderTarget::Remote => {
+                    let host = remote_host.unwrap_or_else(|| std::env::consts::OS.to_string());
+                    folders::list(project, fallback, host, &path, offset, cx)
+                }
+            };
         }
         "open_folder" => {
             return match required(args, "path").and_then(|path| {
                 let app_state = workspace::AppState::try_global(cx)
                     .context("Praxis is still starting. Retry opening the folder.")?;
-                let project = with_workspace(window, cx, |workspace, _, cx| {
-                    Ok(workspace.read(cx).project().clone())
+                let requested_target = args.get("target").and_then(Value::as_str);
+                let (project, has_remote) = with_workspace(window, cx, |workspace, _, cx| {
+                    let project = workspace.read(cx).project().clone();
+                    let has_remote = project.read(cx).remote_connection_options(cx).is_some();
+                    Ok((project, has_remote))
                 })?;
-                Ok(folders::open(path, project, app_state, cx))
+                let target = folders::resolve_target(
+                    requested_target,
+                    path,
+                    has_remote,
+                    util::paths::PathStyle::local(),
+                )?;
+                Ok(folders::open(path, target, project, app_state, cx))
             }) {
                 Ok(task) => task,
                 Err(error) => Task::ready(Err(error)),

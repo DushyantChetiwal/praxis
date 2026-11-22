@@ -33,6 +33,7 @@ import io.github.dushyantchetiwal.praxis.remote.data.parsePlanInspection
 import io.github.dushyantchetiwal.praxis.remote.data.parseSkillSuggestions
 import io.github.dushyantchetiwal.praxis.remote.data.parseWatchdogInfo
 import io.github.dushyantchetiwal.praxis.remote.data.parseWorktrees
+import io.github.dushyantchetiwal.praxis.remote.data.resolveFolderTarget
 import io.github.dushyantchetiwal.praxis.remote.ui.PlanCallbacks
 import io.github.dushyantchetiwal.praxis.remote.data.Device
 import io.github.dushyantchetiwal.praxis.remote.data.DetailRequest
@@ -1785,21 +1786,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         edit { copy(queue = queue.copy(visible = false, loading = false)) }
     }
 
-    fun browseHostFolder(path: String = "", more: Boolean = false) {
+    fun browseHostFolder(path: String = "", more: Boolean = false, target: String? = null) {
         if (d.folderBrowser.loading || d.folderBrowser.opening) return
         val scope = requestScope()
         val request = ++folderRequest
-        val previous = d.folderBrowser.listing.takeIf { more && it?.path == path }
+        val existingListing = d.folderBrowser.listing.takeIf { d.folderBrowser.visible }
+        val resolvedTarget = resolveFolderTarget(
+            requestedTarget = target,
+            currentTarget = d.folderBrowser.target.takeIf { d.folderBrowser.visible },
+            path = path,
+            listing = existingListing,
+        )
+        val sameTarget = resolvedTarget == null || resolvedTarget == existingListing?.target?.takeIf(String::isNotEmpty)
+        val previous = existingListing.takeIf { more && sameTarget && it.path == path }
         val offset = if (more) previous?.nextOffset ?: return else 0
-        edit { copy(folderBrowser = FolderBrowserState(visible = true, loading = true, listing = previous)) }
+        val retainedListing = previous ?: existingListing
+        edit {
+            copy(
+                folderBrowser = FolderBrowserState(
+                    visible = true,
+                    loading = true,
+                    target = resolvedTarget,
+                    listing = retainedListing,
+                )
+            )
+        }
+        val args = windowArgs {
+            put("path", path)
+            put("offset", offset)
+            resolvedTarget?.let { put("target", it) }
+        }
         viewModelScope.launch {
             try {
-                val result = praxis("host_folders", JSONObject().put("path", path).put("offset", offset), scope)
+                val result = praxis("host_folders", args, scope)
                     ?: throw ApiException(ErrorKind.State, str(R.string.error_unreadable_response))
                 if (request != folderRequest || scope != requestScope() || !d.folderBrowser.visible) return@launch
                 val page = parseHostFolders(result)
                 val listing = if (previous == null) page else page.copy(folders = (previous.folders + page.folders).distinctBy { it.path })
-                edit { copy(folderBrowser = FolderBrowserState(visible = true, listing = listing)) }
+                edit {
+                    copy(
+                        folderBrowser = FolderBrowserState(
+                            visible = true,
+                            target = page.target.takeIf(String::isNotEmpty) ?: resolvedTarget,
+                            listing = listing,
+                        )
+                    )
+                }
             } catch (error: ApiException) {
                 if (request == folderRequest && scope == requestScope() && d.folderBrowser.visible) {
                     edit { copy(folderBrowser = folderBrowser.copy(loading = false, error = error.message)) }
@@ -1817,12 +1849,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (path.isBlank() || d.folderBrowser.loading || d.folderBrowser.opening) return
         val scope = requestScope()
         val request = ++folderRequest
+        val resolvedTarget = resolveFolderTarget(
+            requestedTarget = null,
+            currentTarget = d.folderBrowser.target,
+            path = path,
+            listing = d.folderBrowser.listing,
+        )
+        val args = windowArgs {
+            put("path", path)
+            resolvedTarget?.let { put("target", it) }
+        }
         edit { copy(folderBrowser = folderBrowser.copy(opening = true, error = null)) }
         viewModelScope.launch {
-            val ok = act("open_folder", JSONObject().put("path", path), str(R.string.folder_open_failed), scope)
+            val ok = act("open_folder", args, str(R.string.folder_open_failed), scope)
             if (request != folderRequest || scope != requestScope()) return@launch
             edit { copy(folderBrowser = folderBrowser.copy(opening = false, visible = !ok)) }
-            if (ok) message(str(R.string.folder_opened))
+            if (ok) message(str(if (resolvedTarget == "remote") R.string.folder_opened_remote else R.string.folder_opened))
         }
     }
 

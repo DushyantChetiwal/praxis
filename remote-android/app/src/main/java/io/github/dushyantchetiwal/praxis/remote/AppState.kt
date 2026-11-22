@@ -237,6 +237,7 @@ data class FolderBrowserState(
     val visible: Boolean = false,
     val loading: Boolean = false,
     val opening: Boolean = false,
+    val target: String? = null,
     val listing: HostFolders? = null,
     val error: String? = null,
 )
