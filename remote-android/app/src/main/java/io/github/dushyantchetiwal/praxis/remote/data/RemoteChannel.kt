@@ -418,7 +418,44 @@ fun parseQueue(result: JSONObject): QueuePage = QueuePage(
 )
 
 data class HostFolder(val name: String, val path: String)
-data class HostFolders(val host: String, val path: String, val parent: String?, val folders: List<HostFolder>, val nextOffset: Int?)
+data class HostTarget(val id: String, val label: String)
+data class HostFolders(
+    val host: String,
+    val path: String,
+    val parent: String?,
+    val folders: List<HostFolder>,
+    val nextOffset: Int?,
+    val target: String = "",
+    val targets: List<HostTarget> = emptyList(),
+)
+
+private val windowsDrivePathRegex = Regex("""^[A-Za-z]:[\\/].*""")
+
+/**
+ * Picks the target ("local" or "remote") to send for a host folder request.
+ * Explicit chip selection always wins; otherwise keeps the active browser
+ * target unless the user manually typed a Windows drive/UNC path while on a
+ * remote Unix host or a Unix path while on Windows with a remote target.
+ */
+fun resolveFolderTarget(
+    requestedTarget: String?,
+    currentTarget: String?,
+    path: String,
+    listing: HostFolders?,
+): String? {
+    requestedTarget?.trim()?.takeIf(String::isNotEmpty)?.let { return it }
+    val active = currentTarget?.trim()?.takeIf(String::isNotEmpty)
+        ?: listing?.target?.trim()?.takeIf(String::isNotEmpty)
+    val trimmed = path.trim()
+    if (trimmed.isNotEmpty()) {
+        val isWindowsPath = windowsDrivePathRegex.matches(trimmed) || trimmed.startsWith("\\\\")
+        val hasLocal = listing?.targets?.any { it.id == "local" } == true
+        val hasRemote = listing?.targets?.any { it.id == "remote" } == true
+        if (active == "remote" && isWindowsPath && hasLocal) return "local"
+        if (active == "local" && trimmed.startsWith("/") && listing?.host == "windows" && hasRemote) return "remote"
+    }
+    return active
+}
 
 fun parseHostFolders(result: JSONObject): HostFolders = HostFolders(
     host = result.str("host").orEmpty(),
@@ -428,6 +465,12 @@ fun parseHostFolders(result: JSONObject): HostFolders = HostFolders(
         HostFolder(it.str("name") ?: return@mapNotNull null, it.str("path") ?: return@mapNotNull null)
     }.orEmpty(),
     nextOffset = result.index("next_offset"),
+    target = result.str("target").orEmpty(),
+    targets = result.arr("targets")?.objects()?.mapNotNull {
+        val id = it.str("id")?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+        val label = it.str("label")?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+        HostTarget(id, label)
+    }.orEmpty(),
 )
 
 data class RemoteViewScope(val generation: Int, val viewKey: String, val revision: Long)

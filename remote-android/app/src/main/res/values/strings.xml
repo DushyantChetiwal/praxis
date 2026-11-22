@@ -164,6 +164,7 @@
     <string name="banner_pairing_unconfirmed">%1$s has not confirmed this pairing. Your key and sessions are preserved; retry or pair again if access was removed.</string>
     <string name="folder_open">Open folder on computer</string>
     <string name="folder_open_new_window">Open in new window</string>
+    <string name="folder_open_remote">Open folder</string>
     <string name="folder_path">Absolute folder path on computer</string>
     <string name="folder_host_hint">Browsing %1$s · %2$s. Existing windows stay open.</string>
     <string name="folder_browse">Browse</string>
@@ -171,6 +172,7 @@
     <string name="folder_more">Load more folders</string>
     <string name="folder_open_failed">Couldn’t open folder</string>
     <string name="folder_opened">Folder opened in a new window. Select it in Conversation controls.</string>
+    <string name="folder_opened_remote">Folder added to the connected remote window.</string>
     <string name="action_close">Close</string>
     <string name="action_retry">Retry</string>
     <string name="action_queue">Queue message</string>
