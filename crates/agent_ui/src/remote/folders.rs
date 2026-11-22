@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, bail};
 use fs::Fs;
 use futures::StreamExt as _;
-use gpui::{App, Entity, Task};
+use gpui::{App, AppContext as _, Entity, Task};
 use project::Project;
 use serde_json::{Value, json};
 use util::paths::PathStyle;
@@ -301,7 +301,6 @@ pub(super) fn open(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::AppContext as _;
 
     #[gpui::test]
     async fn folder_listing_pages_without_rewriting_host_paths(cx: &mut gpui::TestAppContext) {

@@ -1798,7 +1798,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             listing = existingListing,
         )
         val sameTarget = resolvedTarget == null || resolvedTarget == existingListing?.target?.takeIf(String::isNotEmpty)
-        val previous = existingListing.takeIf { more && sameTarget && it.path == path }
+        val previous = existingListing?.takeIf { more && sameTarget && it.path == path }
         val offset = if (more) previous?.nextOffset ?: return else 0
         val retainedListing = previous ?: existingListing
         edit {
