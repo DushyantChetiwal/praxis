@@ -485,7 +485,9 @@ mod tests {
             name: "gemini-2.5-flash".to_string(),
             display_name: None,
             max_tokens: 1_000_000,
-            mode: Some(google_ai::GoogleModelMode::Thinking { budget_tokens: None }),
+            mode: Some(google_ai::GoogleModelMode::Thinking {
+                budget_tokens: None,
+            }),
         });
         assert!(flash.supported_thinking_levels.is_empty());
         assert_eq!(flash.default_thinking_level, None);

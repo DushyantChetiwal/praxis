@@ -1040,12 +1040,15 @@ mod tests {
         // Token-budget models accept no levels, so requests keep their budget.
         let (levels, default) = thinking_levels_for_model(
             "gemini-2.5-flash",
-            GoogleModelMode::Thinking { budget_tokens: None },
+            GoogleModelMode::Thinking {
+                budget_tokens: None,
+            },
         );
         assert!(levels.is_empty());
         assert_eq!(default, None);
 
-        let (levels, default) = thinking_levels_for_model("gemini-4-neon", GoogleModelMode::Default);
+        let (levels, default) =
+            thinking_levels_for_model("gemini-4-neon", GoogleModelMode::Default);
         assert!(levels.is_empty());
         assert_eq!(default, None);
     }
