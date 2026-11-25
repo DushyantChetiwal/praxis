@@ -108,6 +108,44 @@ pub(crate) fn lowest_thinking_level(model_id: &str) -> Option<ThinkingLevel> {
     }
 }
 
+/// The thinking levels a model accepts, and the level Zed selects until the user picks another.
+///
+/// Both are empty for models that budget thinking by tokens rather than by level.
+fn thinking_levels(model_id: &str) -> (Vec<ThinkingLevel>, Option<ThinkingLevel>) {
+    let Some(lowest) = lowest_thinking_level(model_id) else {
+        return (Vec::new(), None);
+    };
+    let highest = highest_thinking_level(model_id);
+    (
+        [
+            ThinkingLevel::Minimal,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::XHigh,
+        ]
+        .into_iter()
+        .filter(|level| (lowest..=highest).contains(level))
+        .collect(),
+        Some(default_thinking_level(model_id)),
+    )
+}
+
+/// Thinking levels for a model described by settings rather than by the catalog.
+///
+/// A settings entry such as `language_models.google.available_models` has no catalog entry to
+/// read capabilities from, so it derives the same levels from its id. Without this the agent
+/// drops the thread's effort and sends a token budget, which level-based models reject.
+pub fn thinking_levels_for_model(
+    model_id: &str,
+    mode: GoogleModelMode,
+) -> (Vec<ThinkingLevel>, Option<ThinkingLevel>) {
+    if !matches!(mode, GoogleModelMode::Thinking { .. }) {
+        return (Vec::new(), None);
+    }
+    thinking_levels(model_id)
+}
+
 /// Whether the ID has a version after `gemini-`, as in `gemini-3.1-pro-preview`.
 ///
 /// Every Gemini text model is versioned. Unversioned IDs such as `gemini-flash-latest` or
@@ -929,33 +967,18 @@ impl Model {
         let max_input_tokens = entry.input_token_limit.filter(|limit| *limit > 0)?;
         let max_output_tokens = entry.output_token_limit.filter(|limit| *limit > 0)?;
 
-        let (mode, supported_thinking_levels, default_thinking_level) =
-            match (entry.thinking, lowest_thinking_level(id)) {
-                (false, _) => (GoogleModelMode::Default, Vec::new(), None),
-                (true, None) => (
-                    GoogleModelMode::Thinking {
-                        budget_tokens: None,
-                    },
-                    Vec::new(),
-                    None,
-                ),
-                (true, Some(lowest)) => (
-                    GoogleModelMode::Thinking {
-                        budget_tokens: None,
-                    },
-                    [
-                        ThinkingLevel::Minimal,
-                        ThinkingLevel::Low,
-                        ThinkingLevel::Medium,
-                        ThinkingLevel::High,
-                        ThinkingLevel::XHigh,
-                    ]
-                    .into_iter()
-                    .filter(|level| (lowest..=highest_thinking_level(id)).contains(level))
-                    .collect(),
-                    Some(default_thinking_level(id)),
-                ),
-            };
+        let (mode, supported_thinking_levels, default_thinking_level) = if entry.thinking {
+            let (levels, default_level) = thinking_levels(id);
+            (
+                GoogleModelMode::Thinking {
+                    budget_tokens: None,
+                },
+                levels,
+                default_level,
+            )
+        } else {
+            (GoogleModelMode::Default, Vec::new(), None)
+        };
 
         Some(Self {
             id: id.to_string(),
@@ -1001,6 +1024,31 @@ mod tests {
     use language_model_core::LanguageModelCompletionEvent;
     use serde_json::json;
     use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn settings_thinking_levels_match_catalog_levels() {
+        let (levels, default) = thinking_levels_for_model(
+            "gemini-4-neon",
+            GoogleModelMode::Thinking {
+                budget_tokens: Some(24_000),
+            },
+        );
+        assert_eq!(levels.first(), Some(&ThinkingLevel::Low));
+        assert_eq!(levels.last(), Some(&ThinkingLevel::XHigh));
+        assert_eq!(default, Some(ThinkingLevel::High));
+
+        // Token-budget models accept no levels, so requests keep their budget.
+        let (levels, default) = thinking_levels_for_model(
+            "gemini-2.5-flash",
+            GoogleModelMode::Thinking { budget_tokens: None },
+        );
+        assert!(levels.is_empty());
+        assert_eq!(default, None);
+
+        let (levels, default) = thinking_levels_for_model("gemini-4-neon", GoogleModelMode::Default);
+        assert!(levels.is_empty());
+        assert_eq!(default, None);
+    }
 
     #[test]
     fn stream_body_failures_remain_retryable() {
