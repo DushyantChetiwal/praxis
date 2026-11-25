@@ -432,6 +432,9 @@ fn language_model(model: &google_ai::Model) -> LanguageModel {
 
 /// Converts a settings-defined `available_models` entry into a `google_ai::Model`.
 fn available_model_to_google_model(available: &AvailableModel) -> google_ai::Model {
+    let mode = available.mode.unwrap_or_default();
+    let (supported_thinking_levels, default_thinking_level) =
+        google_ai::thinking_levels_for_model(&available.name, mode);
     google_ai::Model {
         id: available.name.clone(),
         display_name: available
@@ -440,9 +443,9 @@ fn available_model_to_google_model(available: &AvailableModel) -> google_ai::Mod
             .unwrap_or_else(|| available.name.clone()),
         max_input_tokens: available.max_tokens,
         max_output_tokens: None,
-        mode: available.mode.unwrap_or_default(),
-        supported_thinking_levels: Vec::new(),
-        default_thinking_level: None,
+        mode,
+        supported_thinking_levels,
+        default_thinking_level,
     }
 }
 
@@ -456,6 +459,49 @@ mod tests {
     use language_model::{LanguageModelRequestMessage, MessageContent, Role};
     use parking_lot::Mutex;
     use serde_json::json;
+
+    #[test]
+    fn settings_models_keep_the_thinking_levels_of_their_id() {
+        let neon = available_model_to_google_model(&AvailableModel {
+            name: "gemini-4-neon".to_string(),
+            display_name: Some("Gemini 4 Neon".to_string()),
+            max_tokens: 1_000_000,
+            mode: Some(google_ai::GoogleModelMode::Thinking {
+                budget_tokens: Some(24_000),
+            }),
+        });
+        assert_eq!(
+            neon.supported_thinking_levels.first(),
+            Some(&ThinkingLevel::Low)
+        );
+        assert_eq!(
+            neon.supported_thinking_levels.last(),
+            Some(&ThinkingLevel::XHigh)
+        );
+        assert_eq!(neon.default_thinking_level, Some(ThinkingLevel::High));
+
+        // A token-budget model keeps no levels, so its budget is used instead.
+        let flash = available_model_to_google_model(&AvailableModel {
+            name: "gemini-2.5-flash".to_string(),
+            display_name: None,
+            max_tokens: 1_000_000,
+            mode: Some(google_ai::GoogleModelMode::Thinking {
+                budget_tokens: None,
+            }),
+        });
+        assert!(flash.supported_thinking_levels.is_empty());
+        assert_eq!(flash.default_thinking_level, None);
+
+        // Models that don't think have no levels even if their id is level-based.
+        let plain = available_model_to_google_model(&AvailableModel {
+            name: "gemini-4-neon".to_string(),
+            display_name: None,
+            max_tokens: 1_000_000,
+            mode: None,
+        });
+        assert!(plain.supported_thinking_levels.is_empty());
+        assert_eq!(plain.default_thinking_level, None);
+    }
 
     #[gpui::test]
     async fn catalog_models_drop_xhigh_effort_unless_supported(cx: &mut TestAppContext) {
